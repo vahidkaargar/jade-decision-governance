@@ -1,0 +1,86 @@
+# Risk classification: ordered precedence rules. First match wins. Evaluated by `jade hook pretool`
+# and `jade decide classify`. Patterns are Python `re` applied to the whitespace-normalised command
+# (Bash) or the absolute path (Write/Edit). This file is GENERIC and public. Hosts, paths and extra
+# rules specific to one machine live in a gitignored overlay `policies/local/risk.local.yaml`
+# (see policies/local/risk.local.example.yaml and policies/loader.py for the merge rules).
+schema_version: 1.0.0
+environments:
+  production_hosts: []        # overlay adds host names / IPs; any command naming one => environment=production
+  production_paths: ["/etc/", "/Library/LaunchDaemons/", "/usr/local/", "/opt/homebrew/etc/"]
+  staging_markers: ["staging", "preview", "\\.test\\b", "localhost", "127\\.0\\.0\\.1"]
+rules:
+  - id: R-01
+    level: critical
+    reversibility: irreversible
+    blast_radius: public
+    match: "\\b(pfctl|iptables|nft|ufw)\\b|/etc/pf\\.conf"
+    rationale: "Firewall change: human approval required"
+  - id: R-02
+    level: critical
+    reversibility: irreversible
+    blast_radius: host
+    match: "\\bsudo\\b.*(launchctl (bootout|unload|disable)|systemctl (disable|mask)|rm -rf /(?![a-zA-Z])|diskutil|fdisk|mkfs|dd if=)"
+    rationale: "Destructive privileged operation on boot services or disks"
+  - id: R-03
+    level: critical
+    reversibility: irreversible
+    blast_radius: org
+    match: "\\b(kubectl (apply|delete|rollout|scale)|helm (install|upgrade|uninstall)|terraform (apply|destroy)|ansible-playbook|fly deploy|vercel --prod|cap \\S+ deploy)\\b"
+    rationale: "Production deploy"
+  - id: R-04
+    level: critical
+    reversibility: irreversible
+    blast_radius: org
+    data_sensitivity: secret
+    match: "security (add|delete)-generic-password|ovault secret (set|import|rm|delete)|vault_key|id_(rsa|ed25519|ecdsa)\\b|\\.pem\\b|BEGIN [A-Z ]*PRIVATE KEY"
+    rationale: "Key material or secret-store mutation"
+  - id: R-10
+    level: high
+    reversibility: partially_reversible
+    blast_radius: public
+    match: "\\b(git push|gh (pr|release) (create|merge)|glab mr (create|merge)|npm publish|cargo publish|twine upload|docker push|composio execute)\\b"
+    rationale: "External side effect: publish, push, send, act in a connected app"
+  - id: R-11
+    level: high
+    reversibility: irreversible
+    blast_radius: repo
+    match: "git (reset --hard|push --force|branch -D|clean -fd)|\\brm -rf (?!/private/tmp|/tmp|\\$TMPDIR|\\./?(node_modules|dist|build|\\.venv|target)\\b)"
+    rationale: "Destroys local history or files"
+  - id: R-12
+    level: high
+    reversibility: partially_reversible
+    blast_radius: host
+    match: "\\b(launchctl (bootstrap|load|enable|kickstart)|systemctl (start|stop|restart|enable)|crontab -|docker (compose )?(up|down|rm)|brew services)\\b|/Library/LaunchAgents/.*\\.plist"
+    rationale: "Service lifecycle on this host"
+  - id: R-13
+    level: high
+    reversibility: reversible
+    blast_radius: host
+    match: "\\.claude/(settings(\\.local)?\\.json|hooks/|CLAUDE\\.md)|\\bAGENTS\\.md\\b|\\.cursor/rules|\\.ai/rules\\.md|policies/(safety|promotion)\\.yaml|policies/local/"
+    rationale: "Changes agent policy, hooks or protected targets"
+  - id: R-14
+    level: high
+    reversibility: partially_reversible
+    blast_radius: service
+    match: "(^|[;&|] *)(ssh|scp|sftp) (?!-keygen|-add|-agent|-copy-id)|\\brsync\\b.* \\S+:"
+    rationale: "Any remote shell or copy (hosts in the overlay's critical list escalate to critical via a prepended rule)"
+  - id: R-20
+    level: medium
+    reversibility: reversible
+    blast_radius: repo
+    match: "\\bgit (merge|rebase|reset(?! --hard)|stash drop)\\b"
+    rationale: "Rewrites or discards local repo state, recoverable via reflog"
+  - id: R-90
+    level: low
+    reversibility: reversible
+    blast_radius: repo
+    match: "\\bgit (commit|checkout|switch|add)\\b|\\b(pip|pip3) install\\b|\\bbrew install\\b|\\buv (add|remove|tool install|pip install)\\b|\\bnpm (install|ci)\\b|\\bcomposer (require|install)\\b|\\b(curl|wget) .*(-o|-O|--output)\\b"
+    rationale: "Commits, checkouts, installs and downloads are routine and reversible"
+  - id: R-99
+    level: low
+    reversibility: reversible
+    blast_radius: file
+    match: ".*"
+    rationale: "Default: read, local edit, test, build"
+permit_required_at: high          # high and critical require an ISSUED permit at PreToolUse
+human_approval_required_at: high  # PENDING -> ISSUED only via an interactive TTY for high and critical

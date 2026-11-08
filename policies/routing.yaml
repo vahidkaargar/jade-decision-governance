@@ -1,0 +1,66 @@
+# Preflight and routing. `jade route` runs preflight in order; the first decisive check sets the route.
+schema_version: 1.0.0
+preflight:
+  - id: PF-01
+    check: deterministic_solvable
+    description: "Exit code, file existence, regex match, arithmetic, schema validation, access check"
+    on_true: FAST
+  - id: PF-02
+    check: safety_invariant_match
+    description: "policies/safety.yaml pattern matches the proposed action"
+    on_true: ESCALATE            # blocked regardless of evidence
+  - id: PF-03
+    check: evidence_present
+    description: "At least one evidence_ref resolves to raw tool output, diff, or document, not a paraphrase"
+    on_false: NEEDS_EVIDENCE
+  - id: PF-04
+    check: duplicate_question
+    description: "Same question_id + state_hash already answered in this session"
+    on_true: REUSE               # return cached answer; flag repeat_without_new_evidence
+  - id: PF-05
+    check: candidate_validity
+    description: "Choice: >= 2 eligible options after code-level eligibility filter; else no valid option"
+    on_false: NEEDS_REVISION
+  - id: PF-06
+    check: primitive_suitable
+    description: "Question is atomic, bounded, answerable from state; multi-step synthesis is not"
+    on_false: DEEP
+  - id: PF-07
+    check: context_fresh
+    description: "context_freshness.observed_at + ttl_s > now"
+    on_false: NEEDS_EVIDENCE
+  - id: PF-08
+    check: cost_of_evaluation_justified
+    description: "Phase 3+: expected loss reduction > latency budget; until then always true for risk >= medium, true for low risk only when the agent is about to claim done"
+    on_false: FAST
+default_route: JEV
+routes:
+  FAST:
+    description: "Deterministic code; no model call"
+    requires: ["evidence_refs"]
+  JEV:
+    description: "One batched Decisions API request with all independent registry questions for the task family"
+    requires: ["question_id", "state_file_or_stdin"]
+    max_questions_per_request: 8
+    max_parallel_requests: 4
+    deadline_ms: 20000
+  DEEP:
+    description: "Reasoning model decomposes; may emit atomic JEV questions (HYBRID pattern); verdict needs evidence_refs"
+  ESCALATE:
+    description: "Human (WAITING_HUMAN). Batched with other open questions; includes recommended default"
+question_quality_gates:    # enforced by `jade question lint` on registry entries
+  - one_concept_per_question
+  - explicit_positive_and_negative_criteria
+  - no_dependency_on_sibling_answer_in_same_batch
+  - state_fields_named_and_referenced_in_backticks
+  - no_match_or_companion_presence_question_for_open_sets
+  - no_leading_language   # banned tokens: "obviously", "clearly", "confirm that", "as expected"
+dedup:
+  key: "sha256(question_id + version + canonical(state))"
+  scope: session
+  ttl_s: 3600
+  repeat_without_new_evidence: flag_and_return_cached
+cache:
+  eligible_families: ["evidence_quality", "candidate_fit", "routing"]
+  never_cached: ["authorization", "permit", "verify_claim with environment=production"]
+  ttl_s: 1800

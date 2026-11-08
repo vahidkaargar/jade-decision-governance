@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jade.local/schemas/improvement.schema.json",
+  "title": "ImprovementCandidate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "baseline_version", "target_component", "change_diff", "hypothesis", "predicted_benefit", "risk", "evaluation_plan", "dataset_versions", "results", "promotion_decision", "rollout_scope", "rollback_reference", "audit_trail"],
+  "properties": {
+    "schema_version": { "$ref": "_defs.schema.json#/$defs/schema_version" },
+    "candidate_id": { "$ref": "_defs.schema.json#/$defs/id" },
+    "baseline_version": { "type": "string", "minLength": 1 },
+    "target_component": { "enum": ["question_template", "state_selection", "routing_heuristic", "calibration_threshold", "batch_strategy", "cache_ttl", "skill_reference", "escalation_heuristic", "performance"] },
+    "change_diff": { "type": "string", "minLength": 1 },
+    "hypothesis": { "type": "string", "minLength": 8 },
+    "predicted_benefit": { "type": "string", "minLength": 1 },
+    "risk": { "$ref": "_defs.schema.json#/$defs/risk_level" },
+    "evaluation_plan": { "type": "string", "minLength": 8 },
+    "dataset_versions": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+    "results": { "type": ["object", "null"], "additionalProperties": true },
+    "promotion_decision": { "enum": ["pending", "shadow", "canary", "promoted", "rejected", "rolled_back"] },
+    "rollout_scope": { "enum": ["offline", "shadow", "canary", "all"] },
+    "rollback_reference": { "type": "string", "minLength": 1 },
+    "audit_trail": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["at", "actor", "event"],
+      "properties": { "at": { "type": "string" }, "actor": { "type": "string" }, "event": { "type": "string" } } } }
+  }
+}

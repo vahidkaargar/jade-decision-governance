@@ -1,0 +1,45 @@
+# Thresholds and escalation per task family. Defaults from TypeSafe docs (0.7 yes / 0.3 no) until
+# the calibration group has >= min_labeled rows; then values may change via improvement candidates only.
+schema_version: 1.0.0
+defaults:
+  noul: { accept: 0.70, reject: 0.30 }
+  choice: { accept_top_p: 0.70, require_companion_presence: true }
+  score: { gates: false }
+  min_labeled_for_adjustment: 200
+  ci: wilson_95
+families:
+  verify_claim:
+    noul: { accept: 0.70, reject: 0.30 }
+    by_risk:
+      high:     { accept: 0.85 }
+      critical: { accept: 0.90, abstain_to: human }
+    abstain_to: deep
+    max_revisions: 3
+  root_cause:
+    choice: { accept_top_p: 0.60 }
+    abstain_to: deep
+  strategy_choice:
+    choice: { accept_top_p: 0.55 }     # several acceptable options may split probability (docs)
+    abstain_to: deep
+    note: "Low confidence on a harmless preference choice is acceptable; record the margin"
+  risk_triage:
+    noul: { accept: 0.60, reject: 0.20 }   # asymmetric: false negatives cost more
+    abstain_to: human
+  evidence_quality:
+    score: { gates: false }
+  candidate_fit:
+    noul: { accept: 0.70, reject: 0.30 }
+    abstain_to: fast
+  routing:
+    choice: { accept_top_p: 0.65 }
+    abstain_to: deep
+exit_codes:
+  accept: 0
+  abstain: 3
+  reject: 4
+  provider_unavailable: 5
+  invalid_question: 6
+human_batching:
+  group_window_s: 600
+  each_question_includes: ["context", "impact", "options", "recommended_default", "consequence_of_no_answer"]
+  deadline_default_h: 24

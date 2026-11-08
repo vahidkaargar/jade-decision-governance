@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0.0",
+  "candidate_id": "imp_0f0e0d0c0b0a",
+  "baseline_version": "q.verify_claim.supported_by_evidence@1",
+  "target_component": "question_template",
+  "change_diff": "instructions: add 'A plausible claim without supporting evidence is not supported.'",
+  "hypothesis": "Explicit negative criterion lowers P for claims whose evidence is a paraphrase, reducing false accepts",
+  "predicted_benefit": "false-accept rate at accept=0.70 drops from 0.12 to <= 0.08 on replay set",
+  "risk": "low",
+  "evaluation_plan": "Offline replay on calibration split v1 (n=240), paired comparison vs baseline, report Wilson 95% CI; shadow 7 days; no auto-promotion",
+  "dataset_versions": ["verify_claim-calib-v1", "verify_claim-protected-v1"],
+  "results": null,
+  "promotion_decision": "pending",
+  "rollout_scope": "offline",
+  "rollback_reference": "q.verify_claim.supported_by_evidence@1",
+  "audit_trail": [ { "at": "2026-11-08T22:00:00Z", "actor": "agent:claude", "event": "created from ledger pattern low_p_then_done" } ]
+}

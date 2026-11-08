@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0.0",
+  "id": "W-01",
+  "parent": null,
+  "type": "blocker",
+  "priority": "P0",
+  "status": "waiting_human",
+  "owner": "human",
+  "dependencies": [],
+  "impact": "Nothing past Phase 0 may start without design approval",
+  "rationale": "Master plan deliverable 5 and §16: skill and runtime only after validated design",
+  "evidence_refs": ["docs/01-adrs.md"],
+  "next_action": "Human reviews docs/00–07 and answers the questions in BACKLOG.md §Human decisions",
+  "retry_or_revisit_trigger": "on_session_start",
+  "created_at": "2026-11-08",
+  "updated_at": "2026-11-08",
+  "history": [ { "at": "2026-11-08", "change": "created" } ],
+  "title": "Approve JADE design (DESIGN_READY gate)",
+  "phase": 0
+}

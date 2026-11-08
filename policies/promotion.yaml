@@ -1,0 +1,33 @@
+# Champion/challenger promotion rules for improvement candidates (Phase 4). Protected.
+schema_version: 1.0.0
+pipeline: [offline_replay, shadow, canary, promote]
+offline_replay:
+  datasets: [dev, calibration]          # never protected test
+  min_samples: 200
+  paired: true
+  metrics: [false_accept_rate, abstain_coverage, brier, selective_risk_at_coverage]
+  pass_if:
+    false_accept_rate: "<= baseline (upper 95% CI of challenger <= point estimate of champion)"
+    brier: "<= baseline + 0.01"
+    abstain_coverage: ">= baseline - 0.05"
+  multiple_testing: holm
+  subgroups: [language:fa, language:en, risk:high+]
+shadow:
+  duration_days: 7
+  min_live_samples: 100
+  hot_path_latency_increase_ms_max: 0     # shadow runs async; any hot-path increase fails
+canary:
+  requires_human_opt_in: true
+  scope: ["question_template", "cache_ttl"]   # the only auto-promotable targets
+  traffic_fraction: 0.2
+  rollback_triggers:
+    - false_accept_rate > champion + 0.03
+    - provider_error_rate > 0.05
+    - resolved_model of live traffic differs from the candidate's dataset_versions model (new group, re-evaluate)
+promote:
+  requires: ["protected_test_non_inferior", "no_safety_invariant_violation", "latency_within_budget", "audit_trail_complete"]
+  auto_allowed_for: ["question_template", "cache_ttl"]
+  human_required_for: ["calibration_threshold", "routing_heuristic", "escalation_heuristic", "state_selection", "batch_strategy", "skill_reference", "performance"]
+kill_switch:
+  file: ~/.local/share/jade/FREEZE
+  effect: "all challengers disabled; champion versions pinned; thresholds frozen"

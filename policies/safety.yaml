@@ -1,0 +1,34 @@
+# Immutable invariants and protected targets. Enforced before any permit check; cannot be changed by
+# an improvement candidate (improvement.schema.json target_component enum excludes them). Editing this
+# file is R-13 (high) and needs a human-issued permit. Machine-specific invariants go in the overlay
+# policies/local/safety.local.yaml (see safety.local.example.yaml); overlays may only ADD invariants.
+schema_version: 1.0.0
+invariants:
+  - id: SI-01
+    description: "No model output authorizes a side effect"
+    enforcement: "permit.approval_reference must be tty:*; jade ask never writes permits"
+  - id: SI-02
+    description: "Local model servers and backends never bind a public address"
+    block: "(OLLAMA_HOST|HOST|BIND|LISTEN)=(0\\.0\\.0\\.0|\\[::\\]|\\*)|--host[= ](0\\.0\\.0\\.0|\\[::\\])|\\b(0\\.0\\.0\\.0|\\*):[0-9]{2,5}\\b"
+  - id: SI-05
+    description: "Secrets never in state, logs, chat or files"
+    enforcement: "redact() before provider call and ledger write; block on residual match"
+    block: "(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|gho_[A-Za-z0-9]{30,}|glpat-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY)"
+  - id: SI-06
+    description: "No autonomous production release"
+    enforcement: "R-03 and overlay deploy rules => critical => PENDING permit; never auto-ISSUED"
+  - id: SI-07
+    description: "Unknown outcome is never success; irreversible actions never auto-retry"
+    enforcement: "state machine guards (docs/02 section 2)"
+  - id: SI-08
+    description: "Never push to the default branch"
+    block: "git push( [^|;&]*)? (origin |upstream )?(main|master)\\b"
+protected_targets:
+  - policies/safety.yaml
+  - policies/promotion.yaml
+  - policies/local/safety.local.yaml
+  - evals/*/protected/**
+  - permit issuance and approval code
+  - ledger append/transition code
+  - agent harness hook configuration (e.g. ~/.claude/settings.json)
+  - OS keychain and password-manager access

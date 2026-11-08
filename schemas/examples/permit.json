@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0.0",
+  "permit_id": "prm_1234567890ab",
+  "decision_id": "dec_0a1b2c3d4e5f",
+  "principal": "human:alice",
+  "authorized_action": "git.push",
+  "resource_scope": "repo:example branch:feature/jade",
+  "environment": "local",
+  "plan_hash": "0000111122223333444455556666777788889999aaaabbbbccccddddeeeeffff",
+  "preconditions": [ { "kind": "git_head", "fingerprint": "deadbeefcafe" }, { "kind": "policy_version", "fingerprint": "abc1234" } ],
+  "policy_version": "abc1234",
+  "approval_reference": "tty:alice@2026-11-08T21:05:00Z",
+  "issued_at": "2026-11-08T21:05:00Z",
+  "expires_at": "2026-11-08T21:35:00Z",
+  "nonce": "0123456789abcdef0123456789abcdef",
+  "usage_limit": 1,
+  "uses": 0,
+  "state": "ISSUED",
+  "risk_level": "high"
+}

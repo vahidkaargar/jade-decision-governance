@@ -1,0 +1,30 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install uv (pinned)
+        run: pip install --quiet uv==0.13.6
+      - name: Sync dev environment
+        run: uv sync --frozen
+      - name: Lint
+        run: uv run ruff check .
+      - name: Contract and policy tests
+        run: uv run pytest -q
+      - name: Policy replay smoke (synthetic rows)
+        run: |
+          printf '%s\n' '{"session":"s1","ts":"2026-01-01T00:00:00Z","primitive":"verify","dry_run":false,"question":"q","p":0.9}' \
+                        '{"session":"s1","ts":"2026-01-01T00:00:01Z","primitive":"verify","dry_run":false,"question":"q","p":0.5,"next_text_done_claim":true}' > /tmp/rows.jsonl
+          uv run python evals/replay_policy.py /tmp/rows.jsonl

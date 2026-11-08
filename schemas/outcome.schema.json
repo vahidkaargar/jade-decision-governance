@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jade.local/schemas/outcome.schema.json",
+  "title": "Outcome",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "outcome_id", "decision_id", "execution_id", "observation_type", "verification_method", "measurements", "attribution_quality", "observed_at", "evidence_refs", "success"],
+  "properties": {
+    "schema_version": { "$ref": "_defs.schema.json#/$defs/schema_version" },
+    "outcome_id": { "$ref": "_defs.schema.json#/$defs/id" },
+    "decision_id": { "$ref": "_defs.schema.json#/$defs/id" },
+    "execution_id": { "$ref": "_defs.schema.json#/$defs/id" },
+    "observation_type": { "enum": ["observed", "estimated", "unknown"] },
+    "verification_method": { "type": "string", "minLength": 1 },
+    "measurements": { "type": "object", "additionalProperties": { "type": ["number", "string", "boolean"] } },
+    "attribution_quality": { "enum": ["direct", "indirect", "none"] },
+    "observed_at": { "$ref": "_defs.schema.json#/$defs/ts" },
+    "evidence_refs": { "type": "array", "items": { "$ref": "_defs.schema.json#/$defs/ref" } },
+    "success": { "type": ["boolean", "null"] }
+  },
+  "allOf": [
+    { "if": { "properties": { "observation_type": { "const": "unknown" } } }, "then": { "properties": { "success": { "type": "null" } } } },
+    { "if": { "properties": { "observation_type": { "enum": ["observed", "estimated"] } } }, "then": { "properties": { "success": { "type": "boolean" } } } }
+  ]
+}

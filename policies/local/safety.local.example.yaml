@@ -1,0 +1,10 @@
+# Example machine-specific safety overlay. Copy to policies/local/safety.local.yaml (gitignored).
+# Overlays may only append invariants (ids SL-xx); they cannot remove or weaken shipped ones.
+schema_version: 1.0.0
+invariants_append:
+  - id: SL-01
+    description: "Never start the retired local crawler container; the server copy is the single instance"
+    block: "docker (start|run|compose up).*example-crawler"
+  - id: SL-02
+    description: "Never recreate retired gateways or tunnels"
+    block: ":(8500|7500)\\b.*(gateway|tunnel)"

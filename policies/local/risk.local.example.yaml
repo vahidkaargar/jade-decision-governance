@@ -1,0 +1,28 @@
+# Example machine-specific overlay. Copy to policies/local/risk.local.yaml (gitignored) and edit.
+# Merge rules (policies/loader.py): lists under `environments` are appended; `rules_prepend` are
+# merged by severity tier ahead of the shipped rules of the same tier, so they can raise a command's
+# level but never shadow a shipped rule of a higher tier; `rules_override` may change level/rationale
+# of a shipped rule by id but may not delete it or drop a critical/high rule below medium.
+schema_version: 1.0.0
+environments:
+  production_hosts: ["prod.example.net", "router.example.net", "10.0.0.1"]
+  production_paths: ["~/infra/", "~/Library/LaunchAgents/", "/Volumes/Data/"]
+hosts:
+  critical: ["router.example.net", "10.0.0.1"]     # routers, firewalls, hypervisors
+rules_prepend:
+  - id: R-L01
+    level: critical
+    reversibility: irreversible
+    blast_radius: public
+    match: "\\b(ssh|scp|sftp)\\b.*\\b(router\\.example\\.net|10\\.0\\.0\\.1)\\b"
+    rationale: "Remote shell to a router or firewall"
+  - id: R-L02
+    level: critical
+    reversibility: irreversible
+    blast_radius: org
+    match: "scripts/deploy-prod\\.sh|rsync .* prod\\.example\\.net:"
+    rationale: "Site-specific production deploy script"
+rules_override:
+  R-20:
+    level: medium
+    rationale: "kept as shipped"

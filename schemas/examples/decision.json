@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0.0",
+  "decision_id": "dec_0a1b2c3d4e5f",
+  "task_id": "task_1111aaaa2222",
+  "tenant_scope": "local:example",
+  "objective": "Confirm that the CI runner image rebuild removed both HIGH findings before reporting done",
+  "candidate_actions": [
+    { "name": "report_done", "canonical_action": "report.done", "description": "Tell the user the rebuild is verified", "eligible": true },
+    { "name": "gather_more", "canonical_action": "evidence.gather", "description": "Re-run trivy and attach output", "eligible": true }
+  ],
+  "constraints": ["no deploy", "local only"],
+  "assumptions": ["trivy db is current"],
+  "evidence_refs": ["file:/home/user/.cache/trivy/last.json#sha256=ab12", "cmd:trivy image --severity HIGH runner:latest"],
+  "context_fingerprint": "9f2c1d0e8b7a65544332211000ffeeddccbbaa99887766554433221100ffeedd",
+  "context_freshness": { "observed_at": "2026-11-08T21:00:00Z", "ttl_s": 3600 },
+  "risk": { "level": "low", "reversibility": "reversible", "environment": "local", "blast_radius": "repo", "data_sensitivity": "none", "permission_scope": "read", "rationale": "reporting only; no side effect", "rule_id": "R-99" },
+  "route": "JEV",
+  "evaluation_refs": ["call_aaaabbbbcccc"],
+  "policy_version": "abc1234",
+  "status": "ACCEPTED",
+  "timestamps": { "created_at": "2026-11-08T21:00:01Z", "updated_at": "2026-11-08T21:00:02Z", "expires_at": "2026-11-09T21:00:01Z" },
+  "trace_id": "trace-0001-abcdef",
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "revision_count": 0
+}

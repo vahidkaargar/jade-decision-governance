@@ -1,0 +1,8 @@
+evals/baseline/dataset-*.jsonl
+.venv/
+__pycache__/
+*.sqlite
+.pytest_cache/
+policies/local/*.yaml
+!policies/local/*.example.yaml
+evals/performance/result.json
