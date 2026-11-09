@@ -56,7 +56,7 @@ rules:
     level: high
     reversibility: reversible
     blast_radius: host
-    match: "\\.claude/(settings(\\.local)?\\.json|hooks/|CLAUDE\\.md)|\\bAGENTS\\.md\\b|\\.cursor/rules|\\.ai/rules\\.md|policies/(safety|promotion)\\.yaml|policies/local/"
+    match: "\\.claude/(settings(\\.local)?\\.json|hooks/|CLAUDE\\.md)|\\bAGENTS\\.md\\b|\\.cursor/rules|\\.ai/rules\\.md|policies/(safety|promotion)\\.yaml|policies/local/|\\.config/jade/|\\.local/share/jade/|\\bjade (improve (promote|rollback)|ledger purge|label set)\\b"
     rationale: "Changes agent policy, hooks or protected targets"
   - id: R-14
     level: high
@@ -82,5 +82,30 @@ rules:
     blast_radius: file
     match: ".*"
     rationale: "Default: read, local edit, test, build"
+# Classification works per simple command (pipeline segment). A segment whose command word matches one of
+# these patterns and that does not redirect output to a file only reads, so it is `low` whatever it mentions:
+# `grep pfctl notes.md` is not a firewall change. Heredoc bodies and quoted prose are ignored for the same reason.
+read_only:
+  - "^(cat|head|tail|less|more|bat|wc|ls|ll|stat|file|which|type|whereis|man|pwd|date|whoami|id|uname|printenv|echo|printf|true|false|test|\\[|grep|egrep|fgrep|rg|ag|ack|jq|yq|sort|uniq|cut|tr|column|nl|diff|cmp|comm|basename|dirname|realpath|readlink|du|df|ps|pgrep|lsof|netstat|sw_vers|md5|shasum|sha256sum|hexdump|xxd|strings|tree|fd|awk|gawk|cd|pushd|popd|export|set|unset|sleep|wait)\\b"
+  - "^sed\\b(?!.*\\s-[a-zA-Z]*i)"
+  - "^find\\b(?!.*\\s-(delete|exec|execdir|ok)\\b)"
+  - "^git( -C \\S+)? (status|log|diff|show|rev-parse|ls-files|ls-remote|blame|describe|shortlog|reflog|cat-file|fetch|remote( -v)?$|remote get-url|branch( -[avr]+| --list| --show-current)*$|tag( -l| --list)?$|stash list)\\b"
+  - "^(gh|glab) (pr|mr|issue|run|repo|release|workflow) (view|list|status|checks|diff|watch)\\b"
+  - "^docker (compose )?(ps|images|logs|inspect|info|version|stats|top)\\b"
+  - "^launchctl (list|print)\\b"
+  - "^(kubectl|helm) (get|describe|logs|list|status|version|top)\\b"
+  - "^systemctl (status|is-active|is-enabled|list-units)\\b"
+  - "^(ssh|scp) -V$"
+  - "^jade (ledger (stats|show)|permit (list|show|request)|question|check|work (list|render)|gate status|hooks status|eval|label (queue|auto)|decide (show|list)|route|ops (status|drift))\\b"
+# MCP tools are classified by tool name (the PreToolUse matcher includes `mcp__.*`). A tool whose input carries a
+# shell command (`command`, `cmd`, `script`) is classified by that command exactly like Bash. First match wins.
+mcp_tools:
+  - { id: M-01, level: critical, blast_radius: org, reversibility: irreversible, rationale: "Cluster change through an MCP server",
+      match: "^mcp__.*(kubectl_(apply|create|delete|patch|scale|rollout|generic)|exec_in_pod|(install|upgrade|uninstall)_helm_chart|node_management|cleanup)$" }
+  - { id: M-02, level: high, blast_radius: public, reversibility: partially_reversible, rationale: "Repository or CI change through an MCP server (merge, commit, branch, pipeline, review, comment)",
+      match: "^mcp__.*GitLab__(accept_merge_request|save_merge_request|save_merge_request_review|add_commit|add_branch|save_pipeline|fork_repository|save_work_item|save_note|link_work_items)$" }
+  - { id: M-03, level: high, blast_radius: host, reversibility: partially_reversible, rationale: "Delete, kill or move through an MCP server",
+      match: "^mcp__.*(delete_(file|project|session)|kill_process|force_terminate|move_file|write_file|edit_block|clean_up_worktrees|discard_kept_worktree)$" }
+mcp_command_keys: ["command", "cmd", "script"]
 permit_required_at: high          # high and critical require an ISSUED permit at PreToolUse
 human_approval_required_at: high  # PENDING -> ISSUED only via an interactive TTY for high and critical

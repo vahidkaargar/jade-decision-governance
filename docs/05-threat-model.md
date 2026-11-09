@@ -21,6 +21,8 @@ Adversary assumption: the operator is trusted; threats come from content the age
 | T15 | Data retention / privacy | Ledger stores project text | Redaction; state cap; ledger local only (`~/.local/share/jade`), mode 600; `jade ledger purge --older-than 90d` (default, human decision Q7) removes state_bytes while keeping metrics | runtime |
 | T16 | Cross-tenant contamination | n/a single tenant | `tenant_scope` constant; revisit if multi-host | — |
 | T17 | Hook failure fails open | Hook crashes → Claude Code proceeds | PreToolUse gate exits 2 on any internal error for risk ≥ high (fail closed); low risk fails open by design, logged | hook |
+| T18 | Classification gaps | Command built at run time (base64, variable indirection, `eval` of fetched text); tools the matcher does not name (browser and desktop automation MCP tools) | Classification is syntactic by design and says so. Quoted prose and heredoc bodies are not commands; read-only commands are low; MCP tools are named in `mcp_tools` and shell-carrying MCP tools use the command rules. Claude Code's own permission prompt is the independent backstop | hook + host |
+| T19 | Self-modification of governance wiring | Agent edits hook config, runs `jade hooks`/`jade gate`/`jade permit approve`, or sets `JADE_GATE_MODE` | SI-09 blocks the commands, R-13 gates the files, and the installers and approval refuse to run without a human terminal | runtime + hook |
 
 ## 3. Redaction function (contract)
 

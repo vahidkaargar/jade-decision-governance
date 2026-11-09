@@ -49,18 +49,18 @@ Start: docs defaults 0.70 / 0.30 (Noul), top-p 0.70 (Choice), stricter for high/
 
 Reading: at the docs' default band, 57% of past verifications would not have returned "yes". That is the expected escalation load the human must accept or the thresholds must be re-set against labels (W-08); it is also why abstention routes to DEEP first and to the human only for risk ≥ medium.
 
-### 4b. Live performance (`evals/performance/run.py`, results in `evals/performance/result-2026-11-08.json`, typesafe/jev-1.14-20261014, total cost $0.000862)
+### 4b. Live performance (`evals/performance/run.py --rounds 20`, `evals/performance/result-2026-11-09.json`, typesafe/jev-1.14-20261014, 323 timed calls, total cost $0.005365)
 
-| config | n | p50 ms | p95 ms | max ms | errors |
-|---|---|---|---|---|---|
-| single_noul_parallel_1 | 3 | 509 | 722 | 722 | 0 |
-| single_noul_parallel_4 | 12 | 496 | 515 | 522 | 0 |
-| single_noul_parallel_8 | 24 | 507 | 545 | 650 | 0 |
-| batch_1_serial | 4 | 504 | 505 | 505 | 0 |
-| batch_3_serial | 4 | 506 | 559 | 559 | 0 |
-| batch_8_serial | 4 | 515 | 672 | 672 | 0 |
+| config | n | p50 ms | p95 ms | p99 ms | max ms | errors |
+|---|---|---|---|---|---|---|
+| single_noul_parallel_1 | 20 | 514 | 639 | 728 | 728 | 0 |
+| single_noul_parallel_4 | 80 | 506 | 553 | 562 | 565 | 0 |
+| single_noul_parallel_8 | 160 | 511 | 582 | 617 | 717 | 0 |
+| batch_1_serial | 21 | 505 | 564 | 574 | 574 | 0 |
+| batch_3_serial | 21 | 502 | 551 | 554 | 554 | 0 |
+| batch_8_serial | 21 | 515 | 616 | 617 | 617 | 0 |
 
-Reading: latency is flat at ≈ 500 ms whether one question or eight are sent, and parallelism 8 produced no 429. One batched request per decision is therefore strictly better than today's serial calls (a 10-call session spent ≈ 5 s; one batch spends ≈ 0.5 s). Sample sizes are small; `evals/performance` is re-run at Phase 3 with rounds=20.
+Reading: latency is flat at about 500 ms whether one question or eight are sent, parallelism 8 produced no 429 in 160 calls, and the earlier 2026-11-08 run (rounds 3) agrees (`result-2026-11-08.json`). One batched request per decision is strictly better than serial calls. The 429 and retry-after behaviour is still unobserved (BACKLOG W-16); the adapter's retry path is tested against recorded fixtures.
 
 These numbers are heuristic (regex over transcripts). Phase 1's first job is to replace them with ledger facts; the baseline is re-measured over the first 14 ledger days before any threshold or routing change (paired comparison needs a clean "before").
 

@@ -1,5 +1,6 @@
 line-length = 120
 target-version = "py313"
+extend-exclude = ["tests/fixtures/legacy_jev.py"]
 
 [lint]
 select = ["E", "F", "W", "I", "B", "UP"]

@@ -31,8 +31,13 @@ wheels = [
 
 [[package]]
 name = "jade-decision-governance"
-version = "0.1.0"
-source = { virtual = "." }
+version = "0.2.0"
+source = { editable = "." }
+dependencies = [
+    { name = "jsonschema" },
+    { name = "pyyaml" },
+    { name = "referencing" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -43,6 +48,11 @@ dev = [
 ]
 
 [package.metadata]
+requires-dist = [
+    { name = "jsonschema", specifier = ">=4.26.0,<5" },
+    { name = "pyyaml", specifier = ">=6.0.3,<7" },
+    { name = "referencing", specifier = ">=0.37.0,<1" },
+]
 
 [package.metadata.requires-dev]
 dev = [

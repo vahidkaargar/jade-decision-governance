@@ -1,0 +1,38 @@
+{
+ "status": 200,
+ "body": {
+  "model": "typesafe/jev-1.14-20261014",
+  "answers": {
+   "q": {
+    "type": "score",
+    "score": 1.39,
+    "legend": {
+     "0": "none",
+     "1": "summary only",
+     "2": "partial raw",
+     "3": "complete raw with source"
+    },
+    "probabilities": {
+     "0": 0,
+     "1": 0.72,
+     "2": 0.17,
+     "3": 0.11
+    },
+    "confidence": 0.61
+   }
+  },
+  "usage": {
+   "input_tokens": 333,
+   "output_tokens": 17,
+   "cost": 1.3986e-05,
+   "is_byok": false,
+   "cost_details": {
+    "upstream_inference_cost": 1.3986e-05,
+    "upstream_inference_prompt_cost": 1.3986e-05,
+    "upstream_inference_completions_cost": 0
+   }
+  },
+  "id": "gen-dec-1794181304-ZosQSrszhrfHJoecxaTD",
+  "provider": "TypeSafe"
+ }
+}

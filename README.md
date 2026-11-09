@@ -3,7 +3,7 @@
 [![CI](https://github.com/vahidkaargar/jade-decision-governance/actions/workflows/ci.yml/badge.svg)](https://github.com/vahidkaargar/jade-decision-governance/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-JADE is a design, and soon a small runtime, for one problem: **an AI coding agent that asks a decision model "is this right?" and then acts on the answer as if it were permission.**
+JADE is a design and a small Python runtime for one problem: **an AI coding agent that asks a decision model "is this right?" and then acts on the answer as if it were permission.**
 
 It governs how agents (Claude Code first) use [TypeSafe Jev](https://docs.typesafe.ai), a System One decision model that returns typed probabilities, and when they may act on the result:
 
@@ -19,11 +19,11 @@ It governs how agents (Claude Code first) use [TypeSafe Jev](https://docs.typesa
 | Stage | State |
 |-------|-------|
 | DESIGN_READY | **Yes** — design approved by the maintainer 2026-11-09 |
-| IMPLEMENTED | No — the `jade` package does not exist yet (Phase 1 is next, see `BACKLOG.md`) |
-| VALIDATED | No |
-| PRODUCTION_APPROVED | No |
+| IMPLEMENTED | **Yes** — `jade` 0.2.0: ledger, adapter, redaction, `jev` shim, question registry, permits, hook gate, calibration, bounded improvement loop; Phases 1–5 acceptance tests pass |
+| VALIDATED | No — needs 14 days of real ledger data, labelled outcomes and one full improvement cycle (`docs/08` section 5) |
+| PRODUCTION_APPROVED | No — a human decision (`docs/08`) |
 
-What exists today: the design documents, six JSON Schema contracts, five policy files with a tested loader, the baseline and performance tooling, and acceptance tests for every phase that skip until the runtime lands.
+What exists today: the design documents, the runtime, six JSON Schema contracts, five policy files with a tested loader, a 10-entry question registry, 35 replayable regression and adversarial cases, the baseline and performance tooling, and the phase acceptance tests. Wiring it into an agent harness is deliberately a human step: see `docs/08-deployment-runbook.md`.
 
 ## Why: the measured baseline
 
@@ -51,28 +51,47 @@ A prose rule with no threshold and no enforcement point does not hold. Details a
 | 5 | `docs/05-threat-model.md` | Threats, mitigations, what a Markdown skill can and cannot enforce |
 | 6 | `docs/06-roadmap.md` | Phases 1–5, acceptance tests, rollout and rollback |
 | 7 | `docs/07-self-improvement-and-work-management.md` | Bounded improvement loop, durable work items, human-only boundaries |
+| 8 | `docs/08-deployment-runbook.md` | What is installed, the human-only wiring steps, rollback, coverage limits, the path to VALIDATED |
 | — | `BACKLOG.md` | Every open item: owner, priority, dependency, trigger, next action |
 | — | `docs/JADE_Claude_Code_Master_Plan.md` | The original handoff draft this repository completes |
 
 ## Layout
 
 ```
-docs/             design documents
+jade/             the runtime package (CLI `jade`, shim `jev`)
+registry/         question registry, one JSON file per question version
+skills/jade/      SKILL.md: how agents should use it
+docs/             design documents and the deployment runbook
 schemas/          JSON Schema 2020-12: decision, question, permit, outcome, work-item, improvement (+ examples)
 policies/         risk.yaml routing.yaml escalation.yaml safety.yaml promotion.yaml, loader.py
 policies/local/   machine-specific overlays (gitignored) + committed *.example.yaml
-evals/            baseline miner, policy replay, live performance harness
+evals/            baseline miner, policy replay, regression + adversarial cases, live performance harness
 adapters/jev/     OpenRouter Decisions API probe
-tests/            contract, policy and overlay tests; tests/acceptance = Phase 1–5 checklist
+tests/            contract, policy and overlay tests; tests/acceptance = the Phase 1–5 acceptance checklist
 ```
 
-## Try it
+## Install and use
 
-Requires [uv](https://docs.astral.sh/uv/) and Python 3.13+.
+Requires [uv](https://docs.astral.sh/uv/), Python 3.13+, and an OpenRouter key in the macOS Keychain (service `OPENROUTER_API_KEY`) or the environment.
+
+```bash
+uv tool install .            # installs `jade` and the `jev` compatibility shim
+jev verify "The suite passed" --state-file test-output.txt
+echo $?                      # 0 accept, 3 abstain, 4 reject, 5 provider unavailable, 6 invalid question
+jade check                   # probes ledger, policies, registry, hooks and the provider
+jade ledger stats            # what your agents actually did
+```
+
+Only exit code 0 is a yes. Enforcement of risky tool calls is opt-in and human-wired: `docs/08-deployment-runbook.md`.
+
+## Develop
+
+Requires uv and Python 3.13+.
 
 ```bash
 uv sync
-uv run pytest -q                      # contract, policy and overlay tests
+uv run pytest -q                      # contract, policy, overlay and phase acceptance tests
+uv run python evals/run_cases.py      # regression + adversarial case replay
 uv run ruff check .
 ```
 
@@ -101,9 +120,12 @@ uv run python evals/performance/run.py --rounds 3
 The shipped `policies/risk.yaml` and `policies/safety.yaml` are generic. Your production hosts, deploy scripts and retired services go in gitignored overlays:
 
 ```bash
-cp policies/local/risk.local.example.yaml   policies/local/risk.local.yaml
-cp policies/local/safety.local.example.yaml policies/local/safety.local.yaml
+mkdir -p ~/.config/jade/local
+cp policies/local/risk.local.example.yaml   ~/.config/jade/local/risk.local.yaml
+cp policies/local/safety.local.example.yaml ~/.config/jade/local/safety.local.yaml
 ```
+
+(For development from a checkout, `policies/local/*.local.yaml` is gitignored; the installed tool reads `~/.config/jade/local/`.)
 
 Overlays can add hosts, paths, rules and invariants. They cannot remove a shipped invariant or lower a shipped high-risk rule (`policies/loader.py`, `tests/test_policy_overlay.py`).
 

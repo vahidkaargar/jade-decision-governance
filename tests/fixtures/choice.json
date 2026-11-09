@@ -1,0 +1,30 @@
+{
+ "status": 200,
+ "body": {
+  "model": "typesafe/jev-1.14-20261014",
+  "answers": {
+   "q": {
+    "type": "choice",
+    "choice": "retry",
+    "probabilities": {
+     "retry": 0.76,
+     "cache": 0.24
+    },
+    "confidence": 0.52
+   }
+  },
+  "usage": {
+   "input_tokens": 332,
+   "output_tokens": 31,
+   "cost": 1.3944e-05,
+   "is_byok": false,
+   "cost_details": {
+    "upstream_inference_cost": 1.3944e-05,
+    "upstream_inference_prompt_cost": 1.3944e-05,
+    "upstream_inference_completions_cost": 0
+   }
+  },
+  "id": "gen-dec-1794181304-OFbCCVSjD7Cmk426k84K",
+  "provider": "TypeSafe"
+ }
+}

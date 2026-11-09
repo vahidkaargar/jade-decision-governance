@@ -13,6 +13,7 @@ invariants:
   - id: SI-05
     description: "Secrets never in state, logs, chat or files"
     enforcement: "redact() before provider call and ledger write; block on residual match"
+    match_on: raw          # the whole command including heredoc bodies and quoted text
     block: "(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|gho_[A-Za-z0-9]{30,}|glpat-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY)"
   - id: SI-06
     description: "No autonomous production release"
@@ -22,7 +23,12 @@ invariants:
     enforcement: "state machine guards (docs/02 section 2)"
   - id: SI-08
     description: "Never push to the default branch"
-    block: "git push( [^|;&]*)? (origin |upstream )?(main|master)\\b"
+    enforcement: "pattern below, plus the hook resolves a bare `git push` against the current branch"
+    block: "git push\\b[^|;&]*[ :+](main|master)(\\s|$)"
+  - id: SI-09
+    description: "The agent never approves its own permits and never changes its own governance wiring"
+    enforcement: "these commands also refuse to run without an interactive human terminal"
+    block: "\\bjade (permit approve|hooks (install|uninstall)|claude-md apply|gate (off|advisory|enforce))\\b|\\bJADE_GATE_MODE="
 protected_targets:
   - policies/safety.yaml
   - policies/promotion.yaml

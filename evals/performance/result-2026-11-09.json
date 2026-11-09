@@ -1,0 +1,79 @@
+{
+ "model_requested": "typesafe/jev-1.14",
+ "runs": [
+  {
+   "config": "single_noul_parallel_1",
+   "n": 20,
+   "errors": 0,
+   "p50_ms": 514,
+   "p95_ms": 639,
+   "p99_ms": 728,
+   "max_ms": 728,
+   "mean_ms": 532,
+   "cost_usd": 0.000303,
+   "statuses": []
+  },
+  {
+   "config": "single_noul_parallel_4",
+   "n": 80,
+   "errors": 0,
+   "p50_ms": 506,
+   "p95_ms": 553,
+   "p99_ms": 562,
+   "max_ms": 565,
+   "mean_ms": 509,
+   "cost_usd": 0.001213,
+   "statuses": []
+  },
+  {
+   "config": "single_noul_parallel_8",
+   "n": 160,
+   "errors": 0,
+   "p50_ms": 511,
+   "p95_ms": 582,
+   "p99_ms": 617,
+   "max_ms": 717,
+   "mean_ms": 521,
+   "cost_usd": 0.002426,
+   "statuses": []
+  },
+  {
+   "config": "batch_1_serial",
+   "n": 21,
+   "errors": 0,
+   "p50_ms": 505,
+   "p95_ms": 564,
+   "p99_ms": 574,
+   "max_ms": 574,
+   "mean_ms": 515,
+   "cost_usd": 0.000318,
+   "statuses": []
+  },
+  {
+   "config": "batch_3_serial",
+   "n": 21,
+   "errors": 0,
+   "p50_ms": 502,
+   "p95_ms": 551,
+   "p99_ms": 554,
+   "max_ms": 554,
+   "mean_ms": 509,
+   "cost_usd": 0.000422,
+   "statuses": []
+  },
+  {
+   "config": "batch_8_serial",
+   "n": 21,
+   "errors": 0,
+   "p50_ms": 515,
+   "p95_ms": 616,
+   "p99_ms": 617,
+   "max_ms": 617,
+   "mean_ms": 527,
+   "cost_usd": 0.000683,
+   "statuses": []
+  }
+ ],
+ "resolved_model": "typesafe/jev-1.14-20261014",
+ "total_cost_usd": 0.005365
+}

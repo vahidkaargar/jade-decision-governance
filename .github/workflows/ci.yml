@@ -23,6 +23,8 @@ jobs:
         run: uv run ruff check .
       - name: Contract and policy tests
         run: uv run pytest -q
+      - name: Regression and adversarial case replay
+        run: uv run python evals/run_cases.py
       - name: Policy replay smoke (synthetic rows)
         run: |
           printf '%s\n' '{"session":"s1","ts":"2026-01-01T00:00:00Z","primitive":"verify","dry_run":false,"question":"q","p":0.9}' \

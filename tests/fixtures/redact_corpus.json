@@ -1,0 +1,338 @@
+[
+ {
+  "kind": "openai",
+  "secret": [
+   "sk-Ab3dE6g",
+   "H9jK2mN5pQ8sT1vW4xZ7"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "openai_quoted",
+  "secret": [
+   "sk-Ab3dE6g",
+   "H9jK2mN5pQ8sT1vW4xZ7"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "openrouter",
+  "secret": [
+   "sk-or-v1-0123456789",
+   "abcdef0123456789abcdef0123456789abcdef"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "openrouter_quoted",
+  "secret": [
+   "sk-or-v1-0123456789",
+   "abcdef0123456789abcdef0123456789abcdef"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "github_pat",
+  "secret": [
+   "ghp_A1b2C3d4E",
+   "5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "github_pat_quoted",
+  "secret": [
+   "ghp_A1b2C3d4E",
+   "5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "github_oauth",
+  "secret": [
+   "gho_A1b2C3d4E",
+   "5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "github_oauth_quoted",
+  "secret": [
+   "gho_A1b2C3d4E",
+   "5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "github_fine",
+  "secret": [
+   "github_pat_11ABCDEFG0abcde",
+   "fghijkl_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghij"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "github_fine_quoted",
+  "secret": [
+   "github_pat_11ABCDEFG0abcde",
+   "fghijkl_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghij"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "gitlab",
+  "secret": [
+   "glpat-x7Y",
+   "z9Ab3Cd5Ef7Gh9Ij1K"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "gitlab_quoted",
+  "secret": [
+   "glpat-x7Y",
+   "z9Ab3Cd5Ef7Gh9Ij1K"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "aws",
+  "secret": [
+   "AKIAIO",
+   "SFODNN7EXAMPLE"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "aws_quoted",
+  "secret": [
+   "AKIAIO",
+   "SFODNN7EXAMPLE"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "slack",
+  "secret": [
+   "xoxb-12345",
+   "6789012-abcdefghijkl"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "slack_quoted",
+  "secret": [
+   "xoxb-12345",
+   "6789012-abcdefghijkl"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "google",
+  "secret": [
+   "AIzaSyA1b2C3d",
+   "4E5f6G7h8I9j0K1l2M3n4O5p6Q"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "google_quoted",
+  "secret": [
+   "AIzaSyA1b2C3d",
+   "4E5f6G7h8I9j0K1l2M3n4O5p6Q"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "stripe_live",
+  "secret": [
+   "sk_live_4e",
+   "C39HqLyjWDarjtT1zdp7dc"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "stripe_live_quoted",
+  "secret": [
+   "sk_live_4e",
+   "C39HqLyjWDarjtT1zdp7dc"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "npm",
+  "secret": [
+   "npm_abcdefghi",
+   "jklmnopqrstuvwxyz0123456789"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "npm_quoted",
+  "secret": [
+   "npm_abcdefghi",
+   "jklmnopqrstuvwxyz0123456789"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "hf",
+  "secret": [
+   "hf_abcdefghij",
+   "klmnopqrstuvwxyzABCDEF0123"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "hf_quoted",
+  "secret": [
+   "hf_abcdefghij",
+   "klmnopqrstuvwxyzABCDEF0123"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "jwt",
+  "secret": [
+   "eyJhbGciOiJIUzI1NiJ9.eyJzd",
+   "WIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "jwt_quoted",
+  "secret": [
+   "eyJhbGciOiJIUzI1NiJ9.eyJzd",
+   "WIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "bot",
+  "secret": [
+   "123456789:AAHd",
+   "qTcvCH1vGWJxfSeofSAs0K5PALDsaw"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "bot_quoted",
+  "secret": [
+   "123456789:AAHd",
+   "qTcvCH1vGWJxfSeofSAs0K5PALDsaw"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "auth_header",
+  "secret": [
+   "Zm9vOmJh",
+   "cjEyMzQ1Njc4OQ=="
+  ],
+  "template": "Authorization: Basic @@"
+ },
+ {
+  "kind": "bearer",
+  "secret": [
+   "abcdEFGH",
+   "1234ijklMNOP5678"
+  ],
+  "template": "curl -H 'Authorization: Bearer @@' https://x"
+ },
+ {
+  "kind": "env_password",
+  "secret": [
+   "hunt",
+   "er2hunter2"
+  ],
+  "template": "DB_PASSWORD=@@"
+ },
+ {
+  "kind": "env_secret_yaml",
+  "secret": [
+   "s3cr3",
+   "t-value-123"
+  ],
+  "template": "client_secret: @@"
+ },
+ {
+  "kind": "api_key_assign",
+  "secret": [
+   "k_9f",
+   "8e7d6c5b4a"
+  ],
+  "template": "API_KEY = @@"
+ },
+ {
+  "kind": "url_password",
+  "secret": [
+   "pa5",
+   "5w0rdXYZ"
+  ],
+  "template": "postgres://admin:@@@db.internal:5432/app"
+ },
+ {
+  "kind": "pem",
+  "secret": [
+   "MIIEvQIBAD",
+   "ANBgkqhkiG9w0BAQEFAASC"
+  ],
+  "template": "-----BEGIN PRIVATE KEY-----\n@@\n-----END PRIVATE KEY-----"
+ },
+ {
+  "kind": "email",
+  "secret": [
+   "someone.",
+   "else@example.org"
+  ],
+  "template": "contact @@ about it"
+ },
+ {
+  "kind": "passphrase",
+  "secret": [
+   "correct",
+   "-horse-battery"
+  ],
+  "template": "PASSPHRASE=@@"
+ },
+ {
+  "kind": "access_key_env",
+  "secret": [
+   "wJalrXUtnF",
+   "EMI-K7MDENG-bPxRfiCY"
+  ],
+  "template": "AWS_SECRET_ACCESS_KEY=@@"
+ },
+ {
+  "kind": "token_json",
+  "secret": [
+   "t0k3n-",
+   "abcdef-123456"
+  ],
+  "template": "{\"ACCESS_TOKEN\": \"@@\"}"
+ },
+ {
+  "kind": "credentials_assign",
+  "secret": [
+   "cr3d",
+   "-9999-zzzz"
+  ],
+  "template": "CREDENTIALS: @@"
+ },
+ {
+  "kind": "multi_in_one_line",
+  "secret": [
+   "sk-Qq1Ww2E",
+   "e3Rr4Tt5Yy6Uu7Ii8Oo9"
+  ],
+  "template": "a=1 b=@@ c=3"
+ },
+ {
+  "kind": "bearer_lower",
+  "secret": [
+   "zzzzYY",
+   "YYxxxxWWWW1111"
+  ],
+  "template": "authorization: bearer @@"
+ }
+]
