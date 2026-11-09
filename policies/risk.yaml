@@ -42,8 +42,9 @@ rules:
     # Defeats the standalone pre-push guard (`jade git-hook script`, SI-08): git then does not run the hook that sees the real remote ref. R-10 and R-15 already
     # rate a push and `git -c` high; this rule says why, and adds what they miss: `git config core.hooksPath` (a persistent change), a write to the
     # repository's own pre-push file, `chmod`/`rm`/`mv` of it. Reading one (`git config --get core.hooksPath`, `cat .git/hooks/pre-push`) is not matched.
+    # The environment route (`GIT_CONFIG_KEY_0=core.hooksPath ... git push`, `GIT_CONFIG_PARAMETERS`) is matched by name.
     # The `git:hooks-bypass` marker is added by jade/policy.py when `git -c core.hooksPath=...` (or `--config-env`) is on the command line.
-    match: "(?i:^git:hooks-bypass |^git:unsafe-config .*core\\.hookspath|\\bgit push\\b[^;&|]*\\s--no-ve\\w*|\\bgit config\\b(?![^;&|]*\\s(?:--get\\S*|--list|-l|--show-\\S+)\\b)[^;&|]*core\\.hookspath|\\.git/hooks/pre-push\\b)"
+    match: "(?i:^git:hooks-bypass |^git:unsafe-config .*core\\.hookspath|\\bgit push\\b[^;&|]*\\s--no-ve\\w*|\\bgit config\\b(?![^;&|]*\\s(?:--get\\S*|--list|-l|--show-\\S+)\\b)[^;&|]*core\\.hookspath|\\.git/hooks/pre-push\\b|\\bGIT_CONFIG_(?:KEY_\\d+|PARAMETERS)=\\S*core\\.hookspath)"
     rationale: "Defeats the pre-push guard that stops a push to the default branch (--no-verify, core.hooksPath, or an edit of the pre-push hook): git would not run the check that sees the real remote ref"
   - id: R-10
     level: high

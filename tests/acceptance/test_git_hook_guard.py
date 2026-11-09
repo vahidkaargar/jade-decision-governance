@@ -211,7 +211,7 @@ def test_the_script_does_not_need_jade_to_run(world, tmp_path):
     assert run_script(work, [line], "origin", "u", shell=shutil.which("sh"), path=str(bin_dir)).returncode == 1
     text = githook.script()
     assert text.startswith("#!/bin/sh\n") and githook.MARKER in text
-    assert [ln for ln in text.splitlines() if not ln.lstrip().startswith("#") and "jade" in ln.replace("jade pre-push guard", "")] == []
+    assert [ln for ln in text.splitlines() if not ln.lstrip().startswith("#") and "jade" in ln.replace("jade pre-push guard", "").replace("jade.protectedBranch", "")] == []   # the one git config key is no program
 
 
 def test_the_repositorys_own_pre_push_hook_still_runs_when_the_guard_is_installed_through_hooks_path(world, tmp_path):
@@ -356,3 +356,85 @@ def test_reading_the_hook_or_its_setting_and_the_commands_around_it_stay_low(cmd
 def test_a_write_to_the_hook_file_through_an_edit_tool_is_high(tmp_path):
     a = policy.assess("Write", {"file_path": str(tmp_path / "r" / ".git" / "hooks" / "pre-push"), "content": "#!/bin/sh\nexit 0\n"}, str(tmp_path))
     assert a.level == "high" and a.rule_id == "R-17"
+
+
+# ---- second pass: a default branch with another name and no remote-tracking HEAD ----------------------------------------
+@pytest.fixture
+def headless(world):
+    """The world with refs/remotes/origin/HEAD removed (a clone whose default branch the repository does not record) and a remote branch `trunk`."""
+    work, remote = world
+    git(work, "remote", "set-head", "origin", "-d")
+    assert git(work, "symbolic-ref", "-q", "refs/remotes/origin/HEAD", check=False).returncode != 0
+    return work, remote
+
+
+def test_the_known_limit_with_no_recorded_default_branch_is_main_and_master_only(headless):
+    work, remote = headless
+    assert git(work, "push", "origin", "HEAD:main", check=False).returncode != 0
+    assert git(work, "push", "origin", "HEAD:master", check=False).returncode != 0
+    assert git(work, "push", "origin", "HEAD:trunk", check=False).returncode == 0   # documented in docs/08 section 2.7: record it or name it
+
+
+def test_init_default_branch_is_protected_too(headless):
+    work, remote = headless
+    git(work, "config", "init.defaultBranch", "trunk")
+    r = git(work, "push", "origin", "HEAD:trunk", check=False)
+    assert r.returncode != 0 and "'trunk'" in r.stderr and not remote_has(remote, "trunk")
+    assert git(work, "push", "origin", "HEAD:Trunk", check=False).returncode != 0
+    assert git(work, "push", "origin", "HEAD:trunk-fix", check=False).returncode == 0
+
+
+def test_jade_protected_branch_names_any_number_of_branches(headless):
+    work, remote = headless
+    git(work, "config", "--add", "jade.protectedBranch", "trunk")
+    git(work, "config", "--add", "jade.protectedBranch", "release")
+    for ref in ("trunk", "release", "RELEASE", "refs/heads/trunk"):
+        r = git(work, "push", "origin", f"HEAD:{ref}", check=False)
+        assert r.returncode != 0 and "refusing" in r.stderr, ref
+    assert not remote_has(remote, "trunk") and not remote_has(remote, "release")
+    assert git(work, "push", "origin", "HEAD:releases", check=False).returncode == 0
+    assert git(work, "push", "origin", "--delete", "releases", check=False).returncode == 0
+
+
+def test_the_first_push_of_main_to_an_empty_remote_is_refused_and_no_verify_is_the_human_way(tmp_path, git_env):
+    remote = tmp_path / "empty.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+    work = tmp_path / "w"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
+    git(work, "remote", "add", "origin", str(remote))
+    (work / "a").write_text("a")
+    git(work, "add", "a")
+    git(work, "commit", "-q", "-m", "one")
+    install(work)
+    r = git(work, "push", "-u", "origin", "main", check=False)
+    assert r.returncode != 0 and "refusing" in r.stderr and not remote_has(remote, "main")
+    assert git(work, "push", "--no-verify", "-u", "origin", "main", check=False).returncode == 0
+
+
+def test_check_warns_when_a_remotes_default_branch_is_not_recorded_and_says_what_to_do(headless, capsys):
+    work, _ = headless
+    rc, out = check_cli(work, capsys)
+    assert rc == 0 and "remote origin: default branch not recorded" in out and "git remote set-head origin --auto" in out and "jade.protectedBranch" in out
+    git(work, "config", "init.defaultBranch", "trunk")
+    rc, out = check_cli(work, capsys)
+    assert "also protected by name" in out and "trunk" in out and "and the names above" in out
+
+
+def test_check_names_the_recorded_default_branch(world, capsys):
+    work, _ = world
+    rc, out = check_cli(work, capsys)
+    assert rc == 0 and "remote origin: default branch main (refs/remotes/origin/HEAD) is protected" in out
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_the_protected_names_are_read_by_the_script_under_every_posix_shell(world, shell):
+    work, remote = world
+    git(work, "remote", "set-head", "origin", "-d")
+    git(work, "config", "--add", "jade.protectedBranch", "trunk")
+    git(work, "config", "--add", "jade.protectedBranch", "Release")
+    line = "refs/heads/f {} refs/heads/{} {}"
+    for name in ("trunk", "TRUNK", "release", "main"):
+        r = run_script(work, [line.format("a" * 40, name, "b" * 40)], "origin", str(remote), shell=shell)
+        assert r.returncode == 1 and "refusing" in r.stderr, name
+    for name in ("trunk2", "releases", "team/trunk"):
+        assert run_script(work, [line.format("a" * 40, name, "b" * 40)], "origin", str(remote), shell=shell).returncode == 0, name

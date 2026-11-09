@@ -101,6 +101,8 @@ def load_safety(overlay: Path | None = None, base: Path | None = None) -> dict:
     for inv in safety["invariants"]:
         if "block" in inv:
             inv["_re"] = re.compile(inv["block"])
+        if "block_quoted" in inv:   # also tried on the raw text views, where quoted text is not blanked (policy._assess_shell)
+            inv["_qre"] = re.compile(inv["block_quoted"])
         # `content_block` (default: `block`) is what the content scan of a file write looks for, and `scan_content_paths` limits that scan to
         # the files it names (a shell profile, an environment file): see SI-11.
         if "content_block" in inv:

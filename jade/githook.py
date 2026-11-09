@@ -22,19 +22,35 @@ HOOK_SCRIPT = f"""#!/bin/sh
 # git runs this with the remote name and URL as arguments and one line per ref on stdin:
 #   <local ref> <local sha> <remote ref> <remote sha>
 # The remote ref is what the push really updates, whatever the refspec looked like (HEAD:main, +main, refs/heads/main, a delete).
-# Protected: main and master always, and the branch refs/remotes/<remote>/HEAD points at (the remote's default branch) when it is known.
+# Protected: main and master always, the branch refs/remotes/<remote>/HEAD points at (the remote's default branch) when it is known, init.defaultBranch,
+# and every branch named by `git config --add jade.protectedBranch <name>` (for a default branch with another name and no remote-tracking HEAD:
+# `git remote set-head <remote> --auto` records it, or name it once with jade.protectedBranch).
 # A human who means it uses `git push --no-verify`; JADE rates that command high so an agent needs a permit for it.
 
 remote=$1
 lower() {{ printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }}
 
-default=
+# one name per line: what is protected besides main and master
+default=$(git config --get-all jade.protectedBranch 2>/dev/null)
+init_default=$(git config --get init.defaultBranch 2>/dev/null)
+[ -n "$init_default" ] && default=$default'
+'$init_default
 case $remote in
-  ''|*[!A-Za-z0-9._/-]*) ;;   # a URL or an odd name: no remote-tracking HEAD to read, main and master still count
+  ''|*[!A-Za-z0-9._/-]*) ;;   # a URL or an odd name: no remote-tracking HEAD to read, the other names still count
   *)
-    head_ref=$(git symbolic-ref -q "refs/remotes/$remote/HEAD" 2>/dev/null) && default=${{head_ref#refs/remotes/$remote/}}
+    head_ref=$(git symbolic-ref -q "refs/remotes/$remote/HEAD" 2>/dev/null) && default=$default'
+'${{head_ref#refs/remotes/$remote/}}
     ;;
 esac
+is_protected() {{
+  [ "$1" = main ] || [ "$1" = master ] && return 0
+  while IFS= read -r p; do
+    [ -n "$p" ] && [ "$1" = "$(lower "$p")" ] && return 0
+  done <<PROTECTED_EOF
+$default
+PROTECTED_EOF
+  return 1
+}}
 
 input=$(cat)
 refused=
@@ -46,7 +62,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   esac
   branch=${{remote_ref#refs/heads/}}
   name=$(lower "$branch")
-  if [ "$name" = main ] || [ "$name" = master ] || {{ [ -n "$default" ] && [ "$name" = "$(lower "$default")" ]; }}; then
+  if is_protected "$name"; then
     refused=$branch
     case $local_sha in
       *[!0]*) ;;
@@ -124,4 +140,29 @@ def check(repo: str | os.PathLike) -> tuple[bool, list[str]]:
         return False, lines
     same = hashlib.sha256(text.encode()).digest() == hashlib.sha256(HOOK_SCRIPT.encode()).digest()
     lines.append(f"pre-push: JADE guard v{VERSION} installed" + ("" if same else " (differs from `jade git-hook script`: an older or edited copy)"))
+    lines.extend(_default_branch_lines(base))
     return True, lines
+
+
+def _default_branch_lines(base: Path) -> list[str]:
+    """What the guard protects in this repository besides main and master, and a warning when a remote's default branch is not known to it."""
+    try:
+        _, remotes = _git(base, "remote")
+        _, extra = _git(base, "config", "--get-all", "jade.protectedBranch")
+        _, init = _git(base, "config", "--get", "init.defaultBranch")
+    except (OSError, subprocess.SubprocessError):
+        return []
+    out = []
+    named = [n for n in dict.fromkeys([*extra.splitlines(), init]) if n]
+    if named:
+        out.append("also protected by name (jade.protectedBranch, init.defaultBranch): " + ", ".join(named))
+    for remote in remotes.split():
+        try:
+            code, ref = _git(base, "symbolic-ref", "-q", f"refs/remotes/{remote}/HEAD")
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if code == 0 and ref:
+            out.append(f"remote {remote}: default branch {ref.rsplit('/', 1)[-1]} (refs/remotes/{remote}/HEAD) is protected")
+        else:
+            out.append(f"remote {remote}: default branch not recorded, only main, master" + (" and the names above" if named else "") + f" are protected; if it has another name run `git remote set-head {remote} --auto` or `git config --add jade.protectedBranch <name>`")
+    return out

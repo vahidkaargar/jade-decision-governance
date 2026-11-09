@@ -248,7 +248,7 @@ def test_si10_blocks_the_literal_name_and_a_glob_that_names_the_file(cmd):
 
 
 @pytest.mark.parametrize("cmd", [
-    "ls ~/.local/share/jade/*", "rm tmp/*.key", "ls *seal*", "cat notes/*.md", "cat **permit**", "echo '**permit**'", "ls permit*", "ls src/*.py", "[ -f x ]",
+    "rm tmp/*.key", "ls *seal*", "cat notes/*.md", "cat **permit**", "echo '**permit**'", "ls permit*", "ls src/*.py", "[ -f x ]",
     "cat ~/.local/share/jade/permits.log", "cat docs/permit-lifecycle.md",
 ])
 def test_si10_leaves_ordinary_globs_and_prose_alone(cmd):

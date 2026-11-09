@@ -400,17 +400,27 @@ _GLOB_CLASS = re.compile(r"\[[^\]]*\]")
 MIN_GLOB_LITERALS = 6   # `*.key`, `p*`, `*` and `*seal*` are ordinary arguments; `permit-s*` and `*seal.key` name one file in practice (a word with no `-` or `.` needs two more)
 
 
+def _mentions_state_home(views: list[str]) -> bool:
+    """The command names JADE's state directory (the default `~/.local/share/jade`, a `$JADE_HOME` reference or the directory `JADE_HOME` holds here)."""
+    marks = ["share/jade", "JADE_HOME", os.environ.get("JADE_HOME") or ""]
+    return any(m and m in v for v in views for m in marks)
+
+
 def _names_by_glob(names: list[str], views: list[str]) -> bool:
     """True when a word of the command is a shell glob that would match one of `names` (a file an invariant protects) and holds at least
     `MIN_GLOB_LITERALS` literal characters: `cat ~/.local/share/jade/permit-s*`, `*seal.key`, `permit-seal.k?y`, `permit-[s]eal.key`. Brace lists are already
-    expanded in one of the views. Only the last path component is matched; a directory glob (`*/permit-seal.key`) already contains the name."""
+    expanded in one of the views. Only the last path component is matched; a directory glob (`*/permit-seal.key`) already contains the name.
+
+    A command that also names JADE's state directory (`cat ~/.local/share/jade/*.key`, `cd $JADE_HOME && cat p*`) is the place the threshold is for: there a glob that
+    matches the file counts whatever its length, because the directory says which `*` is meant (`jade ledger stats` is the allowed way to read that directory)."""
+    relaxed = _mentions_state_home(views)
     for view in views:
         for word in _GLOB_WORD_SPLIT.split(view):
             comp = word.rsplit("/", 1)[-1]
             if not comp or len(comp) > 200 or not re.search(r"[*?\[]", comp):
                 continue
             literal = re.sub(r"[*?\[\]]", "", _GLOB_CLASS.sub("", comp))
-            if len(literal) < MIN_GLOB_LITERALS or not re.search(r"[-.]", literal) and len(literal) < MIN_GLOB_LITERALS + 2:   # `**permit**` in prose is not a file
+            if not relaxed and (len(literal) < MIN_GLOB_LITERALS or not re.search(r"[-.]", literal) and len(literal) < MIN_GLOB_LITERALS + 2):   # `**permit**` in prose is not a file
                 continue
             if any(fnmatch.fnmatchcase(n, comp) for n in names):
                 return True
@@ -588,11 +598,17 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
             gated_keys.append(key)
     best = best or risk()["rules"][-1]
     a = _from_rule(best, loader.environment_of(risk(), text_in))
+    views: list[str] | None = None
     for inv in safety()["invariants"]:
         if "_re" not in inv:
             continue
-        haystacks = text_views(text_in) if inv.get("match_on") == "raw" else active + [_bare(s) for s in active]
-        if any(inv["_re"].search(h) for h in haystacks) or (inv.get("match_on") == "raw" and inv.get("block_globs") and _names_by_glob(inv["block_globs"], haystacks)):
+        raw = inv.get("match_on") == "raw"
+        if views is None and (raw or "_qre" in inv):
+            views = text_views(text_in)
+        haystacks = views if raw else active + [_bare(s) for s in active]
+        # `block_quoted`: the same invariant, also read in the quoted text the segmenter blanks (an alias whose value is the whole command, `env -S "..."`)
+        if any(inv["_re"].search(h) for h in haystacks) or (raw and inv.get("block_globs") and _names_by_glob(inv["block_globs"], haystacks)) \
+                or ("_qre" in inv and any(inv["_qre"].search(v) for v in views)):
             a.blocked.append(inv["id"])
     _seal(a, tool, subject, cwd, subject)
     a.hold_key = sha256(canonical({"shell": sorted(set(gated_keys or keys))}))
