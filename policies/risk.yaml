@@ -13,7 +13,8 @@ rules:
     level: critical
     reversibility: irreversible
     blast_radius: public
-    match: "\\b(pfctl|iptables|nft|ufw)\\b|(?i:/etc/pf\\.conf)"
+    # The command word, not a file name that ends in it (`fw.nft`): a dot before the name is a file extension.
+    match: "(?<![\\w.])(pfctl|iptables|nft|ufw)\\b|(?i:/etc/pf\\.conf)"
     rationale: "Firewall change: human approval required"
   - id: R-02
     level: critical

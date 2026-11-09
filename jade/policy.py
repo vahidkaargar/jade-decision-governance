@@ -246,6 +246,10 @@ def _jade_package(path: str) -> str:
     return "/".join(parts)
 
 
+# Options whose value is a name (a project, a container, a package) and never a path the command writes.
+NAME_OPTIONS = frozenset({"--name", "--project-name", "--package", "--app-name", "--title", "--namespace", "--label", "--hostname", "--user"})
+
+
 def _absolute_operands(seg: str, dirs: tuple[str, ...], package: bool = False) -> str:
     """The operands of a segment as absolute, symlink-resolved paths, for every directory the segment may run in.
 
@@ -255,9 +259,12 @@ def _absolute_operands(seg: str, dirs: tuple[str, ...], package: bool = False) -
     out: list[str] = []
     if seg.startswith(shellnorm.TEXT_MARK):
         return ""
-    for n, tok in enumerate(seg.split(" ")[:64]):
+    toks = seg.split(" ")[:64]
+    for n, tok in enumerate(toks):
         if n == 0:
             continue  # the program being run is not something the segment writes (`~/.local/bin/jade check`)
+        if n > 1 and toks[n - 1] in NAME_OPTIONS:
+            continue  # `uv init --name jade`: a name, not a path
         if tok.startswith("-"):
             tok = tok.partition("=")[2]
         tok = tok.replace("\x01", " ")
@@ -499,11 +506,25 @@ def _assess_tool(tool: str, tool_input: dict, cwd: str) -> Assessment:
     return a
 
 
+IDENTITY_FILE = re.compile(r"(?<![\w-])(?:-i|-oIdentityFile=?|-o IdentityFile[= ]?|IdentityFile[= ])\s*(\S+)")
+REMOTE_SHELL_VERBS = ("ssh", "scp", "sftp")
+
+
+def _use_identity(seg: str) -> str:
+    """An ssh, scp or sftp segment with the file named by `-i` (or `-o IdentityFile=`) replaced by `$KEY`: the program reads that key to log in
+    and never prints it, so a key path there is not a key mutation (R-04). A key named anywhere else on the line (`scp ~/.ssh/id_rsa host:`,
+    `cat key`) is untouched, and the remote-shell rule R-14 still rates the call itself."""
+    bare = PREFIX.sub("", seg, count=1).strip()
+    return IDENTITY_FILE.sub("-i $KEY", seg) if bare.split(" ", 1)[0].rsplit("/", 1)[-1] in REMOTE_SHELL_VERBS else seg
+
+
 def classify_segment(seg: str, dirs: tuple[str, ...]) -> tuple[dict, str]:
     """The rule one simple command (a segment of `shellnorm.segments_cwd`) matches, and the command with launcher prefixes and git options gone.
 
     The command is looked at as written and with its operands made absolute for every directory it may run in; a `files_only` rule (R-13, R-16)
     reads only what the command writes (`files_view`)."""
+    real_bare = _bare(seg)
+    seg = _use_identity(seg)
     bare, calls = _analyse(seg)
     texts = [seg, bare, _pathfold(bare), *([UNSAFE_GIT + bare] if any(c.danger for c in calls) else [])]
     view = files_view(bare)  # what a `files_only` rule may look at: None = the whole segment
@@ -520,7 +541,7 @@ def classify_segment(seg: str, dirs: tuple[str, ...]) -> tuple[dict, str]:
     abs_pkg = _absolute_operands(seg if view is None else "x " + view, dirs, package=True) if view != "" else ""
     if (rule := _path_rule(abs_ops, abs_files, {"R-16": abs_pkg})) and LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
         seg_best = rule
-    return seg_best, bare
+    return seg_best, real_bare
 
 
 def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:

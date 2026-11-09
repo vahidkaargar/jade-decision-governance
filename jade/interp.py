@@ -80,13 +80,16 @@ def argv_text(items: list[str]) -> str:
     return " ".join(word(i) for i in items)
 
 
-def effects(lang: str, source: str, depth: int = 0) -> Effects:
+def effects(lang: str, source: str, depth: int = 0, emit_all: bool = False) -> Effects:
+    """`emit_all`: the program's output is piped into a shell (`python3 -c 'print(...)' | sh`), so every string it holds may be a command."""
     source = source[:MAX_SOURCE]
+    if lang == "awk":
+        return awk_effects(source, emit_all)
     if lang == "python":
-        fx = _python(source, depth)
+        fx = _python(source, depth, emit_all)
         if fx is not None:
             return fx
-    return _generic(lang, source)
+    return _generic(lang, source, emit_all)
 
 
 # ------------------------------------------------------------------ python
@@ -118,9 +121,11 @@ TRANSPARENT = {"os.path.expanduser", "os.path.expandvars", "os.path.abspath", "o
 
 
 class _Py:
-    def __init__(self, depth: int):
+    def __init__(self, depth: int, emit_all: bool = False):
         self.fx = Effects()
         self.depth = depth
+        self.emit_all = emit_all
+        self.cwd: str | None = None       # os.chdir("jade") then open("hooks.py", "w"): the write is jade/hooks.py
         self.alias: dict[str, str] = {}   # local name -> dotted module path
         self.vars: dict[str, ast.AST] = {}  # local name -> the expression assigned to it last
         self.lists: dict[str, list[ast.AST]] = {}
@@ -172,13 +177,21 @@ class _Py:
         if isinstance(n, ast.IfExp):
             return self.ev(n.body, d + 1) or self.ev(n.orelse, d + 1)
         if isinstance(n, ast.Subscript):
-            if self.qual(n.value) == "os.environ" and self.ev(n.slice, d + 1) in HOME_NAMES:
+            key = self.ev(n.slice, d + 1)
+            base = self.qual(n.value)
+            if base == "os.environ" and key in HOME_NAMES:
                 return "~"
+            if base and key is not None and f"{base}[{key}]" in self.vars:   # d = {"c": "..."}; d["c"], os.environ["X"] = "..."
+                return self.ev(self.vars[f"{base}[{key}]"], d + 1)
+            if key is not None and key.lstrip("-").isdigit() and (items := self.items(n.value)) is not None and -len(items) <= int(key) < len(items):
+                return self.ev(items[int(key)], d + 1)   # cmds = ["...", "..."]; cmds[0]
             return None
         if isinstance(n, ast.Attribute):
             if n.attr == "parent":
                 v = self.ev(n.value, d + 1)
                 return v.rsplit("/", 1)[0] or "/" if v and "/" in v else "." if v else None
+            if (q := self.qual(n)) and q in self.vars:   # a class attribute (`C.cmd`) or `self.cmd = "..."`
+                return self.ev(self.vars[q], d + 1)
             return None
         if isinstance(n, ast.Call):
             return self._call_value(n, d)
@@ -197,6 +210,10 @@ class _Py:
             return args[0]
         if q in ("os.getenv", "os.environ.get") and args and args[0] in HOME_NAMES:
             return "~"
+        if q in ("os.getenv", "os.environ.get") and args and f"os.environ[{args[0]}]" in self.vars:
+            return self.ev(self.vars[f"os.environ[{args[0]}]"], d + 1)
+        if q in ("shlex.split", "shlex.join") and args and args[0] is not None:
+            return args[0]   # a command line cut into words and handed to subprocess: for the gate it is still that command line
         if isinstance(n.func, ast.Attribute):
             meth, recv = n.func.attr, n.func.value
             r = self.ev(recv, d + 1)
@@ -204,6 +221,8 @@ class _Py:
                 return r
             if meth in ("joinpath", "with_name") and r is not None:
                 return _join_path([r, *[a if a is not None else UNKNOWN for a in args]])
+            if meth in ("split", "rsplit") and r is not None:   # "git push origin main".split(): the words of a command line
+                return r.replace(args[0], " ") if args and args[0] else r
             if meth == "format" and r is not None:
                 return _format(r, args, {k.arg: self.ev(k.value, d + 1) for k in n.keywords if k.arg})
             if meth == "replace" and r is not None and len(args) >= 2 and args[0] is not None and args[1] is not None and not self._is_path_call(recv):
@@ -222,13 +241,42 @@ class _Py:
             return list(n.elts)
         if isinstance(n, ast.Name) and n.id in self.lists:
             return self.lists[n.id]
+        if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Add):   # ["git"] + shlex.split("push origin main")
+            left, right = self.items(n.left), self.items(n.right)
+            return [*left, *right] if left is not None and right is not None else None
+        if isinstance(n, ast.Call) and (words := self._split_words(n)) is not None:
+            return [ast.Constant(w) for w in words]
+        if isinstance(n, (ast.Attribute, ast.Subscript)):
+            key = self._target_key(n)
+            if key is not None and key in self.lists:
+                return self.lists[key]
+        return None
+
+    def _split_words(self, n: ast.Call) -> list[str] | None:
+        """The words of `shlex.split("...")` and `"...".split()` when the string is known."""
+        q = self.qual(n.func)
+        if q == "shlex.split" and n.args and (s := self.ev(n.args[0])) is not None:
+            try:
+                return shlex.split(s)
+            except ValueError:
+                return s.split()
+        if isinstance(n.func, ast.Attribute) and n.func.attr in ("split", "rsplit") and (s := self.ev(n.func.value)) is not None:
+            sep = self.ev(n.args[0]) if n.args else None
+            return s.split(sep) if sep else s.split()
         return None
 
     def argv(self, n: ast.AST) -> str | None:
         items = self.items(n)
         if items is None:
             return None
-        return argv_text([(self.ev(i) if not isinstance(i, ast.Starred) else None) or UNKNOWN for i in items])
+        words: list[str] = []
+        for i in items:
+            if isinstance(i, ast.Starred):   # ["git", *["push", "origin", "main"]]
+                sub = self.items(i.value)
+                words += [self.ev(x) or UNKNOWN for x in sub] if sub is not None else [UNKNOWN]
+            else:
+                words.append(self.ev(i) or UNKNOWN)
+        return argv_text(words)
 
     def command(self, n: ast.AST | None) -> str | None:
         """A command argument: a list is an argv, a string is shell text."""
@@ -285,6 +333,30 @@ class _Py:
                 self.walk(c)
             self._restore(saved)
             return
+        if isinstance(n, (ast.ListComp, ast.SetComp, ast.GeneratorExp)) and len(n.generators) == 1 and not n.generators[0].is_async:
+            gen = n.generators[0]
+            self.walk(gen.iter)
+            items = self.items(gen.iter) if not isinstance(gen.iter, ast.Set) else list(gen.iter.elts)
+            saved = self._save()
+            if items is not None and 0 < len(items) <= 50 and self.nesting < 3:   # [os.system(c) for c in ["..."]]: the element runs once per item
+                for item in items:
+                    self._bind_const(gen.target, item)
+                    self.walk(n.elt)
+            else:
+                self._forget(gen.target)
+                self.walk(n.elt)
+            self._restore(saved)
+            return
+        if isinstance(n, ast.ClassDef):
+            for c in n.body:
+                self.walk(c)
+                if isinstance(c, ast.Assign):
+                    for t in c.targets:
+                        if isinstance(t, ast.Name):   # class C: cmd = "..." -> C.cmd
+                            self.vars[f"{n.name}.{t.id}"] = c.value
+                            if (its := self.items(c.value)) is not None:
+                                self.lists[f"{n.name}.{t.id}"] = list(its)
+            return
         if isinstance(n, (ast.For, ast.AsyncFor)):
             self.walk(n.iter)
             items = self.items(n.iter) if not isinstance(n.iter, ast.Set) else list(n.iter.elts)
@@ -316,7 +388,12 @@ class _Py:
         return dict(self.vars), dict(self.lists)
 
     def _restore(self, saved: tuple[dict, dict]) -> None:
+        """Back to the names a scope started with. What a function stores on an object or a mapping (`self.cmd = ...`, `d["c"] = ...`) outlives it."""
+        kept_v = {k: v for k, v in self.vars.items() if "." in k or "[" in k}
+        kept_l = {k: v for k, v in self.lists.items() if "." in k or "[" in k}
         self.vars, self.lists = saved
+        self.vars.update(kept_v)
+        self.lists.update(kept_l)
 
     def _const(self, node: ast.AST) -> ast.AST:
         """The value of an expression at a call or loop step, frozen so that it keeps its meaning inside the callee (`$X` when unknown)."""
@@ -379,15 +456,38 @@ class _Py:
                 self.vars.pop(x.id, None)
                 self.lists.pop(x.id, None)
 
+    def _target_key(self, t: ast.AST) -> str | None:
+        """`d["c"]`, `os.environ["X"]`, `self.cmd`, `C.cmd`: a stored place a later read finds again."""
+        if isinstance(t, ast.Subscript) and (base := self.qual(t.value)) and (key := self.ev(t.slice)) is not None:
+            return f"{base}[{key}]"
+        if isinstance(t, ast.Attribute):
+            return self.qual(t)
+        return None
+
     def _bind(self, t: ast.AST, value: ast.AST) -> None:
         if not isinstance(t, ast.Name):
-            self._forget(t)
+            if (key := self._target_key(t)) is not None:
+                self.vars[key] = self._const(value) if self.items(value) is None else value
+                if (its := self.items(value)) is not None:
+                    self.lists[key] = list(its)
+                else:
+                    self.lists.pop(key, None)
+            else:
+                self._forget(t)
             return
         if isinstance(value, (ast.Name, ast.Attribute)) and (q := self.qual(value)) and not (isinstance(value, ast.Name) and value.id in self.vars):
             self.alias[t.id] = q   # sp = subprocess, run = subprocess.run
         self.vars[t.id] = value
+        if isinstance(value, ast.Dict):
+            for k, v in zip(value.keys, value.values, strict=True):
+                if k is not None and (kv := self.ev(k)) is not None:
+                    self.vars[f"{t.id}[{kv}]"] = v
+                    if (its := self.items(v)) is not None:
+                        self.lists[f"{t.id}[{kv}]"] = list(its)
         if isinstance(value, (ast.List, ast.Tuple)):
             self.lists[t.id] = list(value.elts)
+        elif isinstance(value, (ast.BinOp, ast.Call)) and (its := self.items(value)) is not None:
+            self.lists[t.id] = list(its)
         else:
             self.lists.pop(t.id, None)
 
@@ -400,46 +500,113 @@ class _Py:
         if c and _bare_shell(c):
             self.fx.shell_fed = True
 
+    def _w(self, p: str | None) -> None:
+        """A write target, made relative to the directory the program moved to (`os.chdir("jade")`)."""
+        if p and self.cwd and not p.startswith(("/", "~", UNKNOWN)):
+            p = _join_path([self.cwd, p])
+        self.fx.add_write(p)
+
+    def _c(self, c: str | None, cwd: str | None = None) -> None:
+        """A command the program runs, from the directory it moved to or was given (`cwd=`)."""
+        cwd = cwd or self.cwd
+        if c and cwd and UNKNOWN not in cwd:
+            c = f"cd {shlex.quote(cwd)} && {c}"
+        self.fx.add_cmd(c)
+
+    def _sink_ref(self, node: ast.AST) -> bool:
+        """A reference to a function that runs a command (`os.system`), passed as a value and not called here."""
+        q = self.qual(node) if isinstance(node, (ast.Name, ast.Attribute)) else None
+        return bool(q) and (q in EXEC_SHELL or q in EXEC_AUTO or q in EXEC_ARGV_FROM or q in EXEC_VARARGS_FROM)
+
+    def _payload(self, node: ast.AST, depth: int = 0) -> None:
+        """What an indirect call hands to a command-running function: a string is a command, a list is an argv and each element may be one."""
+        if depth > 2:
+            return
+        if isinstance(node, ast.Starred):
+            node = node.value
+        if (items := self.items(node)) is not None:
+            self._c(self.argv(node))
+            for i in items:
+                self._payload(i, depth + 1)
+        elif (v := self.ev(node)) is not None:
+            self._c(v)
+
+    def _indirect(self, n: ast.Call) -> None:
+        """`atexit.register(os.system, "...")`, `functools.partial(os.system, "...")`, `map(os.system, [...])`, `Thread(target=os.system, args=(...))`:
+        the command is an argument of the call that names the function, not of a call of it."""
+        vals = [*n.args, *(k.value for k in n.keywords)]
+        if any(self._sink_ref(v) for v in vals):
+            for v in vals:
+                if not self._sink_ref(v):
+                    self._payload(v)
+
+    def _is_libc(self, recv: ast.AST, d: int = 0) -> bool:
+        """`ctypes.CDLL(None)`, `ctypes.cdll.LoadLibrary("libc.so.6")` or a name bound to one: `.system(b"...")` on it runs a command."""
+        if d > 4:
+            return False
+        if isinstance(recv, ast.Name) and recv.id in self.vars:
+            return self._is_libc(self.vars[recv.id], d + 1)
+        if isinstance(recv, ast.Call):
+            q = self.qual(recv.func) or ""
+            return q.endswith(("CDLL", "PyDLL", "LoadLibrary", "cdll.LoadLibrary")) or q.startswith("ctypes.")
+        q = self.qual(recv) or ""
+        return q.startswith(("ctypes.cdll", "ctypes.CDLL", "ctypes.pydll"))
+
     def _call(self, n: ast.Call) -> None:
         fx = self.fx
         q = self.qual(n.func) or ""
         kw = {k.arg: k.value for k in n.keywords if k.arg}
         a = n.args
+        self._indirect(n)
+        if q in ("map", "list", "filter") and a and isinstance(a[0], ast.Lambda) and len(a) > 1 and len(a[0].args.args) == 1 \
+                and (items := self.items(a[1])) is not None and 0 < len(items) <= 50 and self.nesting < 3:
+            saved = self._save()   # map(lambda c: os.system(c), ["..."]): the body runs once per item
+            for item in items:
+                self._bind_const(ast.Name(id=a[0].args.args[0].arg, ctx=ast.Store()), item)
+                self.walk(a[0].body)
+            self._restore(saved)
+        if q == "os.chdir" and a:
+            d = self.ev(a[0])
+            self.cwd = None if d is None else _join_path([self.cwd, d]) if self.cwd and not d.startswith(("/", "~")) else d
+            return
+        if self.emit_all and q in ("print", "sys.stdout.write", "os.write", "sys.stdout.buffer.write") and a:
+            self._c(" ".join(self.ev(x) or UNKNOWN for x in a if not (isinstance(x, ast.Constant) and x.value is None)))
         if q in EXEC_SHELL or q in EXEC_AUTO:
             c = self.command(a[0] if a else kw.get("args") or kw.get("cmd") or kw.get("command"))
             if c is not None and q == "pexpect.spawn" and len(a) > 1 and (extra := self.argv(a[1])):
                 c = f"{c} {extra}"
-            fx.add_cmd(c)
+            self._c(c, self.ev(kw["cwd"]) if "cwd" in kw else None)
             self._shell_sink(c)
         elif q in EXEC_ARGV_FROM and len(a) > EXEC_ARGV_FROM[q]:
             c = self.argv(a[EXEC_ARGV_FROM[q]]) or (argv_text([self.ev(a[0]) or UNKNOWN]) if a else None)
-            fx.add_cmd(c)
+            self._c(c)
             self._shell_sink(c)
         elif q in EXEC_VARARGS_FROM:
             c = argv_text([self.ev(x) or UNKNOWN for x in a[EXEC_VARARGS_FROM[q]:]])
-            fx.add_cmd(c)
+            self._c(c)
             self._shell_sink(c)
         elif q.startswith("sh.") and q.count(".") == 1:
-            fx.add_cmd(argv_text([q[3:], *[self.ev(x) or UNKNOWN for x in a]]))
+            self._c(argv_text([q[3:], *[self.ev(x) or UNKNOWN for x in a]]))
         elif q in OPEN_FUNCS:
             mode_n = a[1] if len(a) > 1 else kw.get("mode")
             if mode_n is not None and ((m := self.ev(mode_n)) is None or set(m) & set("wax+")):  # a mode the source does not contain counts as a write
-                fx.add_write(self.path(a[0] if a else kw.get("file") or kw.get("name") or kw.get("filename")))
+                self._w(self.path(a[0] if a else kw.get("file") or kw.get("name") or kw.get("filename")))
         elif q == "os.open":
             flags = ast.dump(a[1]) if len(a) > 1 else ast.dump(kw["flags"]) if "flags" in kw else ""
             if re.search(r"O_(?:WRONLY|RDWR|CREAT|APPEND|TRUNC)", flags):
-                fx.add_write(self.path(a[0] if a else None))
+                self._w(self.path(a[0] if a else None))
         elif q in WRITE_FIRST:
-            fx.add_write(self.path(a[0] if a else kw.get("filename") or kw.get("path") or kw.get("base_name")))
+            self._w(self.path(a[0] if a else kw.get("filename") or kw.get("path") or kw.get("base_name")))
         elif q == "logging.basicConfig" and "filename" in kw:
-            fx.add_write(self.path(kw["filename"]))
+            self._w(self.path(kw["filename"]))
         elif q in WRITE_BOTH:
             for x in a[:2]:
-                fx.add_write(self.path(x))
+                self._w(self.path(x))
         elif q in WRITE_SECOND:
-            fx.add_write(self.path(a[1]) if len(a) > 1 else None)
-        elif q in ("exec", "eval") and a and self.depth < MAX_DEPTH and (s := self.ev(a[0])) is not None:
-            fx.merge(effects("python", s, self.depth + 1))
+            self._w(self.path(a[1]) if len(a) > 1 else None)
+        elif q in ("exec", "eval") and a and self.depth < MAX_DEPTH and (s := self.ev(
+                a[0].args[0] if isinstance(a[0], ast.Call) and self.qual(a[0].func) == "compile" and a[0].args else a[0])) is not None:
+            fx.merge(effects("python", s, self.depth + 1))   # exec(compile("...", "<s>", "exec")) runs the same text
         elif q in MODULE_LOADERS and a and (s := self.ev(a[0])):
             self._jade_import(s)
         elif isinstance(n.func, ast.Name) and n.func.id in self.funcs and self.nesting < 3 and self.inlined < 200:
@@ -447,24 +614,26 @@ class _Py:
         elif isinstance(n.func, ast.Attribute):
             meth, recv = n.func.attr, n.func.value
             if meth in PATH_WRITE_METHODS:
-                fx.add_write(self.path(recv))
+                self._w(self.path(recv))
             elif meth in PATH_MOVE_METHODS and len(a) == 1:   # Path.rename(target): str.replace takes two arguments
-                fx.add_write(self.path(recv))
-                fx.add_write(self.path(a[0]))
+                self._w(self.path(recv))
+                self._w(self.path(a[0]))
+            elif meth in ("system", "popen") and a and self._is_libc(recv):
+                self._c(self.ev(a[0]))
             elif meth == "open" and (mode_n := a[0] if a else kw.get("mode")) is not None and set(self.ev(mode_n) or "") & set("wax+"):
-                fx.add_write(self.path(recv))
+                self._w(self.path(recv))
             elif meth in OBJ_PATH_METHODS and (a or kw):
-                fx.add_write(self.path(a[0] if a else next(iter(kw.values()))))
+                self._w(self.path(a[0] if a else next(iter(kw.values()))))
             elif meth in ("append", "extend") and isinstance(recv, ast.Name) and recv.id in self.lists and a:
                 self.lists[recv.id] = [*self.lists[recv.id], *((self.items(a[0]) or []) if meth == "extend" else [a[0]])]
 
     def finish(self, tree: ast.AST) -> None:
         """Strings a started shell may read as its input (`Popen(["sh"]).communicate(b"...")`): with no way to tell which, all of them count."""
-        if self.fx.shell_fed:
+        if self.fx.shell_fed or self.emit_all:
             for n in ast.walk(tree):
                 if isinstance(n, ast.Constant) and isinstance(n.value, (str, bytes)):
                     text = n.value if isinstance(n.value, str) else n.value.decode("utf-8", "replace")
-                    if len(text.split()) > 1:
+                    if len(text.split()) > 1 or (self.emit_all and text.strip()):
                         self.fx.add_cmd(text)
 
 
@@ -504,7 +673,7 @@ def _join_path(parts: list[str]) -> str:
     return out
 
 
-def _python(source: str, depth: int) -> Effects | None:
+def _python(source: str, depth: int, emit_all: bool = False) -> Effects | None:
     tree = None
     for text in (source, textwrap.dedent(source)):
         try:
@@ -516,7 +685,7 @@ def _python(source: str, depth: int) -> Effects | None:
             continue
     if tree is None:
         return None
-    p = _Py(depth)
+    p = _Py(depth, emit_all)
     try:
         p.walk(tree)
         p.finish(tree)
@@ -662,7 +831,7 @@ _JS_TAG = re.compile(r"\$\s*`((?:[^`\\]|\\.)*)`", re.S)
 _WRITE_MODE = re.compile(r"[wax+]")
 
 
-def _generic(lang: str, src: str) -> Effects:
+def _generic(lang: str, src: str, emit_all: bool = False) -> Effects:
     fx = Effects()
     consts = _consts(src)
     if rx := _BACKTICK.get(lang):
@@ -704,10 +873,10 @@ def _generic(lang: str, src: str) -> Effects:
                         fx.add_cmd(t.strip("|"))
                     elif t.startswith((">", "+<", "+>")):
                         fx.add_write(t.lstrip("+<>").strip())
-    if fx.shell_fed:
+    if fx.shell_fed or emit_all:
         for m in LIT_RE.finditer(src):
             text = _unescape(next(g for g in m.groups() if g is not None))
-            if len(text.split()) > 1:
+            if len(text.split()) > 1 or (emit_all and text.strip()):
                 fx.add_cmd(text)
     return fx
 
@@ -718,10 +887,14 @@ AWK_LIT = r'"((?:[^"\\]|\\.)*)"'
 AWK_RISKY = re.compile(r"\bsystem\s*\(|\bgetline\b|\bprintf?\b[^;}\n]*(?<![=!<>])(?:>>?|(?<!\|)\|(?!\|))")
 
 
-def awk_effects(prog: str) -> Effects:
+def awk_effects(prog: str, emit_all: bool = False) -> Effects:
     """The commands and files an awk program uses, from its literal arguments. `fx.dynamic` is set when a risky construct names something the
     program text does not contain (`print > $1".txt"`, `system(cmd)`): the caller then treats the whole call as one that may write any operand."""
     fx = Effects()
+    if emit_all:   # its output is piped into a shell: every string literal may be a command
+        for m in re.finditer(AWK_LIT, prog):
+            if m.group(1).strip():
+                fx.add_cmd(_unescape(m.group(1)))
     risky = AWK_RISKY.findall(prog)
     if not risky:
         return fx

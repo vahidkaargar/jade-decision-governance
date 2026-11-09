@@ -48,6 +48,7 @@ SHELL_RE = re.compile(r"^(?:(?:ba|z|da|k|a|fi|c|tc)?sh|source|\.)$")
 INTERP_RE = re.compile(r"^(?:python[\d.]*|pypy\d*|perl\d*|ruby\d*|node(?:js)?|php\d*|osascript|lua\d*|deno|bun)$")
 STDIN_PATHS = {"/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"}
 CODE_FLAG = re.compile(r"-[a-zA-Z]*[ceEr]|--eval|--print|--command")
+AWK_NAMES = {"awk", "gawk", "mawk", "nawk"}
 SHELL_NAME = re.compile(r"^(?:ba|z|da|k|a|fi|c|tc)?sh$")
 PLAIN = re.compile(r"[^\\'\"$`<\n;(){}&|#]+")
 _INERT = re.compile(r"[;&|<>(){}`]")   # characters a quoted word may hold that the splitter and the redirect check would read as syntax
@@ -119,6 +120,9 @@ def _command_word(stage_text: str) -> tuple[str, list[str]]:
 def _stdin_kind(word: str, args: list[str]) -> str | None:
     """'shell', or the language of an interpreter (`python`, `perl` ...), when this command would run text arriving on stdin as code, else None."""
     w = word.rsplit("/", 1)[-1].lower()
+    if w in AWK_NAMES:   # `awk -f - <<EOF`, `awk -f /dev/stdin`: the program arrives on stdin
+        return "awk" if any((a in ("-f", "--file") and k + 1 < len(args) and args[k + 1] in ("-", *STDIN_PATHS))
+                            or a in ("--file=-", *(f"--file={p}" for p in STDIN_PATHS)) for k, a in enumerate(args)) else None
     kind = "shell" if SHELL_RE.match(w) else interp.language_of(w) if INTERP_RE.match(w) else None
     if kind is None:
         return None
@@ -132,7 +136,7 @@ def _stdin_kind(word: str, args: list[str]) -> str | None:
         elif a in ("-o", "+o", "-W", "-X", "-O"):
             skip = True
         elif CODE_FLAG.fullmatch(a):
-            return kind if idx == len(args) - 1 else None  # `xargs sh -c`: the script arrives on stdin
+            return kind if idx == len(args) - 1 or args[idx + 1:idx + 2] == ["{}"] else None  # `xargs sh -c`, `xargs -I{} sh -c {}`: the script arrives on stdin
         elif not a.startswith("-"):
             return None
     return kind
@@ -606,6 +610,23 @@ def git_effects(call: GitCall) -> tuple[bool, list[str]]:
     return unsafe or bool(code), [c for c in code if c.strip()]
 
 
+def awk_options_end(args: list[str]) -> int:
+    """Index of the program word of an awk command line (the first operand that is not an option or the value of -F, -v, -W), else len(args)."""
+    i = 0
+    while i < len(args):
+        if args[i] in ("-F", "-v", "-W"):
+            i += 1
+        elif not args[i].startswith("-"):
+            return i
+        i += 1
+    return len(args)
+
+
+def awk_program(args: list[str]) -> str | None:
+    i = awk_options_end(args)
+    return args[i] if i < len(args) else None
+
+
 def verb_effects(cmd: str, args: list[str]) -> tuple[bool, list[str], list[str]]:
     """(can write a file or run a program, shell commands it carries, program text to search) for a command and its decoded arguments.
 
@@ -624,17 +645,8 @@ def verb_effects(cmd: str, args: list[str]) -> tuple[bool, list[str], list[str]]
         bad = [sc for sc in scripts if not sed_is_safe(sc)]
         unsafe, text = risky or bool(bad), bad
     elif cmd in ("awk", "gawk", "mawk", "nawk"):
-        prog, i = None, 0
-        while i < len(args):
-            a = args[i]
-            if a in ("-F", "-v", "-W"):
-                i += 1
-            elif a in ("-f", "-i", "-E", "-l") or any(_long(a, n, 2) is not None for n in ("file", "include", "load", "exec")):
-                unsafe = True
-            elif not a.startswith("-"):
-                prog = a
-                break
-            i += 1
+        prog = awk_program(args)
+        unsafe = any(a in ("-f", "-i", "-E", "-l") or any(_long(a, n, 2) is not None for n in ("file", "include", "load", "exec")) for a in args[:awk_options_end(args)])
         if prog is not None:
             fx = interp.awk_effects(prog)   # the literal commands and files of its system(), print | and print > ; any other string is data
             unsafe = unsafe or bool(fx.commands or fx.writes or fx.dynamic)
@@ -749,17 +761,35 @@ class _Scan:
     def _sub(self, text: str) -> str:
         return skeleton(text, self.depth + 1, self.budget)
 
+    def _producer_program(self, raw: str) -> tuple[str, str] | None:
+        """(language, program text) when a pipeline stage or substitution is `python3 -c '...'`, `perl -e`, `node -e`, `awk '...'`: a program whose
+        output may be the script of a shell that reads it."""
+        enc = " ".join(words_of(raw))
+        rest = PREFIX.sub("", enc, count=1).split(" ")
+        cmd = _dec(rest[0]).rsplit("/", 1)[-1].lower() if rest and rest[0] else ""
+        if cmd in AWK_NAMES:
+            prog = awk_program([_dec(a) for a in rest[1:]])
+            return ("awk", prog) if prog is not None else None
+        if INTERP_RE.match(cmd) and (prog := interp_code(rest[1:])) is not None:
+            return interp.language_of(cmd) or "", prog
+        return None
+
     def _produced(self, raw: str, kind: str) -> str:
-        """What `echo ... | sh` hands to the reader: the echoed words, parsed as shell for a shell, searched as text otherwise."""
+        """What `echo ... | sh` hands to the reader: the echoed words, parsed as shell for a shell, searched as text otherwise. A program that prints
+        (`python3 -c 'print("...")' | sh`) hands over every string it holds."""
+        if kind == "shell" and (prog := self._producer_program(raw)):
+            return self._interp(prog[0], prog[1], emit_all=True)
         text = " ".join(_dec(w) for w in words_of(PRODUCER.sub("", raw, count=1)))
         return self._sub(text) if kind == "shell" else self._interp(kind, text)
 
-    def _interp(self, lang: str, body: str) -> str:
+    def _interp(self, lang: str, body: str, emit_all: bool = False) -> str:
         """What a program in `lang` does (interp.py): its literal commands as nested shell text, its literal write targets as the destination of a
-        `tee`, and the lines other rules read as written. Every other string in it is data and is dropped."""
-        fx = interp.effects(lang, body)
+        `tee`, and the lines other rules read as written. Every other string in it is data and is dropped (`emit_all`: its output is a shell script)."""
+        fx = interp.effects(lang, body, emit_all=emit_all)
         parts = [self._sub(c) for c in fx.commands]
         parts += [self._sub("tee " + shlex.quote(_enc(p))) for p in fx.writes]
+        if fx.dynamic:   # an awk sink whose target the program text does not contain: the whole program is searched
+            parts.append(_code(body))
         return " ; ".join(parts + [f"{TEXT_MARK} {t}" for t in fx.texts])
 
     def _backtick(self, i: int, in_dq: bool) -> tuple[str, int]:
@@ -776,7 +806,7 @@ class _Scan:
         deferred.append(self._sub(code))
         m = PRODUCER_SUBST.fullmatch(code)
         inner = (m.group(1) or m.group(2) or "") if m else ""
-        if PRODUCER.match(inner):  # `eval "$(echo git push)"`: the output of an echo is the program
+        if PRODUCER.match(inner) or self._producer_program(inner):  # `eval "$(echo git push)"`: the output of an echo or a program is the script
             deferred.append(self._produced(inner, "shell"))
 
     def _stage(self, raw: str, deferred: list[str]) -> None:
@@ -886,7 +916,7 @@ class _Scan:
         self.nest += 1
         out: list[str] = []
         deferred: list[str] = []
-        pending: list[tuple[str, bool, bool, str | None]] = []
+        pending: list[tuple[str, bool, bool, str | None, bool]] = []
         cur = ""  # the current stage so far: its first and last characters are all the checks below look at
         chain: list[str] = []  # the earlier stages of the pipeline being read: any of them may feed text to a shell at its end
         raw_at = i
@@ -1014,8 +1044,10 @@ class _Scan:
             elif c == "<" and s.startswith("<<", i) and (m := HEREDOC_OP.match(s, i)):
                 quoted = m.group(2) is not None or m.group(3) is not None or bool(m.group(4))
                 delim = m.group(2) if m.group(2) is not None else m.group(3) if m.group(3) is not None else m.group(5)
-                kind = _stdin_kind(*_command_word(cur)) or _rest_of_line_pipes_to_code(s, m.end())
-                pending.append((delim, quoted, bool(m.group(1)), kind))
+                own = _stdin_kind(*_command_word(cur))
+                after = _rest_of_line_pipes_to_code(s, m.end())
+                kind = own or after
+                pending.append((delim, quoted, bool(m.group(1)), kind, own not in (None, "shell") and after == "shell"))   # last: a program whose output is piped to a shell
                 emit("<<HEREDOC")
                 i = m.end()
             elif c == "\n":
@@ -1070,7 +1102,7 @@ class _Scan:
 
     def _heredoc_bodies(self, i: int, pending: list, deferred: list[str]) -> int:
         s, n = self.s, self.n
-        for delim, quoted, tabs, kind in pending:
+        for delim, quoted, tabs, kind, prints_to_shell in pending:
             lines: list[str] = []
             while i < n:
                 e = s.find("\n", i)
@@ -1086,7 +1118,7 @@ class _Scan:
             if kind == "shell":
                 deferred.append(self._sub(body))
             elif kind:
-                deferred.append(self._interp(kind, body))
+                deferred.append(self._interp(kind, body, emit_all=prints_to_shell))
         return i
 
 
