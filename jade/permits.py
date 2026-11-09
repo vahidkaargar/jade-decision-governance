@@ -21,7 +21,7 @@ import sqlite3
 import unicodedata
 from types import SimpleNamespace
 
-from . import ledger, paths, policy, schemas
+from . import ledger, paths, policy, redact, schemas
 from .state_machine import TERMINAL as TERMINAL_DECISION
 from .util import at_least, canonical, human_tty_refusal, new_id, parse_ts, ts, ts_in, user
 
@@ -116,11 +116,16 @@ def make_context(tool: str, a: policy.Assessment, event: dict | None = None, *, 
     longer than MAX_SUBJECT is flagged `truncated` and cannot be approved); `hash_subject` and `hash_cwd` are exactly what the plan hash covers."""
     shown = a.subject if subject is None else subject
     ev = event or {}
-    ctx = {"tool": tool, "subject": shown[:MAX_SUBJECT], "length": len(shown), "truncated": len(shown) > MAX_SUBJECT, "cwd": cwd,
+    clean, hits = redact.redact(shown, secrets_only=True)   # a secret is never stored; see `_verify` for what that means for approval
+    ctx = {"tool": tool, "subject": clean[:MAX_SUBJECT], "length": len(shown), "truncated": len(shown) > MAX_SUBJECT, "cwd": cwd,
            "hash_cwd": a.plan_cwd, "rule": a.rule_id, "rationale": a.rationale}
     if a.plan_subject != shown:
-        ctx["hash_subject"] = a.plan_subject[:MAX_SUBJECT * 2]
+        hash_clean, n = redact.redact(a.plan_subject, secrets_only=True)
+        hits += n
+        ctx["hash_subject"] = hash_clean[:MAX_SUBJECT * 2]
         ctx["truncated"] = ctx["truncated"] or len(a.plan_subject) > MAX_SUBJECT * 2
+    if hits:
+        ctx["redacted"] = hits
     if ev.get("session_id") is not None or ev.get("agent_id") is not None:  # a hook call: bind the permit to the caller
         ctx.update(bound=True, session_id=ev.get("session_id"), agent_id=ev.get("agent_id"), permission_mode=ev.get("permission_mode"))
     return ctx
@@ -252,6 +257,9 @@ def verify_scope(p) -> dict:
 def _verify(ctx: dict, plan_hash: str) -> dict:
     if "subject" not in ctx or "tool" not in ctx:
         raise PermitError("this permit carries no command to review; ask the agent to request it again")
+    if ctx.get("redacted"):
+        raise PermitError(f"the command contains {ctx['redacted']} secret-shaped value(s) that JADE does not store, so it cannot be shown in full and is not approved. "
+                          "Ask the agent to pass the secret in an environment variable or a file and request the command again without it")
     if ctx.get("truncated"):
         raise PermitError(f"the command is {ctx.get('length', '?')} characters and cannot be shown in full (limit {MAX_SUBJECT}); "
                           "it is not approved. Ask the agent to put it in a script file you can read, then request the script")

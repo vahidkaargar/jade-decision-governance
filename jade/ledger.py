@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import paths
+from . import paths, redact
 from .util import new_id, now, parse_ts, ts
 
 SCHEMA = """
@@ -62,13 +62,27 @@ class Ledger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.timeout = float(timeout)
         self._depth = 0
+        self._create_private()
         self.con = sqlite3.connect(self.path, timeout=self.timeout, isolation_level=None)
         self.con.row_factory = sqlite3.Row
         self._init()
+        self._lock_down()
+
+    def _create_private(self) -> None:
+        """Create the database file mode 600 before SQLite opens it. SQLite gives `-wal` and `-shm` the mode of the main file, so no sidecar
+        is ever group- or world-readable, whatever the umask (docs/05 T15)."""
         try:
-            os.chmod(self.path, 0o600)
+            os.close(os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600))
         except OSError:
             pass
+
+    def _lock_down(self) -> None:
+        """Mode 600 on the database and on the sidecars that exist now (an older file, or one made by another tool, is tightened too)."""
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.chmod(f"{self.path}{suffix}", 0o600)
+            except OSError:
+                pass
 
     def _init(self) -> None:
         """WAL switch and schema creation ignore the busy timeout when several processes open a fresh file at
@@ -148,6 +162,9 @@ class Ledger:
                         (session, question_id, version, state_hash, claim_hash)):
                     if (now() - parse_ts(row["ts"])).total_seconds() <= DEDUP_TTL_S:
                         dedup_of = row["call_id"]
+            for col in ("state_text", "question_text"):  # nothing stored in the ledger carries a credential, whoever the caller is
+                if isinstance(cols.get(col), str):
+                    cols[col] = redact.redact(cols[col], secrets_only=True)[0]
             data = {"call_id": call_id, "question_id": question_id, "question_version": version, "state_hash": state_hash,
                     "session_id": session, "claim_hash": claim_hash, "dedup_of": dedup_of, "state": "EVALUATING", "ts": ts(), **cols}
             if data.get("state_text"):
@@ -173,6 +190,8 @@ class Ledger:
         """Append an event. Returns False when the idempotency key was already applied."""
         sql = ("INSERT INTO events(entity_id, kind, prev_state, next_state, guard, actor, idempotency_key, detail_json, ts) "
                "VALUES(?,?,?,?,?,?,?,?,?)")
+        guard = redact.redact(guard, secrets_only=True)[0] if isinstance(guard, str) else guard
+        detail = redact.redact_obj(detail, secrets_only=True)[0] if detail is not None else None
         args = (entity_id, kind, prev, next, guard, actor, key, json.dumps(detail, ensure_ascii=False) if detail is not None else None, ts())
         try:
             (con or self.con).execute(sql, args)

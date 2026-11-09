@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import __version__, ask, ledger, paths, questions
+from . import __version__, ask, ledger, paths, questions, redact
 from .util import human_tty_refusal, is_human_tty, session_id, ts
 
 LEGACY = ("verify", "noul", "choice", "score")
@@ -65,7 +65,7 @@ def ask_main(argv: list[str], prog: str = "jade ask", provider=None) -> int:
             for f in a.field:
                 k, sep, v = f.partition("=")
                 if not sep:
-                    raise questions.InvalidQuestion(f"--field must be name=value, got {f!r}")
+                    raise questions.InvalidQuestion(f"--field must be name=value ({len(f)} characters given, none of them an '=')")
                 state[k.strip()] = Path(v[1:]).read_text(errors="replace") if v.startswith("@") else v
             ask.check_required(a.question_id, state)
             specs = [ask.registry_spec(a.question_id, options=a.option or None)]
@@ -75,13 +75,17 @@ def ask_main(argv: list[str], prog: str = "jade ask", provider=None) -> int:
                                     true=getattr(a, "true", None), false=getattr(a, "false", None))]
             state = {"context": evidence}
     except questions.InvalidQuestion as e:
-        print(f"jade: INVALID_QUESTION, exit 6 ({e}). Nothing was sent; this is not a yes.", file=sys.stderr)
-        _journal_invalid(str(e))
+        why = redact.redact(str(e))[0]   # an error may quote what the agent typed, and an agent's transcript is not a safe place for a secret
+        print(f"jade: INVALID_QUESTION, exit 6 ({why}). Nothing was sent; this is not a yes.", file=sys.stderr)
+        _journal_invalid(why)
         return 6
     if a.dry_run:
         from . import adapter
 
+        state, hits, cut, leaked = ask.prepare(specs, state)   # the same redaction a real call applies: a dry run shows what would leave the machine
         print(json.dumps({"model": a.model or adapter.DEFAULT_MODEL, "state": state, "questions": {s.key: s.payload for s in specs}}, ensure_ascii=False, indent=2))
+        print(f"jade: dry run: {hits} redaction(s){', state truncated to 32 KiB' if cut else ''}; "
+              f"{'a secret-shaped string survived redaction, a real call would be refused (exit 6)' if leaked else 'no secret-shaped string left'}", file=sys.stderr)
         return 0
     result = ask.run(specs, state, risk=a.risk, decision_id=a.decision, provider=provider, model=a.model, use_cache=not a.no_cache)
     return ask.emit(result, raw=a.raw, as_json=a.json)

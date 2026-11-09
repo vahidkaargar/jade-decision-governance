@@ -361,7 +361,7 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
         pending = permits.pending_for(db, a.plan_hash, context=ctx, fingerprints=fp)
         if pending is None:
             with db.tx():
-                doc = decide.open_decision(db, f"Execute {tool}: {a.subject[:300]}", command=a.subject, tool=tool, cwd=cwd,
+                doc = decide.open_decision(db, f"Execute {tool}: {decide.scrub(a.subject)[:300]}", command=a.subject, tool=tool, cwd=cwd,
                                            session=event.get("session_id"), route="ESCALATE", assessment=a)
                 decide.step(db, doc["decision_id"], "route", guard="route=ESCALATE: permit required")
                 decide.step(db, doc["decision_id"], "escalate", guard="no issued permit for this plan", ttl_s=permits.DEFAULT_TTL_S)
@@ -370,6 +370,11 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
         else:
             pid = pending.permit_id
         why = f" (Permit {found.permit_id} exists but cannot be used: {refusal}.)" if found is not None and refusal else ""
+        if ctx.get("redacted"):
+            return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}). This {tool} call needs a human-approved permit, and the {ctx['redacted']} secret-shaped "
+                                 f"value(s) in it are not stored, so a human cannot review the whole command and the permit cannot be approved.{why}\n"
+                                 "Put each secret in an environment variable or a file the command reads, remove it from the command line, and retry. "
+                                 f"(Permit {pid} stays PENDING and will expire.) Do not rephrase the command to avoid the gate.")
         return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}). This {tool} call needs a human-approved permit.{why}\n"
                              f"Permit {pid} is PENDING. Ask the human to run in their own terminal:  jade permit approve {pid}\n"
                              "Then retry the identical command (single use, 30 minutes). You cannot approve it yourself; "

@@ -90,7 +90,7 @@ def test_provider_crash_leaves_evaluating_row_and_never_a_yes():
 
 def test_redact_corpus():
     corpus = json.loads((FX / "redact_corpus.json").read_text())
-    assert len(corpus) >= 40
+    assert len(corpus) >= 80
     for item in corpus:
         secret = "".join(item["secret"])  # stored in parts so the repository holds no literal token-shaped strings
         text, hits = redact.redact(item["template"].replace("@@", secret))

@@ -72,22 +72,31 @@ def cap_state(state: dict) -> tuple[dict, bool]:
     return state, cut
 
 
-def run(specs: list[Spec], state: dict, *, risk: str = "low", session: str | None = None, decision_id: str | None = None,
-        provider=None, model: str | None = None, db: ledger.Ledger | None = None, use_cache: bool = True) -> AskResult:
-    cfg = paths.config()
-    owners = tuple(e.lower() for e in cfg.get("owner_emails", []))
-    session = session or session_id()
-    model = model or cfg.get("model") or adapter.DEFAULT_MODEL
-    warnings: list[str] = []
+def prepare(specs: list[Spec], state: dict) -> tuple[dict, int, bool, bool]:
+    """Everything that happens to a call's text before it can leave the machine: redaction of the state and of every question payload (in
+    place on the specs), the 32 KiB cap, and the residual-secret check. Returns (state, redactions, cut, residual). `run` and `--dry-run` both
+    use it, so a dry run shows exactly what a real call would send."""
+    owners = tuple(e.lower() for e in paths.config().get("owner_emails", []))
     state, hits = redact.redact_obj(state, owners)
     for s in specs:
         s.payload, n = redact.redact_obj(s.payload, owners)
         hits += n
     state, cut = cap_state(state)
+    leaked = redact.residual(canonical(state)) or any(redact.residual(canonical(s.payload)) for s in specs)
+    return state, hits, cut, leaked
+
+
+def run(specs: list[Spec], state: dict, *, risk: str = "low", session: str | None = None, decision_id: str | None = None,
+        provider=None, model: str | None = None, db: ledger.Ledger | None = None, use_cache: bool = True) -> AskResult:
+    cfg = paths.config()
+    session = session or session_id()
+    model = model or cfg.get("model") or adapter.DEFAULT_MODEL
+    warnings: list[str] = []
+    state, hits, cut, leaked = prepare(specs, state)
     if cut:
         warnings.append("state truncated to 32 KiB")
     items = [Item(s) for s in specs]
-    if redact.residual(canonical(state)) or any(redact.residual(canonical(s.payload)) for s in specs):
+    if leaked:
         for it in items:
             it.exit_code, it.error_kind = 6, "RESIDUAL_SECRET"
         return AskResult(items, 6, "a secret-shaped string survived redaction; nothing was sent", redactions=hits, warnings=warnings)

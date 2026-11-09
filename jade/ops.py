@@ -135,12 +135,38 @@ def expected_models(db: ledger.Ledger | None = None) -> list[str]:
 
 
 # ---- retention -----------------------------------------------------------------------------------
+PURGED = "[purged by retention]"
+OPEN_PERMIT = ("PENDING", "ISSUED")
+
+
 def purge(db: ledger.Ledger, older_than_days: int = 90) -> int:
-    """Remove stored state and question text older than the retention window; keep every metric (decision Q7)."""
+    """Remove stored project text older than the retention window and keep every metric (decision Q7): the state and question text of Jev
+    calls, the objective and command text of decisions, the command a permit carried (never one still open: PENDING or ISSUED and not yet expired) and the detail of
+    events. Statuses, hashes, risk levels, timings, costs and probabilities stay. Returns the number of rows cleared."""
     cutoff = ts(now() - timedelta(days=older_than_days))
+    n = 0
     with db.tx() as con:
-        n = con.execute("UPDATE jev_calls SET state_text=NULL, question_text=NULL WHERE ts<? AND (state_text IS NOT NULL OR question_text IS NOT NULL)",
-                        (cutoff,)).rowcount
+        n += con.execute("UPDATE jev_calls SET state_text=NULL, question_text=NULL WHERE ts<? AND (state_text IS NOT NULL OR question_text IS NOT NULL)",
+                         (cutoff,)).rowcount
+        for r in con.execute("SELECT decision_id, doc_json FROM decisions WHERE updated_at<? AND json_extract(doc_json,'$.objective') IS NOT ?",
+                             (cutoff, PURGED)).fetchall():
+            doc = json.loads(r["doc_json"])
+            doc["objective"] = PURGED
+            doc["candidate_actions"] = [{**act, "description": PURGED} if isinstance(act, dict) else act for act in doc.get("candidate_actions", [])]
+            doc["constraints"], doc["assumptions"], doc["evidence_refs"] = [], [], []
+            con.execute("UPDATE decisions SET doc_json=? WHERE decision_id=?", (json.dumps(doc, ensure_ascii=False), r["decision_id"]))
+            n += 1
+        for r in con.execute("SELECT permit_id, scope FROM permits WHERE issued_at<? AND (state NOT IN ('PENDING','ISSUED') OR expires_at<=?) AND scope LIKE '{%'",
+                             (cutoff, ts())).fetchall():
+            try:
+                ctx = json.loads(r["scope"])
+            except ValueError:
+                continue
+            if isinstance(ctx, dict) and "subject" in ctx and ctx["subject"] != PURGED:
+                keep = {k: v for k, v in ctx.items() if k in ("tool", "length", "rule", "bound", "session_id", "agent_id", "permission_mode", "hash_cwd")}
+                con.execute("UPDATE permits SET scope=? WHERE permit_id=?", (json.dumps({**keep, "subject": PURGED, "purged": True}), r["permit_id"]))
+                n += 1
+        n += con.execute("UPDATE events SET detail_json=NULL WHERE ts<? AND detail_json IS NOT NULL AND kind<>'purge'", (cutoff,)).rowcount
         if n:
             db.event("ledger", "purge", guard=f"older than {older_than_days} d", detail={"rows": n}, con=con)
     return n

@@ -53,3 +53,9 @@
 {"id": "R53", "class": "container_named_jade_svc_is_not_si09", "kind": "gate", "command": "docker exec jade-svc approve", "expect": "allow", "note": "pass 2 control"}
 {"id": "R54", "class": "symlink_to_a_checkout_named_jade_is_not_si09", "kind": "gate", "command": "ln -s /opt/x/jade /usr/local/bin/jade2", "expect": "allow", "note": "pass 2 control: only the installed launcher and `which jade` are wrapped"}
 {"id": "R55", "class": "permit_for_the_exact_text_with_a_trailing_space", "kind": "permit_variant", "command": "rm -rf /x/y", "variant": "rm -rf /x/y ", "expect": "allow", "note": "pass 2 control: a trailing space is not read by any shell"}
+{"id": "R56", "class": "non_secret_text_is_not_redacted", "kind": "redact_keep", "text": "max_tokens=4096", "note": "F23 control"}
+{"id": "R57", "class": "non_secret_text_is_not_redacted", "kind": "redact_keep", "text": "def login(password: str, token: Optional[str] = None):", "note": "F23 control"}
+{"id": "R58", "class": "non_secret_text_is_not_redacted", "kind": "redact_keep", "text": "TOKENIZERS_PARALLELISM=false", "note": "F23 control"}
+{"id": "R59", "class": "non_secret_text_is_not_redacted", "kind": "redact_keep", "text": "git remote add origin git@github.com:org/repo.git", "note": "F23 control"}
+{"id": "R60", "class": "non_secret_text_is_not_redacted", "kind": "redact_keep", "text": "authorization: required for /admin", "note": "F23 control"}
+{"id": "R61", "class": "non_secret_text_is_not_redacted", "kind": "redact_keep", "text": "token_count: 1532", "note": "F23 control"}

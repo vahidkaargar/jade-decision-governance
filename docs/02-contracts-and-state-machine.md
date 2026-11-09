@@ -78,7 +78,7 @@ All records: `schema_version` (semver string), `additionalProperties: false`, ti
 `candidate_id, baseline_version, target_component (enum of permitted targets only), change_diff, hypothesis, predicted_benefit, risk, evaluation_plan, dataset_versions[], results, promotion_decision (pending|promoted|rejected|rolled_back), rollout_scope, rollback_reference, audit_trail[]`. The enum excludes every protected target (`policies/safety.yaml`), so a candidate against a protected target fails validation.
 
 ### 3.7 Jev call row (ledger-internal, not a contract)
-`call_id, decision_id?, question_id, question_version, request_model, resolved_model, provider, provider_request_id, state_hash, state_bytes, answers_json, latency_ms, input_tokens, output_tokens, cost_usd, error_kind, exit_code, session_id, ts`. State text itself is stored only after redaction (`docs/05`), capped at 32 KiB.
+`call_id, decision_id?, question_id, question_version, request_model, resolved_model, provider, provider_request_id, state_hash, state_bytes, answers_json, latency_ms, input_tokens, output_tokens, cost_usd, error_kind, exit_code, session_id, ts`. State text itself is stored only after redaction (`docs/05`), capped at 32 KiB. Decision objectives and commands, permit commands, outcomes and event details are stored redacted too, and the retention purge clears that text as well (statuses, hashes and metrics stay).
 
 ## 4. Serialization and privacy
 Canonical JSON (sorted keys, no whitespace) for every hash. Redaction before storage and before sending: Keychain-shaped tokens, `sk-`/`ghp_`/`glpat-` prefixes, `Authorization:` lines, `.env` assignments, email addresses outside the user's own. Redaction is a pure function with its own tests (Phase 1).

@@ -5,10 +5,16 @@ from __future__ import annotations
 import json
 import re
 
-from . import ledger, paths, policy, schemas, state_machine
+from . import ledger, paths, policy, redact, schemas, state_machine
 from .util import LEVELS, canonical, new_id, session_id, sha256, ts, ts_in, user
 
 DEFAULT_TTL_S = 24 * 3600
+
+
+def scrub(value):
+    """A JSON-like value with every credential-shaped string redacted: what a decision, an outcome or an event may store (docs/05 T4, T15).
+    Email addresses stay: this text never leaves the machine."""
+    return redact.redact_obj(value, secrets_only=True)[0]
 
 
 def open_decision(db: ledger.Ledger, objective: str, *, command: str | None = None, tool: str = "Bash", cwd: str = "",
@@ -22,14 +28,15 @@ def open_decision(db: ledger.Ledger, objective: str, *, command: str | None = No
     level = a.level
     if raise_risk_to and LEVELS[raise_risk_to] > LEVELS[level]:
         level = raise_risk_to
-    objective = (objective or "").strip()[:2000]
-    evidence_refs = [str(e)[:512] for e in (evidence_refs or [])]
-    actions = actions or [{"name": "proceed", "canonical_action": "shell.exec" if command else "report.done",
-                           "description": (command or objective)[:500], "eligible": True}]
+    objective = scrub((objective or "").strip())[:2000]    # the risk level above was read from the raw command; what is stored is redacted
+    evidence_refs = scrub([str(e)[:512] for e in (evidence_refs or [])])
+    actions = scrub(actions or [{"name": "proceed", "canonical_action": "shell.exec" if command else "report.done",
+                                 "description": scrub(command or objective)[:500], "eligible": True}])
+    constraints, assumptions = scrub(list(constraints or [])), scrub(list(assumptions or []))
     doc = {
         "schema_version": "1.0.0", "decision_id": new_id("dec"), "task_id": new_id("task"), "tenant_scope": f"local:{user()}",
         "objective": objective if len(objective) >= 8 else objective.ljust(8, "."), "candidate_actions": actions,
-        "constraints": list(constraints or []), "assumptions": list(assumptions or []), "evidence_refs": evidence_refs,
+        "constraints": constraints, "assumptions": assumptions, "evidence_refs": evidence_refs,
         "context_fingerprint": sha256(canonical({"evidence": evidence_refs, "plan": a.plan_hash or objective})),
         "context_freshness": {"observed_at": ts(), "ttl_s": 3600},
         "risk": {"level": level, "reversibility": a.reversibility, "environment": a.environment, "blast_radius": a.blast_radius,
@@ -86,8 +93,8 @@ def record_outcome(db: ledger.Ledger, decision_id: str, observation_type: str, s
     elif success is None:
         raise ValueError("observed/estimated outcomes need success true or false")
     out = {"schema_version": "1.0.0", "outcome_id": new_id("out"), "decision_id": decision_id, "execution_id": new_id("exec"),
-           "observation_type": observation_type, "verification_method": method, "measurements": measurements or {},
-           "attribution_quality": attribution, "observed_at": ts(), "evidence_refs": [str(e)[:512] for e in (evidence_refs or [])],
+           "observation_type": observation_type, "verification_method": scrub(method), "measurements": scrub(measurements or {}),
+           "attribution_quality": attribution, "observed_at": ts(), "evidence_refs": scrub([str(e)[:512] for e in (evidence_refs or [])]),
            "success": success}
     schemas.validate("outcome", out)
     who = {"caller_session": caller_session} if caller_session is not None else {}

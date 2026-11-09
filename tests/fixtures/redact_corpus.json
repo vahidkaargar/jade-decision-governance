@@ -334,5 +334,320 @@
    "YYxxxxWWWW1111"
   ],
   "template": "authorization: bearer @@"
+ },
+ {
+  "kind": "pypi",
+  "secret": [
+   "pypi-AgEIcHlwaS5vcmcCJGFi",
+   "Y2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIz"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "slack_webhook",
+  "secret": [
+   "https://hooks.slack.com/",
+   "services/T01234ABC/B01234ABC/",
+   "abcdefghijklmnopqrstuvwx"
+  ],
+  "template": "curl -X POST @@ -d hi"
+ },
+ {
+  "kind": "discord_webhook",
+  "secret": [
+   "https://discord.com/",
+   "api/webhooks/123456789012345678/",
+   "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKL"
+  ],
+  "template": "curl -X POST @@ -d hi"
+ },
+ {
+  "kind": "slack_xapp",
+  "secret": [
+   "xapp-",
+   "1-A01234567-",
+   "1234567890123-abcdef0123456789abcdef0123456789"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "azure_account_key",
+  "secret": [
+   "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ01",
+   "23456789abcdefghijklmnopqrs=="
+  ],
+  "template": "DefaultEndpointsProtocol=https;AccountName=foo;AccountKey=@@;EndpointSuffix=core.windows.net"
+ },
+ {
+  "kind": "azure_sas_sig",
+  "secret": [
+   "abcdefghijklmnopqrstuvwxyz0123",
+   "456789ABCDEF%3D"
+  ],
+  "template": "https://acct.blob.core.windows.net/c/b?sv=2020-08-04&sig=@@&se=2030"
+ },
+ {
+  "kind": "x_api_key_header",
+  "secret": [
+   "abcdef0123456789",
+   "abcdef0123456789"
+  ],
+  "template": "x-api-key: @@"
+ },
+ {
+  "kind": "api_key_hyphen_header",
+  "secret": [
+   "abcdef0123456789",
+   "abcdef0123456789"
+  ],
+  "template": "api-key: @@"
+ },
+ {
+  "kind": "x_api_key_curl",
+  "secret": [
+   "abcdef0123456789",
+   "abcdef0123456789"
+  ],
+  "template": "curl -H 'X-Api-Key: @@' https://x.example.org"
+ },
+ {
+  "kind": "gcp_oauth",
+  "secret": [
+   "ya29.a0AfH6SMBabcdefghij",
+   "klmnopqrstuvwxyz0123456789ABCDEFGHIJ"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "gcp_client_secret",
+  "secret": [
+   "GOCSPX-abcdefghij",
+   "klmnopqrstuvwxyz01"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "stripe_webhook",
+  "secret": [
+   "whsec_abcdefghijklmnop",
+   "qrstuvwxyz012345"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "stripe_publishable",
+  "secret": [
+   "pk_live_abcdefghij",
+   "klmnopqrstuvwxyz"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "twilio_sk",
+  "secret": [
+   "SK0123456789abcdef",
+   "0123456789abcdef"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "sendgrid",
+  "secret": [
+   "SG.abcdefghijklmnop",
+   "qrstuv.abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "db_pass",
+  "secret": [
+   "hunter2",
+   "hunter2"
+  ],
+  "template": "DB_PASS=@@"
+ },
+ {
+  "kind": "pass_lower",
+  "secret": [
+   "hunter2",
+   "hunter2"
+  ],
+  "template": "pass=@@"
+ },
+ {
+  "kind": "pwd_assign",
+  "secret": [
+   "hunter2",
+   "hunter2"
+  ],
+  "template": "pwd=@@"
+ },
+ {
+  "kind": "auth_key",
+  "secret": [
+   "abcdef",
+   "0123456789abcdef"
+  ],
+  "template": "AUTH_KEY=@@"
+ },
+ {
+  "kind": "numeric_password",
+  "secret": [
+   "1234",
+   "5678"
+  ],
+  "template": "password=@@"
+ },
+ {
+  "kind": "set_cookie",
+  "secret": [
+   "abcdef0123456789",
+   "abcdef0123456789"
+  ],
+  "template": "Set-Cookie: sid=@@; HttpOnly"
+ },
+ {
+  "kind": "cookie_header",
+  "secret": [
+   "abcdef0123456789",
+   "abcdef0123456789"
+  ],
+  "template": "Cookie: session=@@; theme=dark"
+ },
+ {
+  "kind": "curl_user_pass",
+  "secret": [
+   "S3cr3t",
+   "PWxyz"
+  ],
+  "template": "curl -u admin:@@ https://x.example.org/api"
+ },
+ {
+  "kind": "mysql_p_flag",
+  "secret": [
+   "S3cr3t",
+   "PWxyz"
+  ],
+  "template": "mysql -u root -p@@ prod"
+ },
+ {
+  "kind": "password_flag",
+  "secret": [
+   "S3cr3t",
+   "PWxyz"
+  ],
+  "template": "tool --password @@ --other"
+ },
+ {
+  "kind": "json_escaped_password",
+  "secret": [
+   "hunter2",
+   "hunter2"
+  ],
+  "template": "{\\\"password\\\": \\\"@@\\\"}"
+ },
+ {
+  "kind": "bracket_password",
+  "secret": [
+   "hunter2",
+   "hunter2"
+  ],
+  "template": "PASSWORD=[@@]"
+ },
+ {
+  "kind": "redis_empty_user",
+  "secret": [
+   "S3cr3t",
+   "PWxyz"
+  ],
+  "template": "redis://:@@@redis:6379/0"
+ },
+ {
+  "kind": "redis_database_url",
+  "secret": [
+   "S3cr3t",
+   "PWxyz"
+  ],
+  "template": "DATABASE_URL=redis://:@@@localhost:6379"
+ },
+ {
+  "kind": "url_password_with_at",
+  "secret": [
+   "pa@ss",
+   "1234"
+  ],
+  "template": "postgres://user:@@@db/x"
+ },
+ {
+  "kind": "url_password_with_slash",
+  "secret": [
+   "pa/ss",
+   "1234"
+  ],
+  "template": "postgres://user:@@@db/x"
+ },
+ {
+  "kind": "aws_secret_access_key",
+  "secret": [
+   "wJalrXUtnFEMI/K7MDENG",
+   "/bPxRfiCYEXAMPLEKEY"
+  ],
+  "template": "AWS_SECRET_ACCESS_KEY=@@"
+ },
+ {
+  "kind": "url_query_access_token",
+  "secret": [
+   "abcdef0123456789",
+   "abcdef0123456789"
+  ],
+  "template": "https://api.x.example.org/v1?access_token=@@&x=1"
+ },
+ {
+  "kind": "npmrc_auth_token",
+  "secret": [
+   "abcdef01-2345-6789",
+   "-abcd-ef0123456789"
+  ],
+  "template": "//registry.npmjs.org/:_authToken=@@"
+ },
+ {
+  "kind": "proxy_authorization",
+  "secret": [
+   "dXNlcjpwYXNz",
+   "d29yZDEyMw=="
+  ],
+  "template": "Proxy-Authorization: Basic @@"
+ },
+ {
+  "kind": "keychain_output",
+  "secret": [
+   "S3cr3tFrom",
+   "Keychain99"
+  ],
+  "template": "$ security find-generic-password -s FOO -w\n@@"
+ },
+ {
+  "kind": "keychain_output_trailing_flags",
+  "secret": [
+   "S3cr3tFrom",
+   "Keychain99"
+  ],
+  "template": "% security find-generic-password -a me -s FOO -w -g\n@@\nnext line"
+ },
+ {
+  "kind": "keychain_output_after_blank",
+  "secret": [
+   "S3cr3tFrom",
+   "Keychain99"
+  ],
+  "template": "security find-internet-password -s FOO -w\n\n@@"
+ },
+ {
+  "kind": "keychain_add_value",
+  "secret": [
+   "S3cr3tFrom",
+   "Keychain99"
+  ],
+  "template": "security add-generic-password -a me -s FOO -w @@ -U"
  }
 ]

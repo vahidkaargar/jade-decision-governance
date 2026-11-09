@@ -25,7 +25,8 @@ def run_case(c: dict) -> list[str]:
         prov = adapter.FixtureProvider(lambda s, q, m, p=p: {k: {"type": "noul", "noul": p} for k in q})
         claim = c.get("claim", "tests pass")
         secret = "".join(c.get("secret_parts", []))
-        evidence = c.get("evidence") or (f"log line with key {secret} inside" if kind == "secret" else "pytest: 42 passed in 3.1s")
+        evidence = c.get("evidence") or (c["template"].replace("@@", secret) if c.get("template") else f"log line with key {secret} inside" if kind == "secret"
+                                         else "pytest: 42 passed in 3.1s")
         specs = lambda: ask.verify_specs(companion=False)  # noqa: E731
         r = ask.run(specs(), {"claim": claim, "evidence": evidence}, provider=prov, session="case-session", risk=c.get("risk", "low"))
         if kind == "repeat":
@@ -72,10 +73,53 @@ def run_case(c: dict) -> list[str]:
         for inv in c.get("expect_blocked", []):
             if inv not in res.stderr:
                 problems.append(f"expected invariant {inv} in the block message")
+    elif kind == "secret_stored":
+        problems += _run_secret_stored(c)
+    elif kind == "redact_keep":
+        from jade import redact
+
+        if redact.redact(c["text"]) != (c["text"], 0):
+            problems.append(f"non-secret text was changed: {redact.redact(c['text'])[0]!r}")
     elif kind in ("permit_variant", "permit_forged", "decide_walk"):
         problems += _run_lifecycle(c)
     else:
         problems.append(f"unknown case kind {kind}")
+    return problems
+
+
+def _run_secret_stored(c: dict) -> list[str]:
+    """Review cluster C: a secret in a gated command or in a `jade ask` argument must be absent from stdout, stderr and every ledger table.
+    `via` is gate (the PreToolUse hook; the permit must also be unapprovable), dry_run (`jade ask --dry-run`) or invalid_field (`--field` without `=`)."""
+    import contextlib
+    import io
+
+    from jade import cli, hooks, ledger, permits
+
+    secret = "".join(c["secret_parts"])
+    text = c["template"].replace("@@", secret)
+    problems: list[str] = []
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        if c["via"] == "gate":
+            res = hooks.pretool({"tool_name": "Bash", "tool_input": {"command": text}, "session_id": "case-session", "cwd": "/tmp/case"})
+            err.write(res.stderr)
+            if res.exit_code != 2:
+                problems.append(f"gate exit {res.exit_code}, expected 2")
+        elif c["via"] == "dry_run":
+            cli.ask_main(["verify", "claim", "-s", text, "--dry-run"], prog="jade ask")
+        else:
+            cli.ask_main(["question", "q.verify_claim.supported_by_evidence", "--field", text], prog="jade ask")
+    db = ledger.open()
+    for where, blob in (("stdout", out.getvalue()), ("stderr", err.getvalue()), ("ledger", "\n".join(db.con.iterdump()))):
+        if secret in blob:
+            problems.append(f"the secret is in {where}")
+    if c["via"] == "gate" and c.get("expect_unapprovable"):
+        pend = permits.listing(db, ("PENDING",))
+        try:
+            permits.review_text(pend[0])
+            problems.append("a permit for a command with an inline secret can be reviewed and approved")
+        except (permits.PermitError, IndexError):
+            pass
     return problems
 
 
