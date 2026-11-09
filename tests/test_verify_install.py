@@ -10,6 +10,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+# A CI runner has an empty uv cache: let the script download there (UV_OFFLINE=0). Locally it stays offline unless the caller says otherwise.
+_NET = {"UV_OFFLINE": "0"} if os.environ.get("CI") else {}
+
 SCRIPT = ROOT / "scripts" / "verify_install.sh"
 SH = shutil.which("sh")
 
@@ -35,7 +38,7 @@ def dist(tmp_path_factory):
     if shutil.which("uv") is None:
         pytest.skip("uv is not installed; the release workflow runs scripts/verify_install.sh")
     keep = tmp_path_factory.mktemp("dist")
-    env = {**os.environ, "VERIFY_INSTALL_KEEP_DIST": str(keep)}
+    env = {**_NET, **os.environ, "VERIFY_INSTALL_KEEP_DIST": str(keep)}
     r = subprocess.run([SH, str(SCRIPT)], capture_output=True, text=True, timeout=600, env=env, cwd=ROOT, check=False)
     return r, keep
 
@@ -86,7 +89,7 @@ def test_no_private_overlay_or_baseline_dataset_is_ever_packaged(dist):
 
 
 def run_script(**env):
-    return subprocess.run([SH, str(SCRIPT)], capture_output=True, text=True, timeout=600, env={**os.environ, **env}, cwd=ROOT, check=False)
+    return subprocess.run([SH, str(SCRIPT)], capture_output=True, text=True, timeout=600, env={**_NET, **os.environ, **env}, cwd=ROOT, check=False)
 
 
 def test_a_prebuilt_dist_directory_is_verified_instead_of_building(dist):
