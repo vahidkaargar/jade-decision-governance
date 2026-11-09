@@ -97,7 +97,7 @@ def test_a_copy_is_judged_by_its_destination():
 
 PROGRAMMATIC = [
     "python3 -c \"from jade import cli; cli.main(['permit','approve','prm_x'])\"", "uv run python -c 'from jade.cli import main; main()'",
-    "python3 -c \"import jade.permits as p; p.approve\"", "python -m jade.cli permit list", "python jade/cli.py check", "python3 {root}/jade/cli.py check",
+    "python3 -c \"import jade.permits as p; p.approve\"", "python -m jade.cli permit approve prm_x", "python jade/cli.py hooks install", "python3 {root}/jade/cli.py gate off",
     "python3 -c \"from jade import ledger; ledger.open().con.execute('update permits set state=1')\"", "python3 -c \"import jade.improve as i\"",
     "python3 -c \"from jade import evals, cli\"", "python3 - <<'EOF'\nfrom jade import cli\ncli.main(['hooks','uninstall'])\nEOF",
 ]
@@ -115,10 +115,17 @@ def test_calling_the_human_only_code_from_python_is_blocked(cmd):
 @pytest.mark.parametrize("cmd", [
     "uv run jade check", "uv run python evals/run_cases.py", "uv run pytest -q tests/", "python3 -c \"from jade import redact; print(redact.redact('x'))\"",
     "python3 -c \"import json\"", "grep -rn 'from jade import cli' tests/", "cat jade/cli.py",
+    "python -m jade.cli permit list", "python -m jade.cli check",   # the CLI run as a module is the CLI: only its human-only subcommands are SI-09
 ])
 def test_ordinary_python_and_the_cli_stay_allowed(cmd):
     a = level(cmd)
     assert not a.blocked and a.level == "low", a
+
+
+@pytest.mark.parametrize("cmd", ["python jade/cli.py check", "python3 {root}/jade/cli.py permit list", "python3 -m jade.cli ledger stats"])
+def test_the_cli_run_as_a_script_is_not_si09_unless_the_subcommand_is_human_only(cmd):
+    """Running the entry script is R-16 (a protected file runs), not SI-09: the CLI refuses its human-only subcommands itself."""
+    assert "SI-09" not in level(cmd.format(root=ROOT)).blocked
 
 
 @pytest.mark.parametrize("sub", ["remove", "stop", "kill", "kickstart", "submit"])

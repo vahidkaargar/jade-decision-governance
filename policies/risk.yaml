@@ -35,6 +35,16 @@ rules:
     data_sensitivity: secret
     match: "security (add|delete)-generic-password|ovault secret (set|import|rm|delete)|(?i:vault_key|id_(rsa|ed25519|ecdsa)\\b|\\.pem\\b)|BEGIN [A-Z ]*PRIVATE KEY"
     rationale: "Key material or secret-store mutation"
+  - id: R-17
+    level: high
+    reversibility: partially_reversible
+    blast_radius: repo
+    # Defeats the standalone pre-push guard (`jade git-hook script`, SI-08): git then does not run the hook that sees the real remote ref. R-10 and R-15 already
+    # rate a push and `git -c` high; this rule says why, and adds what they miss: `git config core.hooksPath` (a persistent change), a write to the
+    # repository's own pre-push file, `chmod`/`rm`/`mv` of it. Reading one (`git config --get core.hooksPath`, `cat .git/hooks/pre-push`) is not matched.
+    # The `git:hooks-bypass` marker is added by jade/policy.py when `git -c core.hooksPath=...` (or `--config-env`) is on the command line.
+    match: "(?i:^git:hooks-bypass |^git:unsafe-config .*core\\.hookspath|\\bgit push\\b[^;&|]*\\s--no-ve\\w*|\\bgit config\\b(?![^;&|]*\\s(?:--get\\S*|--list|-l|--show-\\S+)\\b)[^;&|]*core\\.hookspath|\\.git/hooks/pre-push\\b)"
+    rationale: "Defeats the pre-push guard that stops a push to the default branch (--no-verify, core.hooksPath, or an edit of the pre-push hook): git would not run the check that sees the real remote ref"
   - id: R-10
     level: high
     reversibility: partially_reversible
@@ -140,7 +150,7 @@ read_only:
   - "^systemctl (status|is-active|is-enabled|list-units)\\b"
   - "^(for|select) \\S+ in\\b|^case\\b|^(done|fi|esac|elif)$"   # shell syntax: the commands in the body are segments of their own
   - "^(ssh|scp) -V$"
-  - "^jade (ledger (stats|show)|permit (list|show|request)|question|check|work (list|render)|gate status|hooks status|eval|label (queue|auto)|decide (show|list)|route|ops (status|drift))\\b"
+  - "^jade (ledger (stats|show)|permit (list|show|request)|question|check|work (list|render)|gate status|hooks status|eval|label (queue|auto)|decide (show|list)|route|ops (status|drift)|git-hook (script|check))\\b"
 # Commands that only READ their path operands (or touch the git index, not the file). R-16 (`files_only`) never fires on them, so `git add jade/hooks.py`,
 # `ruff check jade/policy.py` and `uv run pytest jade/x.py` stay low. Everything else that names a protected code or policy file is gated, because an
 # unknown command may write any operand; cp, rsync, ln, install and tar -c are narrowed to their destination by jade/policy.py instead.

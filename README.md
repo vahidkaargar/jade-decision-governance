@@ -19,7 +19,7 @@ It governs how agents (Claude Code first) use [TypeSafe Jev](https://docs.typesa
 | Stage | State |
 |-------|-------|
 | DESIGN_READY | **Yes** — design approved by the maintainer 2026-11-09 |
-| IMPLEMENTED | **Yes** — `jade` 0.2.1: ledger, adapter, redaction, `jev` shim, question registry, permits, hook gate, calibration, bounded improvement loop; Phases 1–5 acceptance tests pass. 0.2.1 is the release that closes the first independent adversarial review (see `CHANGELOG.md`); the residual risks it leaves are listed in `docs/05-threat-model.md` and tracked in `BACKLOG.md` |
+| IMPLEMENTED | **Yes** — `jade` 0.2.2: ledger, adapter, redaction, `jev` shim, question registry, permits, hook gate, calibration, bounded improvement loop, standalone pre-push guard (`jade git-hook`); Phases 1–5 acceptance tests pass. 0.2.1 closed the first independent adversarial review and 0.2.2 the false-positive pass and the structural fix for "never push to the default branch" (see `CHANGELOG.md`). The command classifier is defence in depth, not the enforcement of that rule: the enforcement is the pre-push guard and branch protection on the remote, which only a human can install (`docs/08-deployment-runbook.md` section 2.7, W-68, W-69). The residual risks are listed in `docs/05-threat-model.md` and tracked in `BACKLOG.md` |
 | VALIDATED | No — needs 14 days of real ledger data, labelled outcomes and one full improvement cycle (`docs/08` section 5) |
 | PRODUCTION_APPROVED | No — a human decision (`docs/08`) |
 
@@ -83,6 +83,8 @@ jade ledger stats            # what your agents actually did
 ```
 
 Only exit code 0 is a yes. Enforcement of risky tool calls is opt-in and human-wired: `docs/08-deployment-runbook.md`.
+
+Never pushing to the default branch is enforced by git and the remote, not by reading shell: `jade git-hook script` prints a standalone pre-push guard, `jade git-hook check <repo>` says whether a repository runs it, and branch protection on the remote covers every other client. Both are installed by a human (`docs/08-deployment-runbook.md` section 2.7).
 
 ## Develop
 

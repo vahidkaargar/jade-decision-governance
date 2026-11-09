@@ -76,8 +76,13 @@ def test_f06_si09_leaves_ordinary_jade_commands_alone(cmd):
 
 
 def _fake_ps(monkeypatch, rows):
-    out = "\n".join(f"{pid} {ppid} {cmd}" for pid, ppid, cmd in rows)
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=out, stderr=""))
+    """A synthetic process tree: rows of (pid, ppid, command) or (pid, ppid, executable, arguments); a command is split at its first space."""
+    table = {}
+    for row in rows:
+        pid, ppid, *rest = row
+        exe, args = (rest[0], rest[1]) if len(rest) == 2 else (rest[0].partition(" ")[0], rest[0].partition(" ")[2])
+        table[pid] = util.Proc(ppid, exe, args)
+    monkeypatch.setattr(util, "read_process_table", lambda: table)
 
 
 def test_f06_an_agent_among_the_ancestors_refuses_approval_even_with_a_pty_and_a_clean_environment(monkeypatch, human_env):

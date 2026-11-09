@@ -107,7 +107,7 @@ def test_f00_global_options_do_not_hide_high_risk_git(cmd, rule):
 ])
 def test_f00_config_that_can_run_commands_is_high(cmd):
     a = assess(cmd)
-    assert a.level == "high" and a.rule_id == "R-15", (cmd, a)
+    assert a.level == "high" and a.rule_id == ("R-17" if "hooksPath" in cmd else "R-15"), (cmd, a)   # core.hooksPath defeats the pre-push guard: R-17 says so
     assert pre(cmd).exit_code == 2
 
 

@@ -69,18 +69,30 @@ def _seal_key(db, create: bool = False) -> bytes | None:
     f = db.path.parent / SEAL_KEY_FILE
     try:
         key = f.read_bytes()
-        return key if len(key) >= 32 else None
     except OSError:
-        pass
+        key = None
+    if key is not None and len(key) >= 32:
+        return key
+    if key is not None:   # a key file that is empty or truncated: never a key, and never silently replaced (every permit sealed with the old one would fail)
+        if create:
+            raise PermitError(f"the permit seal key {f} is {len(key)} bytes, not the 32 or more it must hold (an empty or truncated file); no permit can be sealed or "
+                              "approved until a human moves it aside, after which pending permits must be requested again")
+        return None
     if not create:
         return None
-    try:
-        fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:  # another process created it between the read and now
-        return _seal_key(db)
+    tmp = f.with_name(f".{f.name}.{os.getpid()}.tmp")   # written whole under a temp name and linked into place: no process ever sees a half-written key
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     key = secrets.token_bytes(32)
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(key)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(key)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.link(tmp, f)
+    except FileExistsError:  # another process created it between the read and now: theirs is the key
+        return _seal_key(db, create=True)
+    finally:
+        tmp.unlink(missing_ok=True)
     return key
 
 

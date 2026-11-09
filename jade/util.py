@@ -10,6 +10,7 @@ import re
 import secrets
 import sys
 from datetime import UTC, datetime, timedelta
+from typing import NamedTuple
 
 AGENT_ENV = ("CLAUDECODE", "CLAUDE_CODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT", "CURSOR_AGENT", "CODEX_SANDBOX", "AI_AGENT")
 LEVELS = {"low": 0, "medium": 1, "high": 2, "critical": 3}
@@ -52,54 +53,102 @@ def agent_env_present() -> bool:
     return any(os.environ.get(k) for k in AGENT_ENV)
 
 
-# Programs that run an agent: the executable's name, or an interpreter running a script whose path names one. Case-sensitive on purpose: the
-# Claude desktop app is `Claude`, the agent CLI is `claude`, and a human's own terminal panel inside the app must not look like an agent.
-# Only the executable and the script an interpreter runs are looked at, never the whole command line: `vim ~/claude-code/notes` or
-# `pytest /src/claude-code/tests` above a human's shell must not make that human an agent.
-_AGENT_PROGRAMS = frozenset({"claude", "claude-code", "codex", "cursor-agent", "aider"})
+# Programs that run an agent. A process is looked at by its executable (the `comm` column of `ps`, which holds the whole path, spaces
+# included: the desktop app keeps its agent under `~/Library/Application Support/Claude/claude-code/<version>/.../claude.app/Contents/MacOS/claude`)
+# and, for an interpreter, by the script it runs. Case-sensitive on purpose: the Claude desktop app itself is `Claude` (Electron), the agent
+# CLI is `claude`, and a human's own terminal panel inside the app must not look like an agent. The agent binary the app starts, and its
+# `disclaimer` launcher, are agents. Only the executable and the script an interpreter runs are looked at, never the whole command line:
+# `vim ~/claude-code/notes` or `pytest /src/claude-code/tests` above a human's shell must not make that human an agent.
+_AGENT_PROGRAMS = frozenset({"claude", "claude-code", "claude-agent-sdk", "codex", "cursor-agent", "aider", "goose", "opencode", "gemini"})
 _INTERPRETERS = re.compile(r"^(?:node|nodejs|bun|deno|npx|bunx|pnpx|python[\d.]*|uv|uvx)$")
-_AGENT_ENTRY = re.compile(r"@anthropic-ai/claude-code|/\.?claude(?:-code)?/versions/|@openai/codex|cursor-agent")
+# A path that is an agent whatever its file name: the per-version directory the desktop app unpacks its agent into, the app's helper that
+# launches it, the npm packages and the native-install directory of the CLI, the agent SDK and its bundled binary.
+_AGENT_ENTRY = re.compile(r"@anthropic-ai/claude-(?:code|agent-sdk)|claude-agent-sdk|/\.?claude(?:-code)?/versions/|/Application Support/Claude/claude-code/"
+                          r"|/Claude\.app/Contents/Helpers/disclaimer$|@openai/codex|cursor-agent")
 
 
-def _agent_word(cmd: str) -> str | None:
-    """The name of the agent this process command line starts, or None."""
-    words = cmd.split()
-    if not words:
+class Proc(NamedTuple):
+    """One row of the process table: the parent, the executable as `ps` prints it (the whole path, spaces and all) and the rest of the command line."""
+
+    ppid: int
+    exe: str
+    args: str = ""
+
+
+def _agent_word(proc: Proc) -> str | None:
+    """The name of the agent this process is, or None."""
+    exe = proc.exe.strip()
+    if not exe:
         return None
-    prog = os.path.basename(words[0])
-    if prog in _AGENT_PROGRAMS or _AGENT_ENTRY.search(words[0]):
+    prog = os.path.basename(exe)
+    if prog in _AGENT_PROGRAMS or _AGENT_ENTRY.search(exe):
         return prog or "unnamed"
     if _INTERPRETERS.match(prog):
-        script = next((w for w in words[1:] if not w.startswith("-")), "")
-        if os.path.basename(script) in _AGENT_PROGRAMS or _AGENT_ENTRY.search(script):
-            return os.path.basename(script)
+        script = next((w for w in proc.args.split() if not w.startswith("-")), "")
+        if os.path.basename(script) in _AGENT_PROGRAMS or _AGENT_ENTRY.search(proc.args):
+            return os.path.basename(script) or prog
     return None
 
 
-def agent_ancestor() -> str | None:
+def _ps_rows(column: str) -> dict[int, str]:
+    import subprocess
+
+    out = subprocess.run(["ps", "-axo", f"pid=,ppid=,{column}="], capture_output=True, text=True, timeout=3, check=True).stdout
+    rows: dict[int, str] = {}
+    for line in out.splitlines():
+        parts = line.split(None, 2)   # the text of the last column is everything after the second number, never split on a space
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            rows[int(parts[0])] = f"{parts[1]} {parts[2].strip() if len(parts) > 2 else ''}"
+    return rows
+
+
+def read_process_table() -> dict[int, Proc]:
+    """pid -> Proc for every process, from two `ps` reads: `comm` is the executable path whole (on macOS, where a path may hold spaces) and
+    `command` adds the arguments; the arguments are what follows the executable in the command line. Raises OSError or SubprocessError when
+    `ps` cannot be read. Tests replace this function with a synthetic tree."""
+    comm, command = _ps_rows("comm"), _ps_rows("command")
+    table: dict[int, Proc] = {}
+    for pid, row in comm.items():
+        ppid, _, exe = row.partition(" ")
+        cmd = command.get(pid, "").partition(" ")[2]
+        argv0, _, rest = cmd.partition(" ")
+        if exe and cmd.startswith(exe):
+            args = cmd[len(exe):].strip()
+        elif exe.startswith("/"):   # macOS: comm is the real path, argv[0] is whatever the caller typed (a symlink, a bare name)
+            args = rest.strip()
+        elif os.path.basename(argv0).startswith(exe[:15]):   # Linux: comm is the program name cut to 15 characters, argv[0] has the path
+            exe, args = argv0, rest.strip()
+        else:
+            args = rest.strip()
+        table[pid] = Proc(int(ppid), exe, args)
+    return table
+
+
+def agent_ancestor(table: dict[int, Proc] | None = None, pid: int | None = None) -> str | None:
     """Why the process tree above this one looks like an agent harness, or None when it does not.
 
     An environment check is defeated by an agent that clears its variables, a tty check by an agent that allocates its own pty; neither
     changes who the parent processes are. This is a heuristic with a known hole (a process that double-forks and is reparented to launchd
-    leaves no ancestry, docs/05 T2). When the process table cannot be read the answer is "refuse", never "allow"."""
+    leaves no ancestry, docs/05 T2). When the process table cannot be read, or does not list this process, the answer is "refuse", never
+    "allow". `table` and `pid` let a test walk a synthetic tree."""
     import subprocess
 
-    try:
-        out = subprocess.run(["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True, timeout=3, check=True).stdout
-    except (OSError, subprocess.SubprocessError):
-        return "the process table could not be read"
-    table: dict[int, tuple[int, str]] = {}
-    for line in out.splitlines():
-        parts = line.split(None, 2)
-        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
-            table[int(parts[0])] = (int(parts[1]), parts[2] if len(parts) > 2 else "")
-    pid, seen = os.getpid(), set()
-    while pid in table and pid not in seen and pid > 1:
-        seen.add(pid)
-        ppid, cmd = table[pid]
-        if pid != os.getpid() and (name := _agent_word(cmd)):
-            return f"it runs under an agent process ({name}, pid {pid})"
-        pid = ppid
+    me = os.getpid() if pid is None else pid
+    if table is None:
+        try:
+            table = read_process_table()
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return "the process table could not be read"
+    if me not in table:
+        return "the process table does not list this process"
+    seen: set[int] = set()
+    cur = me
+    while cur in table and cur not in seen and cur > 1:
+        seen.add(cur)
+        proc = table[cur]
+        if cur != me and (name := _agent_word(proc)):
+            return f"it runs under an agent process ({name}, pid {cur})"
+        cur = proc.ppid
     return None
 
 

@@ -462,6 +462,18 @@ def _ops(a) -> int:
         return 1
 
 
+def _git_hook(a) -> int:
+    from . import githook
+
+    if a.action == "script":
+        print(githook.script(), end="")
+        return 0
+    guarded, lines = githook.check(a.repo)
+    print("\n".join(lines))
+    print("guarded" if guarded else "NOT GUARDED")
+    return 0 if guarded else 1
+
+
 def _maintain(a) -> int:
     """Daily job: expiries, retention, drift canary, miner. Prints one JSON line for the log."""
     from . import decide, improve, ops, permits
@@ -594,6 +606,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("hooks").add_argument("action", choices=("status", "install", "uninstall"))
     sub.add_parser("gate").add_argument("action", choices=("status", "enforce", "advisory", "off"))
     sub.add_parser("claude-md").add_argument("action", choices=("show", "apply"))
+    gh = sub.add_parser("git-hook", help="the standalone pre-push guard for the default branch (SI-08): `script` prints it, `check <repo>` says whether a repository runs it").add_subparsers(dest="action", required=True)
+    gh.add_parser("script", help="print the self-contained POSIX sh pre-push hook (installs nothing; install it yourself, docs/08 section 2.7)")
+    gh.add_parser("check", help="report whether the pre-push hook git runs for REPO is the JADE guard; exit 1 when it is not").add_argument("repo")
     sub.add_parser("maintain").add_argument("--offline", action="store_true")
     lp = sub.add_parser("launchd-plist")
     lp.add_argument("--label", default="com.jade.maintain")
@@ -629,7 +644,7 @@ def main(argv: list[str] | None = None) -> int:
         print(ops.launchd_plist(a.label), end="")
         return 0
     table = {"permit": _permit, "decide": _decide, "ack": _ack, "question": _question, "route": _route, "fast": _fast, "work": _work,
-             "label": _label, "eval": _eval, "improve": _improve, "hooks": _ops, "gate": _ops, "claude-md": _ops, "maintain": _maintain}
+             "label": _label, "eval": _eval, "improve": _improve, "hooks": _ops, "gate": _ops, "claude-md": _ops, "maintain": _maintain, "git-hook": _git_hook}
     return table[a.cmd](a)
 
 

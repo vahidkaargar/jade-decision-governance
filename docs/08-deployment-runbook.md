@@ -90,6 +90,44 @@ Add one line to the existing health script so silence is never mistaken for heal
 
 `skills/jade/SKILL.md` is the how-to for agents. Copy it into the place your agent tooling reads skills from. It documents behaviour; the exit codes and the gate enforce it.
 
+### 2.7 Install the pre-push guard and protect the default branch
+
+"Never push to the default branch" (SI-08) cannot be enforced completely by reading shell: here-string quote escapes, a redirection before the command and wrappers have each been found by a reviewer, and the next spelling will be too (docs/05 T18). Two things see the real ref instead and are the enforcement; the shell classifier is defence in depth.
+
+1. **A pre-push hook** on this machine. git hands it the remote ref it is about to update, in whatever spelling the refspec had (`HEAD:main`, `+main`, `refs/heads/main`, a delete), so nothing is parsed. `jade git-hook script` prints a self-contained POSIX sh hook (it needs only git and sh, not jade, at run time). It refuses a push whose remote ref is `main`, `master` or the branch `refs/remotes/<remote>/HEAD` points at, a delete included, with a message that says what to do instead. It is not installed by jade and not by an agent: it changes a repository's hooks or the global git configuration, so it is a human step (and R-17 rates an agent's attempt high).
+2. **Branch protection on the remote.** A hook stops this machine only; protection stops every client and a `--no-verify` push.
+
+**Per repository** (one clone, nothing global changes):
+
+```bash
+cd ~/path/to/repo
+jade git-hook script > .git/hooks/pre-push
+chmod +x .git/hooks/pre-push
+jade git-hook check .          # "JADE guard v1 installed", exit 0; anything else exits 1 and says why
+```
+
+`.git/hooks` is not versioned, so each clone needs it. A repository whose hooks are managed by husky or lefthook has its own `core.hooksPath` or its own `pre-push` entry: add the script there as that tool's pre-push command, then run `jade git-hook check` (it reads the directory git itself reports for hooks, so it follows `core.hooksPath`) and try a push of a scratch branch called `main` to a scratch remote.
+
+**For every repository at once** (global `core.hooksPath`):
+
+```bash
+mkdir -p ~/.config/git/hooks
+jade git-hook script > ~/.config/git/hooks/pre-push
+chmod +x ~/.config/git/hooks/pre-push
+git config --global core.hooksPath ~/.config/git/hooks
+jade git-hook check ~/path/to/repo
+```
+
+Caveats of the global form, read them first: `core.hooksPath` **replaces** the `.git/hooks` directory of every repository that has no hooksPath of its own, so a `pre-commit`, `commit-msg` or lefthook hook that lives in `.git/hooks` stops running (copy those into the global directory if you want them); the guard itself still runs the repository's own `.git/hooks/pre-push` after its check, when there is one. A repository that sets its own `core.hooksPath` (husky does) overrides the global one and is not guarded; `jade git-hook check <repo>` tells you which repositories those are. Undo: `git config --global --unset core.hooksPath` and delete the directory.
+
+**Branch protection** (do this for `vahidkaargar/jade-decision-governance` and your other repositories; it is a setting of the repository owner):
+
+- GitHub: Settings, Rules, Rulesets (or Branches, Add branch protection rule) on the default branch: require a pull request before merging, block force pushes, block deletion, and do not let administrators bypass it. A solo maintainer who still wants to merge their own pull request sets the required approvals to 0.
+- GitLab: Settings, Repository, Protected branches: for the default branch, allowed to push and merge set to "No one" (merge through merge requests), force push off.
+- Verify from a scratch clone: `git push origin HEAD:main` must be rejected by the remote ("protected branch"), not by a hook.
+
+What defeats the hook, and how JADE treats it: `git push --no-verify`, `git -c core.hooksPath=...`, `git config core.hooksPath ...` and an edit, `chmod` or `rm` of the hook file are rated high (R-17), so an agent needs a human-approved permit for each. The hook does not stop a human who passes `--no-verify` on purpose; remote protection does. `jade git-hook check` is not part of `jade check`: the guard is optional per repository and a failing check on every machine without it would be noise.
+
 ## 3. Full rollback
 
 | Layer | Command |
@@ -104,7 +142,7 @@ Add one line to the existing health script so silence is never mistaken for heal
 
 ## 4. Known coverage limits
 
-- Classification is syntactic. A command built at run time (base64, variable indirection, `eval` of fetched text) is not recognised. Unnamed MCP tools are medium (recorded, not gated) unless their name says they mutate; browser and desktop automation MCP tools that click or type are not gated, but text typed into a shell is classified as a command.
+- Classification is syntactic. The one rule that must not depend on it, no push to the default branch, is enforced by the pre-push guard and by branch protection on the remote (section 2.7), not by the classifier. A command built at run time (base64, variable indirection, `eval` of fetched text) is not recognised. Unnamed MCP tools are medium (recorded, not gated) unless their name says they mutate; browser and desktop automation MCP tools that click or type are not gated, but text typed into a shell is classified as a command.
 - **JADE's gate is the only gate whenever the host shows no permission prompt.** The hook event carries `permission_mode`. With `bypassPermissions` or `auto`, with `acceptEdits` (file edits), in headless `claude -p` runs and in unattended subagents, Claude Code asks nobody, so the host prompt is not a backstop and every classification gap above is a bypass. `jade check` prints this under `host permission prompt` together with how many gated calls of the last 7 days ran without a prompt. Run such agents in a sandbox or as a separate OS user, and read `jade ledger stats` for `would_block` and `gated` events.
 - The gate fails closed (docs/05 T17): an unreadable or locked ledger blocks high-risk calls, an overlay that does not load blocks everything but clearly read-only commands and ordinary file writes, and the whole handler answers within 6 s, below the 10 s host timeout. If the gate blocks everything, run `jade check`; a human can set `JADE_GATE_MODE=advisory` while fixing the cause.
 - An earlier run of a command whose outcome is unknown (SI-07) blocks the identical command until `jade decide outcome <decision> --type observed --success true|false --method "..."` records what really happened.

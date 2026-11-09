@@ -8,6 +8,7 @@ and treats read-only commands as low (see the `read_only` list in risk.yaml).
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 from contextlib import contextmanager
@@ -31,6 +32,7 @@ GATED_BUILTIN = (*SHELL_TOOLS, *WRITE_TOOLS, "RemoteTrigger")
 OLD_KEYS = {"old_string", "old_str"}  # text that is being removed is never scanned as content
 PATH_KEYS = ("source", "destination", "src", "dest", "dst", "from", "to", "old_path", "new_path", "dir", "directory", "folder")
 UNSAFE_GIT = shellnorm.UNSAFE_GIT  # marker prefix R-15 matches; carried only in the text a rule sees
+HOOKS_BYPASS = "git:hooks-bypass "  # marker prefix R-17 matches: a `git -c core.hooksPath=...` command
 PATH_RULES = ("R-01", "R-04", "R-12", "R-13", "R-16")  # the rules about where a write lands: they also see relative operands made absolute
 WRITE_KEYS = ("file_path", "notebook_path", "path", "filePath", "file", "filepath", "target_file", "file_name", "filename", "target")
 CONTENT_KEYS = {"content", "new_string", "old_string", "new_str", "old_str", "new_source", "text", "contents", "data", "source", "patch"}
@@ -393,6 +395,28 @@ def text_views(text: str) -> list[str]:
     return list(dict.fromkeys(views))
 
 
+_GLOB_WORD_SPLIT = re.compile(r"[\s;&|()<>\x27\x22`=:,]+")
+_GLOB_CLASS = re.compile(r"\[[^\]]*\]")
+MIN_GLOB_LITERALS = 6   # `*.key`, `p*`, `*` and `*seal*` are ordinary arguments; `permit-s*` and `*seal.key` name one file in practice (a word with no `-` or `.` needs two more)
+
+
+def _names_by_glob(names: list[str], views: list[str]) -> bool:
+    """True when a word of the command is a shell glob that would match one of `names` (a file an invariant protects) and holds at least
+    `MIN_GLOB_LITERALS` literal characters: `cat ~/.local/share/jade/permit-s*`, `*seal.key`, `permit-seal.k?y`, `permit-[s]eal.key`. Brace lists are already
+    expanded in one of the views. Only the last path component is matched; a directory glob (`*/permit-seal.key`) already contains the name."""
+    for view in views:
+        for word in _GLOB_WORD_SPLIT.split(view):
+            comp = word.rsplit("/", 1)[-1]
+            if not comp or len(comp) > 200 or not re.search(r"[*?\[]", comp):
+                continue
+            literal = re.sub(r"[*?\[\]]", "", _GLOB_CLASS.sub("", comp))
+            if len(literal) < MIN_GLOB_LITERALS or not re.search(r"[-.]", literal) and len(literal) < MIN_GLOB_LITERALS + 2:   # `**permit**` in prose is not a file
+                continue
+            if any(fnmatch.fnmatchcase(n, comp) for n in names):
+                return True
+    return False
+
+
 def _scan_content(a: Assessment, tool_input: dict, read_only: bool = False, cwd: str = "") -> None:
     """Invariants marked `scan_content` (SI-02, SI-05) apply to the text a non-shell call carries: file content, new text, any argument.
 
@@ -526,7 +550,8 @@ def classify_segment(seg: str, dirs: tuple[str, ...]) -> tuple[dict, str]:
     real_bare = _bare(seg)
     seg = _use_identity(seg)
     bare, calls = _analyse(seg)
-    texts = [seg, bare, _pathfold(bare), *([UNSAFE_GIT + bare] if any(c.danger for c in calls) else [])]
+    hooks_off = any("core.hookspath" in d for c in calls for d in c.danger)   # `git -c core.hooksPath=...` turns the pre-push guard off for this command (R-17)
+    texts = [*([HOOKS_BYPASS + bare] if hooks_off else []), seg, bare, _pathfold(bare), *([UNSAFE_GIT + bare] if any(c.danger for c in calls) else [])]
     view = files_view(bare)  # what a `files_only` rule may look at: None = the whole segment
     seg_best = None
     pairs = [(t, view if view is not None else _program_basename(t)) for t in dict.fromkeys(texts)]
@@ -567,7 +592,7 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         if "_re" not in inv:
             continue
         haystacks = text_views(text_in) if inv.get("match_on") == "raw" else active + [_bare(s) for s in active]
-        if any(inv["_re"].search(h) for h in haystacks):
+        if any(inv["_re"].search(h) for h in haystacks) or (inv.get("match_on") == "raw" and inv.get("block_globs") and _names_by_glob(inv["block_globs"], haystacks)):
             a.blocked.append(inv["id"])
     _seal(a, tool, subject, cwd, subject)
     a.hold_key = sha256(canonical({"shell": sorted(set(gated_keys or keys))}))
