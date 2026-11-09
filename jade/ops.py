@@ -169,6 +169,8 @@ def purge(db: ledger.Ledger, older_than_days: int = 90) -> int:
         n += con.execute("UPDATE events SET detail_json=NULL WHERE ts<? AND detail_json IS NOT NULL AND kind<>'purge'", (cutoff,)).rowcount
         if n:
             db.event("ledger", "purge", guard=f"older than {older_than_days} d", detail={"rows": n}, con=con)
+    if n:
+        db.scrub()   # the cleared text must not stay readable in the file's free pages or the write-ahead log
     return n
 
 

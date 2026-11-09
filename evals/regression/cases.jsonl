@@ -59,3 +59,14 @@
 {"id": "R59", "class": "non_secret_text_is_not_redacted", "kind": "redact_keep", "text": "git remote add origin git@github.com:org/repo.git", "note": "F23 control"}
 {"id": "R60", "class": "non_secret_text_is_not_redacted", "kind": "redact_keep", "text": "authorization: required for /admin", "note": "F23 control"}
 {"id": "R61", "class": "non_secret_text_is_not_redacted", "kind": "redact_keep", "text": "token_count: 1532", "note": "F23 control"}
+{"id": "R62", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "cmd --password $PW", "note": "cluster C pass 2: env reference stays readable"}
+{"id": "R63", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "vercel --prod --token $VERCEL_TOKEN", "note": "cluster C pass 2: env reference after a flag"}
+{"id": "R64", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "curl -u user:$PW https://x", "note": "cluster C pass 2: env reference as the curl password"}
+{"id": "R65", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "mysql -u r -p$PW", "note": "cluster C pass 2: env reference as the mysql password"}
+{"id": "R66", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "TOKEN=$(cat /run/secrets/t) deploy", "note": "cluster C pass 2: fetch from a file"}
+{"id": "R67", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "API_KEY=$(op read op://v/i/k) deploy", "note": "cluster C pass 2: fetch from a store"}
+{"id": "R68", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "token_type: bearer", "note": "cluster C pass 2: a type, not a credential"}
+{"id": "R69", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "token_url: https://x/oauth/token", "note": "cluster C pass 2: a location, not a credential"}
+{"id": "R70", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "secret_ref: foo", "note": "cluster C pass 2: a reference"}
+{"id": "R71", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "ssh -p 2222 host", "note": "cluster C pass 2: -p is a port outside a password command"}
+{"id": "R72", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "docker run -e TOKEN_TYPE=bearer img", "note": "cluster C pass 2: TOKEN_TYPE is not a credential"}

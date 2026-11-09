@@ -92,6 +92,7 @@ class Ledger:
             try:
                 self.con.execute("PRAGMA journal_mode=WAL")
                 self.con.execute("PRAGMA synchronous=NORMAL")
+                self.con.execute("PRAGMA secure_delete=ON")   # a deleted or overwritten value is zeroed in its page, not left in a free block
                 self.con.executescript(SCHEMA)
                 self._migrate()
                 return
@@ -99,6 +100,19 @@ class Ledger:
                 if "locked" not in str(e) and "busy" not in str(e) or time.monotonic() > deadline:
                     raise
                 time.sleep(0.02 + random.random() * 0.05)  # noqa: S311 - backoff jitter
+
+    def scrub(self) -> bool:
+        """Rewrite the database file and empty the write-ahead log, so that text a purge cleared is not left in free pages or in old log frames.
+        `secure_delete` zeroes what a later write removes; `VACUUM` also rebuilds the pages freed before it was on (an older ledger), and a
+        `TRUNCATE` checkpoint folds the log into the file and cuts it to zero. Best effort: False when another process holds the database."""
+        if self._depth:
+            return False
+        try:
+            self.con.execute("VACUUM")
+            self.con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.OperationalError:
+            return False
+        return True
 
     def _migrate(self) -> None:
         for table, cols in MIGRATIONS.items():
