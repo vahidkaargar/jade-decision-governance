@@ -23,7 +23,39 @@ SPLIT = shellnorm.SPLIT
 PREFIX = shellnorm.PREFIX
 WRITE_REDIRECT = re.compile(r">>?\s*\S")
 WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
-UNSAFE_GIT = "git:unsafe-config "  # marker prefix R-15 matches; carried only in the text a rule sees
+UNSAFE_GIT = shellnorm.UNSAFE_GIT  # marker prefix R-15 matches; carried only in the text a rule sees
+PATH_RULES = ("R-01", "R-04", "R-12", "R-13")  # the rules about where a write lands: they also see relative operands made absolute
+WRITE_KEYS = ("file_path", "notebook_path", "path", "filePath", "file", "filepath", "target_file", "file_name", "filename", "target")
+CONTENT_KEYS = {"content", "new_string", "old_string", "new_str", "old_str", "new_source", "text", "contents", "data", "source", "patch"}
+
+
+def _strings(obj, key: str = ""):
+    if isinstance(obj, str):
+        if key not in CONTENT_KEYS:
+            yield obj
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            yield from _strings(v, str(k))
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            yield from _strings(v, key)
+
+
+def write_paths(tool_input: dict) -> list[str]:
+    """The path(s) a Write/Edit-style call targets: the known path keys, else every string value that is not file content."""
+    known = [str(tool_input[k]) for k in WRITE_KEYS if isinstance(tool_input.get(k), str) and tool_input[k].strip()]
+    if known:
+        return known
+    return [v for v in _strings(tool_input) if v.strip() and len(v) <= 4096]
+
+
+def tool_subject(tool: str, tool_input: dict) -> str:
+    """The text a gate decision is about: the command, or the target path(s)."""
+    if tool in WRITE_TOOLS:
+        return "\n".join(write_paths(tool_input))
+    if is_mcp(tool):
+        return mcp_command(tool_input) or ""
+    return str(tool_input.get("command") or "")
 
 
 def is_mcp(tool: str) -> bool:
@@ -70,6 +102,7 @@ def reset_cache() -> None:
 
 skeleton = shellnorm.skeleton
 segments = shellnorm.segments
+segments_cwd = shellnorm.segments_cwd
 
 
 def _analyse(seg: str) -> tuple[str, list[shellnorm.GitCall]]:
@@ -121,6 +154,31 @@ def plan_hash(tool: str, subject: str, cwd: str = "") -> str:
     return sha256(canonical({"tool": tool, "subject": re.sub(r"\s+", " ", subject).strip(), "cwd": cwd or ""}))
 
 
+def _absolute_operands(seg: str, dirs: tuple[str, ...]) -> str:
+    """The operands of a segment as absolute, symlink-resolved paths, for every directory the segment may run in.
+
+    Catches `cd /etc && sort -o pf.conf in`, `sort -o ../../etc/pf.conf in` and a path reached through a symlink.
+    """
+    out: list[str] = []
+    for tok in seg.split(" ")[:64]:
+        if tok.startswith("-"):
+            tok = tok.partition("=")[2]
+        tok = tok.replace("\x01", " ")
+        if not tok or tok.startswith(("$", "@", '"')) or tok in ("&&", "||") or "git:unsafe" in tok:
+            continue
+        for d in dirs:
+            if d or os.path.isabs(os.path.expanduser(tok)):
+                if (p := normalise_path(tok, d)) and p != tok:
+                    out.append(p)
+    return " ".join(dict.fromkeys(out))
+
+
+def _path_rule(text: str) -> dict | None:
+    if not text:
+        return None
+    return next((r for r in risk()["rules"] if r["id"] in PATH_RULES and r["_re"].search(text)), None)
+
+
 def _first_match(text: str) -> dict:
     for r in risk()["rules"]:
         if r["_re"].search(text):
@@ -131,15 +189,21 @@ def _first_match(text: str) -> dict:
 def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
     """Classify one tool call. Raises on malformed policy; callers decide how to fail."""
     if tool in WRITE_TOOLS:
-        subject = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
-        norm = normalise_path(subject, cwd)
-        cands = [subject, *([norm] if norm and norm != subject else [])]
-        rule = max((_first_match(c) for c in cands), key=lambda r: LEVELS[r["level"]])
-        envs = [loader.environment_of(risk(), c) for c in cands]
+        subjects = write_paths(tool_input) or [""]
+        best_rule, envs = None, []
+        for subject in subjects:
+            norm = normalise_path(subject, cwd)
+            cands = [subject, *([norm] if norm and norm != subject else [])]
+            for c in cands:
+                r = _first_match(c)
+                if best_rule is None or LEVELS[r["level"]] > LEVELS[best_rule["level"]]:
+                    best_rule = r
+                envs.append(loader.environment_of(risk(), c))
         env = "production" if "production" in envs else "staging" if "staging" in envs else "local"
-        a = _from_rule(rule, env)
+        a = _from_rule(best_rule, env)
         if env == "production" and LEVELS[a.level] < LEVELS["high"]:
             a.level, a.rule_id, a.rationale = "high", "R-ENV", "Write under a production path"
+        subject = "\n".join(subjects)
         a.plan_hash, a.subject = plan_hash(tool, subject, ""), subject
         return a
     if is_mcp(tool) and mcp_command(tool_input) is None:
@@ -155,7 +219,7 @@ def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
     subject = mcp_command(tool_input) or str(tool_input.get("command") or "") if is_mcp(tool) else str(tool_input.get("command") or "")
     best: dict | None = None
     active: list[str] = []
-    for seg in segments(subject):
+    for seg, dirs in shellnorm.segments_cwd(subject, cwd):
         if is_read_only(seg):
             continue
         active.append(seg)
@@ -165,6 +229,8 @@ def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
             rule = _first_match(text)
             if best is None or LEVELS[rule["level"]] > LEVELS[best["level"]]:
                 best = rule
+        if (rule := _path_rule(_absolute_operands(seg, dirs))) and (best is None or LEVELS[rule["level"]] > LEVELS[best["level"]]):
+            best = rule
     best = best or risk()["rules"][-1]
     a = _from_rule(best, loader.environment_of(risk(), subject))
     for inv in safety()["invariants"]:

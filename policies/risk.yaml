@@ -44,13 +44,13 @@ rules:
     level: high
     reversibility: irreversible
     blast_radius: repo
-    match: "git (reset\\b[^;&|]*--hard|push --force|branch\\b[^;&|]* -D\\b|clean\\b[^;&|]* -[a-zA-Z]*(f[a-zA-Z]*d|d[a-zA-Z]*f))|\\brm -rf (?!/private/tmp|/tmp|\\$TMPDIR|\\./?(node_modules|dist|build|\\.venv|target)\\b)"
+    match: "git (reset\\b[^;&|]*--ha(?:rd?)?\\b|push --force|branch\\b(?:(?=[^;&|]*\\s-[a-zA-Z]*D)|(?=[^;&|]*\\s(?:-[a-zA-Z]*d|--delete\\b))(?=[^;&|]*\\s(?:-[a-zA-Z]*f|--force\\b)))|clean\\b(?=[^;&|]*\\s(?:-[a-zA-Z]*f|--f(?:o(?:r(?:ce?)?)?)?\\b))(?=[^;&|]*\\s-[a-zA-Z]*d))|\\brm -rf (?!/private/tmp|/tmp|\\$TMPDIR|\\./?(node_modules|dist|build|\\.venv|target)\\b)"
     rationale: "Destroys local history or files"
   - id: R-12
     level: high
     reversibility: partially_reversible
     blast_radius: host
-    match: "\\b(launchctl (bootstrap|load|enable|kickstart)|systemctl (start|stop|restart|enable)|crontab -|docker (compose )?(up|down|rm)|brew services)\\b|/Library/LaunchAgents/.*\\.plist"
+    match: "\\b(launchctl (bootstrap|load|enable|kickstart)|systemctl (start|stop|restart|enable)|crontab -|docker (compose )?(up|down|rm)|brew services)\\b|(?i:/library/launchagents/.*\\.plist)"
     rationale: "Service lifecycle on this host"
   - id: R-13
     level: high
@@ -69,7 +69,7 @@ rules:
     reversibility: partially_reversible
     blast_radius: host
     match: "^git:unsafe-config "
-    rationale: "git -c (alias, pager, editor, sshCommand, fsmonitor, hooksPath, credential, url ...) or --exec-path can run a program or redirect a remote"
+    rationale: "git -c (alias, pager, editor, sshCommand, fsmonitor, hooksPath, credential, url ...), --exec-path or a GIT_* environment variable (GIT_SSH_COMMAND, GIT_PAGER, GIT_CONFIG_*) can run a program or redirect a remote"
   - id: R-20
     level: medium
     reversibility: reversible

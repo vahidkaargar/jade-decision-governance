@@ -58,7 +58,7 @@ def run_case(c: dict) -> list[str]:
         if kind == "gate_mcp":
             ev = {"tool_name": c["tool"], "tool_input": c["input"], "session_id": "case-session", "cwd": "/tmp/case"}
         if kind == "gate_write":
-            ev = {"tool_name": "Write", "tool_input": {"file_path": c["path"]}, "session_id": "case-session", "cwd": "/tmp/case"}
+            ev = {"tool_name": "Write", "tool_input": {c.get("key", "file_path"): c["path"]}, "session_id": "case-session", "cwd": "/tmp/case"}
         res = hooks.pretool(ev)
         want = 2 if c["expect"] == "block" else 0
         if res.exit_code != want:

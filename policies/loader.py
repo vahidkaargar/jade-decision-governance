@@ -79,7 +79,8 @@ def environment_of(risk: dict, command: str) -> str:
     env = risk.get("environments", {})
     if any(h and h in command for h in env.get("production_hosts", [])):
         return "production"
-    if any(p and p in command for p in env.get("production_paths", [])):
+    low = command.lower()  # the macOS filesystem is case-insensitive
+    if any(p and p.lower() in low for p in env.get("production_paths", [])):
         return "production"
     if any(re.search(m, command) for m in env.get("staging_markers", [])):
         return "staging"

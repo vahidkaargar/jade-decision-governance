@@ -14,7 +14,7 @@ def _runner():
 
 def test_regression_and_adversarial_cases_all_pass(capsys):
     assert _runner().main([]) == 0
-    assert "54/54 cases pass" in capsys.readouterr().out
+    assert "76/76 cases pass" in capsys.readouterr().out
 
 
 def test_runner_detects_a_wrong_expectation(tmp_path, capsys):

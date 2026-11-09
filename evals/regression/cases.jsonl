@@ -28,3 +28,10 @@
 {"id": "R28", "class": "gate_sort_output_is_not_read_only", "kind": "gate", "command": "sort -o /etc/pf.conf in.txt", "expect": "block", "note": "F01: sort -o writes"}
 {"id": "R29", "class": "gate_sort_uniq_pipeline_is_low", "kind": "gate", "command": "sort in.txt | uniq -c | head", "expect": "allow"}
 {"id": "R30", "class": "gate_commit_heredoc_substitution_is_low", "kind": "gate", "command": "git commit -m \"$(cat <<'EOF'\nfix: don't push (git push)\nEOF\n)\"", "expect": "allow", "note": "F02 control: quoted heredoc inside $() stays inert"}
+{"id": "R31", "class": "gate_sed_block_script_is_low", "kind": "gate", "command": "sed -n '/^## /{p;q}' f", "expect": "allow", "note": "F01 second pass control"}
+{"id": "R32", "class": "gate_uniq_numeric_option_is_low", "kind": "gate", "command": "uniq -f 1 in", "expect": "allow", "note": "F01 second pass control"}
+{"id": "R33", "class": "gate_comment_text_is_inert", "kind": "gate", "command": "echo hi # git push origin main", "expect": "allow", "note": "F03 second pass control"}
+{"id": "R34", "class": "gate_brace_list_is_low", "kind": "gate", "command": "echo file{1,2}.txt", "expect": "allow", "note": "F03 second pass control"}
+{"id": "R35", "class": "gate_sh_c_echo_is_low", "kind": "gate", "command": "sh -c 'echo hello'", "expect": "allow", "note": "F02 second pass control"}
+{"id": "R36", "class": "gate_git_pager_cat_is_low", "kind": "gate", "command": "GIT_PAGER=cat git log", "expect": "allow", "note": "N7 control"}
+{"id": "R37", "class": "gate_rebase_exec_classifies_the_command", "kind": "gate", "command": "git rebase --exec 'make test' main", "expect": "allow", "note": "F01 second pass control (medium, below the permit floor)"}

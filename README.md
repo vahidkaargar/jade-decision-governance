@@ -23,7 +23,7 @@ It governs how agents (Claude Code first) use [TypeSafe Jev](https://docs.typesa
 | VALIDATED | No — needs 14 days of real ledger data, labelled outcomes and one full improvement cycle (`docs/08` section 5) |
 | PRODUCTION_APPROVED | No — a human decision (`docs/08`) |
 
-What exists today: the design documents, the runtime, six JSON Schema contracts, five policy files with a tested loader, a 10-entry question registry, 35 replayable regression and adversarial cases, the baseline and performance tooling, and the phase acceptance tests. Wiring it into an agent harness is deliberately a human step: see `docs/08-deployment-runbook.md`.
+What exists today: the design documents, the runtime, six JSON Schema contracts, five policy files with a tested loader, a 10-entry question registry, 76 replayable regression and adversarial cases, the baseline and performance tooling, and the phase acceptance tests. Wiring it into an agent harness is deliberately a human step: see `docs/08-deployment-runbook.md`.
 
 ## Why: the measured baseline
 

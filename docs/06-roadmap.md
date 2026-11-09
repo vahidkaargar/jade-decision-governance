@@ -6,7 +6,7 @@ Completion states (plan §16): **DESIGN_READY** → **IMPLEMENTED** → **VALIDA
 Inventory, live API probes, baseline mining, ADRs, contracts, policies, threat model, this roadmap. Evidence: `docs/00`, `evals/baseline/summary-2026-11-08.json`, `adapters/jev/probe_openrouter.py` output recorded in `docs/00` S1–S12.
 
 ## Executable today
-`uv run pytest -q` runs the contract, policy, overlay and phase acceptance tests; `uv run python evals/run_cases.py` replays 35 regression and adversarial cases; `evals/replay_policy.py`, `evals/performance/run.py` and `evals/baseline/mine_transcripts.py` are the measurement harnesses.
+`uv run pytest -q` runs the contract, policy, overlay and phase acceptance tests; `uv run python evals/run_cases.py` replays 76 regression and adversarial cases; `evals/replay_policy.py`, `evals/performance/run.py` and `evals/baseline/mine_transcripts.py` are the measurement harnesses.
 
 ## Phase 1 — Instrument (no behaviour change)
 Scope: `jade` package (`uv tool install`), SQLite ledger, OpenRouter adapter with typed errors and bounded retries, `redact()`, `jev` compatibility shim that journals every call and prints exactly today's output format, `jade ledger stats`, `work-items.jsonl` + `jade work render`.

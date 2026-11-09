@@ -134,15 +134,15 @@ def _push_hits_default(call: policy.shellnorm.GitCall, cwd: str) -> bool:
 def _on_default_branch(cwd: str, command: str) -> bool:
     """A `git push` whose destination is main/master or the current branch while that is main/master (invariant SI-08).
 
-    The classifier has already removed git global options, escapes and quoting (policy.segments), so `git -C d push origin HEAD`
-    and `git push origin HEAD:refs/heads/main` are seen as what they are. A destination that cannot be resolved
-    (`$BRANCH`) counts as the current branch.
+    The classifier has already removed git global options, escapes and quoting (policy.segments_cwd), so `git -C d push origin HEAD`
+    and `git push origin HEAD:refs/heads/main` are seen as what they are, and each push is resolved in the directory it
+    runs in (`cd repo && git push` follows the cd). A destination that cannot be resolved (`$BRANCH`) counts as the current branch.
     """
-    for seg in policy.segments(command):
+    for seg, dirs in policy.segments_cwd(command, cwd):
         if policy.is_read_only(seg):
             continue
         for call in policy.git_calls(seg):
-            if call.sub == "push" and _push_hits_default(call, cwd):
+            if call.sub == "push" and any(_push_hits_default(call, d) for d in dirs):
                 return True
     return False
 
@@ -156,9 +156,9 @@ def pretool(event: dict, permit=None) -> HookResult:
     if tool != "Bash" and tool not in policy.WRITE_TOOLS and not policy.is_mcp(tool):
         return HookResult()
     cwd = event.get("cwd") or ""
-    subject = str(tool_input.get("command") or tool_input.get("file_path") or tool_input.get("notebook_path") or "")
-    if policy.is_mcp(tool):
-        subject = policy.mcp_command(tool_input) or json.dumps(tool_input, sort_keys=True, ensure_ascii=False)
+    subject = policy.tool_subject(tool, tool_input)
+    if policy.is_mcp(tool) and not subject:
+        subject = json.dumps(tool_input, sort_keys=True, ensure_ascii=False)
     try:
         a = _classify(tool, tool_input, cwd)
         runs_shell = tool == "Bash" or (policy.is_mcp(tool) and policy.mcp_command(tool_input) is not None)
