@@ -13,6 +13,7 @@ timeout, so a quadratic pattern is a way to make the gate fail open (`test_redac
 
 from __future__ import annotations
 
+import math
 import re
 from bisect import bisect_left
 from collections.abc import Callable
@@ -58,6 +59,13 @@ _LOOK_BACK = 2000   # how far back a command word is looked for from a flag (one
 _KC_LINE = r"(?:[^\n|>]|[ \t]\d>(?:&\d|[^\s|>]*)){0,300}"
 _KC_LEAD = r"(?m)^([ \t]*(?:[$%>#][ \t]*)?(?:[^\s/]*/){0,8}security[ \t]+find-(?:generic|internet)-password\b"
 
+# A bare random token (W-42): no vendor prefix and no key name, so nothing above sees it. A run of 20 or more key-alphabet characters is a candidate; it
+# is redacted only when it looks random (`_random_looking`). It never starts after a word character, `/`, `.`, `_`, `-` or `+` (a path segment, a
+# file extension, the tail of a slug), after `base64,` (a data URI), `h1:` (a Go checksum) or `SHA256:`, `SHA1:`, `MD5:` (a fingerprint). A `=` only ends it
+# (padding), so `key=VALUE` offers the value. One greedy run from its start, nothing after it to backtrack into: linear.
+_ENTROPY_RUN = (r"(?<![A-Za-z0-9_/.+-])(?<!base64,)(?<!h1:)(?<!SHA256:)(?<!SHA1:)(?<!MD5:)"
+                r"[A-Za-z0-9][A-Za-z0-9_+/-]{19,}={0,2}(?![A-Za-z0-9_+/-])")
+
 PATTERNS: list[tuple[str, re.Pattern, str | Callable[[re.Match], str]]] = [
     ("private_key", re.compile(r"-----BEGIN [A-Z ]*" + _PK + r"(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z ]*" + _PK + r"(?: BLOCK)?-----|\Z)"), "[REDACTED:private_key]"),
     ("keychain", re.compile(_KC_LEAD + _KC_LINE.replace("{0,300}", "{0,300}?") + r"[ \t]-[A-Za-z]*w[A-Za-z]*(?=[ \t\r]|$)" + _KC_LINE
@@ -91,6 +99,7 @@ PATTERNS: list[tuple[str, re.Pattern, str | Callable[[re.Match], str]]] = [
     ("annotated", re.compile(r"(?i)" + _KEY + r"(\s*:\s*[A-Za-z_][A-Za-z0-9_.]*(?:\[[^\]\n]{0,128}\])?\s*=\s*)" + _VALUE), "assignment"),
     ("assignment", re.compile(r"(?i)" + _KEY + r"(\\?[\"']?\s*[=:]\s*)" + _VALUE), "assignment"),
     ("spaced", re.compile(r"(?i)\b((?:api|secret|access|auth|private|client|account|signing)[ ]+(?:key|secret|token))(\s*[:=]\s*)" + _VALUE), "assignment"),
+    ("entropy", re.compile(_ENTROPY_RUN), "entropy"),
     ("email", re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b(?!:[A-Za-z0-9_~./-])"), "[REDACTED:email]"),
 ]
 # The patterns whose match is a credential beyond doubt: `residual()` is their union, so it can never disagree with redact().
@@ -127,6 +136,40 @@ _SCOPES = {
 def _secret_key(key: str) -> bool:
     key = key.replace(" ", "_")
     return _STRONG_KEY.fullmatch(key) is not None or _WEAK_KEY.fullmatch(key) is not None
+
+
+# What a run is tested against, and why (the false-positive twins are in tests/fixtures/redact_twins.json, the rate is measured in docs/05 section 3):
+_ENTROPY_MIN, _ENTROPY_MAX = 20, 256   # shorter is a word or a short id; longer is a dump or an attachment, not a credential
+_ENTROPY_BITS = 3.5                    # Shannon bits per character: a random base-62 token of 20 characters has 4.0 on average, English-like names 3.0
+_WORD_SHARE = 0.6                      # the share of the run made of word chunks (`Config`, `retry`): a camel-case identifier is over 0.8, a random token 0.2
+_WORD_CHUNK = re.compile(r"[A-Z]?[a-z]{3,}")
+_WORDLIKE = re.compile(r"[A-Z]?[a-z]+")
+_NOT_A_TOKEN_PREFIX = ("iVBORw0KGgo", "R0lGOD", "UEsDB", "AAAAB3NzaC1", "AAAAC3NzaC1", "MII", "sha1-", "sha256-", "sha384-", "sha512-")   # image, zip, ssh public key, certificate, SRI hash
+
+
+def _random_looking(t: str) -> bool:
+    """Is this run a random token rather than a name, a hash, a path or a blob? Conservative: it needs a digit, an upper-case and a lower-case letter, so a
+    hex hash (a git SHA, a SHA-256, a UUID) is never a candidate; that also means a random hex key is not found (docs/05 section 3, accepted)."""
+    t = t.rstrip("=")
+    n = len(t)
+    if not _ENTROPY_MIN <= n <= _ENTROPY_MAX or t.startswith(_NOT_A_TOKEN_PREFIX):
+        return False
+    if not (any(c.isdigit() for c in t) and any(c.isupper() for c in t) and any(c.islower() for c in t)):
+        return False
+    if sum(c in "_-" for c in t) > n * 0.1:   # a slug or a branch name; a url-safe base64 token has about 3% of them
+        return False
+    if "/" in t and any(len(seg) >= 4 and _WORDLIKE.fullmatch(seg) for seg in t.split("/")):   # a relative path (`src/Components/x`), not base64 with a slash
+        return False
+    if sum(len(w.group(0)) for w in _WORD_CHUNK.finditer(t)) > n * _WORD_SHARE:   # camel-case identifiers
+        return False
+    counts: dict[str, int] = {}
+    for c in t:
+        counts[c] = counts.get(c, 0) + 1
+    return -sum(v / n * math.log2(v / n) for v in counts.values()) >= _ENTROPY_BITS
+
+
+def _entropy(m: re.Match) -> str:
+    return "[REDACTED:entropy]" if _random_looking(m.group(0)) else m.group(0)
 
 
 def _glued_secret(m: re.Match) -> str:
@@ -201,8 +244,8 @@ def redact(text: str, owner_emails: tuple[str, ...] = (), *, secrets_only: bool 
             fn = _email(owner_emails)
             n = sum(1 for m in pattern.finditer(text) if fn(m) != m.group(0))
             text = pattern.sub(fn, text)
-        elif repl in ("assignment", "glued") or repl in _CLI:
-            fn = _assignment if repl == "assignment" else _glued_secret if repl == "glued" else _CLI[repl]
+        elif repl in ("assignment", "glued", "entropy") or repl in _CLI:
+            fn = {"assignment": _assignment, "glued": _glued_secret, "entropy": _entropy}.get(repl) or _CLI[repl]
             n = 0
 
             def _count(m: re.Match, fn=fn) -> str:

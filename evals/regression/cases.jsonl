@@ -125,3 +125,19 @@
 {"id": "R125", "class": "si09_module_in_pytest_expression", "kind": "gate", "command": "uv run pytest tests/ -q -k 'jade.permits'", "expect": "allow", "note": "W-71 twin of A164-A175: the name is data, not an effect"}
 {"id": "R126", "class": "si09_module_in_cov_option", "kind": "gate", "command": "uv run python -m pytest -q --cov=jade.permits tests", "expect": "allow", "note": "W-71 twin of A164-A175: the name is data, not an effect"}
 {"id": "R127", "class": "si09_command_in_runbook_heredoc", "kind": "gate", "command": "cat > docs/runbook.md <<'EOF'\nRun: jade hooks install\nRun: jade permit approve prm_x\nEOF", "expect": "allow", "note": "W-71 twin of A164-A175: the name is data, not an effect"}
+{"id": "R128", "class": "curl_upload_to_localhost_is_low", "kind": "gate", "command": "curl -d @payload.json http://localhost:8080/x", "expect": "allow", "note": "twin of A192: the same upload, to this machine"}
+{"id": "R129", "class": "curl_upload_to_loopback_ip_is_low", "kind": "gate", "command": "curl --data-binary @payload.json http://127.0.0.1:3333/x", "expect": "allow", "note": "twin of A192: the same upload, to this machine"}
+{"id": "R130", "class": "curl_get_of_a_public_url_is_low", "kind": "gate", "command": "curl -sS https://example.org/data.json", "expect": "allow", "note": "twin of A192: nothing leaves, a page is fetched"}
+{"id": "R131", "class": "curl_download_to_a_file_is_low", "kind": "gate", "command": "curl -L -o out.tgz https://example.org/file.tgz", "expect": "allow", "note": "twin of A192: a download"}
+{"id": "R132", "class": "curl_inline_json_body_is_low", "kind": "gate", "command": "curl -X POST -d '{\"a\":1}' https://example.org/api", "expect": "allow", "note": "twin of A192: a body typed in the command is not a file or a variable"}
+{"id": "R133", "class": "curl_bearer_header_variable_is_low", "kind": "gate", "command": "curl -H \"Authorization: Bearer $TOKEN\" https://api.example.org/v1/me", "expect": "allow", "note": "twin of A200: a header is not a body"}
+{"id": "R134", "class": "wget_download_is_low", "kind": "gate", "command": "wget -q -O out.html https://example.org", "expect": "allow", "note": "twin of A201: a download"}
+{"id": "R135", "class": "nc_port_check_is_low", "kind": "gate", "command": "nc -zv example.org 443", "expect": "allow", "note": "twin of A198: -z sends nothing"}
+{"id": "R136", "class": "nc_to_localhost_is_low", "kind": "gate", "command": "echo ping | nc localhost 6379", "expect": "allow", "note": "twin of A198: to this machine"}
+{"id": "R137", "class": "gist_list_is_low", "kind": "gate", "command": "gh gist list", "expect": "allow", "note": "twin of A199: lists, publishes nothing"}
+{"id": "R138", "class": "local_rsync_is_low", "kind": "gate", "command": "rsync -a src/ /tmp/backup/", "expect": "allow", "note": "twin of A210: no remote host"}
+{"id": "R139", "class": "reading_a_source_file_is_low", "kind": "gate", "command": "cat src/main.py", "expect": "allow", "note": "twin of A192: reading a source file"}
+{"id": "R140", "class": "reading_env_example_is_low", "kind": "gate", "command": "cat .env.example", "expect": "allow", "note": "twin of R141: a template holds no secret"}
+{"id": "R141", "class": "reading_a_dotenv_is_recorded_not_gated", "kind": "gate", "command": "cat .env", "expect": "allow", "note": "W-55 decision: a plain read is medium (R-30), recorded and not gated; the send is what needs a permit"}
+{"id": "R142", "class": "reading_aws_credentials_is_recorded_not_gated", "kind": "gate", "command": "cat ~/.aws/credentials", "expect": "allow", "note": "W-55 decision: a plain read is medium (R-30), recorded and not gated"}
+{"id": "R143", "class": "grep_for_an_env_example_name_is_low", "kind": "gate", "command": "grep -rn .env.example docs", "expect": "allow", "note": "twin of R141: the name of a template"}

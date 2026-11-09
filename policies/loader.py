@@ -115,6 +115,53 @@ def load_safety(overlay: Path | None = None, base: Path | None = None) -> dict:
     return safety
 
 
+class RoutingError(ValueError):
+    """policies/routing.yaml is missing, unreadable or malformed: nothing that reads a limit from it may carry on with a guess."""
+
+
+def _positive_int(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+
+def load_routing(base: Path | None = None) -> dict:
+    """The routing policy, checked for the shape the runtime reads (the limits are positive integers, every route a check names exists).
+    Which checks and gates the code implements is `jade.route.policy_problems`, because that needs the code."""
+    path = base or POLICIES / "routing.yaml"
+    try:
+        doc = _read(path)
+    except (OSError, UnicodeError, yaml.YAMLError) as e:
+        raise RoutingError(f"routing policy cannot be read ({type(e).__name__})") from None
+    if not isinstance(doc, dict):
+        raise RoutingError("routing policy is not a mapping")
+    routes = doc.get("routes")
+    jev = routes.get("JEV") if isinstance(routes, dict) else None
+    if not isinstance(jev, dict):
+        raise RoutingError("routing policy has no routes.JEV")
+    for key in ("max_questions_per_request", "max_parallel_requests", "deadline_ms"):
+        if not _positive_int(jev.get(key)):
+            raise RoutingError(f"routes.JEV.{key} must be a positive integer")
+    dedup = doc.get("dedup")
+    if not _positive_int(dedup.get("ttl_s") if isinstance(dedup, dict) else None):
+        raise RoutingError("dedup.ttl_s must be a positive integer")
+    pf = doc.get("preflight")
+    if not isinstance(pf, list) or not all(isinstance(p, dict) and isinstance(p.get("id"), str) for p in pf):
+        raise RoutingError("preflight must be a list of checks with an id")
+    ids = [p["id"] for p in pf]
+    if len(ids) != len(set(ids)):
+        raise RoutingError("preflight check ids must be unique")
+    known = set(routes) | {"NEEDS_EVIDENCE", "NEEDS_REVISION", "REUSE"}
+    for p in pf:
+        for k in ("on_true", "on_false"):
+            if k in p and p[k] not in known:
+                raise RoutingError(f"{p['id']}.{k} names the unknown route {p[k]!r}")
+    if doc.get("default_route") not in routes:
+        raise RoutingError("default_route names a route that does not exist")
+    gates = doc.get("question_quality_gates")
+    if not isinstance(gates, list) or not all(isinstance(g, str) for g in gates):
+        raise RoutingError("question_quality_gates must be a list of names")
+    return doc
+
+
 def blocked_by(safety: dict, command: str) -> list[str]:
     return [i["id"] for i in safety["invariants"] if "_re" in i and i["_re"].search(command)]
 

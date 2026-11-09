@@ -157,11 +157,47 @@ def _proxy_for(parts):
     return p
 
 
+GRACE_S = 0.1   # how long past the deadline the caller waits for the worker to report its own timeout before it abandons the worker
+
+
 def http_transport(payload: dict, key: str, timeout: float):
     """Returns (status, body_text, headers). Raises OSError/TimeoutError/HTTPException on transport failure.
 
-    `timeout` is a wall-clock limit for the whole exchange, not for one socket operation: a timer shuts the socket at the deadline,
-    so a server that trickles a byte at a time (or stalls just under a per-read timeout) cannot hold the caller past it."""
+    `timeout` is a wall-clock limit for the whole exchange (DNS, connect, TLS, request, headers and body), not for one socket operation.
+    The exchange runs in a daemon worker thread and the caller waits for it with a monotonic deadline: Python cannot interrupt `getaddrinfo`
+    or a connect that is waiting on a dropped SYN, so at the deadline the caller abandons the worker and raises TimeoutError. The abandoned
+    worker ends when its resolver or connect returns (the socket timeout bounds the connect) and sends nothing once the deadline has passed.
+    Inside the worker a timer also shuts the socket at the deadline, so a server that trickles a byte at a time cannot hold it either."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    expired = threading.Event()
+    box: dict = {}
+    done = threading.Event()
+    holder: list = []   # the connection, once the worker has made one, so an abandoned worker's socket can be closed
+
+    def work() -> None:
+        try:
+            box["result"] = _exchange(payload, key, deadline, expired, holder)
+        except BaseException as e:  # noqa: BLE001 - handed back to the caller unchanged
+            box["error"] = e
+        finally:
+            done.set()
+
+    threading.Thread(target=work, name="jade-provider-exchange", daemon=True).start()
+    if not done.wait(max(0.0, deadline - time.monotonic()) + GRACE_S):
+        expired.set()
+        for conn in holder:
+            try:
+                conn.close()
+            except OSError:
+                pass
+        raise TimeoutError("deadline reached")
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
+
+
+def _exchange(payload: dict, key: str, deadline: float, expired: threading.Event, holder: list):
+    timeout = max(0.0, deadline - time.monotonic())
     parts = urlsplit(URL)
     https = parts.scheme == "https"
     target, headers = parts.path or "/", {}
@@ -183,8 +219,7 @@ def http_transport(payload: dict, key: str, timeout: float):
             conn.set_tunnel(parts.hostname, parts.port or 443, headers=auth)   # TCP to the proxy, CONNECT, then TLS to the provider
         else:
             target, headers = URL, auth
-    deadline = time.monotonic() + timeout
-    expired = threading.Event()
+    holder.append(conn)
 
     def cut() -> None:
         expired.set()
@@ -199,6 +234,9 @@ def http_transport(payload: dict, key: str, timeout: float):
     timer.daemon = True
     timer.start()
     try:
+        conn.connect()   # DNS, TCP, tunnel and TLS happen here; a worker that outlives the deadline must not send the request afterwards
+        if expired.is_set() or time.monotonic() >= deadline:
+            raise TimeoutError("deadline reached")
         conn.request("POST", target, body=json.dumps(payload).encode(),
                      headers={**headers, "Authorization": f"Bearer {key}", "Content-Type": "application/json", "X-Title": "jade-decision-governance"})
         resp = conn.getresponse()
@@ -235,11 +273,11 @@ class OpenRouterProvider:
         self.transport, self.key_fn, self.sleep, self.deadline_s = transport, key_fn, sleep, deadline_s
 
     def ask(self, state: dict, questions: dict, model: str = DEFAULT_MODEL) -> Result:
+        start = time.monotonic()   # the deadline covers the key lookup too (a slow Keychain no longer adds to a full exchange)
         key = self.key_fn()
         if not key:
             return Result(ok=False, error_kind="NO_KEY", detail="no OPENROUTER_API_KEY in Keychain or environment")
         payload = {"model": model, "state": state, "questions": questions}
-        start = time.monotonic()
         attempt, result = 0, None
         while True:
             attempt += 1

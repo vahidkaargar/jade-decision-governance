@@ -28,7 +28,7 @@ Exit: budgets in `docs/04` §6 met or consciously re-set with rationale.
 Rollback: thresholds revert to docs defaults by deleting `calibration/current.json`.
 
 ## Phase 4 — Improve (async, bounded)
-Scope: `jade improve mine` → task-observer observations + improvement records; offline replay; shadow; canary only for `question_template` and `cache_ttl` after human opt-in; kill switch file; champion/challenger pins.
+Scope: `jade improve mine` → task-observer observations + improvement records; offline replay; shadow; canary after human opt-in, in code for `question_template` only (`cache_ttl` is in the policy scope but has no evaluator, W-44); kill switch file; champion/challenger pins.
 Acceptance: `test_candidate_cannot_target_protected`, `test_promotion_requires_protected_pass`, `test_kill_switch_freezes`, `test_shadow_adds_zero_hot_path_latency`.
 Exit: one full cycle (mine → candidate → replay → shadow → human decision) completed and audited.
 Rollback: `FREEZE` file; `jade improve rollback <candidate>` restores the exact prior champion (or the prior threshold band); under `FREEZE` it needs a human terminal.

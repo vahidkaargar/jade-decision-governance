@@ -131,13 +131,13 @@ def test_main_handles_a_malformed_event_without_opening_the_gate(monkeypatch):
     assert hooks.main("pretool") == 2
 
 
-def test_unresolvable_push_destination_fails_closed_even_with_an_issued_permit(human_env, monkeypatch):
+def test_unresolvable_push_destination_fails_closed_even_with_an_issued_permit(human_env, monkeypatch, tmp_path):
     """SI-08 resolution asks git; if git hangs the push is treated as unsafe instead of as not-main."""
     import subprocess
 
     db = ledger.open()
     cmd = "git push origin feat/x"
-    pre(cmd)
+    pre(cmd, cwd=str(tmp_path))   # W-60: an existing directory, so that the hung git is what fails (a missing one has nothing to push from)
     pid = permits.listing(db, ("PENDING",))[0].permit_id
     permits.approve(db, pid, stdin_isatty=True)
 
@@ -145,7 +145,7 @@ def test_unresolvable_push_destination_fails_closed_even_with_an_issued_permit(h
         raise subprocess.TimeoutExpired(a[0], 3)
 
     monkeypatch.setattr(subprocess, "run", hang)
-    r = pre(cmd)
+    r = pre(cmd, cwd=str(tmp_path))
     assert r.exit_code == 2 and permits.get(db, pid).state == "ISSUED"
 
 

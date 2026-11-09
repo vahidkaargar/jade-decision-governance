@@ -73,7 +73,21 @@ LIVE = "COALESCE({a}source,'')<>'test'"   # rows a verification run wrote under 
 def live(alias: str = "") -> str:
     """SQL condition that leaves rows tagged `test` out. `alias` is a table alias such as `c` (no dot)."""
     return LIVE.format(a=f"{alias}." if alias else "")
-DEDUP_TTL_S = 3600
+
+
+def dedup_ttl_s() -> int:
+    """How long an answered call anchors a repeat: `dedup.ttl_s` of policies/routing.yaml (3600 as shipped)."""
+    from . import policy
+
+    return int(policy.routing()["dedup"]["ttl_s"])
+
+
+def __getattr__(name: str):
+    if name == "DEDUP_TTL_S":   # the old constant, kept as a name for callers; the value is the policy's
+        return dedup_ttl_s()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 STALE_EVALUATING_S = 600   # a provider call ends within 20 s; a row older than this belongs to a process that died
 STATE_CAP = 32 * 1024
 DEFAULT_TIMEOUT_S = 10.0
@@ -204,16 +218,8 @@ class Ledger:
             dedup_of = None
             self._sweep_stale(con)
             if session:
-                # The anchor of a repeat is an answered call from the same kind of run (a `JADE_SOURCE=test` row never anchors a live one, and
-                # a purge of test rows must not leave a live row pointing at a deleted anchor): DONE with an answer (exit 0, 3 or 4). An errored, rejected or still
-                # EVALUATING original is no anchor, so a later success becomes the new original and stays visible to calibration.
-                for row in con.execute(
-                        "SELECT call_id, ts FROM jev_calls WHERE session_id=? AND question_id=? AND question_version=? "
-                        "AND state_hash=? AND COALESCE(claim_hash,'')=COALESCE(?, '') AND dedup_of IS NULL "
-                        "AND state='DONE' AND exit_code IN (0,3,4) AND COALESCE(source,'')=COALESCE(?, '') ORDER BY rowid DESC LIMIT 1",
-                        (session, question_id, version, state_hash, claim_hash, self.source)):
-                    if (now() - parse_ts(row["ts"])).total_seconds() <= DEDUP_TTL_S:
-                        dedup_of = row["call_id"]
+                row = self._anchor(con, session, question_id, version, state_hash, claim_hash)
+                dedup_of = row["call_id"] if row else None
             for col in ("state_text", "question_text"):  # nothing stored in the ledger carries a credential, whoever the caller is
                 if isinstance(cols.get(col), str):
                     cols[col] = redact.redact(cols[col], secrets_only=True)[0]
@@ -226,6 +232,36 @@ class Ledger:
             keys = ",".join(data)
             con.execute(f"INSERT INTO jev_calls({keys}) VALUES({','.join('?' * len(data))})", tuple(data.values()))  # noqa: S608 - keys are code-defined
         return call_id
+
+    def _anchor(self, con, session: str, question_id: str, version: int, state_hash: str, claim_hash: str | None):
+        """The answered call a repeat of this question points at, or None. The anchor is an answered call from the same kind of run (a `JADE_SOURCE=test`
+        row never anchors a live one, and a purge of test rows must not leave a live row pointing at a deleted anchor): DONE with an answer (exit 0, 3 or 4).
+        An errored, rejected or still EVALUATING original is no anchor, so a later success becomes the new original and stays visible to calibration."""
+        ttl = dedup_ttl_s()
+        for row in con.execute(
+                "SELECT call_id, ts FROM jev_calls WHERE session_id=? AND question_id=? AND question_version=? "
+                "AND state_hash=? AND COALESCE(claim_hash,'')=COALESCE(?, '') AND dedup_of IS NULL "
+                "AND state='DONE' AND exit_code IN (0,3,4) AND COALESCE(source,'')=COALESCE(?, '') ORDER BY rowid DESC LIMIT 1",
+                (session, question_id, version, state_hash, claim_hash, self.source)):
+            if (now() - parse_ts(row["ts"])).total_seconds() <= ttl:
+                return row
+        return None
+
+    def find_repeat(self, question_id: str, version: int, state_hash: str, claim_hash: str | None, session: str):
+        """Read-only form of the lookup `begin_call` does: the answered call that a new ask of this question on this state would repeat (PF-04)."""
+        row = self._anchor(self.con, session, question_id, version, state_hash, claim_hash)
+        return self.get_call(row["call_id"]) if row else None
+
+    def in_flight_batches(self, within_s: float, exclude: tuple[str, ...] = ()) -> int:
+        """Provider requests still waiting for an answer, over every process: the distinct (session, state) pairs of calls left EVALUATING in the
+        last `within_s` seconds (the questions of one batch share both). Older rows belong to a process that died, not to a live exchange."""
+        sql = ("SELECT COUNT(DISTINCT COALESCE(session_id,'') || '|' || state_hash) AS n FROM jev_calls "
+               "WHERE state='EVALUATING' AND ts>=? AND COALESCE(source,'')=COALESCE(?, '')")
+        args: list = [ts(now() - timedelta(seconds=within_s)), self.source]
+        if exclude:
+            sql += f" AND call_id NOT IN ({','.join('?' * len(exclude))})"  # noqa: S608 - placeholders only
+            args += list(exclude)
+        return int(self.one(sql, tuple(args)).n)
 
     def _sweep_stale(self, con) -> None:
         """A row left EVALUATING by a crashed process is closed as an error, so it is neither in flight for ever nor an anchor."""

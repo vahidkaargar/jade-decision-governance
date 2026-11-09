@@ -697,5 +697,153 @@
    "I9j0K1l2M3n4O5p6Q7r8"
   ],
   "template": "saw @@ in the log"
+ },
+ {
+  "kind": "entropy_b62_24",
+  "secret": [
+   "ldFsNiBxla3D",
+   "4g8nFnx1kuP8"
+  ],
+  "template": "saw @@ in the log"
+ },
+ {
+  "kind": "entropy_b62_32",
+  "secret": [
+   "17tZ6kxBznLNA3SX",
+   "fmlSqkK2DituwOEX"
+  ],
+  "template": "output was @@ and then it stopped"
+ },
+ {
+  "kind": "entropy_b62_48",
+  "secret": [
+   "lDiJ3mv9SfdjN7Rp",
+   "dyqp0t3J95NjPGRN",
+   "SCUzWRFY6bCGlgpa"
+  ],
+  "template": "@@"
+ },
+ {
+  "kind": "entropy_b64_40_slash",
+  "secret": [
+   "fzjogZqi3oyaM91U2BGI",
+   "AM4uQeeUKKVAV60kET21"
+  ],
+  "template": "wrote @@ to stdout"
+ },
+ {
+  "kind": "entropy_b64_44_padded",
+  "secret": [
+   "A/gZ8LCc2yiSXvX",
+   "3SOV/ECFFC/X5dO",
+   "7/8Lm9OAfqF6Z="
+  ],
+  "template": "out: @@"
+ },
+ {
+  "kind": "entropy_b64_88_padded",
+  "secret": [
+   "eYESeLa3L2bRN9xstV+kdKSQe4tbpr",
+   "so1Bdk9yrw+as5HY49BdGewHTBnv+c",
+   "YZXCDXXlW11daFDOItq/5QxNZd=="
+  ],
+  "template": "blob @@ end"
+ },
+ {
+  "kind": "entropy_urlsafe_43",
+  "secret": [
+   "CCyPr8quamFFVfe",
+   "Vet3Pc2QUGVqgSj",
+   "cAPBzKDhT9V4a"
+  ],
+  "template": "id @@ end"
+ },
+ {
+  "kind": "entropy_twilio_sid",
+  "secret": [
+   "AC471acc056d9fae4",
+   "af15c469ec8096d6c"
+  ],
+  "template": "account @@ is active"
+ },
+ {
+  "kind": "entropy_unlisted_key_name",
+  "secret": [
+   "w5NnuGfyjgI4xEuY",
+   "dp5NzSGqimRUTFyM"
+  ],
+  "template": "curl --data key=@@ https://example.test/x"
+ },
+ {
+  "kind": "entropy_pin_name",
+  "secret": [
+   "Vjx7lBqfg7MF7r",
+   "gliIbivEWeQNSg"
+  ],
+  "template": "pin=@@"
+ },
+ {
+  "kind": "entropy_auth_name",
+  "secret": [
+   "rFU1BbgUCvCdX58XLH",
+   "9yoizkzI6EMHmJrr1n"
+  ],
+  "template": "export AUTH=@@"
+ },
+ {
+  "kind": "entropy_json_value",
+  "secret": [
+   "VyKQYWPGNgpTs37",
+   "9aE58IXbnKnZCyg"
+  ],
+  "template": "{\"value\": \"@@\", \"n\": 1}"
+ },
+ {
+  "kind": "entropy_url_query",
+  "secret": [
+   "TLkhCYiNXgkC7p8s",
+   "GzVZxE5lqRUTxrWY"
+  ],
+  "template": "GET https://example.test/cb?code=@@&state=1"
+ },
+ {
+  "kind": "entropy_yaml_value",
+  "secret": [
+   "97tb9jFqQzIl1TXTdIt1",
+   "vjhzRmZtVED3HuX6tHmv"
+  ],
+  "template": "data:\n  value: @@\n"
+ },
+ {
+  "kind": "entropy_bare_line_no_command",
+  "secret": [
+   "4IMBI7PhzsaJtcOX",
+   "msSafOZPS2erMgGZ"
+  ],
+  "template": "$ run-thing\nstarting\n@@\ndone"
+ },
+ {
+  "kind": "entropy_header_custom",
+  "secret": [
+   "M9xeEzhD4mf5SahF2",
+   "rXXFuHxYeqqUyE35r"
+  ],
+  "template": "X-Custom-Id: @@"
+ },
+ {
+  "kind": "entropy_after_equals_escaped_json",
+  "secret": [
+   "yO0RgxaUNCbKgNGz",
+   "7nsrfabHCmYtSIKR"
+  ],
+  "template": "{\"cmd\": \"run --x=\\\"@@\\\"\"}"
+ },
+ {
+  "kind": "entropy_two_on_a_line",
+  "secret": [
+   "w9BFs1Bw6d2E3",
+   "FM2SJuXZYPse4"
+  ],
+  "template": "a=@@ b=OTHERVALUE1"
  }
 ]
