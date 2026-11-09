@@ -19,7 +19,7 @@ It governs how agents (Claude Code first) use [TypeSafe Jev](https://docs.typesa
 | Stage | State |
 |-------|-------|
 | DESIGN_READY | **Yes** — design approved by the maintainer 2026-11-09 |
-| IMPLEMENTED | **Yes** — `jade` 0.3.1: ledger, adapter, redaction, `jev` shim, question registry, permits, hook gate, calibration, bounded improvement loop, standalone pre-push guard (`jade git-hook`); Phases 1–5 acceptance tests pass. 0.2.1 closed the first independent adversarial review and 0.2.2 the false-positive pass and the structural fix for "never push to the default branch" (see `CHANGELOG.md`). The command classifier is defence in depth, not the enforcement of that rule: the enforcement is the pre-push guard and branch protection on the remote, which only a human can install (`docs/08-deployment-runbook.md` section 2.7, W-68, W-69). The residual risks are listed in `docs/05-threat-model.md` and tracked in `BACKLOG.md` |
+| IMPLEMENTED | **Yes** — `jade` 0.3.2: ledger, adapter, redaction, `jev` shim, question registry, permits, hook gate, calibration, bounded improvement loop, standalone pre-push guard (`jade git-hook`); Phases 1–5 acceptance tests pass. 0.2.1 closed the first independent adversarial review and 0.2.2 the false-positive pass and the structural fix for "never push to the default branch" (see `CHANGELOG.md`). The command classifier is defence in depth, not the enforcement of that rule: the enforcement is the pre-push guard and branch protection on the remote, which only a human can install (`docs/08-deployment-runbook.md` section 2.7, W-68, W-69). The residual risks are listed in `docs/05-threat-model.md` and tracked in `BACKLOG.md` |
 | LIVE (advisory) | **Yes, on the reference machine since 2026-11-09** — the four hooks are installed, the gate records `would_block` and never blocks risk rules (safety invariants still block), the daily maintenance job is loaded, the pre-push guard and the remote branch ruleset protect `main`. This is the soak state of `docs/08` section 2.1, not enforcement |
 | VALIDATED | No — needs 14 days of real ledger data, labelled outcomes and one full improvement cycle (`docs/08` section 5); earliest 2026-11-23 |
 | PRODUCTION_APPROVED | No — a human decision (`docs/08`) |
@@ -88,7 +88,7 @@ This is the first installable release. It runs in **advisory mode**: it records 
 **1. Install** (pinned to a release tag; installs `jade` and the `jev` compatibility shim)
 
 ```bash
-uv tool install git+https://github.com/vahidkaargar/jade-decision-governance@v0.3.1
+uv tool install git+https://github.com/vahidkaargar/jade-decision-governance@v0.3.2
 jade --version
 ```
 
