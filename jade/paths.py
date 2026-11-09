@@ -24,6 +24,13 @@ def home() -> Path:
     return p
 
 
+def row_source() -> str | None:
+    """`test` when the process runs under `JADE_SOURCE=test` (a verification run that has to use the live hook or ledger), else None. Every row such a
+    process writes carries the tag: `jade ledger stats`, the miner, the calibration labels and the SessionStart notice leave tagged rows out, and
+    `jade ledger purge --test-rows` removes them (W-72). The tag changes nothing the gate decides, and any other value is ignored."""
+    return "test" if os.environ.get("JADE_SOURCE") == "test" else None
+
+
 def config_dir() -> Path:
     return Path(os.environ.get("JADE_CONFIG") or Path.home() / ".config" / "jade")
 
@@ -150,7 +157,7 @@ def _same(a: str, b: Path) -> bool:
 
 def gate_overrides(env: Mapping[str, str] | None = None, source: str = "environment") -> list[Override]:
     """The one list of variables that move what the gate reads: its mode, its policies, its configuration (local overlays and `gate_mode`) and its
-    ledger (pins, the permit seal key, SI-07 history). `env` is the process environment, or the `env` block of a Claude settings file, which the host
+    ledger (pins, the permit seal key, SI-07 history), and `JADE_SOURCE=test`, which changes no decision but hides what the ledger shows of them. `env` is the process environment, or the `env` block of a Claude settings file, which the host
     hands to every hook (docs/05 T19). A variable set to the value the default already gives is listed but does not weaken anything."""
     env = os.environ if env is None else env
     out: list[Override] = []
@@ -167,6 +174,8 @@ def gate_overrides(env: Mapping[str, str] | None = None, source: str = "environm
         add("JADE_CONFIG", not _same(env["JADE_CONFIG"], Path.home() / ".config" / "jade"), "reads gate_mode and local overlays from another directory")
     if env.get("JADE_HOME"):
         add("JADE_HOME", not _same(env["JADE_HOME"], Path.home() / ".local" / "share" / "jade"), "uses another ledger, pins and permit seal key")
+    if env.get("JADE_SOURCE") == "test":   # W-72: tags every row, so a persisted tag hides gated calls from the statistics and the pending-permit notice
+        add("JADE_SOURCE", True, "tags every ledger row `test`, which leaves its gated calls out of `jade ledger stats` and out of the pending-permit notice")
     for var in ("JADE_REGISTRY_DIR", "JADE_CLAUDE_SETTINGS", "JADE_BIN"):
         if env.get(var):
             add(var, False, "does not change what the gate decides")

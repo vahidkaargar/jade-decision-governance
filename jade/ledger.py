@@ -8,6 +8,7 @@ import os
 import random
 import sqlite3
 import time
+import zlib
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -45,7 +46,33 @@ CREATE TABLE IF NOT EXISTS labels(call_id TEXT PRIMARY KEY, label INTEGER NOT NU
 CREATE TABLE IF NOT EXISTS work_items(id TEXT PRIMARY KEY, status TEXT, doc_json TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS improvements(candidate_id TEXT PRIMARY KEY, decision TEXT, doc_json TEXT NOT NULL, updated_at TEXT NOT NULL);
 """
-MIGRATIONS = {"jev_calls": [("language", "TEXT")], "decisions": [("hold_key", "TEXT")]}   # columns added after the first release: (name, type)
+# Indexes created after the migrations: some name a column added after the first release (hold_key, source), which an older file lacks until `_migrate`
+# has run. Each serves a query that every gated call or every Stop hook runs, measured at 100k rows in evals/performance/ledger_load.py (W-58); the
+# test tests/acceptance/test_ledger_scale_w58.py fails when one of those queries scans a whole table again.
+INDEXES = """
+CREATE INDEX IF NOT EXISTS decisions_open ON decisions(status, expires_at);
+CREATE INDEX IF NOT EXISTS decisions_plan ON decisions(plan_hash, status);
+CREATE INDEX IF NOT EXISTS decisions_hold ON decisions(hold_key, status);
+CREATE INDEX IF NOT EXISTS permits_open ON permits(state, expires_at);
+CREATE INDEX IF NOT EXISTS permits_decision ON permits(decision_id);
+CREATE INDEX IF NOT EXISTS outcomes_decision ON outcomes(decision_id);
+CREATE INDEX IF NOT EXISTS events_kind_ts ON events(kind, ts);
+CREATE INDEX IF NOT EXISTS calls_claim ON jev_calls(session_id, claim_hash);
+CREATE INDEX IF NOT EXISTS decisions_test ON decisions(source) WHERE source='test';
+CREATE INDEX IF NOT EXISTS permits_test ON permits(source) WHERE source='test';
+CREATE INDEX IF NOT EXISTS calls_evaluating ON jev_calls(ts) WHERE state='EVALUATING';
+"""
+MIGRATIONS = {"jev_calls": [("language", "TEXT"), ("source", "TEXT")], "decisions": [("hold_key", "TEXT"), ("source", "TEXT")],
+              "permits": [("source", "TEXT")], "events": [("source", "TEXT")]}   # columns added after the first release: (name, type)
+# PRAGMA user_version of a file once SCHEMA, the migrations and INDEXES have been applied to it; a file already at this value skips all three (W-58). It is a
+# digest of those three, so changing any of them changes the version and every file is brought up to date once: nobody has to remember to bump a number.
+SCHEMA_VERSION = zlib.crc32(json.dumps([SCHEMA, INDEXES, MIGRATIONS], sort_keys=True).encode()) & 0x7FFFFFFF
+LIVE = "COALESCE({a}source,'')<>'test'"   # rows a verification run wrote under JADE_SOURCE=test are not live data (W-72)
+
+
+def live(alias: str = "") -> str:
+    """SQL condition that leaves rows tagged `test` out. `alias` is a table alias such as `c` (no dot)."""
+    return LIVE.format(a=f"{alias}." if alias else "")
 DEDUP_TTL_S = 3600
 STALE_EVALUATING_S = 600   # a provider call ends within 20 s; a row older than this belongs to a process that died
 STATE_CAP = 32 * 1024
@@ -64,6 +91,7 @@ class Ledger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.timeout = float(timeout)
         self._depth = 0
+        self.source = paths.row_source()   # stamped on every row this connection writes (W-72)
         self._create_private()
         self.con = sqlite3.connect(self.path, timeout=self.timeout, isolation_level=None)
         self.con.row_factory = sqlite3.Row
@@ -95,8 +123,11 @@ class Ledger:
                 self.con.execute("PRAGMA journal_mode=WAL")
                 self.con.execute("PRAGMA synchronous=NORMAL")
                 self.con.execute("PRAGMA secure_delete=ON")   # a deleted or overwritten value is zeroed in its page, not left in a free block
-                self.con.executescript(SCHEMA)
-                self._migrate()
+                if self.con.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:   # every hook process opens the ledger: do the work once per file
+                    self.con.executescript(SCHEMA)
+                    self._migrate()
+                    self.con.executescript(INDEXES)
+                    self.con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 return
             except sqlite3.OperationalError as e:
                 if "locked" not in str(e) and "busy" not in str(e) or time.monotonic() > deadline:
@@ -173,18 +204,21 @@ class Ledger:
             dedup_of = None
             self._sweep_stale(con)
             if session:
-                # The anchor of a repeat is an answered call: DONE with an answer (exit 0, 3 or 4). An errored, rejected or still
+                # The anchor of a repeat is an answered call from the same kind of run (a `JADE_SOURCE=test` row never anchors a live one, and
+                # a purge of test rows must not leave a live row pointing at a deleted anchor): DONE with an answer (exit 0, 3 or 4). An errored, rejected or still
                 # EVALUATING original is no anchor, so a later success becomes the new original and stays visible to calibration.
                 for row in con.execute(
                         "SELECT call_id, ts FROM jev_calls WHERE session_id=? AND question_id=? AND question_version=? "
                         "AND state_hash=? AND COALESCE(claim_hash,'')=COALESCE(?, '') AND dedup_of IS NULL "
-                        "AND state='DONE' AND exit_code IN (0,3,4) ORDER BY rowid DESC LIMIT 1",
-                        (session, question_id, version, state_hash, claim_hash)):
+                        "AND state='DONE' AND exit_code IN (0,3,4) AND COALESCE(source,'')=COALESCE(?, '') ORDER BY rowid DESC LIMIT 1",
+                        (session, question_id, version, state_hash, claim_hash, self.source)):
                     if (now() - parse_ts(row["ts"])).total_seconds() <= DEDUP_TTL_S:
                         dedup_of = row["call_id"]
             for col in ("state_text", "question_text"):  # nothing stored in the ledger carries a credential, whoever the caller is
                 if isinstance(cols.get(col), str):
                     cols[col] = redact.redact(cols[col], secrets_only=True)[0]
+            if self.source:
+                cols.setdefault("source", self.source)
             data = {"call_id": call_id, "question_id": question_id, "question_version": version, "state_hash": state_hash,
                     "session_id": session, "claim_hash": claim_hash, "dedup_of": dedup_of, "state": "EVALUATING", "ts": ts(), **cols}
             if data.get("state_text"):
@@ -213,11 +247,11 @@ class Ledger:
     # ---- events and meta ---------------------------------------------------------------------
     def event(self, entity_id: str, kind: str, *, prev=None, next=None, guard=None, actor="runtime", key=None, detail=None, con=None) -> bool:  # noqa: A002
         """Append an event. Returns False when the idempotency key was already applied."""
-        sql = ("INSERT INTO events(entity_id, kind, prev_state, next_state, guard, actor, idempotency_key, detail_json, ts) "
-               "VALUES(?,?,?,?,?,?,?,?,?)")
+        sql = ("INSERT INTO events(entity_id, kind, prev_state, next_state, guard, actor, idempotency_key, detail_json, ts, source) "
+               "VALUES(?,?,?,?,?,?,?,?,?,?)")
         guard = redact.redact(guard, secrets_only=True)[0] if isinstance(guard, str) else guard
         detail = redact.redact_obj(detail, secrets_only=True)[0] if detail is not None else None
-        args = (entity_id, kind, prev, next, guard, actor, key, json.dumps(detail, ensure_ascii=False) if detail is not None else None, ts())
+        args = (entity_id, kind, prev, next, guard, actor, key, json.dumps(detail, ensure_ascii=False) if detail is not None else None, ts(), self.source)
         try:
             (con or self.con).execute(sql, args)
         except sqlite3.IntegrityError:

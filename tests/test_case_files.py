@@ -13,8 +13,9 @@ def _runner():
 
 
 def test_regression_and_adversarial_cases_all_pass(capsys):
+    """The default run covers the regression, adversarial, routing, judgment and calibration sets (W-49)."""
     assert _runner().main([]) == 0
-    total = sum(1 for f in ("regression", "adversarial") for line in (ROOT / "evals" / f / "cases.jsonl").read_text().splitlines() if line.strip())
+    total = sum(1 for f in ("regression", "adversarial", "routing", "judgment", "calibration") for line in (ROOT / "evals" / f / "cases.jsonl").read_text().splitlines() if line.strip())
     assert f"{total}/{total} cases pass" in capsys.readouterr().out
 
 

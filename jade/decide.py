@@ -48,10 +48,10 @@ def open_decision(db: ledger.Ledger, objective: str, *, command: str | None = No
     }
     schemas.validate("decision", doc)
     with db.tx() as con:
-        con.execute("INSERT INTO decisions(decision_id, status, risk_level, rule_id, route, session_id, plan_hash, hold_key, doc_json, created_at, updated_at, expires_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        con.execute("INSERT INTO decisions(decision_id, status, risk_level, rule_id, route, session_id, plan_hash, hold_key, doc_json, created_at, updated_at, expires_at, source) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (doc["decision_id"], "CLASSIFIED", level, a.rule_id, route, doc["session_id"], a.plan_hash or None, a.hold_key or a.plan_hash or None,
-                     json.dumps(doc, ensure_ascii=False), ts(), ts(), doc["timestamps"]["expires_at"]))
+                     json.dumps(doc, ensure_ascii=False), ts(), ts(), doc["timestamps"]["expires_at"], db.source))
         db.event(doc["decision_id"], "open", prev=None, next="VALIDATED", guard="schema valid", actor="agent", con=con)
         db.event(doc["decision_id"], "classify", prev="VALIDATED", next="CLASSIFIED", guard=f"{a.rule_id}: {a.rationale}", con=con)
     return doc
@@ -124,7 +124,8 @@ def sweep(db: ledger.Ledger) -> dict:
     """End decisions past their deadline (SessionStart and daily maintenance): a state that waits for something that never came expires; an
     execution or verification with no outcome becomes OUTCOME_UNKNOWN, never success and never merely expired (SI-07)."""
     now_s, n = ts(), {"expired": 0, "unknown": 0}
-    for row in db.all("SELECT decision_id, status FROM decisions WHERE expires_at < ?", (now_s,)):
+    swept = sorted({*state_machine.EXPIRES, "EXECUTING", "VERIFYING"})   # a finished decision is never listed: this runs in every gated call, and most rows are finished
+    for row in db.all(f"SELECT decision_id, status FROM decisions WHERE status IN ({','.join('?' * len(swept))}) AND expires_at < ?", (*swept, now_s)):  # noqa: S608 - placeholders only
         try:
             with db.tx():
                 if row.status in state_machine.EXPIRES:

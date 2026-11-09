@@ -213,6 +213,42 @@ def purge(db: ledger.Ledger, older_than_days: int = 90) -> int:
     return n
 
 
+TEST_ID = re.compile(r"(?:prm|dec)_[0-9a-f]{12}")
+
+
+def purge_test_rows(db: ledger.Ledger, ids=()) -> dict[str, int]:
+    """Remove the rows a verification run left in the ledger under `JADE_SOURCE=test` (W-72): Jev calls (and their labels), decisions (and their
+    outcomes), permits and events. Returns the number removed per table. `ids` are permit or decision ids (`prm_...`, `dec_...`) written before the tag
+    existed: they are tagged first, together with the permits of a named decision, the decision of a named permit (when no other permit uses it) and the events of all of them. Rows
+    with no tag are never touched, so a permit nobody named stays. The only record is one `purge` event with counts; no command text is read or kept."""
+    ids = [str(i) for i in ids]
+    for i in ids:
+        if not TEST_ID.fullmatch(i):
+            raise ValueError(f"not a permit or decision id: {i!r} (prm_ or dec_ followed by 12 hex characters)")
+    out = dict.fromkeys(("jev_calls", "decisions", "permits", "events"), 0)
+    with db.tx() as con:
+        for i in ids:
+            if i.startswith("dec_"):
+                con.execute("UPDATE decisions SET source='test' WHERE decision_id=?", (i,))
+                con.execute("UPDATE permits SET source='test' WHERE decision_id=?", (i,))
+            else:
+                con.execute("UPDATE permits SET source='test' WHERE permit_id=?", (i,))
+                # the decision goes with its permit only when no other permit still uses it: a permit that stays must not lose its decision
+                con.execute("UPDATE decisions SET source='test' WHERE decision_id IN (SELECT decision_id FROM permits WHERE permit_id=?) "
+                            "AND NOT EXISTS (SELECT 1 FROM permits p WHERE p.decision_id=decisions.decision_id AND COALESCE(p.source,'')<>'test')", (i,))
+        con.execute("UPDATE events SET source='test' WHERE entity_id IN (SELECT decision_id FROM decisions WHERE source='test' "
+                    "UNION SELECT permit_id FROM permits WHERE source='test')")
+        con.execute("DELETE FROM labels WHERE call_id IN (SELECT call_id FROM jev_calls WHERE source='test')")
+        con.execute("DELETE FROM outcomes WHERE decision_id IN (SELECT decision_id FROM decisions WHERE source='test')")
+        for table in ("jev_calls", "decisions", "permits", "events"):
+            out[table] = con.execute(f"DELETE FROM {table} WHERE source='test'").rowcount  # noqa: S608 - constant table names
+        if sum(out.values()):
+            db.event("ledger", "purge", guard="test rows", detail={"test_rows": sum(out.values()), **out}, con=con)
+    if sum(out.values()):
+        db.scrub()
+    return out
+
+
 # ---- harness wiring (human only) -------------------------------------------------------------------
 class WiringError(ValueError):
     """A wiring file could not be read or understood; nothing was written."""
@@ -1060,7 +1096,7 @@ def _permission_prompt_detail() -> str:
     try:
         db = ledger.open(timeout=2)
         try:
-            rows = db.all("SELECT detail_json FROM events WHERE kind IN ('gated','safety_block') AND ts>=?", (ts(now() - timedelta(days=7)),))
+            rows = db.all("SELECT detail_json FROM events WHERE kind IN ('gated','safety_block') AND " + ledger.live() + " AND ts>=?", (ts(now() - timedelta(days=7)),))
         finally:
             db.close()
         seen = no_prompt = 0
