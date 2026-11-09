@@ -304,15 +304,44 @@ def _raise_to(a: Assessment, other: Assessment) -> None:
         a.reversibility, a.blast_radius, a.data_sensitivity = other.reversibility, other.blast_radius, other.data_sensitivity
 
 
-def _scan_content(a: Assessment, tool_input: dict, read_only: bool = False) -> None:
+_QUOTES = re.compile(r"[\x27\x22\\]")
+_EXPANSION = re.compile(r"\$\{[^}]*\}|\$\([^)]*\)\)?|`[^`]*`|\$[A-Za-z_]\w*")
+
+
+def text_views(text: str) -> list[str]:
+    """Every reading of one text that a `match_on: raw` pattern is tried on (the single choke point for spelling tricks): the folded text; the
+    text with every quote and backslash removed (`'JADE_HOME'=x`, `JADE_HO""ME=x`); that with every expansion deleted (`JADE_HO${E}ME=x`, an
+    expansion that expands to nothing); and the shell's own decoding (`$'\\x4aADE_HOME'`, braces) from `shellnorm.skeleton`. The unquoted views keep
+    the words apart, so a pattern that needs a boundary still sees one."""
+    f = fold(text.replace("\x00", ""))
+    stripped = _QUOTES.sub("", f)
+    views = [f, stripped, _EXPANSION.sub("", stripped)]
+    try:
+        views.append(shellnorm.skeleton(f))
+    except Exception:  # noqa: BLE001, S110 - a text the decoder cannot read is still matched in its other readings
+        pass
+    return list(dict.fromkeys(views))
+
+
+def _scan_content(a: Assessment, tool_input: dict, read_only: bool = False, cwd: str = "") -> None:
     """Invariants marked `scan_content` (SI-02, SI-05) apply to the text a non-shell call carries: file content, new text, any argument.
 
     The text is folded first (`util.fold`). An invariant with `scan_read_only: false` skips a tool whose name only reads, and one with `scan_skip_keys`
     skips those keys (a page URL or a search term is not a bind address)."""
     invs = [i for i in safety()["invariants"] if i.get("scan_content") and "_re" in i and i["id"] not in a.blocked
             and not (read_only and i.get("scan_read_only") is False)]
+    targets = None
     for inv in invs:
         skip = frozenset(str(k).lower() for k in inv.get("scan_skip_keys", []))
+        if "_paths_re" in inv:   # only a write into one of these files counts (SI-11: a shell profile or an environment file)
+            if targets is None:
+                targets = [x for p in dict.fromkeys([*write_paths(tool_input), *_path_args(tool_input)]) for x in (p, normalise_path(p, cwd)) if x]
+            if not any(inv["_paths_re"].search(t) for t in targets):
+                continue
+            rx = inv.get("_cre") or inv["_re"]
+            if any(rx.search(v) for t in content_strings(tool_input, "", skip) for v in text_views(t)):
+                a.blocked.append(inv["id"])
+            continue
         if any(inv["_re"].search(fold(t)) for t in content_strings(tool_input, "", skip)):
             a.blocked.append(inv["id"])
 
@@ -440,7 +469,7 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     for inv in safety()["invariants"]:
         if "_re" not in inv:
             continue
-        haystacks = [fold(text_in)] if inv.get("match_on") == "raw" else active + [_bare(s) for s in active]
+        haystacks = text_views(text_in) if inv.get("match_on") == "raw" else active + [_bare(s) for s in active]
         if any(inv["_re"].search(h) for h in haystacks):
             a.blocked.append(inv["id"])
     _seal(a, tool, subject, cwd, subject)
@@ -465,7 +494,7 @@ def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
     else:
         return _assess_shell(tool, str(tool_input.get("command") or ""), cwd)
     a.hold_key = a.hold_key or a.plan_hash
-    _scan_content(a, tool_input, read_only=is_mcp(tool) and mcp_command(tool_input) is None and _tool_rule(tool, False).get("id") in ("M-06", "M-06a"))
+    _scan_content(a, tool_input, read_only=is_mcp(tool) and mcp_command(tool_input) is None and _tool_rule(tool, False).get("id") in ("M-06", "M-06a"), cwd=cwd)
     return a
 
 

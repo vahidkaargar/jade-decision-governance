@@ -283,6 +283,7 @@ class HookCommand(NamedTuple):
     binary: str
     sub: str
     shell_safe: bool   # the command line is exactly `<one word> hook <sub>`: a shell runs the same program this parse names
+    ours: bool = True  # the program is JADE's (is_jade_program), not another program that is only called `jade`
 
 
 def parse_hook_command(command: str) -> HookCommand | None:
@@ -299,7 +300,36 @@ def parse_hook_command(command: str) -> HookCommand | None:
     binary, safe = (words[0], True) if len(words) == 1 else (raw, False)   # a path with a space written unquoted by an older install
     if os.path.basename(binary) not in {"jade", os.path.basename(jade_bin())}:
         return None
-    return HookCommand(binary, m["sub"], safe)
+    return HookCommand(binary, m["sub"], safe, is_jade_program(binary))
+
+
+_MARKERS = (b"jade.cli", b"jade-decision-governance", b"from jade", b"import jade")
+
+
+def is_jade_program(binary: str) -> bool:
+    """Whether a program named `jade` in a hook or LaunchAgent is this package's launcher and not another tool that shares the name.
+    The configured `JADE_BIN` and the `jade` that PATH finds are JADE's when they resolve to the same file as the program named; any other file
+    is JADE's when it is a launcher that runs `jade.cli` (a uv tool, a venv script, a shim) and is not when it is something else. A path that no
+    longer exists cannot be read, so it is JADE's only when it is the configured one, `~/.local/bin/jade`, or inside a `jade-decision-governance`
+    directory (the uv tool install); a bare `jade` that PATH cannot resolve is JADE's (a dead install of ours, which uninstall should remove)."""
+    path = binary
+    if "/" not in binary:
+        path = shutil.which(binary) or ""
+        if not path:
+            return True
+    path = os.path.expanduser(path)
+    known = {os.path.realpath(p) for p in (os.environ.get("JADE_BIN"), shutil.which("jade") if "/" in binary else None) if p}
+    known.add(os.path.realpath(jade_bin()))
+    if os.path.realpath(path) in known or path in {jade_bin(), str(Path.home() / ".local" / "bin" / "jade")}:
+        return True
+    if os.path.isfile(path):
+        try:
+            with open(path, "rb") as f:
+                head = f.read(65536)
+        except OSError:
+            return False
+        return any(mark in head for mark in _MARKERS)
+    return "jade-decision-governance" in Path(path).parts
 
 
 def hook_command(sub: str) -> str:
@@ -336,7 +366,7 @@ def _jade_hooks(data: dict):
         for g in groups:
             for h in g.get("hooks", []):
                 parsed = parse_hook_command(h.get("command", ""))
-                if parsed:
+                if parsed and parsed.ours:
                     yield event, g, h, parsed
 
 
@@ -381,7 +411,7 @@ def _strip_jade_hooks(data: dict) -> int:
     for event in list(hooks):
         kept_groups = []
         for g in hooks[event]:
-            keep = [h for h in g.get("hooks", []) if not parse_hook_command(h.get("command", ""))]
+            keep = [h for h in g.get("hooks", []) if not ((p := parse_hook_command(h.get("command", ""))) and p.ours)]
             removed += len(g.get("hooks", [])) - len(keep)
             if keep or "hooks" not in g:
                 kept_groups.append({**g, "hooks": keep} if "hooks" in g else g)
@@ -436,11 +466,18 @@ def claude_md_section() -> str:
 
 _ATX = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$")
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_SETEXT = re.compile(r"^ {0,3}(=+|-+)[ \t]*$")
+_BREAK = re.compile(r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$")
+_CONTAINER = re.compile(r"^ {0,3}(?:[-*+](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|>)")
 
 
 def markdown_headings(text: str):
-    """(line_index, level, title) of every ATX heading that is not inside a fenced code block."""
+    """(line_index, level, title) of every heading that is not inside a fenced code block: ATX (`## T`) and setext (`T` over `===` or `---`).
+    A setext heading is the paragraph lines above its underline and starts at the first of them; a list item, a block quote and what leans on
+    them up to the next blank line is never part of a paragraph that an underline could turn into a heading (`---` there is a thematic break)."""
     fence = None
+    para: list[tuple[int, str]] = []   # the open paragraph: (line index, text)
+    container = False                   # inside a list item or block quote (until a blank line)
     for i, line in enumerate(text.splitlines()):
         m = _FENCE.match(line)
         if fence:
@@ -448,11 +485,29 @@ def markdown_headings(text: str):
                 fence = None
             continue
         if m:
-            fence = m[1]
+            fence, para, container = m[1], [], False
+            continue
+        if not line.strip():
+            para, container = [], False
+            continue
+        if para and (u := _SETEXT.match(line)):
+            yield para[0][0], 1 if u[1][0] == "=" else 2, " ".join(t for _, t in para)
+            para = []
             continue
         h = _ATX.match(line)
         if h:
             yield i, len(h[1]), h[2]
+            para, container = [], False
+            continue
+        if _BREAK.match(line):
+            para, container = [], False
+            continue
+        if _CONTAINER.match(line):
+            para, container = [], True
+            continue
+        if container or (line.startswith("    ") and not para):   # a continuation of an item, or an indented code block
+            continue
+        para.append((i, line.strip()))
 
 
 def claude_md_apply(target: Path | None = None, stdin_isatty: bool | None = None) -> Path:
@@ -635,7 +690,7 @@ def maintain_jobs() -> list[tuple[Path, str, list]]:
         except (OSError, ValueError, plistlib.InvalidFileException):
             continue
         args = doc.get("ProgramArguments") if isinstance(doc, dict) else None
-        if isinstance(args, list) and len(args) >= 2 and args[-1] == "maintain" and os.path.basename(str(args[0])) in {"jade", os.path.basename(jade_bin())}:
+        if isinstance(args, list) and len(args) >= 2 and args[-1] == "maintain" and os.path.basename(str(args[0])) in {"jade", os.path.basename(jade_bin())} and is_jade_program(str(args[0])):
             out.append((f, str(doc.get("Label") or f.stem), args))
     return out
 
