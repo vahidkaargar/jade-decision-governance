@@ -50,7 +50,22 @@ High and critical actions (push, publish, remote shell or copy, deploy, service 
 3. Retry the identical command once. A permit is single use and lasts 30 minutes. A different command needs its own permit.
 4. Do not rephrase, split or wrap the command to get past the gate. Continue other work meanwhile.
 
+5. A permit for a Write, Edit or MCP call is bound to its content as well as its target: a changed edit needs its own permit.
+6. A command that carries an inline secret cannot be approved from its redacted text. Put the value in an environment variable or a file and reference it. If the human has turned on `permit_reveal`, they review the raw text with `jade permit show <id> --raw` in their own terminal; never print or copy it yourself.
+
 A safety invariant block (for example pushing the default branch) cannot be approved at all.
+
+Ordinary work that is rated high on purpose: running text fetched at run time (`curl ... | sh`, `base64 -d | sh`), sending a file out (`curl -d @file`), a new skill, command or agent file, `git config` for aliases, hooks or credentials, and edits to `pyproject.toml` or `uv.lock` of a JADE checkout. Do the work the plain way (download, read, then run; install skills from your terminal). If a call is blocked anyway, report it; do not wrap it.
+
+## Human-only commands
+
+Never run these; tell the user which one is waiting: `jade permit approve`, `jade permit show ... --raw`, `jade hooks install|uninstall`, `jade gate enforce|advisory|off`, `jade claude-md apply`, `jade setup` (`--status` is read-only), `jade upgrade` (`--check` is read-only), `jade ledger purge`, `jade label set|auto`.
+
+## Testing JADE or anything that calls the hook
+
+- Run every `jade`, `jev` or hook call that uses a synthetic payload with `JADE_HOME=$(mktemp -d)` and an empty `JADE_CONFIG`. A synthetic `terraform destroy` piped into the live hook leaves a real pending permit.
+- `JADE_SOURCE=test` tags rows that must reach the live ledger; the human removes them with `jade ledger purge --test-rows`.
+- A ledger connection opened before other processes write can read an old snapshot: reopen it before asserting.
 
 ## Never
 

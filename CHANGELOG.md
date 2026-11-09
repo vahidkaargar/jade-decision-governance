@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-09
+
+Skill and rules text only, no code change. `skills/jade/SKILL.md` and the CLAUDE.md section (`docs/claude-md-jev-section.md`) now say: a permit for Write, Edit and MCP calls is bound to its content; what to do with a command that carries an inline secret (`permit_reveal`, `jade permit show --raw`); which ordinary work is rated high on purpose; the full list of human-only commands; and how to test without touching the live ledger (`JADE_HOME=$(mktemp -d)`, `JADE_SOURCE=test`, reopen a ledger connection after other processes write). To pick it up: `jade upgrade`, then `jade setup` (replaces the skill file after a backup) and `jade claude-md apply` in your terminal.
+
 ## [0.3.2] - 2026-11-09
 
 Hardening batch 4: fetch-and-run and git config/alias reads (R-22, R-23), patch and link reads within one command, JADE-checkout dependency files (R-24), blind-spot records (R-31, R-32), Write/Edit/MCP permits bound to content, hook payload fixtures and PostToolUse loop, opt-in human-only `jade permit show --raw`, shadow runs for choice and score questions, evaluation metrics, `jade work add`. Advisory mode; not VALIDATED. After `jade upgrade`: run `jade hooks install` in a terminal (wider PostToolUse matcher) and start a new Claude Code session; open permits must be requested again.
