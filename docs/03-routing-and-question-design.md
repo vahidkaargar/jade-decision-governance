@@ -22,7 +22,7 @@ Policy files: `policies/routing.yaml`, `policies/risk.yaml`, `policies/escalatio
 - **FAST** — code. Emits a decision with `evaluation_refs` pointing at the deterministic check.
 - **JEV** — one Decisions API request carrying every independent registry question for the task family (batching: verified S7; up to 8 questions, 0.68 s for 3). `max_questions_per_request` (8) is enforced: `ask.check_text` refuses a larger batch with exit 6. `max_parallel_requests` (4) is enforced too: `ask.run` does not start a request while that many are in flight in the ledger, over every process (exit 5, `TOO_MANY_IN_FLIGHT`). Questions cannot depend on each other's answers within a batch; a dependent question is a second request.
 - **DEEP** — the reasoning model (Claude) answers with a structured verdict and evidence refs. The HYBRID pattern lives here: DEEP decomposes, emits atomic JEV questions, and code combines them with explicit rules ("any serious violation" = max, not mean — sde_cascade cookbook).
-- **ESCALATE** — human. An escalation carries context, impact, options, recommended default, and the consequence of no answer. Batching human questions in a 10-minute window is designed and not built (W-35).
+- **ESCALATE** — human. An escalation carries context, impact, options, recommended default, and the consequence of no answer. Escalations are not batched: each is its own question (W-35).
 
 ## 4. Question registry
 

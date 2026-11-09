@@ -40,7 +40,6 @@ exit_codes:
   reject: 4
   provider_unavailable: 5
   invalid_question: 6
-human_batching:
-  group_window_s: 600
+human_question:                        # every escalation is its own question; none are grouped or delayed (W-35, docs/05 T14)
   each_question_includes: ["context", "impact", "options", "recommended_default", "consequence_of_no_answer"]
   deadline_default_h: 24

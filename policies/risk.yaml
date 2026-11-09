@@ -91,6 +91,21 @@ rules:
     files_only: true
     match: "(?i:(?<![\\w.-])jade/(?:[\\w*?\\[\\]-]*\\.py\\b|_\\w+/|\\*|(?=\\s|$)))"
     rationale: "Changes JADE's own code (the gate, the permit and TTY checks, the ledger, the CLI)"
+  - id: R-24
+    level: high
+    reversibility: reversible
+    blast_radius: host
+    # The project files that decide what the installed tool is made of: `pyproject.toml` (entry points, dependencies, the build) and `uv.lock`, in JADE's OWN checkout (W-37,
+    # docs/05 T19). A change reaches the installed tool when the human runs `uv tool install`, which is R-13, but the file is what that command builds from, so an edit the
+    # human did not read is a way in. `checkout_only` (jade/policy.py `_in_checkout`): the word must resolve, in a directory the call may run in, to a file beside a `jade/` package
+    # that holds `__init__.py` and `hooks.py`; every other project has a `pyproject.toml` and stays low. `files_only` as for R-13: a write target (redirect, the destination of
+    # cp/mv/install, `sed -i`, `tee`, the whole segment of a verb that may write any operand, a patch that names the file, `uv add|remove|lock|version`) and never a read, a
+    # `git add`, a grep, a message or a file-body text that names the path. A Write/Edit/MultiEdit path is always a target. A relative word with no known directory is not
+    # resolved (accepted gap: docs/05 T19).
+    files_only: true
+    checkout_only: true
+    match: "(?i:(?<![\\w.-])(?:pyproject\\.toml|uv\\.lock)(?![\\w.-]))"
+    rationale: "Changes the dependencies, entry points or build of JADE's own checkout (pyproject.toml, uv.lock)"
   - id: R-18
     level: high
     reversibility: reversible
@@ -121,6 +136,19 @@ rules:
     # rsync to `host:` are R-14. Not covered (T22): clients this rule does not name, the Read-then-send done in a script, and the web tools.
     match: "^egress:upload |\\bgh gist (?:create|edit)\\b|/dev/(?:tcp|udp)/(?!(?:localhost|127\\.0\\.0\\.1|::1)/)"
     rationale: "Sends a file, standard input or a variable to a network destination (curl/wget upload, nc, gh gist, /dev/tcp): the data leaves this machine"
+  - id: R-22
+    level: high
+    reversibility: partially_reversible
+    blast_radius: host
+    data_sensitivity: secret
+    # Text that is fetched or decoded at run time and then run as code (W-31, docs/05 T18): the program is not on the command line and never will be, so the shape is
+    # rated. `^fetch:exec ` is a marker that jade/shellnorm.py adds when a pipeline whose last stage reads its stdin as code (`sh`, `bash`, `python3 -`, `source /dev/stdin`)
+    # starts with a fetcher (`curl`, `wget`, `nc` ...) or a decoder (`base64 -d`, `xxd -r`, `zcat`), when a process substitution does (`bash <(curl ..)`), when the script
+    # word of `eval` or `sh -c` is a substitution that does (`eval "$(curl ..)"`), and that jade/policy.py adds to a segment that runs a file an earlier segment of the same
+    # command downloaded (`curl -o x.sh URL && sh x.sh`). Not matched: a download alone, a fetch piped into `jq`/`grep`/`tee`/`head`, a decode into a file, `eval "$(brew shellenv)"`.
+    # A script file that is already on disk is R-31 (recorded): that is the human's decision, not this rule's.
+    match: "^fetch:exec "
+    rationale: "Runs text that was fetched or decoded at run time (curl | sh, sh -c \"$(curl ..)\", base64 -d | sh, download then run): the program is not on the command line"
   - id: R-14
     level: high
     reversibility: partially_reversible
@@ -132,7 +160,18 @@ rules:
     reversibility: partially_reversible
     blast_radius: host
     match: "^git:unsafe-config "
-    rationale: "git -c (alias, pager, editor, sshCommand, fsmonitor, hooksPath, credential, url ...), --exec-path or a GIT_* environment variable (GIT_SSH_COMMAND, GIT_PAGER, GIT_CONFIG_*) can run a program or redirect a remote"
+    rationale: "git -c or `git config` (alias, pager, editor, sshCommand, fsmonitor, hooksPath, credential, url ...), --exec-path or a GIT_* environment variable (GIT_SSH_COMMAND, GIT_PAGER, GIT_CONFIG_*) can run a program or redirect a remote"
+  - id: R-23
+    level: high
+    reversibility: reversible
+    blast_radius: host
+    # A write to a git config file (W-31): `~/.gitconfig`, `~/.config/git/config`, a repository's `.git/config` (and a submodule's). An alias, `core.sshCommand`, a filter driver
+    # or `core.fsmonitor` set there runs a program the next time git runs; `git config` and `git -c` for the same keys are R-15. `files_only`: a read, a copy from one,
+    # `git add .gitconfig` and a name that only starts like one (`.gitconfig-notes`, `gitconfig.py`) are not matched. A `.gitconfig` kept in a project is matched too (it is a write
+    # to a file named that, wherever it is); the price is a permit for that file.
+    files_only: true
+    match: "(?i:(?<![\\w.-])\\.git/(?:modules/\\S+?/)?config(?![\\w./-])|/\\.config/git/config(?![\\w.-])|(?<![\\w.-])\\.gitconfig(?![\\w.-]))"
+    rationale: "Edits a git config file: an alias, pager, sshCommand or filter set there runs a program the next time git runs"
   - id: R-20
     level: medium
     reversibility: reversible
@@ -154,6 +193,27 @@ rules:
     reads: true
     match: "(?i:(?<![\\w.-])\\.env(?![\\w.-]*\\.(?:example|sample|template|dist|defaults?|schema|tpl)(?![\\w-]))(?:\\.[\\w.-]+)?(?![\\w-])|(?<![\\w.-])\\.(?:npmrc|pypirc|netrc|pgpass|git-credentials)(?![\\w-])(?![\\w.-]*\\.(?:example|sample|template|dist|defaults?|schema|tpl)(?![\\w-]))|\\.aws/credentials(?![\\w-])|\\.docker/config\\.json|\\.kube/config(?![\\w-])|\\.config/gh/hosts\\.yml|(?<![\\w.-])id_(?:rsa|ed25519|ecdsa|dsa)(?!\\w|\\.pub\\b)|\\.(?:pem|p12|pfx)(?![\\w-])|\\bvault_key\\b|\\bsecurity\\s+(?:find-(?:generic|internet)-password\\b[^;&|]*\\s-[a-z]*[wg][a-z]*\\b|dump-keychain\\b))"
     rationale: "Reads a credential file or a Keychain value: recorded, not gated (a send out of this machine is R-21)"
+  - id: R-32
+    level: medium
+    reversibility: reversible
+    blast_radius: file
+    # The two blind-spot labels that hand a script or a directory to a verb the gate otherwise reads as read-only (W-33; docs/05 T18): `script-option` (`sed -f F`, `awk -f F`:
+    # the program is a file) and `computed-cwd` (a relative write after `cd $VAR`: the target directory is computed at run time). Medium, so the rating says what the gate could not read,
+    # and recorded like R-31 (event `blind_spot`, label only). `permit_required_at` is high, so nothing is gated and no routine `sed -f` or `awk -f` is slowed; a human who lowers the floor
+    # to medium gets a permit prompt for exactly these. Listed before R-31 because the first rule that matches one text wins. A script run by name, `eval` and a patch stay R-31 (low).
+    match: "^blind:(?:script-option|computed-cwd) "
+    rationale: "Hands a script file or a computed directory to a verb the gate treats as read-only: medium, recorded and not gated (W-33)"
+  - id: R-31
+    level: low
+    reversibility: reversible
+    blast_radius: file
+    # What the gate cannot read and only records (level low: every existing low-risk expectation stays true, and the hook still journals it) (W-31, W-33; docs/05 T18): `jade/policy.py` and `jade/shellnorm.py` add `blind:<label> ` to the text of a segment that runs a program or
+    # reads a script whose text is not on the command line. Labels: `script-file` (`bash x.sh`, `python3 x.py`, `source f`, `./x`, `cat x.sh | sh`, `sh < x.sh`), `script-option`
+    # (`sed -f`, `awk -f`), `eval-file` (`eval "$(cat f)"`), `eval-var` (`eval "$CMD"`, `sh -c "$CMD"`), `computed-cwd` (a relative write after `cd $VAR`). Not gated. The hook
+    # journals event `blind_spot` (rule, label, tool, session; never the command or a path; once per session and label), so a soak report can size what a floor at high would
+    # cost before a human decides it. A file that the same command wrote and ran is read (jade/blind.py `written_scripts`) and is not a blind spot. Never lowers a higher rating.
+    match: "^blind:"
+    rationale: "Runs a script file or computed text the gate cannot read: recorded, not gated (whether to gate it is a human decision, W-31)"
   - id: R-90
     level: low
     reversibility: reversible

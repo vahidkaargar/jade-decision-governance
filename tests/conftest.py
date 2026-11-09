@@ -58,6 +58,7 @@ def isolated(tmp_path, monkeypatch):
 
     monkeypatch.setattr(paths, "checkout_overlay_dir", lambda: tmp_path / "checkout-local")   # never this checkout's private policies/local (W-56)
     monkeypatch.setattr(util, "agent_ancestor", lambda: None)  # the test run itself may sit under an agent; tests of the real walk patch `ps`
+    monkeypatch.setattr(util, "tty_session_refusal", lambda *a, **k: None)  # nor is the test run led by an interactive shell on a terminal (W-37); tests of the real check keep the original
     for fn in (policy.reset_cache, questions.reset_cache, thresholds.escalation.cache_clear):
         fn()
     yield

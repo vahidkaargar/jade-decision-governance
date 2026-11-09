@@ -221,7 +221,21 @@ def shadow_verdict(res: dict, pol: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
+def unmeasured_reason(res: dict) -> str | None:
+    """Why the code cannot measure a shadowed template past the shadow stage, or None. Labels, the protected split and the canary's false-accept
+    trigger read noul answers only (W-30): a choice or score template stays at the shadow stage and a human applies it by hand."""
+    sh = res.get("shadow")
+    prim = sh.get("primitive", "noul") if isinstance(sh, dict) else "noul"   # a shadow stored before W-30 is a noul shadow
+    if prim == "noul":
+        return None
+    return (f"the shadowed question is a {prim} question and only noul answers carry labels, so the protected split and the canary's false-accept "
+            "trigger cannot measure it; a human applies the change by hand (docs/08)")
+
+
 def protected_verdict(res: dict, pol: dict) -> tuple[bool, str]:
+    why = unmeasured_reason(res)
+    if why:
+        return False, why
     pr = res.get("protected")
     if not isinstance(pr, dict) or not isinstance(pr.get("champion"), dict) or not isinstance(pr.get("challenger"), dict):
         return False, "the protected split was not evaluated (a human runs `jade improve protected`)"
@@ -335,6 +349,9 @@ def canary_verdict(res: dict, home: Path, db) -> tuple[bool, str]:
     """A template reaches promotion only through a canary, at no more than the policy's traffic share, of the version that was shadowed,
     with none of the canary's rollback triggers fired."""
     can, sh = res.get("canary"), res.get("shadow") or {}
+    why = unmeasured_reason(res)
+    if why:
+        return False, why
     if not isinstance(can, dict) or can.get("version") != sh.get("challenger_version"):
         return False, "no canary of the shadowed version was started"
     pin = ops.pins_of(home, res.get("question_id", ""))
@@ -516,6 +533,9 @@ def start_canary(path, candidate_id: str, stdin_isatty: bool | None = None) -> d
             raise PromotionBlocked(f"candidate {candidate_id} is already in canary; a canary is not restarted (`jade improve rollback` ends it, then shadow again)")
         if pol.get("canary", {}).get("requires_human_opt_in") and not (is_human_tty(stdin_isatty) or paths.config().get("auto_promotion_opt_in")):
             raise PromotionBlocked("a canary needs a human at a terminal or the human opt-in `auto_promotion_opt_in` in config.json")
+        why = unmeasured_reason(res)
+        if why:
+            raise PromotionBlocked(f"no canary: {why}")
         ok, why = shadow_verdict(res, pol)
         if not ok:
             raise PromotionBlocked(f"shadow stage not passed: {why}")
@@ -601,10 +621,60 @@ def _observe(p: dict, root: Path | None) -> str | None:
         Path(f.name).unlink(missing_ok=True)
 
 
+SHADOW_PRIMITIVES = ("noul", "choice", "score")
+SCORE_AGREEMENT_TOLERANCE = 0.1   # two scores this far apart or less count as the same ranking in a score shadow (scores are not probabilities: there is no band)
+
+
+def _no_match_names(qid: str, *versions: int | None) -> set[str]:
+    """The no-match option names the given versions of a choice question declare (a version that is not registered any more declares none)."""
+    from . import questions
+
+    out = set()
+    for v in versions:
+        try:
+            out.add(questions.get(qid, v).get("no_match_option"))
+        except questions.InvalidQuestion:
+            pass
+    return out - {None}
+
+
+def _stored_answer(raw, prim: str) -> dict | None:
+    """The champion's answer as the ledger kept it, or None when it cannot serve as a reference for a `prim` question."""
+    try:
+        a = json.loads(raw) if raw else None
+    except (ValueError, TypeError, RecursionError):
+        return None
+    if not isinstance(a, dict) or a.get("type") != prim:
+        return None
+    if prim == "choice":
+        probs = a.get("probabilities")
+        return a if isinstance(probs, dict) and isinstance(a.get("choice"), str) and a["choice"] in probs else None
+    if prim == "score":
+        return a if isinstance(a.get("score"), int | float) and not isinstance(a["score"], bool) else None
+    return a
+
+
+def _choice_payload(qid: str, version: int, champ: dict, row_version: int | None) -> dict:
+    """The challenger's choice question over the options the champion call offered. The ledger keeps the names of the options (the keys of
+    the stored probabilities), not their descriptions: a description comes from the challenger's own template where it has one, else the name
+    stands for it. The no-match option is added back by the builder."""
+    from . import questions
+
+    skip = _no_match_names(qid, version, row_version)
+    tpl = questions.get(qid, version).get("template", {}).get("criteria")
+    desc = tpl if isinstance(tpl, dict) else {}
+    return questions.build_choice(qid, {n: desc.get(n, n) for n in champ["probabilities"] if n not in skip}, version=version)
+
+
 def shadow(db: ledger.Ledger, candidate_id: str, question_id: str, version: int, provider=None, limit: int = 100, days: int = 7) -> dict:
     """Asynchronous shadow run: replay recent champion questions' stored (redacted) state through a challenger
     question version and compare verdicts. It runs from a maintenance command, writes nothing to the live call
-    table, and never sits on the hot path (`shadow_mode_is_async`). Needs state text still inside retention."""
+    table, and never sits on the hot path (`shadow_mode_is_async`). Needs state text still inside retention.
+
+    The comparison depends on what the question is. noul: the verdict, and the champion's rejects the challenger accepts. choice (W-30): the
+    verdict and the option picked, and the champion's "no option fits" answers the challenger accepts. score: how far apart the scores are
+    (a score gates nothing, so it has no verdict). Only noul answers carry labels, so a choice or score shadow cannot pass the protected
+    stage or a canary (`unmeasured_reason`): a human applies such a change by hand."""
     from . import adapter, questions, thresholds
 
     if frozen(db.path.parent):
@@ -612,39 +682,77 @@ def shadow(db: ledger.Ledger, candidate_id: str, question_id: str, version: int,
     if (get(db, candidate_id) or {}).get("promotion_decision") == "canary":   # the canary's triggers read this run's recorded models: it is not replaced while the canary runs
         raise PromotionBlocked(f"candidate {candidate_id} is in canary; its shadow evidence is not replaced (`jade improve rollback` ends the canary first)")
     entry = questions.get(question_id, version)
-    if entry["primitive"] != "noul":
-        raise PromotionBlocked("shadow comparison is implemented for noul questions")
+    prim = entry["primitive"]
+    if prim not in SHADOW_PRIMITIVES:
+        raise PromotionBlocked("shadow comparison is implemented for noul, choice and score questions")
     provider = provider or adapter.OpenRouterProvider()
-    rows = db.all("SELECT call_id, state_text, exit_code FROM jev_calls WHERE question_id=? AND state_text IS NOT NULL AND exit_code IN (0,3,4) "
-                  "AND dedup_of IS NULL AND ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?) ORDER BY rowid DESC LIMIT ?", (question_id, f"-{days} days", limit))
+    only = "" if prim == "noul" else " AND primitive=?"   # a question id whose version changed primitive has nothing to compare
+    rows = db.all("SELECT call_id, state_text, exit_code, answers_json, question_version FROM jev_calls WHERE question_id=?" + only + " AND state_text IS NOT NULL "  # noqa: S608 - constant fragment
+                  "AND exit_code IN (0,3,4) AND dedup_of IS NULL AND ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?) ORDER BY rowid DESC LIMIT ?",
+                  (question_id, *([prim] if only else []), f"-{days} days", limit))
     base = sorted(x.latency_ms for x in db.all("SELECT latency_ms FROM jev_calls WHERE question_id=? AND latency_ms>0 AND dedup_of IS NULL "
                                                "AND exit_code IN (0,3,4) AND ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?)", (question_id, f"-{days} days")))
-    payload = questions.build_noul(question_id)
-    n = agree = champ_acc = chall_acc = errors = unsafe = 0
-    cost, lats, disagreements, models = 0.0, [], [], set()
+    fixed = None if prim == "choice" else (questions.build_noul if prim == "noul" else questions.build_score)(question_id, version=version)
+    no_match = entry.get("no_match_option") if prim == "choice" else None
+    n = agree = champ_acc = chall_acc = errors = skipped = unsafe = same_option = option_changes = 0
+    cost, lats, disagreements, models, diffs = 0.0, [], [], set(), []
     for r in rows:
+        champ = None if prim == "noul" else _stored_answer(r.answers_json, prim)
+        if prim != "noul" and champ is None:
+            skipped += 1
+            continue
+        try:
+            payload = fixed or _choice_payload(question_id, version, champ, r.question_version)
+        except questions.InvalidQuestion:
+            skipped += 1
+            continue
         res = provider.ask(json.loads(r.state_text), {"q": payload})
         if not res.ok or "q" not in res.answers or adapter.check_answer(res.answers["q"], payload):
             errors += 1
             continue
         if res.resolved_model:
             models.add(res.resolved_model)
-        v = thresholds.judge(res.answers["q"], entry["task_family"], "low", version, res.resolved_model, primitive="noul")
+        ans = res.answers["q"]
         n += 1
-        agree += v.exit_code == r.exit_code
-        champ_acc += r.exit_code == 0
-        chall_acc += v.exit_code == 0
-        unsafe += r.exit_code == 4 and v.exit_code == 0
         cost += res.cost_usd or 0.0
         lats.append(res.latency_ms or 0.0)
-        if v.exit_code != r.exit_code and len(disagreements) < 20:
-            disagreements.append({"call_id": r.call_id, "champion_exit": r.exit_code, "challenger_exit": v.exit_code})
+        if prim == "score":
+            diff = abs(float(ans["score"]) - float(champ["score"]))
+            diffs.append(diff)
+            agree += diff <= SCORE_AGREEMENT_TOLERANCE
+            if diff > SCORE_AGREEMENT_TOLERANCE and len(disagreements) < 20:
+                disagreements.append({"call_id": r.call_id, "champion_score": champ["score"], "challenger_score": ans["score"]})
+            continue
+        v = thresholds.judge(ans, entry["task_family"], "low", version, res.resolved_model, primitive=prim, no_match=no_match)
+        champ_acc += r.exit_code == 0
+        chall_acc += v.exit_code == 0
+        if prim == "noul":
+            agree += v.exit_code == r.exit_code
+            unsafe += r.exit_code == 4 and v.exit_code == 0
+            if v.exit_code != r.exit_code and len(disagreements) < 20:
+                disagreements.append({"call_id": r.call_id, "champion_exit": r.exit_code, "challenger_exit": v.exit_code})
+            continue
+        picked = ans["choice"] == champ["choice"]
+        same_option += picked
+        option_changes += picked is False and v.exit_code == 0 == r.exit_code
+        unsafe += champ["choice"] in _no_match_names(question_id, version, r.question_version) and v.exit_code == 0   # the champion found no option that fits; the challenger accepts one
+        same = v.exit_code == r.exit_code and (v.exit_code != 0 or picked)
+        agree += same
+        if not same and len(disagreements) < 20:
+            disagreements.append({"call_id": r.call_id, "champion_exit": r.exit_code, "challenger_exit": v.exit_code,
+                                  "champion_choice": champ["choice"], "challenger_choice": ans["choice"]})
     lats.sort()
     pct = lambda xs: round(xs[int(0.95 * (len(xs) - 1))]) if xs else None  # noqa: E731
-    out = {"question_id": question_id, "challenger_version": version, "n": n, "errors": errors, "agreement": round(agree / n, 3) if n else None,
-           "champion_accept_rate": round(champ_acc / n, 3) if n else None, "challenger_accept_rate": round(chall_acc / n, 3) if n else None,
+    gates = prim != "score"
+    out = {"question_id": question_id, "challenger_version": version, "primitive": prim, "n": n, "errors": errors, "skipped": skipped,
+           "agreement": round(agree / n, 3) if n else None,
+           "champion_accept_rate": round(champ_acc / n, 3) if n and gates else None, "challenger_accept_rate": round(chall_acc / n, 3) if n and gates else None,
            "reject_to_accept": unsafe, "cost_usd": round(cost, 6), "p95_latency_ms": pct(lats), "champion_p95_latency_ms": pct(base),
            "resolved_models": sorted(models), "disagreements": disagreements, "min_live_samples_met": n >= int(policy().get("shadow", {}).get("min_live_samples", 100)), "ran_at": ts()}
+    if prim == "choice":
+        out |= {"option_agreement": round(same_option / n, 3) if n else None, "accepted_option_changes": option_changes}
+    if prim == "score":
+        out |= {"mean_abs_score_diff": round(sum(diffs) / n, 4) if n else None, "max_abs_score_diff": round(max(diffs), 4) if diffs else None}
     prior = get(db, candidate_id) or {}
     started = (prior.get("results") or {}).get("shadow_started_at") or ts()
     attach_results(db, candidate_id, {"shadow": out, "question_id": question_id, "shadow_started_at": started}, stage="shadow", _computed=True)
@@ -681,11 +789,18 @@ def replay_threshold(db: ledger.Ledger, candidate_id: str, group: str, accept: f
     return attach_results(db, candidate_id, res, stage="offline_replay", _computed=True)
 
 
-def protected_check(db: ledger.Ledger, candidate_id: str, provider=None, stdin_isatty: bool | None = None, limit: int = 100) -> dict:
+def _protected_row_limit(limit: int | None) -> int:
+    """How many protected rows a template re-ask reads: the policy's minimum unless the caller asks for fewer, so the stage can reach it."""
+    return int(limit) if limit else int(policy().get("protected_test", {}).get("min_samples", 150))
+
+
+def protected_check(db: ledger.Ledger, candidate_id: str, provider=None, stdin_isatty: bool | None = None, limit: int | None = None) -> dict:
     """Evaluate a candidate on the protected split. Human terminal only (threat T10): the split is how a candidate is kept honest, so an
     agent session never reads it. A threshold is re-judged on the stored answers; a question template is re-asked of the challenger on the
     stored state of labeled calls. Stores the paired metrics; `promote` decides from them."""
     from . import adapter, evals, questions, thresholds
+
+    limit = _protected_row_limit(limit)
 
     if not is_human_tty(stdin_isatty):
         raise evals.ProtectedSetAccessDenied("the protected split is evaluated only by `jade improve protected` from a human terminal")
@@ -707,8 +822,11 @@ def protected_check(db: ledger.Ledger, candidate_id: str, provider=None, stdin_i
         sh = res.get("shadow")
         if not isinstance(sh, dict):
             raise PromotionBlocked("run the shadow stage of this template first")
+        why = unmeasured_reason(res)
+        if why:
+            raise PromotionBlocked(f"no protected check: {why}")
         qid, version = sh["question_id"], int(sh["challenger_version"])
-        entry, payload = questions.get(qid, version), questions.build_noul(qid)
+        entry, payload = questions.get(qid, version), questions.build_noul(qid, version=version)   # the challenger's own text, as in the shadow stage
         provider = provider or adapter.OpenRouterProvider()
         champ_p, chall_p, labels = [], [], []
         for r in [r for r in evals.labeled(db, include_protected=True) if r["split"] == "protected" and r["question_id"] == qid][:limit]:

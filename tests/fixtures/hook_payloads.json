@@ -1,0 +1,151 @@
+{
+  "_provenance": "SYNTHETIC. Shaped after the Claude Code hooks reference (common fields: session_id, transcript_path, cwd, permission_mode, hook_event_name; tool fields: tool_name, tool_input, tool_use_id, and tool_response on PostToolUse; agent_id and agent_type only on a call made inside a subagent). Not captured from a live session: every id, path and text below is invented. W-40 asks a human to replace each family with one redacted real pair (set `captured` to true); tests/acceptance/test_hook_payloads_w40.py then asserts the same invariants against the real shapes.",
+  "bash": {
+    "captured": false,
+    "pre": {
+      "session_id": "sess-00000000-aaaa-4000-8000-000000000001",
+      "transcript_path": "/home/user/.claude/projects/-work-project/sess-00000000.jsonl",
+      "cwd": "/work/project",
+      "permission_mode": "default",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {"command": "git push origin feat-x", "description": "Push the branch"},
+      "tool_use_id": "toolu_synthetic_bash_0001"
+    },
+    "post": {
+      "session_id": "sess-00000000-aaaa-4000-8000-000000000001",
+      "transcript_path": "/home/user/.claude/projects/-work-project/sess-00000000.jsonl",
+      "cwd": "/work/project",
+      "permission_mode": "default",
+      "hook_event_name": "PostToolUse",
+      "tool_name": "Bash",
+      "tool_input": {"command": "git push origin feat-x", "description": "Push the branch"},
+      "tool_response": {"stdout": "Everything up-to-date", "stderr": "", "interrupted": false, "isImage": false},
+      "tool_use_id": "toolu_synthetic_bash_0001"
+    }
+  },
+  "write": {
+    "captured": false,
+    "pre": {
+      "session_id": "sess-00000000-aaaa-4000-8000-000000000001",
+      "transcript_path": "/home/user/.claude/projects/-work-project/sess-00000000.jsonl",
+      "cwd": "/work/project",
+      "permission_mode": "default",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Write",
+      "tool_input": {"file_path": "~/.claude/settings.json", "content": "{\"hooks\": {}}\n"},
+      "tool_use_id": "toolu_synthetic_write_0001"
+    },
+    "post": {
+      "session_id": "sess-00000000-aaaa-4000-8000-000000000001",
+      "transcript_path": "/home/user/.claude/projects/-work-project/sess-00000000.jsonl",
+      "cwd": "/work/project",
+      "permission_mode": "default",
+      "hook_event_name": "PostToolUse",
+      "tool_name": "Write",
+      "tool_input": {"file_path": "~/.claude/settings.json", "content": "{\"hooks\": {}}\n"},
+      "tool_response": {"type": "update", "filePath": "~/.claude/settings.json", "content": "{\"hooks\": {}}\n", "structuredPatch": []},
+      "tool_use_id": "toolu_synthetic_write_0001"
+    }
+  },
+  "edit": {
+    "captured": false,
+    "pre": {
+      "session_id": "sess-00000000-aaaa-4000-8000-000000000001",
+      "transcript_path": "/home/user/.claude/projects/-work-project/sess-00000000.jsonl",
+      "cwd": "/work/project",
+      "permission_mode": "acceptEdits",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Edit",
+      "tool_input": {"file_path": "~/.claude/settings.json", "old_string": "{}", "new_string": "{\"hooks\": {}}", "replace_all": false},
+      "tool_use_id": "toolu_synthetic_edit_0001"
+    },
+    "post": {
+      "session_id": "sess-00000000-aaaa-4000-8000-000000000001",
+      "transcript_path": "/home/user/.claude/projects/-work-project/sess-00000000.jsonl",
+      "cwd": "/work/project",
+      "permission_mode": "acceptEdits",
+      "hook_event_name": "PostToolUse",
+      "tool_name": "Edit",
+      "tool_input": {"file_path": "~/.claude/settings.json", "old_string": "{}", "new_string": "{\"hooks\": {}}", "replace_all": false},
+      "tool_response": {"filePath": "~/.claude/settings.json", "oldString": "{}", "newString": "{\"hooks\": {}}", "originalFile": "{}", "structuredPatch": [], "userModified": false, "replaceAll": false},
+      "tool_use_id": "toolu_synthetic_edit_0001"
+    }
+  },
+  "mcp": {
+    "captured": false,
+    "pre": {
+      "session_id": "sess-00000000-aaaa-4000-8000-000000000001",
+      "transcript_path": "/home/user/.claude/projects/-work-project/sess-00000000.jsonl",
+      "cwd": "/work/project",
+      "permission_mode": "default",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "mcp__demo__shell",
+      "tool_input": {"command": "git push origin feat-x", "cwd": "/work/project"},
+      "tool_use_id": "toolu_synthetic_mcp_0001"
+    },
+    "post": {
+      "session_id": "sess-00000000-aaaa-4000-8000-000000000001",
+      "transcript_path": "/home/user/.claude/projects/-work-project/sess-00000000.jsonl",
+      "cwd": "/work/project",
+      "permission_mode": "default",
+      "hook_event_name": "PostToolUse",
+      "tool_name": "mcp__demo__shell",
+      "tool_input": {"command": "git push origin feat-x", "cwd": "/work/project"},
+      "tool_response": [{"type": "text", "text": "ok"}],
+      "tool_use_id": "toolu_synthetic_mcp_0001"
+    }
+  },
+  "task": {
+    "captured": false,
+    "pre": {
+      "session_id": "sess-00000000-aaaa-4000-8000-000000000001",
+      "transcript_path": "/home/user/.claude/projects/-work-project/sess-00000000.jsonl",
+      "cwd": "/work/project",
+      "permission_mode": "default",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Task",
+      "tool_input": {"description": "Explore the repository", "prompt": "List the top-level directories.", "subagent_type": "general-purpose"},
+      "tool_use_id": "toolu_synthetic_task_0001"
+    },
+    "post": {
+      "session_id": "sess-00000000-aaaa-4000-8000-000000000001",
+      "transcript_path": "/home/user/.claude/projects/-work-project/sess-00000000.jsonl",
+      "cwd": "/work/project",
+      "permission_mode": "default",
+      "hook_event_name": "PostToolUse",
+      "tool_name": "Task",
+      "tool_input": {"description": "Explore the repository", "prompt": "List the top-level directories.", "subagent_type": "general-purpose"},
+      "tool_response": {"content": [{"type": "text", "text": "done"}], "totalDurationMs": 1200, "totalTokens": 900},
+      "tool_use_id": "toolu_synthetic_task_0001"
+    }
+  },
+  "subagent_bash": {
+    "captured": false,
+    "pre": {
+      "session_id": "sess-00000000-aaaa-4000-8000-000000000001",
+      "transcript_path": "/home/user/.claude/projects/-work-project/sess-00000000.jsonl",
+      "cwd": "/work/project",
+      "permission_mode": "default",
+      "hook_event_name": "PreToolUse",
+      "agent_id": "agent-0000000000000001",
+      "agent_type": "general-purpose",
+      "tool_name": "Bash",
+      "tool_input": {"command": "git push origin feat-x"},
+      "tool_use_id": "toolu_synthetic_subagent_0001"
+    },
+    "post": {
+      "session_id": "sess-00000000-aaaa-4000-8000-000000000001",
+      "transcript_path": "/home/user/.claude/projects/-work-project/sess-00000000.jsonl",
+      "cwd": "/work/project",
+      "permission_mode": "default",
+      "hook_event_name": "PostToolUse",
+      "agent_id": "agent-0000000000000001",
+      "agent_type": "general-purpose",
+      "tool_name": "Bash",
+      "tool_input": {"command": "git push origin feat-x"},
+      "tool_response": {"stdout": "", "stderr": "", "interrupted": false, "isImage": false},
+      "tool_use_id": "toolu_synthetic_subagent_0001"
+    }
+  }
+}

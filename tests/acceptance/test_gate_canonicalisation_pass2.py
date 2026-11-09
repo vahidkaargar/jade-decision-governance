@@ -460,8 +460,10 @@ def test_probe_rm_without_both_flags_or_with_scratch_targets_is_unchanged(cmd):
 
 
 def test_probe_cd_to_a_computed_directory_is_a_documented_limit():
-    # No way to know where `cd $NOPE/x` lands; the relative operand stays unresolved and is classified as written.
-    assert assess("cd $NOPE/x && sort -o settings.json in").level == "low"
+    # No way to know where `cd $NOPE/x` lands; the relative operand stays unresolved and is classified as written. Since W-33 it is rated medium (R-32,
+    # recorded and not gated), no longer low; it is still not high.
+    a = assess("cd $NOPE/x && sort -o settings.json in")
+    assert a.level == "medium" and a.rule_id == "R-32"
 
 
 def test_n1_huge_command_is_not_masked_and_cost_stays_bounded():

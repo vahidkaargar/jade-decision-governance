@@ -202,15 +202,16 @@ def _run_secret_stored(c: dict) -> list[str]:
 def _run_lifecycle(c: dict) -> list[str]:
     """Permit and decision-lifecycle cases (review cluster B). `permit_variant`: a human approves a permit for `command`, the hook then sees
     `variant`; `permit_forged`: a row nobody approved (`claim_risk`) exists for `command`; `decide_walk`: an agent sends `events` through
-    `jade decide event`. The human terminal is simulated by replacing the ancestry probe; nothing here touches a real terminal or ledger."""
+    `jade decide event`. The human terminal is simulated by replacing the ancestry and session-leader probes; nothing here touches a real terminal or ledger."""
     import contextlib
     import io
 
     from jade import cli, decide, hooks, ledger, permits, policy, util
 
     problems: list[str] = []
-    real, real_cli = util.agent_ancestor, cli.human_tty_refusal
+    real, real_cli, real_tty = util.agent_ancestor, cli.human_tty_refusal, util.tty_session_refusal
     util.agent_ancestor = lambda: None
+    util.tty_session_refusal = lambda *a, **k: None   # the session-leader check (W-37) is also part of the terminal that is simulated here
     try:
         db = ledger.open()
         ev = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}, "session_id": "case-session", "cwd": "/tmp/case"}  # noqa: E731
@@ -246,7 +247,7 @@ def _run_lifecycle(c: dict) -> list[str]:
             if db.one("SELECT COUNT(*) AS n FROM outcomes").n:
                 problems.append("an outcome row exists that no one recorded")
     finally:
-        util.agent_ancestor, cli.human_tty_refusal = real, real_cli
+        util.agent_ancestor, cli.human_tty_refusal, util.tty_session_refusal = real, real_cli, real_tty
         os.environ.pop("JADE_SESSION_ID", None)
     return problems
 

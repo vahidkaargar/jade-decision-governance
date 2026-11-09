@@ -22,7 +22,7 @@ import re
 import shlex
 from dataclasses import dataclass, field
 
-from . import interp
+from . import blind, interp
 
 MAX_DEPTH = 8
 MAX_NEST = 60
@@ -46,7 +46,7 @@ ALIAS_TAIL = re.compile(r"\s-c\s+alias\.[^\s=]*=$")
 GIT_VALUE = re.compile(r"(?:^|[\s(;&|])(?:\S*/)?git(?:\s+\S+)*?\s+-[Cc]\s+$|--(?:git-dir|work-tree|namespace)=$|--(?:git-dir|work-tree|namespace)\s+$")
 
 SHELL_RE = re.compile(r"^(?:(?:ba|z|da|k|a|fi|c|tc)?sh|source|\.)$")
-INTERP_RE = re.compile(r"^(?:python[\d.]*|pypy\d*|perl\d*|ruby\d*|node(?:js)?|php\d*|osascript|lua\d*|deno|bun)$")
+INTERP_RE = re.compile(r"^(?:python[\d.]*|pypy\d*|perl\d*|ruby\d*|node(?:js)?|php\d*|osascript|lua\d*|deno|bun|pwsh|powershell|swift|rscript|tclsh|julia|groovy)$")
 STDIN_PATHS = {"/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"}
 CODE_FLAG = re.compile(r"-[a-zA-Z]*[ceEr]|--eval|--print|--command")
 AWK_NAMES = {"awk", "gawk", "mawk", "nawk"}
@@ -56,7 +56,7 @@ _INERT = re.compile(r"[;&|<>(){}`]")   # characters a quoted word may hold that 
 
 HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|(\\?)([^\s;&|<>()'\"\\`$]+))")
 NEXT_STAGE = re.compile(
-    r"[ \t]*(?:\w+=\S*[ \t]+)*(?:(?:sudo|env|command|exec|nohup|time|xargs)(?:[ \t]+-[ugphCDrtUT][ \t]+\S+|[ \t]+-\S+(?:[ \t]+\d+)?)*[ \t]+)*(?P<w>[\w./+-]+)(?P<a>(?:[ \t]+[^\s;&|()<>`$]+)*)[ \t]*(?=$|[;&|()\n<>])")
+    r"[ \t]*(?:\w+=\S*[ \t]+)*(?:(?:sudo|env|command|exec|nohup|time|xargs)(?:[ \t]+-[ugphCDrtUT][ \t]+\S+|[ \t]+-\S+(?:[ \t]+\d+)?)*[ \t]+)*[\\'\"]?(?P<w>[\w./+-]+)['\"]?(?P<a>(?:[ \t]+[^\s;&|()<>`$]+)*)[ \t]*(?=$|[;&|()\n<>])")
 PIPE_REST = re.compile(r"\|(?!\|)")
 PRODUCER = re.compile(r"^\s*(?:echo|printf|print|cat|yes)\b(?:\s+-[a-zA-Z]+)*")
 ORDINARY_ESCAPE = set("_./-:=@%+,^")
@@ -128,13 +128,15 @@ def _stdin_kind(word: str, args: list[str]) -> str | None:
     if kind is None:
         return None
     args = [a for a in args if not re.match(r"^(?:\d*[<>]|&>|<<)", a)]
+    if kind == "shell" and any(re.fullmatch(r"-[a-zA-Z]*n[a-zA-Z]*", a) or a == "--noexec" for a in args):
+        return None   # `sh -n` reads the text to check its syntax and runs none of it
     if any(a in ("-s", "-") or a in STDIN_PATHS for a in args):
         return kind
     skip = False
     for idx, a in enumerate(args):
         if skip:
             skip = False
-        elif a in ("-o", "+o", "-W", "-X", "-O"):
+        elif a in ("-o", "+o", "-W", "-X", "-O") or (a == "-l" and w == "osascript"):   # `osascript -l JavaScript` names the language, the script is on stdin
             skip = True
         elif CODE_FLAG.fullmatch(a):
             return kind if idx == len(args) - 1 or args[idx + 1:idx + 2] == ["{}"] else None  # `xargs sh -c`, `xargs -I{} sh -c {}`: the script arrives on stdin
@@ -143,9 +145,42 @@ def _stdin_kind(word: str, args: list[str]) -> str | None:
     return kind
 
 
+# Launchers that start the next word as a program and are not in NEXT_STAGE or PREFIX: `curl .. | doas sh`, `| busybox sh`, `| stdbuf -o0 bash`.
+_STAGE_LAUNCHERS = frozenset("stdbuf doas busybox ionice setsid unbuffer chrt taskset".split())
+
+
+def _peel_launchers(words: list[str]) -> list[str]:
+    """`words` without the launchers in front of the program (`nice`, `timeout 5`, `uv run`, `doas -u x`, `su -c`): the program that reads the pipe is the first word left."""
+    for _ in range(6):
+        if not words:
+            break
+        peeled = PREFIX.sub("", " ".join(words), count=1).split()
+        w = peeled[0].rsplit("/", 1)[-1].lower() if peeled else ""
+        if w == "su":   # `su [user] -c CMD`: the command word follows -c
+            peeled = peeled[peeled.index("-c") + 1:] if "-c" in peeled else []
+        elif w in _STAGE_LAUNCHERS:
+            peeled = peeled[1:]
+            while peeled and peeled[0].startswith("-"):
+                peeled = peeled[2:] if peeled[0] in ("-u", "-g", "-C", "-c", "-n", "-p") and len(peeled[0]) == 2 else peeled[1:]
+        if peeled == words:
+            break
+        words = peeled
+    return words
+
+
 def _next_stage_kind(s: str, j: int) -> str | None:
+    """What the stage that starts at s[j] does with its stdin: the language it reads as code, or None. A stage whose stdin is redirected from a heredoc, a
+    here-string or a file does not read the pipe at all (`curl .. | python3 - <<'PY'`)."""
     m = NEXT_STAGE.match(s, j)
-    return _stdin_kind(m.group("w"), m.group("a").split()) if m else None
+    if not m:
+        return None
+    if s[m.end():m.end() + 1] == "<" and s[m.end() + 1:m.end() + 2] != "(":
+        return None
+    kind = _stdin_kind(m.group("w"), m.group("a").split())
+    if kind:
+        return kind
+    words = _peel_launchers([m.group("w"), *m.group("a").split()])
+    return _stdin_kind(words[0], words[1:]) if words else None
 
 
 def _rest_of_line_pipes_to_code(s: str, j: int) -> str | None:
@@ -803,8 +838,29 @@ class _Scan:
         body = re.sub(r'\\([`\\$"])' if in_dq else r"\\([`\\$])", r"\1", body)
         return self._sub(body), min(j + 1, n)
 
+    @staticmethod
+    def _fetch_marks(code: str) -> list[str]:
+        """The R-22 marker for text that a substitution fetches or decodes and a shell or interpreter then reads as its program."""
+        kind = blind.subst_kind(code)
+        return [blind.FETCH_MARK + kind] if kind in ("fetch", "decode") else []
+
+    @staticmethod
+    def _pipe_marks(stages: list[str]) -> list[str]:
+        """Markers for a pipeline whose last stage reads its stdin as code (W-31): text fetched or decoded by an earlier stage is a program that is not on the
+        command line (R-22), a file read by `cat` is one the gate cannot see (recorded, R-31)."""
+        out: list[str] = []
+        for raw in stages:
+            word, args = _command_word(raw)
+            if kind := blind.stage_kind(word, args):
+                out.append(blind.FETCH_MARK + kind)
+            elif word == "cat" and any(not a.startswith("-") for a in args):
+                out.append(blind.BLIND_MARK + "script-file")
+        return out
+
     def _script(self, code: str, deferred: list[str]) -> None:
         deferred.append(self._sub(code))
+        if kind := blind.subst_kind(code):   # `eval "$(curl ..)"`, `sh -c "$(cat f)"`, `eval "$CMD"` (W-31)
+            deferred.append(blind.FETCH_MARK + kind if kind in ("fetch", "decode") else blind.BLIND_MARK + ("eval-file" if kind == "file" else "eval-var"))
         m = PRODUCER_SUBST.fullmatch(code)
         inner = (m.group(1) or m.group(2) or "") if m else ""
         if PRODUCER.match(inner) or self._producer_program(inner):  # `eval "$(echo git push)"`: the output of an echo or a program is the script
@@ -941,6 +997,7 @@ class _Scan:
                 chain.append(raw)
                 if kind := _next_stage_kind(s, resume):
                     deferred.extend(self._produced(r, kind) for r in chain)
+                    deferred.extend(self._pipe_marks(chain))
             else:
                 chain.clear()
             cur, raw_at, hs_kind = "", resume, None
@@ -952,6 +1009,7 @@ class _Scan:
             if hs_kind:
                 kind, hs_kind = hs_kind, None
                 deferred.append(self._sub(body) if kind == "shell" else self._interp(kind, body))
+                deferred.extend(self._fetch_marks(body))   # `sh <<< "$(curl ..)"`: the here-string is fetched text that runs
                 emit('""')
             elif tail.endswith(("-c", "-C", "=", "--git-dir", "--work-tree", "--namespace")) and (
                     ALIAS_TAIL.search(cur) or GIT_VALUE.search(cur)):
@@ -1005,8 +1063,12 @@ class _Scan:
                     emit("$X")
                     i = j
                 elif nxt == "(":
-                    txt, i = self.run(i + 2, ")")
+                    start = i + 2
+                    txt, i = self.run(start, ")")
                     deferred.append(txt)
+                    if hs_kind:   # `sh <<< $(curl ..)`
+                        deferred.extend(self._fetch_marks("$(" + s[start:i - 1] + ")"))
+                        hs_kind = None
                     emit("$X")
                 elif nxt == "'":
                     i, decoded = _ansi_c(s, i + 2)
@@ -1037,6 +1099,7 @@ class _Scan:
                 deferred.append(txt)
                 if kind:
                     deferred.append(self._produced(s[start:i - 1], kind))
+                    deferred.extend(self._pipe_marks(re.split(r"\||;|&&", s[start:i - 1])))
                 emit("/dev/fd/X")
             elif c == "<" and s.startswith("<<<", i):
                 hs_kind = _stdin_kind(*_command_word(cur))
@@ -1219,6 +1282,36 @@ DANGEROUS_KEY = re.compile(
     r"|remote\..*\.(?:pushurl|url|receivepack|uploadpack|proxy)$)")
 
 
+_CONFIG_READS = ("--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color", "--get-colorbool", "--list", "-l", "--show-origin", "--show-scope",
+                 "--name-only", "--unset", "--unset-all", "--remove-section", "--rename-section", "--edit", "-e", "--help")
+_CONFIG_VALUED = {"--file", "-f", "--blob", "--type", "--default", "--comment"}
+
+
+def config_write_key(args: list[str]) -> str | None:
+    """The key a `git config` command sets (`git config alias.p push`, `git config set k v`, `--add`, `--replace-all`), or None for a read, a removal and a
+    single operand (`git config alias.p` prints it)."""
+    a = list(args)
+    if a[:1] and a[0] in ("get", "list", "unset", "edit", "rename-section", "remove-section"):
+        return None
+    if a[:1] == ["set"]:
+        a = a[1:]
+    pos: list[str] = []
+    i = 0
+    while i < len(a):
+        x = a[i]
+        if x in _CONFIG_VALUED:
+            i += 2
+            continue
+        if any(x == r or x.startswith(r + "=") for r in _CONFIG_READS):
+            return None
+        if x.startswith("-") and x != "-":
+            i += 1
+            continue
+        pos.append(x)
+        i += 1
+    return pos[0] if len(pos) >= 2 else None
+
+
 @dataclass
 class GitCall:
     """One `git [global options] <sub> <args>` found in a segment."""
@@ -1283,6 +1376,8 @@ def git_calls(text: str) -> tuple[str, list[GitCall]]:
                 break
         call.sub = toks[j] if j < len(toks) else ""
         call.args = [a for a in toks[j + 1:] if a]
+        if call.sub == "config" and (key := config_write_key(call.args)) is not None and ("$" in key or DANGEROUS_KEY.search(key.lower())):
+            call.danger.append(f"config {key}")   # the persistent form of `git -c key=value` (W-31): an alias, pager, sshCommand ... that runs a program
         calls.append(call)
         out.append("git")
         i = j

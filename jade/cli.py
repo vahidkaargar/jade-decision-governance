@@ -137,7 +137,7 @@ def _stats(a) -> int:
                     "non_accept_reminded_without_disposition": und, "share_of_non_accept": round(und / nonacc, 3) if nonacc else None,
                     "dispositions": {x.disposition: x.n for x in db.all(f"SELECT disposition, COUNT(*) AS n FROM jev_calls WHERE disposition IS NOT NULL AND {w} GROUP BY disposition", arg)},  # noqa: S608
                     "latency_ms": {"p50": pct(0.5), "p95": pct(0.95), "p99": pct(0.99)}, "cost_usd": r.cost, "calls_with_redactions": r.redacted,
-                    "events": {x.kind: x.n for x in db.all("SELECT kind, COUNT(*) AS n FROM events WHERE kind IN ('BYPASS','MODEL_DRIFT','INVALID_QUESTION','would_block','safety_block','secret_read') AND " + ledger.live() + " GROUP BY kind")}})
+                    "events": {x.kind: x.n for x in db.all("SELECT kind, COUNT(*) AS n FROM events WHERE kind IN ('BYPASS','MODEL_DRIFT','INVALID_QUESTION','would_block','safety_block','secret_read','blind_spot') AND " + ledger.live() + " GROUP BY kind")}})
     print(json.dumps(out, indent=1))
     return 0
 
@@ -165,6 +165,17 @@ def _permit(a) -> int:
         if a.action != "revoke":   # a stored record that cannot be read is never shown, approved or used, but it can be revoked
             print(f"jade: permit {a.permit_id} has an unreadable or invalid stored record (`jade check` lists it); revoke it with `jade permit revoke {a.permit_id}`", file=sys.stderr)
             return 1
+    if a.action == "show" and a.raw:   # W-43: the raw call, secrets included, for a human terminal only (SI-09 blocks the spelling for an agent)
+        why = human_tty_refusal()
+        if why:
+            print(f"jade: the raw view of a permit needs a human at an interactive terminal; an agent session cannot see it ({why})", file=sys.stderr)
+            return 1
+        try:
+            print(permits.review_raw(db, p))
+        except permits.PermitError as e:
+            print(f"jade: {e}", file=sys.stderr)
+            return 1
+        return 0
     if a.action == "show":
         print(json.dumps({k: v for k, v in vars(p).items() if k != "nonce"}, indent=1, default=str))
         return 0
@@ -177,8 +188,8 @@ def _permit(a) -> int:
             raise permits.ApprovalRefused(f"permit approval needs a human at an interactive terminal; an agent session cannot approve ({why})")
         if a.yes:
             raise permits.PermitError("-y is not accepted: read the command, then type the code shown")
-        print(permits.review_text(p))  # raises instead of showing a command that was cut or does not match the plan hash
-        code = p.plan_hash[:6]
+        print(permits.review_raw(db, p))  # raises instead of showing a command that was cut or does not match the plan hash; shows a secret only from the raw call W-43 keeps
+        code = permits.confirm_code(p)
         if input(f"Type {code} to approve, anything else to refuse: ").strip().lower() != code:
             print("not approved")
             return 1
@@ -342,21 +353,42 @@ def _work(a) -> int:
             if a.all or w["status"] not in ("done", "dropped"):
                 print(f"{w['id']}  {w['priority']} {w['status']:13} {w['owner']:7} {w.get('title', '')}")
         return 0
+    announce: list[dict] = []
+    if a.action == "add":
+        missing = [flag for flag, val in (("--title", a.title), ("--impact", a.impact), ("--rationale", a.rationale), ("--next", a.next), ("--trigger", a.trigger)) if not val]
+        if missing:
+            print(f"jade: work add needs {', '.join(missing)}", file=sys.stderr)
+            return 1
+        try:
+            w = work.add(items, title=a.title, impact=a.impact, rationale=a.rationale, next_action=a.next, trigger=a.trigger, type=a.type, priority=a.priority,
+                         owner=a.owner, dependencies=a.dep or [], evidence_refs=a.evidence or [], parent=a.parent, phase=a.phase)
+        except ValueError as e:   # DuplicateItem is one
+            print(f"jade: {e}", file=sys.stderr)
+            return 1
+        print(f"added {w['id']}: {w['title']}")
     if a.action == "set":
         try:
-            work.update(items, a.id, status=a.status, note=a.note or "", next_action=a.next, trigger=a.trigger)
+            w = work.update(items, a.id, status=a.status, note=a.note or "", next_action=a.next, trigger=a.trigger)
         except KeyError:
             print(f"jade: no work item {a.id!r} in {a.file}", file=sys.stderr)
             return 1
+        if a.status == "done":
+            announce = work.ready(items, closed=w["id"])
     aged = work.age(items)
     work.save(src, items)
     work.render(src, Path(a.out))
-    if a.action == "sync" or a.action == "set":
+    if a.action in ("sync", "set", "add"):
+        mirror, dups = work.dedupe(items)   # a duplicate stays in the file and out of the ledger, so the next session is not told twice
         db = ledger.open()
         with db.tx() as con:
-            for w in items:
+            for w in mirror:
                 con.execute("INSERT OR REPLACE INTO work_items(id, status, doc_json, updated_at) VALUES(?,?,?,?)", (w["id"], w["status"], json.dumps(w), w["updated_at"]))
+            for dup, first in dups.items():
+                con.execute("DELETE FROM work_items WHERE id=?", (dup,))
+                print(f"not mirrored: {dup} is a duplicate of {first} (same normalised title and target)")
     print(f"rendered {a.out} from {a.file} ({len(items)} items" + (f", aged {', '.join(aged)}" if aged else "") + ")")
+    if announce:
+        print("ready: " + ", ".join(w["id"] for w in announce) + f" (all dependencies done; {a.id} closed)")
     return 0
 
 
@@ -392,6 +424,18 @@ def _label(a) -> int:
 def _eval(a) -> int:
     from . import evals
 
+    if a.action == "routing":   # offline: no ledger is opened
+        f = Path(a.cases) if a.cases else (paths.checkout_dir() or Path.cwd()) / "evals" / "routing" / "cases.jsonl"
+        if not f.is_file():
+            print(f"jade: {f} does not exist; pass --cases", file=sys.stderr)
+            return 1
+        try:
+            res = evals.routing_confusion_from_cases(evals.load_cases(f))
+        except (ValueError, KeyError, TypeError, AttributeError) as e:   # a malformed case file is the person's to fix, not a traceback
+            print(f"jade: {f} is not a valid routing case file: {e}", file=sys.stderr)
+            return 1
+        print(json.dumps(res, indent=1, ensure_ascii=False))
+        return 0
     db = ledger.open()
     if a.action == "run":
         if a.protected and not is_human_tty():
@@ -576,8 +620,10 @@ def build_parser() -> argparse.ArgumentParser:
     rq.add_argument("--command", required=True)
     rq.add_argument("--cwd")
     for name in ("show", "approve", "revoke"):
-        x = pm.add_parser(name)
+        x = pm.add_parser(name, allow_abbrev=False) if name == "show" else pm.add_parser(name)   # `--raw` is spelled out: SI-09 lists that spelling only
         x.add_argument("permit_id")
+        if name == "show":
+            x.add_argument("--raw", action="store_true", help="human terminal only: the whole command with the secret-shaped values the ledger stores redacted (needs `permit_reveal` in the config)")
         if name == "approve":
             x.add_argument("-y", "--yes", action="store_true", help="not accepted: approval always needs the code typed after the command is shown")
 
@@ -626,7 +672,7 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("args", nargs="+")
 
     w = sub.add_parser("work")
-    w.add_argument("action", choices=("list", "render", "set", "sync"))
+    w.add_argument("action", choices=("list", "render", "set", "sync", "add"))
     w.add_argument("id", nargs="?")
     w.add_argument("--file", default="work-items.jsonl")
     w.add_argument("--out", default="BACKLOG.md")
@@ -635,6 +681,16 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--next")
     w.add_argument("--trigger")
     w.add_argument("--all", action="store_true")
+    w.add_argument("--title", help="add: the item's title (required)")
+    w.add_argument("--impact", help="add: what happens if it is not done (required)")
+    w.add_argument("--rationale", help="add: why it is an item (required)")
+    w.add_argument("--type", choices=("blocker", "ambiguity", "risk", "debt", "followup"), default="followup", help="add: item type")
+    w.add_argument("--priority", choices=("P0", "P1", "P2", "P3"), default="P2", help="add: priority")
+    w.add_argument("--owner", choices=("human", "agent", "runtime"), default="agent", help="add: owner")
+    w.add_argument("--dep", action="append", help="add: id of an item this one waits on (repeatable)")
+    w.add_argument("--evidence", action="append", help="add: a file or document the item is about; with the title it identifies a duplicate (repeatable)")
+    w.add_argument("--parent", help="add: id of the parent item")
+    w.add_argument("--phase", type=int, choices=range(0, 6), help="add: roadmap phase 0 to 5")
 
     lb = sub.add_parser("label").add_subparsers(dest="action", required=True)
     lb.add_parser("auto")
@@ -647,6 +703,7 @@ def build_parser() -> argparse.ArgumentParser:
     e = sub.add_parser("eval").add_subparsers(dest="action", required=True)
     e.add_parser("run").add_argument("--protected", action="store_true")
     e.add_parser("conditions")
+    e.add_parser("routing", help="confusion matrix of the router on the hand-written routing cases (offline)").add_argument("--cases", help="a routing cases file (default: evals/routing/cases.jsonl of the checkout)")
     e.add_parser("propose")
 
     im = sub.add_parser("improve").add_subparsers(dest="action", required=True)

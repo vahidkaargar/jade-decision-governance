@@ -252,6 +252,10 @@ def _run(specs: list[Spec], items: list[Item], state: dict, hits: int, warnings:
             ops.check_drift(None, res.resolved_model, ops.expected_models())
         except Exception as e:  # noqa: BLE001 - drift bookkeeping is informational
             warnings.append(f"drift check skipped ({type(e).__name__})")
+    try:
+        ops.check_question_drift(db=db)
+    except Exception as e:  # noqa: BLE001 - drift bookkeeping is informational
+        warnings.append(f"question drift check skipped ({type(e).__name__})")
     if db and decision_id:
         from . import decide, state_machine
 

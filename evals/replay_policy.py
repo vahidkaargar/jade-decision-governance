@@ -41,7 +41,7 @@ def replay(rows):
     per_session_abstain = collections.defaultdict(int)
     repeats = collections.Counter()
     for r in rows:
-        if r.get("dry_run"):
+        if r.get("dry_run") or r.get("mention"):   # a mention is text that names jev, not a call (W-18)
             continue
         key = (r["session"], r["primitive"], r.get("question", ""))
         repeats[key] += 1
