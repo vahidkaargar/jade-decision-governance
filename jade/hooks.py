@@ -9,6 +9,7 @@ under an alarm (BUDGET_S) that is safely below the host's hook timeout, because 
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -48,6 +49,9 @@ _EXEC_FLAG = re.compile(r"--output|--pre\b|--exec|--upload-pack|-exec|--hostname
 _PROTECTED_PATH = re.compile(
     r"(?i)\.claude|\.config/jade|\.local/share/jade|\.local/bin|/etc/|/library/launch|policies/|(?:^|/)jade/|jade\.sqlite|\.ssh|\.gnupg|\.aws|\.pem\b|id_rsa|id_ed25519"
     r"|vault_key|agents\.md|\.cursor|\.zshrc|\.bashrc|\.zprofile|\.profile|sudoers|crontab|launchagents|launchdaemons")
+# Read, Grep and Glob when the policy cannot be consulted: only a call that may touch the permit seal key (SI-10, W-70) is blocked.
+# Not a bare `permit` (a repository has app/Models/Permit.php): the key's own name, a glob that could expand to it (`perm*`, `permit-s*`), the state directory.
+_SEAL_KEY_TEXT = re.compile(r"(?i)permit[-_.]?seal|seal[-_.]?key|\.local/share/jade|jade_home|(?:^|/)perm[^/]*[*?\[]")
 _MUTATING_TOOL = re.compile(
     r"^mcp__.+?__(?:set|write|edit|create|update|delete|remove|move|rename|exec|execute|run|shell|apply|merge|deploy|install|uninstall|kill|terminate|patch|publish"
     r"|push|commit|save|add|drop|truncate|restart|stop|start|send|post|put|accept|fork|link|discard|clean|interact|force|mcp-(?:exec|add|remove|config|create|activate)|code-mode)"
@@ -68,6 +72,12 @@ def failsafe_reason(event: dict) -> str | None:
         for p in policy.write_paths(tin) or [""]:
             if _PROTECTED_PATH.search(p) or _PROTECTED_PATH.search(policy.real(os.path.expanduser(p))):
                 return f"the write target {p[:120]!r} is a protected location"
+        return None
+    if tool in policy.READ_TOOLS:
+        targets, globs = policy.read_targets(tool, tin)
+        for t in (*targets, *globs):
+            if _SEAL_KEY_TEXT.search(t) or _SEAL_KEY_TEXT.search(policy.real(os.path.expanduser(t))) or policy.is_seal_key_dir(policy.real(os.path.expanduser(t))):
+                return f"{tool} names {t[:120]!r}, which may be the permit seal key"
         return None
     cmd = tin.get("command") if tool in policy.SHELL_TOOLS else next((tin[k] for k in ("command", "cmd", "script") if isinstance(tin.get(k), str)), None)
     if cmd is not None or tool in policy.SHELL_TOOLS:
@@ -456,6 +466,29 @@ def _override_notice(db, event: dict) -> list[str]:
     return [f"JADE: gate override in force in the hook environment ({names}); it weakens the gate. `jade check` lists it, unset it unless a human set it on purpose."]
 
 
+def _shadow_notice(db, event: dict) -> list[str]:
+    """Project settings of the live session (the event's cwd and its ancestors up to the repo root) that disable the hooks or shadow JADE's (docs/05
+    T19, W-47): shown and journaled once per session as `gate_override`. Never blocks, and a failure here changes nothing."""
+    cwd = event.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        return []
+    try:
+        from . import ops
+
+        found = ops.shadow_problems(cwd, managed=False, plugins=False)
+    except Exception:  # noqa: BLE001 - a scanner failure must never change the hook's answer
+        return []
+    if not found:
+        return []
+    digest = hashlib.sha1("\n".join(found).encode("utf-8", "replace")).hexdigest()[:12]   # noqa: S324 - an idempotency key, not security
+    try:
+        db.event("gate", "gate_override", guard="; ".join(found)[:500], actor="hook", key=f"gate_override:{event.get('session_id') or '-'}:shadow:{digest}",
+                 detail={"session": event.get("session_id"), "cwd": cwd, "shadowing": found[:10]})
+    except Exception:  # noqa: BLE001, S110 - journaling must never change the hook's answer
+        pass
+    return [f"JADE: settings of this project disable or shadow the JADE hooks ({'; '.join(found[:3])}); `jade check` lists every one. Remove the setting unless a human set it on purpose."]
+
+
 def session_start(event: dict) -> HookResult:
     from . import decide, ledger, permits
 
@@ -463,7 +496,7 @@ def session_start(event: dict) -> HookResult:
     try:
         decide.sweep(db)
         permits.sweep(db)
-        out = _override_notice(db, event)
+        out = _override_notice(db, event) + _shadow_notice(db, event)
         pend = permits.listing(db, ("PENDING",))
         if pend:
             out.append(f"JADE: {len(pend)} permit(s) awaiting human approval: " + ", ".join(p.permit_id for p in pend[:5]))

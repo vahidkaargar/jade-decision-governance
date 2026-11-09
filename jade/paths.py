@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from typing import NamedTuple
@@ -61,8 +63,52 @@ def overlay(kind: str) -> Path | None:
     return p if p.exists() else None
 
 
+def checkout_overlay_dir() -> Path:
+    """`policies/local/` of the checkout (or installed package) the code runs from. Nothing reads it: `jade check` lists the `*.local.yaml` files
+    there so an edit in the wrong place is not silent (W-56)."""
+    return shipped_policy_dir() / "local"
+
+
+def git_commit(directory: Path) -> str | None:
+    """Short HEAD commit of the git checkout at `directory`, or None (not a checkout, no git, a slow or failing git). Never raises."""
+    if not (Path(directory) / ".git").exists():
+        return None
+    try:
+        env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY")}   # inside a git hook these name another repository
+        r = subprocess.run(["git", "-C", str(directory), "rev-parse", "--short=12", "HEAD"], capture_output=True, text=True, timeout=5, check=False, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    sha = r.stdout.strip()
+    return sha if r.returncode == 0 and re.fullmatch(r"[0-9a-f]{12}", sha) else None
+
+
+_COMMIT: list[str | None] = []
+
+
+def code_commit() -> str | None:
+    """Commit of the checkout this code runs from (None for an installed package: site-packages has no .git). Read once per process."""
+    if not _COMMIT:
+        _COMMIT.append(git_commit(PKG.parent))
+    return _COMMIT[0]
+
+
+def code_version() -> str:
+    """`<jade.__version__>` plus `+<commit>` when run from a checkout. Part of policy_version: a code change moves it like a policy change does (W-50)."""
+    import jade
+
+    commit = code_commit()
+    return f"{jade.__version__}+{commit}" if commit else jade.__version__
+
+
+def checkout_dir() -> Path | None:
+    """The checkout a human names as the source of truth for `jade check`'s staleness test: env JADE_CHECKOUT, else config key `checkout`."""
+    named = os.environ.get("JADE_CHECKOUT") or config().get("checkout")
+    return Path(str(named)).expanduser() if named else None
+
+
 def policy_version() -> str:
     h = hashlib.sha256()
+    h.update(b"code:" + code_version().encode() + b"\n")
     files = sorted(policy_dir().glob("*.yaml")) + [p for p in (overlay("risk"), overlay("safety")) if p]
     for f in files:
         h.update(f.name.encode())

@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here. Format: Keep a Changelog; versioning: SemVer once code ships.
 
+## [Unreleased]
+
+### Added
+- **SI-10 gates the Read, Grep and Glob tools for the permit seal key (W-70).** A Read of `permit-seal.key` (by name, symlink or hard link), a Grep of the directory that holds it with no file filter that excludes it and a Glob pattern or Grep `glob` that would match its name are blocked as SI-10; every other read, the rest of the JADE home included, is not gated. The PreToolUse matcher now includes `Read|Grep|Glob`. **Re-run `jade hooks install` in a terminal after upgrading**: `jade check` row `pretool matcher` reports the gap until you do, and the live `~/.claude/settings.json` matcher is not widened by the upgrade.
+- **`jade check` sees shadowed or disabled hooks (W-47).** New row `settings shadowing` scans project `.claude/settings*.json` (cwd up to the repo root), the managed-policy file and `managed-settings.d`, and enabled plugin hooks and manifests. It fails on `disableAllHooks`, `allowManagedHooksOnly`, a JADE hook command that is wrapped, redirected or overridden, and a project `env` block that sets JADE_* variables or process-environment movers (`HOME`, `PATH`, `PYTHON*`, `XDG_*`, `LD_*`, `DYLD_*`). Reports name the file and key, never the command text. SessionStart journals a `gate_override` event once per session and prints a notice. It never blocks. Run `jade check` from the project directory you want scanned.
+- **Overlay lint in `jade check` (W-56).** Rows `overlay lint` and `overlay files` report invalid or match-everything patterns, levels lowered below a shipped critical or high rule, keys the loader never merges, non-list `environments.*` values and overlay files in the checkout the runtime does not read. Findings name the file and rule id, never the pattern or host.
+- **Code version in `policy_version` and `jade check` (W-50).** The running code version and git commit are recorded, a stale install is warned about, and the runbook has a re-install step.
+- **Integrity pass for permit and improvement rows (W-57).** `jade check` compares the wheel schema with the source schema and fails closed on corrupt permit or improvement rows. Rows in a terminal state (revoked, expired, consumed) are not validated, so `jade permit revoke` clears the check.
+
+### Known limits
+- A Grep rooted at an ancestor of the JADE home (for example `~`) is allowed, and MCP file-reader tools are not gated. See docs/05 T19 and backlog W-73.
+
 ## [0.2.2] - 2026-11-09
 
 Round H of the review fixes: the permit-approval ancestor check works for the Claude desktop app, SI-09 stops blocking harmless commands, and "never push to the default branch" no longer depends on parsing shell. The false-positive pass that was listed as unreleased after 0.2.1 ships in this release (below).

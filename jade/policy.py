@@ -28,7 +28,8 @@ WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 SHELL_TOOLS = ("Bash", "PowerShell", "Monitor")  # built-in tools that run a command line: classified like Bash
 # Every built-in tool the PreToolUse matcher names (ops.pretool_matcher adds `mcp__.*`). Agent/Task need no gate: the tool calls a subagent
 # makes run the same hook. CronCreate/CronDelete only schedule a prompt that later runs under the same hooks, so they are not gated either.
-GATED_BUILTIN = (*SHELL_TOOLS, *WRITE_TOOLS, "RemoteTrigger")
+READ_TOOLS = ("Read", "Grep", "Glob")  # gated for one thing only: the permit seal key (SI-10, W-70); every other read is ungated and classified low
+GATED_BUILTIN = (*SHELL_TOOLS, *WRITE_TOOLS, "RemoteTrigger", *READ_TOOLS)
 OLD_KEYS = {"old_string", "old_str"}  # text that is being removed is never scanned as content
 PATH_KEYS = ("source", "destination", "src", "dest", "dst", "from", "to", "old_path", "new_path", "dir", "directory", "folder")
 UNSAFE_GIT = shellnorm.UNSAFE_GIT  # marker prefix R-15 matches; carried only in the text a rule sees
@@ -75,9 +76,47 @@ def tool_subject(tool: str, tool_input: dict) -> str:
     """The text a gate decision is about: the command, or the target path(s)."""
     if tool in WRITE_TOOLS:
         return "\n".join(write_paths(tool_input))
+    if tool in READ_TOOLS:
+        paths_, globs = read_targets(tool, tool_input)
+        return "\n".join([*paths_, *globs])
     if is_mcp(tool):
         return mcp_command(tool_input) or ""
     return str(tool_input.get("command") or "")
+
+
+def read_targets(tool: str, tool_input: dict) -> tuple[list[str], list[str]]:
+    """(paths, globs) a Read/Grep/Glob call names. A Grep `pattern` is a regular expression over file content and is never a target (a search for the
+    text `permit-seal.key` in the docs reads no key); the Glob `pattern` and the Grep `glob` are path patterns."""
+    def text(k: str) -> list[str]:
+        v = tool_input.get(k) if isinstance(tool_input, dict) else None
+        return [v] if isinstance(v, str) and v.strip() and len(v) <= 4096 else []
+
+    paths_ = [x for k in WRITE_KEYS for x in text(k)]
+    globs = text("pattern") if tool == "Glob" else text("glob") if tool == "Grep" else []
+    return paths_, globs
+
+
+def seal_key_dirs() -> tuple[str, ...]:
+    """The directories that may hold the permit seal key, symlinks resolved: the JADE home in force and the default `~/.local/share/jade` (a call that
+    names the default stays covered when `JADE_HOME` points elsewhere, as SI-10 does for a command). Unlike `paths.home()` this creates nothing: a Read
+    must not change the disk."""
+    default = real(os.path.expanduser("~/.local/share/jade"))
+    return tuple(dict.fromkeys((real(os.path.expanduser(os.environ.get("JADE_HOME") or "~/.local/share/jade")), default)))
+
+
+_DATA_FIRMLINK = "/System/Volumes/Data"
+
+
+def _dir_spelling(p: str) -> str:
+    """A directory path as the default macOS volume (APFS, case-insensitive, `/System/Volumes/Data` firmlinked to `/`) treats it: realpath folds neither."""
+    if p == _DATA_FIRMLINK or p.startswith(_DATA_FIRMLINK + "/"):
+        p = p[len(_DATA_FIRMLINK):] or "/"
+    return p.casefold()
+
+
+def is_seal_key_dir(path: str) -> bool:
+    """True when `path` (already resolved with `real`) is one of the directories that may hold the seal key, under any case or firmlink spelling."""
+    return _dir_spelling(path) in {_dir_spelling(d) for d in seal_key_dirs()}
 
 
 def is_mcp(tool: str) -> bool:
@@ -406,14 +445,15 @@ def _mentions_state_home(views: list[str]) -> bool:
     return any(m and m in v for v in views for m in marks)
 
 
-def _names_by_glob(names: list[str], views: list[str]) -> bool:
+def _names_by_glob(names: list[str], views: list[str], relaxed: bool | None = None) -> bool:
     """True when a word of the command is a shell glob that would match one of `names` (a file an invariant protects) and holds at least
     `MIN_GLOB_LITERALS` literal characters: `cat ~/.local/share/jade/permit-s*`, `*seal.key`, `permit-seal.k?y`, `permit-[s]eal.key`. Brace lists are already
     expanded in one of the views. Only the last path component is matched; a directory glob (`*/permit-seal.key`) already contains the name.
 
     A command that also names JADE's state directory (`cat ~/.local/share/jade/*.key`, `cd $JADE_HOME && cat p*`) is the place the threshold is for: there a glob that
     matches the file counts whatever its length, because the directory says which `*` is meant (`jade ledger stats` is the allowed way to read that directory)."""
-    relaxed = _mentions_state_home(views)
+    if relaxed is None:
+        relaxed = _mentions_state_home(views)
     for view in views:
         for word in _GLOB_WORD_SPLIT.split(view):
             comp = word.rsplit("/", 1)[-1]
@@ -423,6 +463,72 @@ def _names_by_glob(names: list[str], views: list[str]) -> bool:
             if not relaxed and (len(literal) < MIN_GLOB_LITERALS or not re.search(r"[-.]", literal) and len(literal) < MIN_GLOB_LITERALS + 2):   # `**permit**` in prose is not a file
                 continue
             if any(fnmatch.fnmatchcase(n, comp) for n in names):
+                return True
+    return False
+
+
+def _glob_prefix(pattern: str) -> str:
+    """The leading directory part of a glob that holds no wildcard: `/a/b/*.key` -> `/a/b`, `**/x` -> ``, `a/b/c` -> `a/b`."""
+    comps = pattern.split("/")
+    idx = next((i for i, c in enumerate(comps) if re.search(r"[*?\[{]", c)), len(comps) - 1)
+    return "/".join(comps[:idx]) or ("/" if pattern.startswith("/") else "")
+
+
+def _grep_glob_keeps_the_key(names: list[str], globs: list[str]) -> bool:
+    """Whether a Grep `glob` filter leaves the key file in the search. Like ripgrep -g: a word that starts with `!` excludes what it matches, any other
+    word restricts the search to what it matches; with no filter, or only exclusions that miss the key, the key is searched."""
+    words = [w for g in globs for w in g.split()]
+    neg = [w[1:] for w in words if w.startswith("!") and len(w) > 1]
+    pos = [w for w in words if not w.startswith("!")]
+    if any(_names_by_glob(names, text_views(w), relaxed=True) for w in neg):
+        return False
+    return any(_names_by_glob(names, text_views(w), relaxed=True) for w in pos) if pos else True
+
+
+def _assess_read(tool: str, tool_input: dict, cwd: str) -> Assessment:
+    """Read, Grep and Glob are gated for the permit seal key only (SI-10, W-70): the call is blocked when it names the key file, resolves to it (a symlink or a
+    hard link), searches the directory that holds it without a filter that leaves it out, or holds a glob that would match its name (six or more literal
+    characters anywhere, any length when the search directory is the one that holds the key). Every other read, the other files of the JADE home included
+    (ledger, logs, pins), and every read of a repository's own files stays low: `jade ledger stats` is the way to read the ledger."""
+    a = Assessment(level="low", rule_id="R-READ", rationale="Read-only tool call; only the permit seal key is protected (SI-10)", blast_radius="file")
+    subject = tool_subject(tool, tool_input)
+    _seal(a, tool, subject, cwd, subject)
+    inv = next((i for i in safety()["invariants"] if i["id"] == "SI-10"), None)
+    if inv is None or not _reads_the_seal_key(inv, tool, tool_input, cwd):
+        return a
+    a.level, a.rule_id, a.rationale = "critical", "SI-10", "Read of the permit seal key"
+    a.reversibility, a.blast_radius, a.data_sensitivity = "irreversible", "service", "secret"
+    a.blocked.append("SI-10")
+    a.hold_key = a.plan_hash
+    return a
+
+
+def _reads_the_seal_key(inv: dict, tool: str, tool_input: dict, cwd: str) -> bool:
+    targets, globs = read_targets(tool, tool_input)
+    names = list(inv.get("block_globs", []))
+    rx = inv.get("_re")
+    # the file name in the text of a path or a glob (not in a Grep pattern), also behind quoting and `..` segments
+    if rx is not None and any(rx.search(v) for t in (*targets, *globs) for v in text_views(_pathfold(t))):
+        return True
+    keydirs = seal_key_dirs()
+    keys = [os.path.join(d, n) for d in keydirs for n in names[:1]]
+    roots = [normalise_path(t, cwd) for t in targets] or [normalise_path(cwd, cwd) if cwd else real(os.getcwd())]
+    for n in filter(None, roots):
+        if n in keys:
+            return True
+        for key in keys:
+            try:
+                if os.path.exists(n) and os.path.exists(key) and os.path.samefile(n, key):   # a hard link, or a symlink the resolution missed
+                    return True
+            except (OSError, ValueError):
+                pass
+    for root in filter(None, roots):
+        if tool == "Grep" and is_seal_key_dir(root) and _grep_glob_keeps_the_key(names, globs):
+            return True   # a recursive search of the directory that holds the key, with no file filter that leaves it out
+        for g in globs:
+            prefix = _glob_prefix(g)
+            where = normalise_path(prefix, root) if prefix else root   # the directory the pattern searches: the key's own directory relaxes the threshold
+            if _names_by_glob(names, text_views(g), relaxed=is_seal_key_dir(where)):
                 return True
     return False
 
@@ -627,6 +733,8 @@ def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
     """Classify one tool call. Raises on malformed policy; callers decide how to fail."""
     if tool in WRITE_TOOLS:
         a = _assess_write(tool, tool_input, cwd)
+    elif tool in READ_TOOLS:
+        return _assess_read(tool, tool_input, cwd)
     elif is_mcp(tool) or tool == "RemoteTrigger":
         a = _assess_tool(tool, tool_input, cwd)
     else:

@@ -79,7 +79,12 @@ def get(path, candidate_id: str) -> dict | None:
     db, own = _db(path)
     try:
         row = db.one("SELECT doc_json FROM improvements WHERE candidate_id=?", (candidate_id,))
-        return json.loads(row.doc_json) if row else None
+        if row is None:
+            return None
+        try:   # validated on every read (W-57): a hand-edited or migrated row is never promoted, shadowed or rolled back on trust
+            return schemas.load("improvement", row.doc_json, id_field="candidate_id", id_value=candidate_id)
+        except schemas.Unreadable as e:
+            raise PromotionBlocked(f"candidate {candidate_id} has an unreadable or invalid stored record ({e}); `jade check` lists it") from None
     finally:
         if own:
             db.close()

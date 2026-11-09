@@ -638,6 +638,154 @@ def settings_env_overrides() -> list[paths.Override]:
     return out
 
 
+# ---- settings files other than the user's (W-47) --------------------------------------------------------------------
+_MANAGED_SETTINGS = "/Library/Application Support/ClaudeCode/managed-settings.json"
+_JADE_HOOK_WORDS = re.compile(r"\bhook\s+(?:pretool|posttool|stop|session-start)\b")
+_GATE_ASSIGN = re.compile(r"\bJADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME)\s*=")
+
+
+def managed_settings_path() -> Path:
+    """The managed-policy settings file of the standard macOS location (`JADE_MANAGED_SETTINGS` moves it, for tests)."""
+    return Path(os.environ.get("JADE_MANAGED_SETTINGS") or _MANAGED_SETTINGS)
+
+
+def project_settings_files(cwd) -> list[Path]:
+    """The project `.claude/settings.json` and `settings.local.json` a session started in `cwd` can read: in `cwd` and each ancestor up to the
+    repository root (the nearest directory with `.git`; without one, `cwd` alone). The user's own two files are not listed: wiring_problems owns them."""
+    try:
+        start = Path(cwd).resolve()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return []
+    dirs: list[Path] = []
+    for d in (start, *start.parents):
+        dirs.append(d)
+        if (d / ".git").exists():
+            break
+    else:
+        dirs = [start]
+    sp = settings_path()
+    user = {os.path.realpath(sp), os.path.realpath(sp.with_name("settings.local.json"))}
+    return [f for d in dirs for name in ("settings.json", "settings.local.json") if os.path.realpath(f := d / ".claude" / name) not in user]
+
+
+def _plugin_registry() -> tuple[list[Path], list[str]]:
+    """(hook files, problems) of the plugins the user settings do not switch off (`enabledPlugins`), from the host's plugin registry: each plugin's
+    `hooks/hooks.json` and the `hooks` its `.claude-plugin/plugin.json` declares inline. A registry that exists but cannot be read or is not a JSON
+    object is a problem (JADE cannot tell what the plugins run); a missing one means no plugins."""
+    reg_path = settings_path().parent / "plugins" / "installed_plugins.json"
+    try:
+        reg = json.loads(reg_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return [], []
+    except (OSError, ValueError) as e:
+        return [], [f"{reg_path}: plugin registry cannot be read ({type(e).__name__}); JADE cannot tell whether a plugin disables or shadows the hooks"]
+    if not isinstance(reg, dict):
+        return [], [f"{reg_path}: plugin registry does not hold a JSON object; JADE cannot tell whether a plugin disables or shadows the hooks"]
+    plugins = reg.get("plugins")
+    enabled = _read_quiet(settings_path()).get("enabledPlugins")
+    out: list[Path] = []
+    for name, entries in (plugins.items() if isinstance(plugins, dict) else ()):
+        if isinstance(enabled, dict) and enabled.get(name) is False:
+            continue
+        for e in entries if isinstance(entries, list) else [entries]:
+            ip = e.get("installPath") if isinstance(e, dict) else None
+            if isinstance(ip, str) and ip:
+                out += [Path(ip) / "hooks" / "hooks.json", Path(ip) / ".claude-plugin" / "plugin.json"]
+    return out, []
+
+
+def plugin_hook_files() -> list[Path]:
+    """The hook files of each installed plugin that the user settings do not switch off (see _plugin_registry)."""
+    return _plugin_registry()[0]
+
+
+MAX_SETTINGS_BYTES = 1024 * 1024
+# Variables in a project `env` block that change which program the hooks run or which files they read; the host hands the block to every hook it starts.
+_ENV_MOVERS = re.compile(r"(?:HOME|PATH|PYTHON\w*|XDG_\w+|LD_\w+|DYLD_\w+)")
+
+
+def _safe_value(v, n: int = 40) -> str:
+    """Settings text shown in a report: a short run of path-like characters only, so a file in a cloned repository cannot put prose in front of the model."""
+    return re.sub(r"[^\w./:=@+,~-]", "?", str(v))[:n]
+
+
+def _shadow_scan(f: Path, *, managed: bool = False) -> list[str]:
+    """What one settings or plugin hook file that is not the user's does to JADE's hooks, as `<file>: <key>: <effect>` lines; [] when the file is
+    absent or harmless. A file that cannot be read or parsed is reported: JADE cannot tell what it disables, and the host may still apply it."""
+    label = f"{f} (-> {os.path.realpath(f)})" if f.is_symlink() else str(f)
+    try:
+        st = os.stat(f)
+        if not stat.S_ISREG(st.st_mode):
+            return [f"{label}: is not a regular file, so JADE does not read it; it cannot tell whether it disables or shadows the hooks"]
+        if st.st_size > MAX_SETTINGS_BYTES:
+            return [f"{label}: too large ({st.st_size} bytes) to read; JADE cannot tell whether it disables or shadows the hooks"]
+        with open(f, "rb") as fh:
+            text = fh.read(MAX_SETTINGS_BYTES + 1).decode("utf-8")
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeDecodeError) as e:
+        return [f"{label}: cannot be read ({type(e).__name__}); JADE cannot tell whether it disables or shadows the hooks"]
+    try:
+        data = json.loads(text) if text.strip() else {}
+    except ValueError as e:
+        return [f"{label}: not valid JSON ({e}); JADE cannot tell whether it disables or shadows the hooks"]
+    if not isinstance(data, dict):
+        return [f"{label}: does not hold a JSON object; JADE cannot tell whether it disables or shadows the hooks"]
+    out: list[str] = []
+    if data.get("disableAllHooks"):
+        out.append(f"{label}: disableAllHooks is true: the host runs no hook at all in a session that reads this file")
+    if managed and data.get("allowManagedHooksOnly"):
+        out.append(f"{label}: allowManagedHooksOnly is true: the host runs only managed hooks, not JADE's")
+    hooks_map = data.get("hooks")
+    for event, groups in (hooks_map.items() if isinstance(hooks_map, dict) else ()):
+        for i, g in enumerate(groups if isinstance(groups, list) else ()):
+            for j, h in enumerate(g.get("hooks") if isinstance(g, dict) and isinstance(g.get("hooks"), list) else ()):
+                cmd = h.get("command") if isinstance(h, dict) else None
+                if not isinstance(cmd, str):
+                    continue
+                parsed = parse_hook_command(cmd)
+                if parsed and parsed.ours and not _GATE_ASSIGN.search(cmd):
+                    continue   # the installed kind of entry, repeated: nothing shadowed
+                if not parsed and not (_JADE_HOOK_WORDS.search(cmd) and "jade" in cmd.lower()):
+                    continue   # not a JADE hook at all: what a foreign hook decides is not visible from here (docs/05 T19)
+                why = ("sets a gate variable for the hook it starts" if _GATE_ASSIGN.search(cmd) else
+                       "runs a different program called jade" if parsed else "wraps or redirects a JADE hook command; it is not the installed one")
+                out.append(f"{label}: hooks.{event}[{i}].hooks[{j}].command {why}")
+    env = data.get("env")
+    if isinstance(env, dict):
+        out += [f"{label}: env.{o.var}={_safe_value(o.value)}: {o.why}" for o in paths.gate_overrides({k: str(v) for k, v in env.items() if str(k).startswith("JADE_")}, source=str(f)) if o.weakens]
+        out += [f"{label}: env.{k}: changes which program the hooks run or which files they read" for k in env if isinstance(k, str) and _ENV_MOVERS.fullmatch(k)]
+    return out
+
+
+def shadow_problems(cwd=None, *, managed: bool = True, plugins: bool = True) -> list[str]:
+    """Hooks that a settings file other than the user's switches off or shadows, for a session working in `cwd` (default: this process's directory):
+    project settings (see project_settings_files), the managed-policy file and plugin hook files. Empty when none does."""
+    if cwd is None:
+        try:
+            cwd = Path.cwd()
+        except OSError:
+            cwd = None
+    out: list[str] = []
+    for f in project_settings_files(cwd) if cwd is not None else []:
+        out += _shadow_scan(f)
+    if managed:
+        m = managed_settings_path()
+        out += _shadow_scan(m, managed=True)
+        try:
+            dropins = sorted(m.with_name("managed-settings.d").glob("*.json"))   # the host merges these over managed-settings.json
+        except OSError:
+            dropins = []
+        for f in dropins:
+            out += _shadow_scan(f, managed=True)
+    if plugins:
+        files, problems = _plugin_registry()
+        out += problems
+        for f in files:
+            out += _shadow_scan(f)
+    return out
+
+
 def _gate_mode_row() -> tuple[str, bool, str]:
     effective, raw = paths.gate_mode(), os.environ.get("JADE_GATE_MODE")
     cfg = paths.config().get("gate_mode")
@@ -661,6 +809,44 @@ def _overrides_row() -> tuple[str, bool, str]:
         return ("gate overrides", False, "weakening: " + ", ".join(f"{o.var} [{o.why}]" for o in weak) + ". Unset them; `JADE_ACK_OVERRIDES=VAR,...` only silences "
                 "this row for a deliberate override in this shell, never one in the Claude settings `env` block")
     return ("gate overrides", True, shown or "none (JADE_GATE_MODE, JADE_POLICY_DIR, JADE_CONFIG, JADE_HOME all default)")
+
+
+def overlay_problems() -> list[str]:
+    """Lint of the overlays the runtime reads (`policies.loader.lint_overlay`); each finding names the file and the rule or list index, never overlay text."""
+    from policies import loader
+
+    out: list[str] = []
+    for kind in ("risk", "safety"):
+        p = paths.overlay(kind)
+        if p is not None:
+            out += [f"{p}: {f}" for f in loader.lint_overlay(kind, p, base=paths.policy_dir() / f"{kind}.yaml")]
+    return out
+
+
+def unread_overlay_files() -> list[Path]:
+    """`*.local.yaml` files in the checkout's policies/local/ that the loader does not read (it reads `<config dir>/local/{risk,safety}.local.yaml`)."""
+    def real(p: Path) -> Path:
+        try:
+            return p.resolve()
+        except (OSError, RuntimeError):
+            return p
+
+    read = {real(p) for p in (paths.overlay("risk"), paths.overlay("safety")) if p}
+    d = paths.checkout_overlay_dir()
+    return [f for f in sorted(d.glob("*.local.yaml")) if real(f) not in read] if d.is_dir() else []
+
+
+def _overlay_rows() -> list[tuple[str, bool, str]]:
+    problems = overlay_problems()
+    lint = ("overlay lint", not problems, "; ".join(problems) if problems else
+            ("risk/safety overlay in " + str(paths.config_dir() / "local") if (paths.overlay("risk") or paths.overlay("safety")) else "no overlay in " + str(paths.config_dir() / "local")))
+    unread = unread_overlay_files()
+    here = paths.config_dir() / "local"
+    files = ("overlay files", not unread,
+             "; ".join(f"{f} is not read by JADE (it reads {here / f.name}" + ("" if f.name in ("risk.local.yaml", "safety.local.yaml") else "; no policy has a file of that name") + "): "
+                       "an edit there changes nothing and policy_version does not show it" for f in unread)
+             if unread else f"no unread *.local.yaml in {paths.checkout_overlay_dir()}")
+    return [lint, files]
 
 
 def _find_jev() -> str | None:
@@ -708,6 +894,79 @@ def _maintain_row() -> tuple[str, bool, str]:
     return ("maintain job", not bad, "; ".join(bad) or ", ".join(f"{label} loaded" for _f, label, _a in jobs))
 
 
+def _version_tuple(v: str) -> tuple[int, ...] | None:
+    m = re.match(r"\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?", v or "")
+    return tuple(int(x or 0) for x in m.groups()) if m else None
+
+
+def _code_row() -> tuple[str, bool, str]:
+    """Running version and commit. Fails only when a checkout the human names (JADE_CHECKOUT or config `checkout`) has a newer pyproject version than the
+    code that is running: an installed tool is not updated by a merge (W-50, docs/08 1)."""
+    import jade
+
+    commit = paths.code_commit()
+    detail = f"jade {jade.__version__}" + (f", commit {commit} (running from a checkout)" if commit else ", installed package (no git checkout)")
+    co = paths.checkout_dir()
+    if co is None:
+        return ("code version", True, detail + "; no checkout named (set JADE_CHECKOUT or config `checkout`), so staleness is not checked")
+    try:
+        import tomllib
+
+        theirs = str(tomllib.loads((co / "pyproject.toml").read_text())["project"]["version"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return ("code version", True, detail + f"; cannot read a version from {co / 'pyproject.toml'} (informational)")
+    a, b = _version_tuple(jade.__version__), _version_tuple(theirs)
+    if a is None or b is None:
+        return ("code version", True, detail + f"; checkout {co} has version {theirs}, not comparable (informational)")
+    if a < b:
+        return ("code version", False, detail + f"; the checkout {co} is at {theirs}, newer than what runs: re-install from it with "
+                f"`uv tool install --reinstall {shlex.quote(str(co))}`")
+    head = paths.git_commit(co)
+    note = f"matches checkout {co} ({theirs})" if a == b else f"newer than checkout {co} ({theirs})"
+    if a == b and head and commit != head:
+        note += f", but its HEAD is {head} (informational: re-install to run it)"
+    return ("code version", True, f"{detail}; {note}")
+
+
+# ---- ledger integrity ------------------------------------------------------------------------------
+_ID_SHAPE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+MAX_INTEGRITY_LISTED = 10
+
+
+def integrity_problems(db: ledger.Ledger) -> tuple[int, int, list[str]]:
+    """Every permit row and improvement candidate row, validated against its schema (W-57). Returns the number of rows of each kind and one
+    line per bad row: the id and the kind of fault, never the stored content (an id that is not id-shaped is shown as `<malformed id>`)."""
+    from . import schemas
+
+    counts, bad = [], []
+    for label, name, table, col in (("permit", "permit", "permits", "permit_id"), ("improvement", "improvement", "improvements", "candidate_id")):
+        rows = db.all(f"SELECT {col} AS id, doc_json{', state' if table == 'permits' else ''} FROM {table} ORDER BY {col}")  # noqa: S608 - constants above
+        counts.append(len(rows))
+        for r in rows:
+            if table == "permits" and r.state in ("REVOKED", "EXPIRED", "CONSUMED"):
+                continue   # never usable again: nothing for the human to act on, and the remedy (revoke) leaves the row in the table
+            try:
+                schemas.load(name, r.doc_json, id_field=col, id_value=r.id)
+            except schemas.Unreadable as e:
+                bad.append(f"{label} {r.id if isinstance(r.id, str) and _ID_SHAPE.fullmatch(r.id) else '<malformed id>'} ({e})")
+    return counts[0], counts[1], bad
+
+
+def _integrity_row() -> tuple[str, bool, str]:
+    try:
+        db = ledger.open()
+        try:
+            n_permits, n_improvements, bad = integrity_problems(db)
+        finally:
+            db.close()
+    except Exception as e:  # noqa: BLE001 - a health probe reports every failure
+        return ("ledger integrity", False, repr(e))
+    if not bad:
+        return ("ledger integrity", True, f"{n_permits} permit row(s) and {n_improvements} improvement row(s) match their schemas")
+    shown = "; ".join(bad[:MAX_INTEGRITY_LISTED]) + (f"; and {len(bad) - MAX_INTEGRITY_LISTED} more" if len(bad) > MAX_INTEGRITY_LISTED else "")
+    return ("ledger integrity", False, f"{len(bad)} row(s) fail validation, never usable: {shown}. Revoke a permit with `jade permit revoke <id>`")
+
+
 # ---- health --------------------------------------------------------------------------------------
 def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
     """Wiring probe. Every row is (name, ok, detail); the CLI exits non-zero when any row fails."""
@@ -730,6 +989,9 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
                                             f"overlay {'yes' if paths.overlay('risk') else 'no'}"))
     except Exception as e:  # noqa: BLE001
         rows.append(("policies load", False, repr(e)))
+    rows.append(_integrity_row())
+    rows.append(_code_row())
+    rows += _overlay_rows()
     try:
         bad = {e["question_id"]: questions.lint(e) for e in questions.entries() if questions.lint(e)}
         rows.append(("question registry", not bad and bool(questions.entries()), f"{len(questions.entries())} entries" + (f", lint: {bad}" if bad else "")))
@@ -741,6 +1003,13 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
     if not missing:
         problems = wiring_problems()
         rows.append(("hook wiring", not problems, "binary runs, hooks enabled, a synthetic event is decided" if not problems else "; ".join(problems)))
+    shadow = shadow_problems()
+    try:
+        scanned = str(Path.cwd())
+    except OSError:
+        scanned = "(no current directory)"
+    rows.append(("settings shadowing", not shadow, f"no managed or plugin settings file, and no project settings file under {scanned} up to its repo root, disables or shadows the hooks "
+                 "(run `jade check` from the project you work in to scan that one)" if not shadow else "; ".join(shadow)))
     gaps = pretool_matcher_gaps()
     if gaps is not None:
         rows.append(("pretool matcher", not gaps, "covers every gated tool" if not gaps else f"does not cover {', '.join(gaps)}: re-run `jade hooks install` in a terminal"))

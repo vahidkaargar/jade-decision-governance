@@ -158,8 +158,12 @@ def _permit(a) -> int:
         return 0
     p = permits.get(db, a.permit_id)
     if p is None:
-        print(f"jade: unknown permit {a.permit_id}", file=sys.stderr)
-        return 1
+        if db.one("SELECT 1 AS x FROM permits WHERE permit_id=?", (a.permit_id,)) is None:
+            print(f"jade: unknown permit {a.permit_id}", file=sys.stderr)
+            return 1
+        if a.action != "revoke":   # a stored record that cannot be read is never shown, approved or used, but it can be revoked
+            print(f"jade: permit {a.permit_id} has an unreadable or invalid stored record (`jade check` lists it); revoke it with `jade permit revoke {a.permit_id}`", file=sys.stderr)
+            return 1
     if a.action == "show":
         print(json.dumps({k: v for k, v in vars(p).items() if k != "nonce"}, indent=1, default=str))
         return 0
@@ -398,10 +402,15 @@ def _improve(a) -> int:
     if a.action == "mine":
         print(json.dumps(improve.mine(db, a.days), indent=1))
     elif a.action == "list":
-        for r in db.all("SELECT candidate_id, decision, updated_at, json_extract(doc_json,'$.target_component') AS t, substr(json_extract(doc_json,'$.hypothesis'),1,90) AS h FROM improvements ORDER BY updated_at DESC"):
-            print(f"{r.candidate_id}  {r.decision:11} {r.t:22} {r.h}")
+        for r in db.all("SELECT candidate_id, decision, updated_at, CASE WHEN json_valid(doc_json) THEN json_extract(doc_json,'$.target_component') END AS t, "
+                        "CASE WHEN json_valid(doc_json) THEN substr(json_extract(doc_json,'$.hypothesis'),1,90) END AS h FROM improvements ORDER BY updated_at DESC"):
+            print(f"{r.candidate_id}  {r.decision or '?':11} {r.t or '(unreadable record)':22} {r.h or ''}")
     elif a.action == "show":
-        print(json.dumps(improve.get(db, a.candidate_id), indent=1))
+        try:
+            print(json.dumps(improve.get(db, a.candidate_id), indent=1))
+        except improve.PromotionBlocked as e:
+            print(f"jade: {e}", file=sys.stderr)
+            return 1
     elif a.action == "shadow":
         try:
             print(json.dumps(improve.shadow(db, a.candidate_id, a.question_id, a.version, limit=a.limit), indent=1))
