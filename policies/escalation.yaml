@@ -3,7 +3,7 @@
 schema_version: 1.0.0
 defaults:
   noul: { accept: 0.70, reject: 0.30 }
-  choice: { accept_top_p: 0.70, require_companion_presence: true }
+  choice: { accept_top_p: 0.70 }       # a choice whose top option is its no_match_option is ABSTAIN whatever its probability
   score: { gates: false }
   min_labeled_for_adjustment: 200
   ci: wilson_95
@@ -27,6 +27,7 @@ families:
     abstain_to: human
   evidence_quality:
     score: { gates: false }
+    noul: { accept: 0.50, reject: 0.20 }   # companion `evidence_is_raw`: only a clear "this is a summary" counts against
   candidate_fit:
     noul: { accept: 0.70, reject: 0.30 }
     abstain_to: fast

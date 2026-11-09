@@ -1,0 +1,701 @@
+[
+ {
+  "kind": "openai",
+  "secret": [
+   "sk-Ab3dE6g",
+   "H9jK2mN5pQ8sT1vW4xZ7"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "openai_quoted",
+  "secret": [
+   "sk-Ab3dE6g",
+   "H9jK2mN5pQ8sT1vW4xZ7"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "openrouter",
+  "secret": [
+   "sk-or-v1-0123456789",
+   "abcdef0123456789abcdef0123456789abcdef"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "openrouter_quoted",
+  "secret": [
+   "sk-or-v1-0123456789",
+   "abcdef0123456789abcdef0123456789abcdef"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "github_pat",
+  "secret": [
+   "ghp_A1b2C3d4E",
+   "5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "github_pat_quoted",
+  "secret": [
+   "ghp_A1b2C3d4E",
+   "5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "github_oauth",
+  "secret": [
+   "gho_A1b2C3d4E",
+   "5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "github_oauth_quoted",
+  "secret": [
+   "gho_A1b2C3d4E",
+   "5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "github_fine",
+  "secret": [
+   "github_pat_11ABCDEFG0abcde",
+   "fghijkl_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghij"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "github_fine_quoted",
+  "secret": [
+   "github_pat_11ABCDEFG0abcde",
+   "fghijkl_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghij"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "gitlab",
+  "secret": [
+   "glpat-x7Y",
+   "z9Ab3Cd5Ef7Gh9Ij1K"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "gitlab_quoted",
+  "secret": [
+   "glpat-x7Y",
+   "z9Ab3Cd5Ef7Gh9Ij1K"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "aws",
+  "secret": [
+   "AKIAIO",
+   "SFODNN7EXAMPLE"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "aws_quoted",
+  "secret": [
+   "AKIAIO",
+   "SFODNN7EXAMPLE"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "slack",
+  "secret": [
+   "xoxb-12345",
+   "6789012-abcdefghijkl"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "slack_quoted",
+  "secret": [
+   "xoxb-12345",
+   "6789012-abcdefghijkl"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "google",
+  "secret": [
+   "AIzaSyA1b2C3d",
+   "4E5f6G7h8I9j0K1l2M3n4O5p6Q"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "google_quoted",
+  "secret": [
+   "AIzaSyA1b2C3d",
+   "4E5f6G7h8I9j0K1l2M3n4O5p6Q"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "stripe_live",
+  "secret": [
+   "sk_live_4e",
+   "C39HqLyjWDarjtT1zdp7dc"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "stripe_live_quoted",
+  "secret": [
+   "sk_live_4e",
+   "C39HqLyjWDarjtT1zdp7dc"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "npm",
+  "secret": [
+   "npm_abcdefghi",
+   "jklmnopqrstuvwxyz0123456789"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "npm_quoted",
+  "secret": [
+   "npm_abcdefghi",
+   "jklmnopqrstuvwxyz0123456789"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "hf",
+  "secret": [
+   "hf_abcdefghij",
+   "klmnopqrstuvwxyzABCDEF0123"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "hf_quoted",
+  "secret": [
+   "hf_abcdefghij",
+   "klmnopqrstuvwxyzABCDEF0123"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "jwt",
+  "secret": [
+   "eyJhbGciOiJIUzI1NiJ9.eyJzd",
+   "WIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "jwt_quoted",
+  "secret": [
+   "eyJhbGciOiJIUzI1NiJ9.eyJzd",
+   "WIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "bot",
+  "secret": [
+   "123456789:AAHd",
+   "qTcvCH1vGWJxfSeofSAs0K5PALDsaw"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "bot_quoted",
+  "secret": [
+   "123456789:AAHd",
+   "qTcvCH1vGWJxfSeofSAs0K5PALDsaw"
+  ],
+  "template": "export KEY=\"@@\""
+ },
+ {
+  "kind": "auth_header",
+  "secret": [
+   "Zm9vOmJh",
+   "cjEyMzQ1Njc4OQ=="
+  ],
+  "template": "Authorization: Basic @@"
+ },
+ {
+  "kind": "bearer",
+  "secret": [
+   "abcdEFGH",
+   "1234ijklMNOP5678"
+  ],
+  "template": "curl -H 'Authorization: Bearer @@' https://x"
+ },
+ {
+  "kind": "env_password",
+  "secret": [
+   "hunt",
+   "er2hunter2"
+  ],
+  "template": "DB_PASSWORD=@@"
+ },
+ {
+  "kind": "env_secret_yaml",
+  "secret": [
+   "s3cr3",
+   "t-value-123"
+  ],
+  "template": "client_secret: @@"
+ },
+ {
+  "kind": "api_key_assign",
+  "secret": [
+   "k_9f",
+   "8e7d6c5b4a"
+  ],
+  "template": "API_KEY = @@"
+ },
+ {
+  "kind": "url_password",
+  "secret": [
+   "pa5",
+   "5w0rdXYZ"
+  ],
+  "template": "postgres://admin:@@@db.internal:5432/app"
+ },
+ {
+  "kind": "pem",
+  "secret": [
+   "MIIEvQIBAD",
+   "ANBgkqhkiG9w0BAQEFAASC"
+  ],
+  "template": "-----BEGIN PRIVATE KEY-----\n@@\n-----END PRIVATE KEY-----"
+ },
+ {
+  "kind": "email",
+  "secret": [
+   "someone.",
+   "else@example.org"
+  ],
+  "template": "contact @@ about it"
+ },
+ {
+  "kind": "passphrase",
+  "secret": [
+   "correct",
+   "-horse-battery"
+  ],
+  "template": "PASSPHRASE=@@"
+ },
+ {
+  "kind": "access_key_env",
+  "secret": [
+   "wJalrXUtnF",
+   "EMI-K7MDENG-bPxRfiCY"
+  ],
+  "template": "AWS_SECRET_ACCESS_KEY=@@"
+ },
+ {
+  "kind": "token_json",
+  "secret": [
+   "t0k3n-",
+   "abcdef-123456"
+  ],
+  "template": "{\"ACCESS_TOKEN\": \"@@\"}"
+ },
+ {
+  "kind": "credentials_assign",
+  "secret": [
+   "cr3d",
+   "-9999-zzzz"
+  ],
+  "template": "CREDENTIALS: @@"
+ },
+ {
+  "kind": "multi_in_one_line",
+  "secret": [
+   "sk-Qq1Ww2E",
+   "e3Rr4Tt5Yy6Uu7Ii8Oo9"
+  ],
+  "template": "a=1 b=@@ c=3"
+ },
+ {
+  "kind": "bearer_lower",
+  "secret": [
+   "zzzzYY",
+   "YYxxxxWWWW1111"
+  ],
+  "template": "authorization: bearer @@"
+ },
+ {
+  "kind": "pypi",
+  "secret": [
+   "pypi-AgEIcHlwaS5vcmcCJGFi",
+   "Y2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIz"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "slack_webhook",
+  "secret": [
+   "https://hooks.slack.com/",
+   "services/T01234ABC/B01234ABC/",
+   "abcdefghijklmnopqrstuvwx"
+  ],
+  "template": "curl -X POST @@ -d hi"
+ },
+ {
+  "kind": "discord_webhook",
+  "secret": [
+   "https://discord.com/",
+   "api/webhooks/123456789012345678/",
+   "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKL"
+  ],
+  "template": "curl -X POST @@ -d hi"
+ },
+ {
+  "kind": "slack_xapp",
+  "secret": [
+   "xapp-",
+   "1-A01234567-",
+   "1234567890123-abcdef0123456789abcdef0123456789"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "azure_account_key",
+  "secret": [
+   "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ01",
+   "23456789abcdefghijklmnopqrs=="
+  ],
+  "template": "DefaultEndpointsProtocol=https;AccountName=foo;AccountKey=@@;EndpointSuffix=core.windows.net"
+ },
+ {
+  "kind": "azure_sas_sig",
+  "secret": [
+   "abcdefghijklmnopqrstuvwxyz0123",
+   "456789ABCDEF%3D"
+  ],
+  "template": "https://acct.blob.core.windows.net/c/b?sv=2020-08-04&sig=@@&se=2030"
+ },
+ {
+  "kind": "x_api_key_header",
+  "secret": [
+   "abcdef0123456789",
+   "abcdef0123456789"
+  ],
+  "template": "x-api-key: @@"
+ },
+ {
+  "kind": "api_key_hyphen_header",
+  "secret": [
+   "abcdef0123456789",
+   "abcdef0123456789"
+  ],
+  "template": "api-key: @@"
+ },
+ {
+  "kind": "x_api_key_curl",
+  "secret": [
+   "abcdef0123456789",
+   "abcdef0123456789"
+  ],
+  "template": "curl -H 'X-Api-Key: @@' https://x.example.org"
+ },
+ {
+  "kind": "gcp_oauth",
+  "secret": [
+   "ya29.a0AfH6SMBabcdefghij",
+   "klmnopqrstuvwxyz0123456789ABCDEFGHIJ"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "gcp_client_secret",
+  "secret": [
+   "GOCSPX-abcdefghij",
+   "klmnopqrstuvwxyz01"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "stripe_webhook",
+  "secret": [
+   "whsec_abcdefghijklmnop",
+   "qrstuvwxyz012345"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "stripe_publishable",
+  "secret": [
+   "pk_live_abcdefghij",
+   "klmnopqrstuvwxyz"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "twilio_sk",
+  "secret": [
+   "SK0123456789abcdef",
+   "0123456789abcdef"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "sendgrid",
+  "secret": [
+   "SG.abcdefghijklmnop",
+   "qrstuv.abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
+  ],
+  "template": "token is @@ in the log"
+ },
+ {
+  "kind": "db_pass",
+  "secret": [
+   "hunter2",
+   "hunter2"
+  ],
+  "template": "DB_PASS=@@"
+ },
+ {
+  "kind": "pass_lower",
+  "secret": [
+   "hunter2",
+   "hunter2"
+  ],
+  "template": "pass=@@"
+ },
+ {
+  "kind": "pwd_assign",
+  "secret": [
+   "hunter2",
+   "hunter2"
+  ],
+  "template": "pwd=@@"
+ },
+ {
+  "kind": "auth_key",
+  "secret": [
+   "abcdef",
+   "0123456789abcdef"
+  ],
+  "template": "AUTH_KEY=@@"
+ },
+ {
+  "kind": "numeric_password",
+  "secret": [
+   "1234",
+   "5678"
+  ],
+  "template": "password=@@"
+ },
+ {
+  "kind": "set_cookie",
+  "secret": [
+   "abcdef0123456789",
+   "abcdef0123456789"
+  ],
+  "template": "Set-Cookie: sid=@@; HttpOnly"
+ },
+ {
+  "kind": "cookie_header",
+  "secret": [
+   "abcdef0123456789",
+   "abcdef0123456789"
+  ],
+  "template": "Cookie: session=@@; theme=dark"
+ },
+ {
+  "kind": "curl_user_pass",
+  "secret": [
+   "S3cr3t",
+   "PWxyz"
+  ],
+  "template": "curl -u admin:@@ https://x.example.org/api"
+ },
+ {
+  "kind": "mysql_p_flag",
+  "secret": [
+   "S3cr3t",
+   "PWxyz"
+  ],
+  "template": "mysql -u root -p@@ prod"
+ },
+ {
+  "kind": "password_flag",
+  "secret": [
+   "S3cr3t",
+   "PWxyz"
+  ],
+  "template": "tool --password @@ --other"
+ },
+ {
+  "kind": "json_escaped_password",
+  "secret": [
+   "hunter2",
+   "hunter2"
+  ],
+  "template": "{\\\"password\\\": \\\"@@\\\"}"
+ },
+ {
+  "kind": "bracket_password",
+  "secret": [
+   "hunter2",
+   "hunter2"
+  ],
+  "template": "PASSWORD=[@@]"
+ },
+ {
+  "kind": "redis_empty_user",
+  "secret": [
+   "S3cr3t",
+   "PWxyz"
+  ],
+  "template": "redis://:@@@redis:6379/0"
+ },
+ {
+  "kind": "redis_database_url",
+  "secret": [
+   "S3cr3t",
+   "PWxyz"
+  ],
+  "template": "DATABASE_URL=redis://:@@@localhost:6379"
+ },
+ {
+  "kind": "url_password_with_at",
+  "secret": [
+   "pa@ss",
+   "1234"
+  ],
+  "template": "postgres://user:@@@db/x"
+ },
+ {
+  "kind": "url_password_with_slash",
+  "secret": [
+   "pa/ss",
+   "1234"
+  ],
+  "template": "postgres://user:@@@db/x"
+ },
+ {
+  "kind": "aws_secret_access_key",
+  "secret": [
+   "wJalrXUtnFEMI/K7MDENG",
+   "/bPxRfiCYEXAMPLEKEY"
+  ],
+  "template": "AWS_SECRET_ACCESS_KEY=@@"
+ },
+ {
+  "kind": "url_query_access_token",
+  "secret": [
+   "abcdef0123456789",
+   "abcdef0123456789"
+  ],
+  "template": "https://api.x.example.org/v1?access_token=@@&x=1"
+ },
+ {
+  "kind": "npmrc_auth_token",
+  "secret": [
+   "abcdef01-2345-6789",
+   "-abcd-ef0123456789"
+  ],
+  "template": "//registry.npmjs.org/:_authToken=@@"
+ },
+ {
+  "kind": "proxy_authorization",
+  "secret": [
+   "dXNlcjpwYXNz",
+   "d29yZDEyMw=="
+  ],
+  "template": "Proxy-Authorization: Basic @@"
+ },
+ {
+  "kind": "keychain_output",
+  "secret": [
+   "S3cr3tFrom",
+   "Keychain99"
+  ],
+  "template": "$ security find-generic-password -s FOO -w\n@@"
+ },
+ {
+  "kind": "keychain_output_trailing_flags",
+  "secret": [
+   "S3cr3tFrom",
+   "Keychain99"
+  ],
+  "template": "% security find-generic-password -a me -s FOO -w -g\n@@\nnext line"
+ },
+ {
+  "kind": "keychain_output_after_blank",
+  "secret": [
+   "S3cr3tFrom",
+   "Keychain99"
+  ],
+  "template": "security find-internet-password -s FOO -w\n\n@@"
+ },
+ {
+  "kind": "keychain_add_value",
+  "secret": [
+   "S3cr3tFrom",
+   "Keychain99"
+  ],
+  "template": "security add-generic-password -a me -s FOO -w @@ -U"
+ },
+ {
+  "kind": "glued_github",
+  "secret": [
+   "xghp_A1b2C3d4E5f6G7h8",
+   "I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "saw @@ in the log"
+ },
+ {
+  "kind": "glued_openai",
+  "secret": [
+   "xsk-A1b2C3d4E5f6G7h8",
+   "I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "saw @@ in the log"
+ },
+ {
+  "kind": "glued_anthropic",
+  "secret": [
+   "xsk-ant-api03-A1b2C3d4E5f6G7h8",
+   "I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "saw @@ in the log"
+ },
+ {
+  "kind": "glued_slack",
+  "secret": [
+   "xxoxb-A1b2C3d4E5f6G7h8",
+   "I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "saw @@ in the log"
+ },
+ {
+  "kind": "glued_digits",
+  "secret": [
+   "123ghp_A1b2C3d4E5f6G7h8",
+   "I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "saw @@ in the log"
+ },
+ {
+  "kind": "glued_underscore",
+  "secret": [
+   "_ghp_A1b2C3d4E5f6G7h8",
+   "I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "saw @@ in the log"
+ }
+]

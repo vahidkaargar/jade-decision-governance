@@ -10,11 +10,19 @@ offline_replay:
     false_accept_rate: "<= baseline (upper 95% CI of challenger <= point estimate of champion)"
     brier: "<= baseline + 0.01"
     abstain_coverage: ">= baseline - 0.05"
-  multiple_testing: holm
+  margins: { brier: 0.01, abstain_coverage: 0.05 }   # the numbers pass_if states; code reads these
+  multiple_testing: holm            # false-accept non-inferiority per comparison (overall and each subgroup), Holm step-down at alpha
+  alpha: 0.05
   subgroups: [language:fa, language:en, risk:high+]
+  subgroup_min_samples: 30           # a subgroup with fewer labeled rows is not compared
+protected_test:
+  min_samples: 30                    # labeled rows in the protected split for the group or question; fewer cannot show non-inferiority
+  # non-inferior: false-accept rate <= champion, brier <= champion + margin, coverage >= champion - margin (margins above)
 shadow:
   duration_days: 7
   min_live_samples: 100
+  max_error_share: 0.05                   # provider errors / (answers + errors) in the shadow run
+  latency_budget_ratio: 1.25              # challenger p95 latency <= champion p95 x ratio
   hot_path_latency_increase_ms_max: 0     # shadow runs async; any hot-path increase fails
 canary:
   requires_human_opt_in: true

@@ -1,0 +1,62 @@
+{
+  "schema_version": "1.0.0",
+  "question_id": "q.root_cause.any_fits",
+  "version": 1,
+  "primitive": "noul",
+  "task_family": "candidate_fit",
+  "objective": "Decide whether any listed candidate cause is consistent with the observations",
+  "input_schema": {
+    "type": "object",
+    "required": [
+      "observations",
+      "candidates"
+    ],
+    "properties": {
+      "observations": {
+        "type": "string"
+      },
+      "candidates": {
+        "type": "string"
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "noul"
+    ],
+    "properties": {
+      "noul": {
+        "type": "number"
+      }
+    }
+  },
+  "required_evidence": [
+    "raw tool output, diff or document excerpt; not a paraphrase"
+  ],
+  "template": {
+    "instructions": "Is at least one entry in `candidates` consistent with everything in `observations`?",
+    "criteria": {
+      "true": "At least one candidate explains the observations without contradiction.",
+      "false": "Every candidate is contradicted by, or does not explain, the observations."
+    }
+  },
+  "prompt_or_template_version": "2026-11-09.1",
+  "model_version": {
+    "request_id": "typesafe/jev-1.14",
+    "accepted_resolved": [
+      "typesafe/jev-1.14-20261014"
+    ]
+  },
+  "calibration_group": "candidate_fit/v1/jev-1.14-20261014",
+  "threshold_policy": {
+    "metric": "noul_p",
+    "accept": 0.7,
+    "reject": 0.3
+  },
+  "abstention_behavior": "return_abstain",
+  "fallback": "fast",
+  "dependencies": [],
+  "batch_eligibility": true,
+  "no_match_option": null
+}

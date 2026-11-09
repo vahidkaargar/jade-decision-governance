@@ -1,0 +1,65 @@
+{
+  "schema_version": "1.0.0",
+  "question_id": "q.strategy.best_option",
+  "version": 1,
+  "primitive": "choice",
+  "task_family": "strategy_choice",
+  "objective": "Pick the option that best satisfies the stated goal and constraints",
+  "input_schema": {
+    "type": "object",
+    "required": [
+      "goal"
+    ],
+    "properties": {
+      "goal": {
+        "type": "string"
+      },
+      "constraints": {
+        "type": "string"
+      },
+      "context": {
+        "type": "string"
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "choice",
+      "probabilities"
+    ],
+    "properties": {
+      "choice": {
+        "type": "string"
+      },
+      "probabilities": {
+        "type": "object"
+      }
+    }
+  },
+  "required_evidence": [
+    "raw tool output, diff or document excerpt; not a paraphrase"
+  ],
+  "template": {
+    "instructions": "Which option best achieves `goal` under `constraints`, given `context`?"
+  },
+  "prompt_or_template_version": "2026-11-09.1",
+  "model_version": {
+    "request_id": "typesafe/jev-1.14",
+    "accepted_resolved": [
+      "typesafe/jev-1.14-20261014"
+    ]
+  },
+  "calibration_group": "strategy_choice/v1/jev-1.14-20261014",
+  "threshold_policy": {
+    "metric": "choice_top_p",
+    "accept": 0.55,
+    "reject": 0.0
+  },
+  "abstention_behavior": "return_abstain",
+  "fallback": "deep",
+  "dependencies": [],
+  "batch_eligibility": true,
+  "no_match_option": "none_of_these",
+  "min_options": 2
+}

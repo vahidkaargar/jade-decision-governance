@@ -1,6 +1,6 @@
 # 01 — Architecture Decision Records
 
-Format: Context → Decision → Alternatives rejected → Consequences. Status of all: **proposed** (awaiting human review of this design; see BACKLOG W-01).
+Format: Context → Decision → Alternatives rejected → Consequences. Status of all: **accepted** by the maintainer on 2026-11-09 (Q1, `BACKLOG.md`) and **implemented** in `jade` 0.2.x. Amendments written after the review carry their own heading (ADR-05, ADR-09). Where an ADR describes a mechanism that is designed but not built, the text says so and names the work item.
 
 ## ADR-01 Deployment topology: one Python package, SQLite, hooks, launchd
 
@@ -26,7 +26,9 @@ Format: Context → Decision → Alternatives rejected → Consequences. Status 
 
 **Context.** 907 calls in 14 days use the `jev verify|choice ...` syntax taught by CLAUDE.md; agents' memories and the user's muscle memory depend on it.
 
-**Decision.** `~/.local/bin/jev` becomes a thin wrapper that execs `jade ask --compat ...` with identical flags and output format, plus new exit codes (ADR-05). All journaling and policy live in `jade`. CLAUDE.md is updated once, at Phase 2, to describe the exit codes and the state-file flag.
+**Decision.** `~/.local/bin/jev` becomes a thin wrapper that runs `jade.compat` (`jade/compat.py`), which calls the same parser and code as `jade ask`, with identical flags and output format, plus new exit codes (ADR-05). All journaling and policy live in `jade`. CLAUDE.md is updated once, at Phase 2, to describe the exit codes and the state-file flag.
+
+**Intentional divergences from the original script** (tested in `tests/acceptance/test_judging_and_improvement.py`): `JEV_MODEL` is honoured (precedence `--model`, `JEV_MODEL`, `config.json`, built-in default). `noul`, `choice` and `score` send the same payload as the original. `verify` sends the registry question `q.verify_claim.supported_by_evidence` (state keys `claim`, `evidence`, `evidence_source` instead of `context`; richer true/false criteria) and, unless `--no-companion`, an `evidence_is_raw` question in the same request; a `verify` with no evidence exits 6 because the registry marks evidence as required (the original sent it). A `noul` whose true and false criteria are equal or blank exits 6. Output line, flags and `--raw`/`--dry-run` are unchanged; the exit codes are the new ones (ADR-05).
 
 **Rejected.** Renaming the command (breaks every running instruction); leaving `jev` unjournaled (gap G1 stays open).
 
@@ -42,13 +44,17 @@ Format: Context → Decision → Alternatives rejected → Consequences. Status 
 
 **Decision.**
 1. `jade ask` exit codes: `0` ACCEPT band, `3` ABSTAIN band, `4` REJECT band, `5` PROVIDER_UNAVAILABLE, `6` INVALID_QUESTION (fails closed: 5 and 6 are never "yes").
-2. `jade permit issue --action <canonical> --target <scope> --plan-hash <h> --ttl 30m` creates a permit in state `PENDING` for `risk >= high`, `ISSUED` for lower risk when policy allows. A `PENDING` permit becomes `ISSUED` only by `jade permit approve <id>` run from an interactive TTY (`isatty(0)` and `CLAUDE_CODE` env absent), i.e., the human types it in Terminal. The agent cannot run it.
+2. A permit for `risk >= high` is created `PENDING` (by the gate when it blocks a call, or by `jade permit request --command <cmd>`; the library call `permits.issue(action, plan_hash, ttl_s=1800)` is for lower risk only and refuses high and critical). A `PENDING` permit becomes `ISSUED` only by `jade permit approve <id>` run by a human at an interactive terminal: stdin and stdout are a tty, no agent environment variable is set and no ancestor process is an agent (docs/05 T2 lists the check and its known hole). The agent cannot run it, and the human types a code taken from the plan hash instead of passing `-y`.
 3. `PreToolUse(Bash|Write|Edit)` hook `jade hook pretool` classifies the command with `policies/risk.yaml`. For `risk >= high` it requires an `ISSUED`, unexpired, unused permit whose `plan_hash` matches the canonicalised command; otherwise exit 2 with the reason. Permits are single-use (nonce consumed in the same transaction).
 4. Immutable guardrails in `policies/safety.yaml` (e.g., never bind a public address, never push to the default branch) block regardless of permits. Machine-specific hosts, paths, deploy scripts and retired services live in gitignored overlays `policies/local/*.yaml` (loader: `policies/loader.py`), so the shipped policies stay generic and public.
 
 **Rejected.** Prompt-only control (the current state; measured failure 30%). Making Jev P part of the permit decision (plan invariant: model output never authorizes). Auto-approval by a second model.
 
-**Consequences.** Low-risk work is unaffected (no permit needed). High-risk commands cost the human one terminal command; Claude Code's own permission prompt remains a second, independent gate. TOCTOU: the hook recomputes `plan_hash` from the actual command at call time.
+**Consequences.** Low-risk work is unaffected (no permit needed). High-risk commands cost the human one terminal command; Claude Code's own permission prompt is a second, independent gate only when the host asks; in `bypassPermissions`, `auto`, headless and unattended-subagent runs JADE's gate is the only gate (docs/05 T18). TOCTOU: the hook recomputes `plan_hash` from the actual command at call time.
+
+**Amendment 2026-11-09 (implementation).** The PreToolUse matcher is `Bash|PowerShell|Monitor|Write|Edit|MultiEdit|NotebookEdit|RemoteTrigger|mcp__.*` (`policy.GATED_BUILTIN`; review cluster A2). MCP tools are classified by name (`mcp_tools` in `policies/risk.yaml`); an MCP tool that carries a shell command (`command`, `cmd`, `script`) is classified by that command like Bash. Classification works per simple command: read-only commands (`read_only` list), quoted prose and heredoc bodies never match rules, which removed false positives such as `grep pfctl docs/`. Every command is first canonicalised by `jade/shellnorm.py` (git global options, escapes, quoting, command substitutions and shell-fed heredocs, pipes and here-strings), so a rule or invariant sees one spelling per operation (review cluster A1). A `jade gate advisory` mode records `would_block` events without blocking, for a soak before enforcement. `jade hooks install`, `jade gate`, `jade claude-md apply` and `jade permit approve` refuse to run for an agent session (SI-09).
+
+**Amendment 2026-11-09 (review cluster B).** The permit is checked at use, not only looked up: the hook compares the permit's risk level, human principal and `tty:` reference with a fresh assessment of the command, and policy version, preconditions, session and agent, and the decision's state (docs/05 T6, T20). `plan_hash` hashes the command text as written and the resolved cwd. Approval needs a tty, no agent environment and no agent among the ancestor processes, shows the whole command, and takes a typed code instead of `-y`; the heuristic's known hole (own pty, clean environment, detached process) is documented in docs/05 T2 and tracked as W-38.
 
 ## ADR-06 Risk classification by precedence rules, not a blended score
 
@@ -64,13 +70,13 @@ Format: Context → Decision → Alternatives rejected → Consequences. Status 
 
 ## ADR-08 Storage: SQLite, append-only ledger tables, policy in git
 
-**Decision.** Tables: `decisions`, `jev_calls`, `permits`, `outcomes`, `work_items`, `improvements`, `events` (every state transition, with `prev_state`, `next_state`, `guard`, `actor`, `ts`). Updates to a decision write a new `events` row; the `decisions` row carries only the current state. Deletion is not supported by the CLI. Policy YAML lives in this repo; the ledger stores `policy_version` = git short SHA of the policies dir at call time.
+**Decision.** Tables: `decisions`, `jev_calls`, `permits`, `outcomes`, `work_items`, `improvements`, `events` (every state transition, with `prev_state`, `next_state`, `guard`, `actor`, `ts`). Updates to a decision write a new `events` row; the `decisions` row carries only the current state. Rows are never deleted: the only removal is `jade ledger purge`, which clears stored project text after the retention window and keeps every metric (docs/05 T15). Policy YAML lives in this repo; the ledger stores `policy_version` = the first 12 hex characters of a SHA-256 over the name and bytes of every `policies/*.yaml` file plus the machine-local `risk` and `safety` overlays at call time (not a git SHA, so it also changes for an uncommitted edit; it does not include the code version, W-50).
 
 **Rejected.** JSONL files (no transactions for permit nonce consumption); tamper-evident hash chains (operator is trusted; threat is injection).
 
 ## ADR-09 Work items: JSON Lines validated by schema, rendered to BACKLOG.md
 
-**Decision.** `work-items.jsonl` is the source; `BACKLOG.md` is generated (Phase 1 CLI `jade work render`); until then both are hand-maintained and the test suite checks the JSONL against `schemas/work-item.schema.json`. Priority aging: P2→P1 after 14 days untouched, P3→P2 after 30 days. Resumption: `SessionStart` hook prints items whose `retry_or_revisit_trigger` is `on_session_start` or whose dependency closed.
+**Decision.** `work-items.jsonl` is the source; `BACKLOG.md` is generated by `jade work render` (also run by `jade work set` and `jade work sync`), which rewrites only the table below the `## Items` heading and keeps the hand-written text above it (`jade/work.py`, `tests/acceptance/test_work_items.py`). Every load and save validates the items against `schemas/work-item.schema.json`. Priority aging: P2→P1 after 14 days untouched, P3→P2 after 30 days, run on each `work` command; an item `in_progress` with no update for more than a day goes back to `open`. Resumption: the `SessionStart` hook prints open items whose `retry_or_revisit_trigger` is `on_session_start` or a date that has come. Not built: dependency-closed resumption and title de-duplication (W-51).
 
 **Rejected.** GitLab issues for personal tooling (adds auth and network); task-observer's observation log (it is for skill findings, not work).
 

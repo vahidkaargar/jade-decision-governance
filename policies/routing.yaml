@@ -13,7 +13,7 @@ preflight:
     check: evidence_present
     description: "At least one evidence_ref resolves to raw tool output, diff, or document, not a paraphrase"
     on_false: NEEDS_EVIDENCE
-  - id: PF-04
+  - id: PF-04                    # not implemented in jade/route.py: duplicates are answered by the ledger dedup inside `jade ask` (W-53)
     check: duplicate_question
     description: "Same question_id + state_hash already answered in this session"
     on_true: REUSE               # return cached answer; flag repeat_without_new_evidence
@@ -25,7 +25,7 @@ preflight:
     check: primitive_suitable
     description: "Question is atomic, bounded, answerable from state; multi-step synthesis is not"
     on_false: DEEP
-  - id: PF-07
+  - id: PF-07                    # not implemented in jade/route.py (W-53)
     check: context_fresh
     description: "context_freshness.observed_at + ttl_s > now"
     on_false: NEEDS_EVIDENCE
@@ -41,8 +41,8 @@ routes:
   JEV:
     description: "One batched Decisions API request with all independent registry questions for the task family"
     requires: ["question_id", "state_file_or_stdin"]
-    max_questions_per_request: 8
-    max_parallel_requests: 4
+    max_questions_per_request: 8   # declared, not read (W-53)
+    max_parallel_requests: 4       # declared, not read (W-53)
     deadline_ms: 20000
   DEEP:
     description: "Reasoning model decomposes; may emit atomic JEV questions (HYBRID pattern); verdict needs evidence_refs"
@@ -60,7 +60,7 @@ dedup:
   scope: session
   ttl_s: 3600
   repeat_without_new_evidence: flag_and_return_cached
-cache:
+cache:                       # RESERVED: read by no code (W-53). The only reuse is the session dedup above (ttl_s 3600, ledger.DEDUP_TTL_S)
   eligible_families: ["evidence_quality", "candidate_fit", "routing"]
   never_cached: ["authorization", "permit", "verify_claim with environment=production"]
   ttl_s: 1800

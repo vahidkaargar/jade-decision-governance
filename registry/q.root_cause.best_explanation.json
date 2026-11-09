@@ -1,0 +1,61 @@
+{
+  "schema_version": "1.0.0",
+  "question_id": "q.root_cause.best_explanation",
+  "version": 1,
+  "primitive": "choice",
+  "task_family": "root_cause",
+  "objective": "Pick the candidate cause that best explains the observations",
+  "input_schema": {
+    "type": "object",
+    "required": [
+      "observations"
+    ],
+    "properties": {
+      "observations": {
+        "type": "string"
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "choice",
+      "probabilities"
+    ],
+    "properties": {
+      "choice": {
+        "type": "string"
+      },
+      "probabilities": {
+        "type": "object"
+      }
+    }
+  },
+  "required_evidence": [
+    "raw tool output, diff or document excerpt; not a paraphrase"
+  ],
+  "template": {
+    "instructions": "Which option best explains `observations`?"
+  },
+  "prompt_or_template_version": "2026-11-09.1",
+  "model_version": {
+    "request_id": "typesafe/jev-1.14",
+    "accepted_resolved": [
+      "typesafe/jev-1.14-20261014"
+    ]
+  },
+  "calibration_group": "root_cause/v1/jev-1.14-20261014",
+  "threshold_policy": {
+    "metric": "choice_top_p",
+    "accept": 0.6,
+    "reject": 0.0
+  },
+  "abstention_behavior": "return_abstain",
+  "fallback": "deep",
+  "dependencies": [
+    "q.root_cause.any_fits"
+  ],
+  "batch_eligibility": false,
+  "no_match_option": "none_of_these",
+  "min_options": 2
+}

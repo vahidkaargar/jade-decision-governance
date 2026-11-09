@@ -9,6 +9,9 @@ environments:
   production_paths: ["~/infra/", "~/Library/LaunchAgents/", "/Volumes/Data/"]
 hosts:
   critical: ["router.example.net", "10.0.0.1"]     # routers, firewalls, hypervisors
+# A rule that names a FILE or directory (not a command) should set `files_only: true`: it then matches what a command writes (a redirect, the
+# destination of cp/mv/tee, any operand of an unknown command) and not a file that is only read, a `git add` operand or text inside a
+# heredoc body. Without it the rule also fires on `cat <path>` and on a message that mentions the path. Rules about hosts or commands stay as they are.
 rules_prepend:
   - id: R-L01
     level: critical

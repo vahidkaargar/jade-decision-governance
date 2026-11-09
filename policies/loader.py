@@ -79,7 +79,8 @@ def environment_of(risk: dict, command: str) -> str:
     env = risk.get("environments", {})
     if any(h and h in command for h in env.get("production_hosts", [])):
         return "production"
-    if any(p and p in command for p in env.get("production_paths", [])):
+    low = command.lower()  # the macOS filesystem is case-insensitive
+    if any(p and p.lower() in low for p in env.get("production_paths", [])):
         return "production"
     if any(re.search(m, command) for m in env.get("staging_markers", [])):
         return "staging"
@@ -100,6 +101,14 @@ def load_safety(overlay: Path | None = None, base: Path | None = None) -> dict:
     for inv in safety["invariants"]:
         if "block" in inv:
             inv["_re"] = re.compile(inv["block"])
+        if "block_quoted" in inv:   # also tried on the raw text views, where quoted text is not blanked (policy._assess_shell)
+            inv["_qre"] = re.compile(inv["block_quoted"])
+        # `content_block` (default: `block`) is what the content scan of a file write looks for, and `scan_content_paths` limits that scan to
+        # the files it names (a shell profile, an environment file): see SI-11.
+        if "content_block" in inv:
+            inv["_cre"] = re.compile(inv["content_block"])
+        if "scan_content_paths" in inv:
+            inv["_paths_re"] = re.compile(inv["scan_content_paths"])
     return safety
 
 

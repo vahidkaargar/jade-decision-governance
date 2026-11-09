@@ -3,26 +3,56 @@
 # file is R-13 (high) and needs a human-issued permit. Machine-specific invariants go in the overlay
 # policies/local/safety.local.yaml (see safety.local.example.yaml); overlays may only ADD invariants.
 schema_version: 1.0.0
+# SI-03 and SI-04 were never assigned: the numbers are reserved and must not be reused for a different rule.
 invariants:
   - id: SI-01
     description: "No model output authorizes a side effect"
-    enforcement: "permit.approval_reference must be tty:*; jade ask never writes permits"
+    enforcement: "permit.approval_reference must be tty:* and the principal human:*, checked by the hook at use for every high or critical command (not only recorded); jade ask never writes permits"
   - id: SI-02
     description: "Local model servers and backends never bind a public address"
-    block: "(OLLAMA_HOST|HOST|BIND|LISTEN)=(0\\.0\\.0\\.0|\\[::\\]|\\*)|--host[= ](0\\.0\\.0\\.0|\\[::\\])|\\b(0\\.0\\.0\\.0|\\*):[0-9]{2,5}\\b"
+    scan_content: true     # also checked on the content a Write/Edit/MultiEdit/NotebookEdit or MCP call carries (new text only, never old_string)
+    scan_read_only: false  # ... but not on the arguments of a tool whose name only reads (a search query or a page URL is not a bind)
+    scan_skip_keys: [url, uri, href, link, query, q, search, search_query, pattern, regex]  # nor on a URL or a search term (navigate http://0.0.0.0:3000)
+    # env/yaml/json key = wildcard (HOST=, "host": , bind_address:), --host/--bind/--listen/--address, gunicorn -b, wildcard:port in any spelling
+    # (0.0.0.0:p, [::]:p, *:p), `bind 0.0.0.0` (redis), `listen 0.0.0.0;` (nginx, default port), and Ollama's own port published on every interface
+    # (`11434:11434`; the loopback form `127.0.0.1:11434:11434` passes).
+    block: '(?i:(?<![a-z0-9])(?:OLLAMA_HOST|HOST|BIND\w*|LISTEN\w*|ADDR(?:ESS)?)[\x22\x27]?\s*[=:]\s*[\x22\x27]?(?:0\.0\.0\.0|\[::\]|::(?![\w:])|\*)(?![\w.-])|--(?:host|bind|listen|address|addr)[= ]\s*[\x22\x27]?(?:0\.0\.0\.0|\[::\]|::(?![\w:]))|(?<!\S)-[bH]\s+[\x22\x27]?(?:0\.0\.0\.0|\[::\])|(?<![\w.])(?:0\.0\.0\.0|\[::\]|\*):[0-9]{2,5}\b|\b(?:bind|listen)\s+[\x22\x27]?(?:0\.0\.0\.0|\[::\]|\*)(?=[\s;,\x22\x27]|$)|(?<![\w.:])(?:11434:\d{2,5}|\d{2,5}:11434)\b(?!:))'
   - id: SI-05
     description: "Secrets never in state, logs, chat or files"
     enforcement: "redact() before provider call and ledger write; block on residual match"
-    block: "(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|gho_[A-Za-z0-9]{30,}|glpat-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY)"
+    match_on: raw          # the whole command including heredoc bodies and quoted text
+    scan_content: true     # also checked on file content and on every string argument of a non-Bash tool call (new text only, never old_string)
+    # Folded before matching: NFKC, zero-width and soft-hyphen characters dropped, Unicode dashes read as "-". Applies to every tool, read-only ones included: a key sent as a search term still leaves the machine.
+    block: "(sk-[A-Za-z0-9]{20,}|(?<![A-Za-z0-9])sk-(?=[A-Za-z0-9_-]*\\d)[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|glpat-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY)"
   - id: SI-06
     description: "No autonomous production release"
     enforcement: "R-03 and overlay deploy rules => critical => PENDING permit; never auto-ISSUED"
   - id: SI-07
     description: "Unknown outcome is never success; irreversible actions never auto-retry"
-    enforcement: "state machine guards (docs/02 section 2)"
+    enforcement: "state machine guards (docs/02 section 2), and the PreToolUse hook: a command whose earlier decision is OUTCOME_UNKNOWN (or an irreversible one still EXECUTING) is blocked before any permit is raised or consumed, until the outcome is reconciled with `jade decide outcome`"
   - id: SI-08
     description: "Never push to the default branch"
-    block: "git push( [^|;&]*)? (origin |upstream )?(main|master)\\b"
+    enforcement: "pattern below on the canonical command (git global options, escapes and quoting removed), plus the hook parses the push arguments: refspec destinations, HEAD and @ resolved against the current branch, --all and --mirror"
+    block: "git push\\b[^|;&]*[ :+](?:(?:refs/)?heads/)?(?i:main|master)(\\s|$)"
+  - id: SI-09
+    description: "The agent never approves its own permits and never changes its own governance wiring"
+    enforcement: "these commands also refuse to run without an interactive human terminal (stdin and stdout a tty, no agent environment, no agent process among the ancestors; a heuristic, docs/05 T2). The pattern is anchored to the spellings of the approving invocations, not to the words approve or jade alone: the program path-qualified, run through `env`, `uv run`, `uvx`, `python -m jade`, `python -m jade.cli`, `python jade/cli.py`, `script`, `xargs`, quoted or split with expansions (`jade ${X:-permit} approve`), the bare word pair `permit approve` at the start of a word, `$VAR hooks install`, `$J permit approve`, a subcommand that is itself an expansion (`jade permit $X`), a variable set to `approve` on its own (`ap=approve; jade permit $ap`), an alias (its value quoted or not: `alias j='jade permit approve'`), `env -S '...'` carrying the program, a function or symlink to the installed launcher, and the same code called from Python (`from jade import cli`, `import jade.permits`, `jade.state_machine`, opening `jade.ledger` or `jade.decide`), which would skip the CLI text but not the TTY check. Any use of those modules is blocked, read-only or not: the classifier splits a command at every `;` and newline, even inside quotes, so the call that approves cannot be tied to the import that sits in another segment (`jade ledger stats` is the allowed way to read). Harmless commands that only sit near the words are not blocked: `gh pr review --approve`, `kubectl certificate approve $CSR`, `ACTION=approve ./deploy.sh`, `jade permit approve` with `--help` (usage text, nothing approved), `python -m jade.cli check`, `pytest -k jade`, `sed -i s/permit approve/x/ f`, a path such as `/src/jade/tests` and a name such as `jade-svc`. It stays a syntactic match: a command built at run time (`importlib.import_module('ja'+'de.permits')`, `base64 -d | sh`, a script the agent wrote first) is outside it (docs/05 T2, T18)"
+    block: "\\bjade\\s+(?:permit\\s+approve|(?:hooks\\s+(?:install|uninstall)|claude-md\\s+apply|gate\\s+(?:off|advisory|enforce)))\\b(?![^;&|\\n]*\\s(?:-h|--help)(?=\\s|$))|(?<![^\\s;&|(){}\\x22\\x27`])permit\\s+approve\\b(?![^;&|\\n]*\\s(?:-h|--help)(?=\\s|$))|\\$(?:\\{[^}\\s]*\\}|\\w+)\\s+(?:hooks\\s+(?:install|uninstall)|claude-md\\s+apply|gate\\s+(?:off|advisory|enforce))\\b|\\$(?:\\{[^}\\s]*\\}|\\w+)(?:\\s+(?:permit|\\$(?:\\{[^}\\s]*\\}|\\w+)))+\\s+approve\\b|(?:\\bjade|\\$(?:\\{[^}\\s]*\\}|\\w+))\\s+permit\\s+[^\\s;&|]*[$`]|\\bjade(?:\\s+|(?=\\$))(?:\\S+\\s+){0,3}(?<![\\w-])approve\\b(?![^;&|\\n]*\\s(?:-h|--help)(?=\\s|$))|\\bjade(?:\\s+|(?=\\$))(?:\\S+\\s+){0,3}(?:hooks|claude-md|gate)\\b[^;&|\\n]{0,40}?\\b(?:install|uninstall|apply|off|advisory|enforce)\\b|\\bJADE_GATE_MODE=|(?:-m\\s+jade\\.cli\\b|\\bjade/(?:cli|__main__)\\.py\\b)[^;&|\\n]*?\\b(?:hooks\\s+(?:install|uninstall)|claude-md\\s+apply|gate\\s+(?:off|advisory|enforce))\\b|(?:-m\\s+jade\\.cli\\b|\\bjade/(?:cli|__main__)\\.py\\b)\\s+(?:[^\\s;&|]*[$`]|\\S+\\s+[^\\s;&|]*[$`])|\\bjade\\.(?:ops|permits|improve|evals|ledger|decide|state_machine)\\b|\\bfrom jade import\\b[^;\\n]*\\b(?:cli|(?:ops|permits|improve|evals|ledger|decide|state_machine))\\b|\\bimport\\s[^;\\n]*\\bjade\\.cli\\b|\\bfrom\\s+jade\\.cli\\b|\\bjade\\.cli\\.\\w|\\b(?:runpy|importlib|__import__)\\b[^;\\n]*\\bjade\\b|\\balias\\s+[\\w-]+=[^;&|\\n]*\\bjade\\b|\\b[\\w-]+\\s*\\(\\)\\s*\\{[^}]*\\bjade\\b|\\bxargs\\b[^;&|\\n]*\\bjade\\b|\\bln\\b[^;&|\\n]*(?:\\.local/bin/jade|uv/tools/jade|\\b(?:which|command -v|type -p|readlink)\\s+jade\\b)|(?:^|[\\s;&|])\\w+=[\\x22\\x27]?approve[\\x22\\x27]?(?=\\s*(?:[;&|\\n]|$))"
+    block_quoted: "\\balias\\s+[\\w-]+=(?:['\\x22][^'\\x22\\n]*|[^;&|\\n]*)\\bjade\\b|\\benv\\s+(?:-[A-Za-z]*S|--split-string)[^;&|\\n]*\\bjade\\b"   # read in the raw text, where the segmenter has not blanked the quoted value: `alias j='jade permit approve'`, `env -S 'jade permit approve p'`
+  - id: SI-10
+    description: "The agent never reads or names the permit seal key"
+    enforcement: "every permit that can be used carries an HMAC over its fields (permits.py), made with a key in the JADE home next to the ledger (permit-seal.key, mode 600). A row edited with SQL then fails at use. The key is a same-user file, so this raises the bar and does not remove it (docs/05 T19): the command text that names it is blocked, also behind quoting and as a shell glob that matches the file name and holds six or more literal characters, one of them a `-` or `.` (eight without) (`permit-s*`, `*seal.key`, `permit-seal.k?y`, `permit-[s]eal.key`, `permit-{seal,x}.key`), and a glob of any length when the same command names the state directory (`share/jade`, `JADE_HOME`, the directory `JADE_HOME` holds: `cat ~/.local/share/jade/*.key`, `cd $JADE_HOME && cat p*`); a shorter glob in a command that does not name the directory (`*seal*`, `perm*`) is not seen, because `rm *.key` and `ls *` are ordinary commands, a script that reads it is not"
+    match_on: raw
+    block: "permit-seal\\.key"
+    block_globs: ["permit-seal.key"]   # a shell glob word whose last path component matches one of these names (six or more literal characters, see policy.MIN_GLOB_LITERALS) is a mention too
+  - id: SI-11
+    description: "The agent never sets the variables that move the gate: JADE_GATE_MODE, JADE_POLICY_DIR, JADE_CONFIG, JADE_HOME"
+    enforcement: "JADE_GATE_MODE (also SI-09, which sees only a command that is not read-only) lowers the mode. The other three point the hook at another policy directory, another configuration (gate_mode and the local overlays) or another ledger (pins, the permit seal key, SI-07 history). A variable in an agent's own command reaches only that command's children, so the lasting routes are a shell profile, `launchctl setenv`, a LaunchAgent plist or the `env` block of a Claude settings file; this invariant matches the assignment wherever it is written in a command, read-only commands and `export` included (raw text, like SI-10, and also read with every quote and escape removed, every expansion deleted and the shell's own decoding applied, so `export 'JADE_HOME'=x`, `JADE_HO\"\"ME=x` and `JADE_HO${E}ME=x` are seen; a name kept in one variable and used as the left side of an expansion assignment, `J=JADE_HOME; env $J=x`, is seen too), and R-13 gates the settings files. `jade check` reports each of them (row `gate overrides`, including the settings `env` block), and the SessionStart hook shows and journals one that is in force (event `gate_override`). The Write, Edit, MultiEdit and NotebookEdit tools are checked the same way when the file they write is a shell profile, an environment file, a fish or environment.d file, a LaunchAgent or LaunchDaemon plist (`scan_content_paths`); the same text in any other file is not. Residual: a name assembled from pieces at run time, a file an agent wrote first and then runs, or an edit to a profile that names no variable the agent had to spell out (docs/05 T19)"
+    match_on: raw
+    block: "\\bJADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME)\\s*\\+?=|\\bsetenv\\s+[\\x22\\x27]?JADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME)\\b|\\b(?:printf\\s+-v|read)\\b[^;&|\\n]*\\bJADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME)\\b|\\A(?s:(?=.*JADE)(?=.*(?<![\\w$])\\$\\{?\\w+\\}?\\+?=))"
+    scan_content: true     # also checked on the new text a Write/Edit/MultiEdit/NotebookEdit or MCP file write carries, but only when the file is one of scan_content_paths
+    scan_content_paths: "(?i)(?:^|/)\\.?(?:zshenv|zprofile|zshrc|zlogin|zlogout|bashrc|bash_profile|bash_login|bash_aliases|profile|envrc|pam_environment)$|(?:^|/)\\.env(?:\\.[\\w.-]+)?$|/etc/(?:profile|environment|zsh|bash)|/launch(?:agents|daemons)/[^/]*\\.plist$|/environment\\.d/|/\\.config/fish/"
+    content_block: "\\bJADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME)\\s*\\+?=|<key>\\s*JADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME)\\s*</key>|\\bJADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME)[\\x22\\x27]?\\s*:"
 protected_targets:
   - policies/safety.yaml
   - policies/promotion.yaml
@@ -31,4 +61,5 @@ protected_targets:
   - permit issuance and approval code
   - ledger append/transition code
   - agent harness hook configuration (e.g. ~/.claude/settings.json)
+  - JADE runtime artifacts (the ledger jade.sqlite and its -wal/-shm files, calibration/current.json, pins.json, ~/.config/jade config and local overlays, the installed package and uv tool directory, the jade and jev launchers); R-13 in policies/risk.yaml gates them
   - OS keychain and password-manager access

@@ -1,0 +1,95 @@
+{"id": "R01", "class": "low_p_then_done", "kind": "verify", "p": 0.55, "risk": "low", "expect_exit": 3, "note": "baseline: 30% of low-P answers were followed by a done claim"}
+{"id": "R02", "class": "paraphrase_evidence", "kind": "verify", "p": 0.08, "risk": "low", "expect_exit": 4}
+{"id": "R03", "class": "accept_band", "kind": "verify", "p": 0.95, "risk": "low", "expect_exit": 0}
+{"id": "R04", "class": "high_risk_stricter_band", "kind": "verify", "p": 0.8, "risk": "high", "expect_exit": 3, "note": "0.80 accepts at low risk, abstains at high"}
+{"id": "R05", "class": "critical_risk_stricter_band", "kind": "verify", "p": 0.89, "risk": "critical", "expect_exit": 3}
+{"id": "R06", "class": "repeat_without_new_evidence", "kind": "repeat", "p": 0.9, "expect_provider_calls": 1, "note": "baseline: 20% of calls were repeats"}
+{"id": "R07", "class": "degenerate_choice", "kind": "choice", "options": ["only=one"], "expect_exit": 6}
+{"id": "R08", "class": "provider_unavailable", "kind": "provider_error", "error_kind": "UNAVAILABLE", "expect_exit": 5}
+{"id": "R09", "class": "provider_rate_limited", "kind": "provider_error", "error_kind": "RATE_LIMITED", "expect_exit": 5}
+{"id": "R10", "class": "provider_malformed", "kind": "provider_error", "error_kind": "MALFORMED", "expect_exit": 5}
+{"id": "R11", "class": "provider_rejected_request", "kind": "provider_error", "error_kind": "REJECTED", "http_status": 400, "expect_exit": 6}
+{"id": "R12", "class": "gate_commit_is_low", "kind": "gate", "command": "git commit -m 'git push later'", "expect": "allow"}
+{"id": "R13", "class": "gate_install_is_low", "kind": "gate", "command": "uv tool install .", "expect": "allow"}
+{"id": "R14", "class": "gate_push_is_high", "kind": "gate", "command": "git push origin feat/x", "expect": "block"}
+{"id": "R15", "class": "gate_ssh_is_high", "kind": "gate", "command": "ssh web1 uptime", "expect": "block"}
+{"id": "R16", "class": "gate_composio_is_high", "kind": "gate", "command": "composio execute GMAIL_SEND_EMAIL", "expect": "block"}
+{"id": "R17", "class": "gate_firewall_is_critical", "kind": "gate", "command": "sudo pfctl -f /etc/pf.conf", "expect": "block"}
+{"id": "R18", "class": "gate_read_only_mention_is_low", "kind": "gate", "command": "grep -rn 'git push' docs/ | head", "expect": "allow", "note": "false positive found while building the classifier"}
+{"id": "R19", "class": "safety_default_branch", "kind": "gate", "command": "git push origin main", "expect": "block", "expect_blocked": ["SI-08"]}
+{"id": "R20", "class": "gate_mcp_cluster_change_is_critical", "kind": "gate_mcp", "tool": "mcp__Kubernetes_MCP_Server__kubectl_apply", "input": {"manifest": "x"}, "expect": "block", "note": "found while auditing the matcher: MCP tools bypassed the Bash gate"}
+{"id": "R21", "class": "gate_mcp_merge_is_high", "kind": "gate_mcp", "tool": "mcp__GitLab__accept_merge_request", "input": {"project_id": "1", "merge_request_iid": 2}, "expect": "block"}
+{"id": "R22", "class": "gate_mcp_read_is_low", "kind": "gate_mcp", "tool": "mcp__GitLab__get_project", "input": {"project_id": "1"}, "expect": "allow"}
+{"id": "R23", "class": "gate_mcp_shell_uses_command_rules", "kind": "gate_mcp", "tool": "mcp__MacOS-MCP__Shell", "input": {"command": "git push origin main"}, "expect": "block", "expect_blocked": ["SI-08"]}
+{"id": "R24", "class": "gate_git_global_option_push_main", "kind": "gate", "command": "git -C . push origin main", "expect": "block", "expect_blocked": ["SI-08"], "note": "F00/F35: git global options hid the push from R-10 and SI-08"}
+{"id": "R25", "class": "gate_git_global_option_hard_reset", "kind": "gate", "command": "git --no-pager reset --hard", "expect": "block", "note": "F00: global option before the subcommand"}
+{"id": "R26", "class": "gate_git_config_option_commit_is_low", "kind": "gate", "command": "git -c user.name=x commit -m hello", "expect": "allow", "note": "harmless -c stays low"}
+{"id": "R27", "class": "gate_git_global_option_status_is_low", "kind": "gate", "command": "git -C . status", "expect": "allow"}
+{"id": "R28", "class": "gate_sort_output_is_not_read_only", "kind": "gate", "command": "sort -o /etc/pf.conf in.txt", "expect": "block", "note": "F01: sort -o writes"}
+{"id": "R29", "class": "gate_sort_uniq_pipeline_is_low", "kind": "gate", "command": "sort in.txt | uniq -c | head", "expect": "allow"}
+{"id": "R30", "class": "gate_commit_heredoc_substitution_is_low", "kind": "gate", "command": "git commit -m \"$(cat <<'EOF'\nfix: don't push (git push)\nEOF\n)\"", "expect": "allow", "note": "F02 control: quoted heredoc inside $() stays inert"}
+{"id": "R31", "class": "gate_sed_block_script_is_low", "kind": "gate", "command": "sed -n '/^## /{p;q}' f", "expect": "allow", "note": "F01 second pass control"}
+{"id": "R32", "class": "gate_uniq_numeric_option_is_low", "kind": "gate", "command": "uniq -f 1 in", "expect": "allow", "note": "F01 second pass control"}
+{"id": "R33", "class": "gate_comment_text_is_inert", "kind": "gate", "command": "echo hi # git push origin main", "expect": "allow", "note": "F03 second pass control"}
+{"id": "R34", "class": "gate_brace_list_is_low", "kind": "gate", "command": "echo file{1,2}.txt", "expect": "allow", "note": "F03 second pass control"}
+{"id": "R35", "class": "gate_sh_c_echo_is_low", "kind": "gate", "command": "sh -c 'echo hello'", "expect": "allow", "note": "F02 second pass control"}
+{"id": "R36", "class": "gate_git_pager_cat_is_low", "kind": "gate", "command": "GIT_PAGER=cat git log", "expect": "allow", "note": "N7 control"}
+{"id": "R37", "class": "gate_rebase_exec_classifies_the_command", "kind": "gate", "command": "git rebase --exec 'make test' main", "expect": "allow", "note": "F01 second pass control (medium, below the permit floor)"}
+{"id": "R38", "class": "read_the_ledger_dir_is_low", "kind": "gate", "command": "cat ~/.local/share/jade/pins.json", "expect": "allow", "note": "G00 control"}
+{"id": "R39", "class": "jade_cli_is_low", "kind": "gate", "command": "jade ledger stats", "expect": "allow", "note": "G00 control: the human-only CLI manages the artifacts"}
+{"id": "R40", "class": "mcp_read_tool_is_low", "kind": "gate_mcp", "tool": "mcp__GitLab__get_project", "input": {"id": 1}, "expect": "allow", "note": "G01 control"}
+{"id": "R41", "class": "write_ordinary_content_is_low", "kind": "gate_write", "path": "/tmp/case/a.txt", "content_parts": ["listen 127.0.0.1:11434"], "expect": "allow", "note": "G02 control"}
+{"id": "R42", "class": "shell_c_harmless_is_low", "kind": "gate", "command": "bash -c 'ls -la /tmp'", "expect": "allow", "note": "F41 control"}
+{"id": "R43", "class": "git_add_of_jade_code_is_low", "kind": "gate", "command": "git add jade/hooks.py", "expect": "allow", "note": "G00 pass 2 control: R-16 looks at write targets"}
+{"id": "R44", "class": "ruff_check_of_jade_code_is_low", "kind": "gate", "command": "uv run ruff check jade/policy.py", "expect": "allow", "note": "G00 pass 2 control"}
+{"id": "R45", "class": "copy_of_jade_code_out_is_low", "kind": "gate", "command": "cp jade/hooks.py /tmp/hooks.bak", "expect": "allow", "note": "G00 pass 2 control: judged by the destination"}
+{"id": "R46", "class": "interface_only_mcp_tool_is_low", "kind": "gate_mcp", "tool": "mcp__ccd_sidebar__set_pinned", "input": {"pinned": true}, "expect": "allow", "note": "G01 pass 2 control"}
+{"id": "R47", "class": "camel_case_read_tool_is_low", "kind": "gate_mcp", "tool": "mcp__x__getThing", "input": {}, "expect": "allow", "note": "G01 pass 2 control"}
+{"id": "R48", "class": "uv_run_pytest_is_low", "kind": "gate", "command": "uv run pytest -q", "expect": "allow", "note": "launcher prefix control"}
+{"id": "R49", "class": "permit_is_for_the_exact_text", "kind": "permit_variant", "command": "git push origin feat-x", "variant": "git push origin feat-x", "expect": "allow", "note": "F08 control: the approved text itself still passes"}
+{"id": "R50", "class": "ordinary_jade_commands_are_not_si09", "kind": "gate", "command": "uv run jade permit list", "expect": "allow", "note": "F06 control: widened SI-09 leaves `jade permit list` alone"}
+{"id": "R51", "class": "quoted_prose_naming_approve_is_not_si09", "kind": "gate", "command": "git commit -m 'document jade permit approve'", "expect": "allow", "note": "F06 control"}
+{"id": "R52", "class": "pytest_in_a_directory_named_jade_with_approve_is_not_si09", "kind": "gate", "command": "pytest /Users/x/Documents/projects/jade/tests -k approve", "expect": "allow", "note": "pass 2 control: a path component jade is not the program"}
+{"id": "R53", "class": "container_named_jade_svc_is_not_si09", "kind": "gate", "command": "docker exec jade-svc approve", "expect": "allow", "note": "pass 2 control"}
+{"id": "R54", "class": "symlink_to_a_checkout_named_jade_is_not_si09", "kind": "gate", "command": "ln -s /opt/x/jade /usr/local/bin/jade2", "expect": "allow", "note": "pass 2 control: only the installed launcher and `which jade` are wrapped"}
+{"id": "R55", "class": "permit_for_the_exact_text_with_a_trailing_space", "kind": "permit_variant", "command": "rm -rf /x/y", "variant": "rm -rf /x/y ", "expect": "allow", "note": "pass 2 control: a trailing space is not read by any shell"}
+{"id": "R56", "class": "non_secret_text_is_not_redacted", "kind": "redact_keep", "text": "max_tokens=4096", "note": "F23 control"}
+{"id": "R57", "class": "non_secret_text_is_not_redacted", "kind": "redact_keep", "text": "def login(password: str, token: Optional[str] = None):", "note": "F23 control"}
+{"id": "R58", "class": "non_secret_text_is_not_redacted", "kind": "redact_keep", "text": "TOKENIZERS_PARALLELISM=false", "note": "F23 control"}
+{"id": "R59", "class": "non_secret_text_is_not_redacted", "kind": "redact_keep", "text": "git remote add origin git@github.com:org/repo.git", "note": "F23 control"}
+{"id": "R60", "class": "non_secret_text_is_not_redacted", "kind": "redact_keep", "text": "authorization: required for /admin", "note": "F23 control"}
+{"id": "R61", "class": "non_secret_text_is_not_redacted", "kind": "redact_keep", "text": "token_count: 1532", "note": "F23 control"}
+{"id": "R62", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "cmd --password $PW", "note": "cluster C pass 2: env reference stays readable"}
+{"id": "R63", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "vercel --prod --token $VERCEL_TOKEN", "note": "cluster C pass 2: env reference after a flag"}
+{"id": "R64", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "curl -u user:$PW https://x", "note": "cluster C pass 2: env reference as the curl password"}
+{"id": "R65", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "mysql -u r -p$PW", "note": "cluster C pass 2: env reference as the mysql password"}
+{"id": "R66", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "TOKEN=$(cat /run/secrets/t) deploy", "note": "cluster C pass 2: fetch from a file"}
+{"id": "R67", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "API_KEY=$(op read op://v/i/k) deploy", "note": "cluster C pass 2: fetch from a store"}
+{"id": "R68", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "token_type: bearer", "note": "cluster C pass 2: a type, not a credential"}
+{"id": "R69", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "token_url: https://x/oauth/token", "note": "cluster C pass 2: a location, not a credential"}
+{"id": "R70", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "secret_ref: foo", "note": "cluster C pass 2: a reference"}
+{"id": "R71", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "ssh -p 2222 host", "note": "cluster C pass 2: -p is a port outside a password command"}
+{"id": "R72", "class": "references_are_not_secrets", "kind": "redact_keep", "text": "docker run -e TOKEN_TYPE=bearer img", "note": "cluster C pass 2: TOKEN_TYPE is not a credential"}
+{"id": "R73", "class": "write_profile_scope_is_narrow", "kind": "gate_write", "path": "/Users/someone/.zshrc", "content_parts": ["export EDITOR=vim"], "expect": "allow", "note": "cluster E pass 2 control: the SI-11 content scan is limited to shell profiles and environment files"}
+{"id": "R74", "class": "write_profile_scope_is_narrow", "kind": "gate_write", "path": "/tmp/case/notes.md", "content_parts": ["set JADE_POLICY_DIR", "=/tmp/e to test"], "expect": "allow", "note": "cluster E pass 2 control: the SI-11 content scan is limited to shell profiles and environment files"}
+{"id": "R75", "class": "low_risk_abstain_is_not_escalated", "kind": "decide_walk", "events": ["route", "jev_result_abstain", "escalate"], "expect_status_not": "WAITING_HUMAN", "note": "F46: docs/02 allows escalate from ABSTAINED only at risk >= medium or when the revisions are used up"}
+{"id": "R76", "class": "non_secret_text_is_not_redacted", "kind": "redact_keep", "text": "disk-encryption-configuration-service-account", "note": "F42 control: an ambiguous prefix inside a slug is not a token"}
+{"id": "R77", "class": "non_secret_text_is_not_redacted", "kind": "redact_keep", "text": "task-2024-quarterly-report-final-draft-notes", "note": "F42 control: an ambiguous prefix inside a slug is not a token"}
+{"id": "R78", "class": "non_secret_text_is_not_redacted", "kind": "redact_keep", "text": "see pdf_conversion_pipeline_for_everything_here", "note": "F42 control: an ambiguous prefix inside a slug is not a token"}
+{"id": "R79", "class": "non_secret_text_is_not_redacted", "kind": "redact_keep", "text": "check_everythingisfinehere_ok", "note": "F42 control: an ambiguous prefix inside a slug is not a token"}
+{"id": "R80", "class": "gate_program_prose_is_low", "kind": "gate", "command": "python3 - <<'EOF'\nprint('git push origin main; systemctl start x')\nEOF", "expect": "allow", "note": "task G: a string a python program only prints is data"}
+{"id": "R81", "class": "gate_program_prose_is_low", "kind": "gate", "command": "perl -e 'print \"git push origin main\\n\"'", "expect": "allow", "note": "task G: a string a perl program only prints is data"}
+{"id": "R82", "class": "gate_program_prose_is_low", "kind": "gate", "command": "awk 'NR>1 && $1 > 5' ~/.claude/settings.json", "expect": "allow", "note": "task G: a quoted comparison is not a redirect"}
+{"id": "R83", "class": "gate_file_body_is_low", "kind": "gate", "command": "cat > notes.md <<'EOF'\nsystemctl start x; policies/risk.yaml\nEOF", "expect": "allow", "note": "task G: the body of a file written by a heredoc is data"}
+{"id": "R84", "class": "gate_read_of_protected_is_low", "kind": "gate", "command": "cp ~/.claude/settings.json /tmp/settings.bak", "expect": "allow", "note": "task G: reading a protected file is not a change to it"}
+{"id": "R85", "class": "gate_read_of_protected_is_low", "kind": "gate", "command": "git add AGENTS.md", "expect": "allow", "note": "task G: git add reads its operands"}
+{"id": "R86", "class": "gate_program_that_pushes_is_blocked", "kind": "gate", "command": "python3 - <<'EOF'\nimport os\nos.system('git push origin main')\nEOF", "expect": "block", "note": "task G twin: a program that really runs the push"}
+{"id": "R87", "class": "gate_program_that_writes_is_high", "kind": "gate", "command": "python3 - <<'EOF'\nopen('/Users/x/.claude/settings.json', 'w').write('{}')\nEOF", "expect": "block", "note": "task G twin: a program that really writes a protected file"}
+{"id": "R88", "class": "gate_file_destination_is_high", "kind": "gate", "command": "cat > policies/risk.yaml <<'EOF'\nx\nEOF", "expect": "block", "note": "task G twin: the destination of a heredoc file counts"}
+{"id": "R89", "class": "gate_redirect_of_read_only_is_high", "kind": "gate", "command": "git show HEAD:x > ~/.claude/settings.json", "expect": "block", "note": "task G twin: the redirect target of a read-only command is a write"}
+{"id": "R90", "class": "gate_split_that_only_prints_is_low", "kind": "gate", "command": "python3 - <<'EOF'\nprint('git push origin main'.split())\nEOF", "expect": "allow", "note": "task G pass 2: a split that runs nothing is data"}
+{"id": "R91", "class": "gate_printed_text_not_piped_to_a_shell_is_low", "kind": "gate", "command": "python3 -c 'print(\"git push origin main\")' | tee /tmp/note.txt", "expect": "allow", "note": "task G pass 2: the twin of A136, the output goes to a file"}
+{"id": "R92", "class": "gate_firewall_file_name_is_low", "kind": "gate", "command": "awk '' in.log > out.nft", "expect": "allow", "note": "task G pass 2: a .nft file name is not a firewall command"}
+{"id": "R93", "class": "gate_firewall_command_is_critical", "kind": "gate", "command": "sudo nft list ruleset", "expect": "block", "note": "task G pass 2: the twin of R92"}
+{"id": "R94", "class": "gate_name_option_is_low", "kind": "gate", "command": "uv init --bare --name jade", "expect": "allow", "note": "task G pass 2: a name option is not a path"}
+{"id": "R95", "class": "gate_awk_stdin_prose_is_low", "kind": "gate", "command": "awk -f - <<'EOF'\nBEGIN{print \"git push origin main\"}\nEOF", "expect": "allow", "note": "task G pass 2: a string an awk program only prints is data"}

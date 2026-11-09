@@ -55,7 +55,7 @@ def pct(xs, p):
 def summarize(label, results):
     ok = [r["ms"] for r in results if r["ok"]]
     return {"config": label, "n": len(results), "errors": sum(1 for r in results if not r["ok"]),
-            "p50_ms": round(pct(ok, 50)) if ok else None, "p95_ms": round(pct(ok, 95)) if ok else None,
+            "p50_ms": round(pct(ok, 50)) if ok else None, "p95_ms": round(pct(ok, 95)) if ok else None, "p99_ms": round(pct(ok, 99)) if ok else None,
             "max_ms": round(max(ok)) if ok else None, "mean_ms": round(statistics.mean(ok)) if ok else None,
             "cost_usd": round(sum(r["cost"] for r in results), 6),
             "statuses": sorted({r.get("status") for r in results if not r["ok"] and r.get("status")})}

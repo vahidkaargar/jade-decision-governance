@@ -69,7 +69,7 @@ def test_overlay_mixed_tiers_are_sorted_into_place(tmp_path):
     )
     risk = load_risk(overlay=ov)
     ids = [r["id"] for r in risk["rules"]]
-    assert ids[0] == "R-L01" and ids.index("R-L10") == ids.index("R-10") - 1
+    assert ids[0] == "R-L01" and ids.index("R-L10") == min(ids.index("R-17"), ids.index("R-10")) - 1   # before the first high shipped rule
     assert classify(risk, "my-service restart")["level"] == "high"
 
 

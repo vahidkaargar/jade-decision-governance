@@ -1,14 +1,22 @@
 [project]
 name = "jade-decision-governance"
-version = "0.1.0"
+version = "0.2.2"
 description = "Adaptive decision governance for AI agents using TypeSafe Jev: journaled decisions, calibrated thresholds, human-held execution permits"
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "Vahid Kaargar" }]
 keywords = ["ai-agents", "decision-governance", "typesafe", "jev", "claude-code"]
-classifiers = ["Development Status :: 2 - Pre-Alpha", "Programming Language :: Python :: 3 :: Only"]
+classifiers = ["Development Status :: 3 - Alpha", "Programming Language :: Python :: 3 :: Only"]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "jsonschema>=4.26.0,<5",
+    "pyyaml>=6.0.3,<7",
+    "referencing>=0.37.0,<1",
+]
+
+[project.scripts]
+jade = "jade.cli:main"
+jev = "jade.compat:main"
 
 [dependency-groups]
 dev = [
@@ -21,3 +29,18 @@ dev = [
 [project.urls]
 Homepage = "https://github.com/vahidkaargar/jade-decision-governance"
 Issues = "https://github.com/vahidkaargar/jade-decision-governance/issues"
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["jade", "policies"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"schemas" = "jade/_schemas"
+"registry" = "jade/_registry"
+"docs/claude-md-jev-section.md" = "jade/_docs/claude-md-jev-section.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
