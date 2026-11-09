@@ -1,6 +1,6 @@
 [project]
 name = "jade-decision-governance"
-version = "0.2.2"
+version = "0.3.0"
 description = "Adaptive decision governance for AI agents using TypeSafe Jev: journaled decisions, calibrated thresholds, human-held execution permits"
 readme = "README.md"
 license = "MIT"
@@ -40,6 +40,7 @@ packages = ["jade", "policies"]
 [tool.hatch.build.targets.wheel.force-include]
 "schemas" = "jade/_schemas"
 "registry" = "jade/_registry"
+"skills" = "jade/_skills"
 "docs/claude-md-jev-section.md" = "jade/_docs/claude-md-jev-section.md"
 
 [tool.pytest.ini_options]

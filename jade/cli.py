@@ -8,7 +8,7 @@ import re
 import sys
 from pathlib import Path
 
-from . import __version__, ask, ledger, paths, questions, redact
+from . import ask, ledger, paths, questions, redact
 from .util import human_tty_refusal, is_human_tty, session_id, ts
 
 LEGACY = ("verify", "noul", "choice", "score")
@@ -538,10 +538,23 @@ def _days(value: str) -> int:
     return int(m.group(1))
 
 
+class _VersionAction(argparse.Action):
+    """`jade --version`: the code version, commit, ledger schema version and policy_version (the same text as `jade version`)."""
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS, default=argparse.SUPPRESS, help=None):  # noqa: A002 - argparse's own signature
+        super().__init__(option_strings, dest=dest, default=default, nargs=0, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        from . import upgrade
+
+        sys.stdout.write(upgrade.version_text(upgrade.version_info()))
+        parser.exit()
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The `jade` command tree (everything but `ask` and `hook`, which `main` hands off first). Also read by the docs test."""
     p = argparse.ArgumentParser(prog="jade", description="Adaptive decision governance for Jev. `jade ask -h` for questions.")
-    p.add_argument("--version", action="version", version=__version__)
+    p.add_argument("--version", action=_VersionAction, help="print the code version, commit, ledger schema version and policy_version")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("ask", help="ask Jev (see `jade ask -h`)")
     sub.add_parser("hook", help="Claude Code hook entry: pretool | posttool | stop | session-start")
@@ -658,6 +671,15 @@ def build_parser() -> argparse.ArgumentParser:
     gh.add_parser("script", help="print the self-contained POSIX sh pre-push hook (installs nothing; install it yourself, docs/08 section 2.7)")
     gh.add_parser("check", help="report whether the pre-push hook git runs for REPO is the JADE guard; exit 1 when it is not").add_argument("repo")
     sub.add_parser("maintain").add_argument("--offline", action="store_true")
+    sub.add_parser("version", help="print the code version, commit, ledger schema version and policy_version").add_argument("--json", action="store_true")
+    up = sub.add_parser("upgrade", help="human only: install a release of jade-decision-governance with uv, then run jade check from it; --check only looks")
+    ug = up.add_mutually_exclusive_group()
+    ug.add_argument("--check", action="store_true", help="read-only: installed version, latest release, CHANGELOG headings in between")
+    ug.add_argument("--ref", help="a release tag (vX.Y.Z) or a full commit hash to install (default: the latest release)")
+    su = sub.add_parser("setup", help="human only: the first-run wizard (gate advisory, hooks, CLAUDE.md section, skill, maintenance job, check); --status only reads")
+    sg = su.add_mutually_exclusive_group()
+    sg.add_argument("--yes", action="store_true", help="apply every step without asking (still needs an interactive terminal)")
+    sg.add_argument("--status", action="store_true", help="read-only: what is done and what is missing")
     lp = sub.add_parser("launchd-plist")
     lp.add_argument("--label", default="com.jade.maintain")
     return p
@@ -697,6 +719,14 @@ def main(argv: list[str] | None = None) -> int:
         from . import ops
 
         return ops.print_check(ops.check(live=not a.offline))
+    if a.cmd in ("version", "upgrade"):
+        from . import upgrade
+
+        return upgrade.cli_version(a) if a.cmd == "version" else upgrade.cli_upgrade(a)
+    if a.cmd == "setup":
+        from . import setup
+
+        return setup.cli_setup(a)
     if a.cmd == "launchd-plist":
         from . import ops
 
