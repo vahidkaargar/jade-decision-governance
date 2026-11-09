@@ -508,7 +508,7 @@ def test_f05_relative_paths_resolve_against_the_event_cwd(tmp_path):
 
 @pytest.mark.parametrize("path", [
     "/work/jade/policies/./safety.yaml", "/work/jade/policies/Safety.yaml", "/work/jade/policies/promotion.yaml",
-    "/work/jade/policies/risk.yaml", "/work/jade/policies/local/risk.local.yaml",
+    "/work/jade/policies/risk.yaml", "/work/jade/policies/local/risk.local.yaml", "/work/jade/policies/loader.py",
     "/work/jade/jade/permits.py", "/work/jade/jade/hooks.py", "/work/jade/jade/ledger.py", "/work/jade/jade/policy.py",
     "/work/jade/jade/shellnorm.py", "/work/jade/jade/decide.py", "/work/jade/jade/state_machine.py",
     "/work/jade/evals/x/protected/a.json", "/work/jade/evals/calibration/protected/deep/b.jsonl",
@@ -520,7 +520,7 @@ def test_f05_protected_targets_are_high(path):
 
 @pytest.mark.parametrize("path", [
     "/work/jade/jade/cli.py", "/work/jade/tests/test_x.py", "/work/jade/evals/run_cases.py", "/work/jade/evals/regression/cases.jsonl",
-    "/work/jade/docs/05-threat-model.md", "/tmp/notes.txt", "/work/jade/README.md", "/work/jade/policies/loader.py",
+    "/work/jade/docs/05-threat-model.md", "/tmp/notes.txt", "/work/jade/README.md",
     "/work/other/jade/permitsx.py", "/work/jade/jade/hooks.pyc.txt",
 ])
 def test_f05_ordinary_files_stay_low(path):

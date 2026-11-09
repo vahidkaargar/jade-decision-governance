@@ -3,24 +3,27 @@
 # file is R-13 (high) and needs a human-issued permit. Machine-specific invariants go in the overlay
 # policies/local/safety.local.yaml (see safety.local.example.yaml); overlays may only ADD invariants.
 schema_version: 1.0.0
+# SI-03 and SI-04 were never assigned: the numbers are reserved and must not be reused for a different rule.
 invariants:
   - id: SI-01
     description: "No model output authorizes a side effect"
     enforcement: "permit.approval_reference must be tty:*; jade ask never writes permits"
   - id: SI-02
     description: "Local model servers and backends never bind a public address"
+    scan_content: true     # also checked on the content a Write/Edit/MultiEdit/NotebookEdit or MCP call carries (new text only, never old_string)
     block: "(OLLAMA_HOST|HOST|BIND|LISTEN)=(0\\.0\\.0\\.0|\\[::\\]|\\*)|--host[= ](0\\.0\\.0\\.0|\\[::\\])|\\b(0\\.0\\.0\\.0|\\*):[0-9]{2,5}\\b"
   - id: SI-05
     description: "Secrets never in state, logs, chat or files"
     enforcement: "redact() before provider call and ledger write; block on residual match"
     match_on: raw          # the whole command including heredoc bodies and quoted text
+    scan_content: true     # also checked on file content and on every string argument of a non-Bash tool call (new text only, never old_string)
     block: "(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|gho_[A-Za-z0-9]{30,}|glpat-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY)"
   - id: SI-06
     description: "No autonomous production release"
     enforcement: "R-03 and overlay deploy rules => critical => PENDING permit; never auto-ISSUED"
   - id: SI-07
     description: "Unknown outcome is never success; irreversible actions never auto-retry"
-    enforcement: "state machine guards (docs/02 section 2)"
+    enforcement: "state machine guards (docs/02 section 2), and the PreToolUse hook: a command whose earlier decision is OUTCOME_UNKNOWN (or an irreversible one still EXECUTING) is blocked before any permit is raised or consumed, until the outcome is reconciled with `jade decide outcome`"
   - id: SI-08
     description: "Never push to the default branch"
     enforcement: "pattern below on the canonical command (git global options, escapes and quoting removed), plus the hook parses the push arguments: refspec destinations, HEAD and @ resolved against the current branch, --all and --mirror"
@@ -37,4 +40,5 @@ protected_targets:
   - permit issuance and approval code
   - ledger append/transition code
   - agent harness hook configuration (e.g. ~/.claude/settings.json)
+  - JADE runtime artifacts (the ledger jade.sqlite and its -wal/-shm files, calibration/current.json, pins.json, ~/.config/jade config and local overlays, the installed package and uv tool directory, the jade and jev launchers); R-13 in policies/risk.yaml gates them
   - OS keychain and password-manager access

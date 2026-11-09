@@ -10,11 +10,19 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import ledger, paths
+from . import ledger, paths, policy
 from .util import is_human_tty, now, ts
 
 HOOK_MARK = "jade hook "
-HOOKS = {"PreToolUse": ("Bash|Write|Edit|MultiEdit|NotebookEdit|mcp__.*", "pretool", 10), "PostToolUse": ("Bash", "posttool", 10),
+
+
+def pretool_matcher() -> str:
+    """Every built-in tool the gate assesses (policy.GATED_BUILTIN) and every MCP tool. Agent/Task are not listed: they need no gate,
+    and the tool calls a subagent makes reach the same hook."""
+    return "|".join((*policy.GATED_BUILTIN, "mcp__.*"))
+
+
+HOOKS = {"PreToolUse": (pretool_matcher(), "pretool", 10), "PostToolUse": ("Bash", "posttool", 10),
          "Stop": ("", "stop", 10), "SessionStart": ("", "session-start", 10)}
 JEV_HEADING = "## Jev: verify outputs and decide (global, all sessions)"
 
@@ -159,6 +167,27 @@ def hooks_status() -> dict[str, bool]:
     return out
 
 
+def pretool_matcher_gaps() -> list[str] | None:
+    """Gated tools the installed PreToolUse matcher does not cover (an install made before the matcher grew). None when the hook is not installed."""
+    import re
+
+    try:
+        hooks = json.loads(settings_path().read_text()).get("hooks", {})
+    except (OSError, ValueError):
+        return None
+    matchers = [g.get("matcher", "") for g in hooks.get("PreToolUse", []) for h in g.get("hooks", []) if f"{HOOK_MARK}pretool" in h.get("command", "")]
+    if not matchers:
+        return None
+    gaps = []
+    for tool in (*policy.GATED_BUILTIN, "mcp__server__tool"):
+        try:
+            if not any(re.fullmatch(m, tool) if m else True for m in matchers):
+                gaps.append(tool)
+        except re.error:
+            return [tool]
+    return gaps
+
+
 def _require_human(what: str, stdin_isatty: bool | None = None) -> None:
     if not is_human_tty(stdin_isatty):
         raise HumanOnly(f"{what} changes agent governance wiring; a human must run it in a terminal (docs/07 section 3)")
@@ -279,7 +308,11 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
     st = hooks_status()
     missing = [k for k, v in st.items() if not v]
     rows.append(("hooks installed", not missing, "all four" if not missing else f"missing {', '.join(missing)}: run `jade hooks install` in a terminal"))
+    gaps = pretool_matcher_gaps()
+    if gaps is not None:
+        rows.append(("pretool matcher", not gaps, "covers every gated tool" if not gaps else f"does not cover {', '.join(gaps)}: re-run `jade hooks install` in a terminal"))
     rows.append(("gate mode", True, paths.gate_mode()))
+    rows.append(("host permission prompt", True, _permission_prompt_detail()))
     shim = shutil.which("jev")
     is_shim = bool(shim) and "jade" in (Path(shim).read_text(errors="replace")[:600] if Path(shim).is_file() else "")
     rows.append(("jev shim", is_shim, shim or "jev not on PATH"))
@@ -299,6 +332,29 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
             bad_r = yes if not yes.ok else no
             rows.append(("provider canary", False, f"{bad_r.error_kind} {bad_r.http_status or ''} {bad_r.detail}"))
     return rows
+
+
+def _permission_prompt_detail() -> str:
+    """JADE's gate is the only gate whenever the host shows no permission prompt; say so, and say how often that was the case here."""
+    from . import hooks
+
+    text = ("JADE's gate is the only gate when the host runs with permission_mode bypassPermissions or auto, with acceptEdits (file edits), "
+            "headless (`claude -p`) or in unattended subagents: the host prompt is not an independent backstop there (docs/05 T18)")
+    try:
+        db = ledger.open(timeout=2)
+        try:
+            rows = db.all("SELECT detail_json FROM events WHERE kind IN ('gated','safety_block') AND ts>=?", (ts(now() - timedelta(days=7)),))
+        finally:
+            db.close()
+        seen = no_prompt = 0
+        for r in rows:
+            d = json.loads(r.detail_json or "{}")
+            seen += 1
+            no_prompt += bool(hooks.no_host_prompt(d.get("permission_mode"), str(d.get("tool") or "")))
+        text += f". Last 7 days: {no_prompt} of {seen} gated call(s) ran with no host prompt" if seen else ". Last 7 days: no gated calls recorded"
+    except Exception:  # noqa: BLE001, S110 - the note is informational; the ledger row above reports ledger failures
+        pass
+    return text
 
 
 def print_check(rows) -> int:

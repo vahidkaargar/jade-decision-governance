@@ -58,7 +58,13 @@ def run_case(c: dict) -> list[str]:
         if kind == "gate_mcp":
             ev = {"tool_name": c["tool"], "tool_input": c["input"], "session_id": "case-session", "cwd": "/tmp/case"}
         if kind == "gate_write":
-            ev = {"tool_name": "Write", "tool_input": {c.get("key", "file_path"): c["path"]}, "session_id": "case-session", "cwd": "/tmp/case"}
+            tin = {c.get("key", "file_path"): c["path"]}
+            if c.get("content_parts"):  # file content assembled from parts so that no case file holds a token-shaped literal
+                tin["content"] = "".join(c["content_parts"])
+            ev = {"tool_name": c.get("tool", "Write"), "tool_input": tin, "session_id": "case-session", "cwd": "/tmp/case"}
+        if kind == "gate_mcp" and c.get("content_parts"):
+            ev["tool_input"] = {**ev["tool_input"], "content": "".join(c["content_parts"])}
+        ev.update(c.get("event", {}))  # extra host fields: permission_mode, agent_id
         res = hooks.pretool(ev)
         want = 2 if c["expect"] == "block" else 0
         if res.exit_code != want:

@@ -24,7 +24,7 @@ jade gate advisory
 jade hooks install
 ```
 
-`hooks install` backs up `~/.claude/settings.json` next to itself, adds four hook entries (PreToolUse for Bash, file edits and MCP tools; PostToolUse for Bash; Stop; SessionStart), and leaves other hooks alone. Hooks are read at session start: open a new Claude Code session afterwards.
+`hooks install` backs up `~/.claude/settings.json` next to itself, adds four hook entries (PreToolUse for Bash, PowerShell, Monitor, file edits, RemoteTrigger and MCP tools; PostToolUse for Bash; Stop; SessionStart). An install made before the matcher grew shows `pretool matcher` as FAIL in `jade check`; run `jade hooks install` again, and leaves other hooks alone. Hooks are read at session start: open a new Claude Code session afterwards.
 
 In advisory mode the gate never blocks. It records a `would_block` event and prints what it would have done, so you can see the real false-positive rate before it can interrupt work.
 
@@ -51,7 +51,7 @@ jade permit list
 jade permit approve prm_xxxxxxxxxxxx     # shows the exact command; type y
 ```
 
-Single use, 30 minutes, bound to the exact command text and working directory. A safety invariant (for example pushing the default branch) cannot be approved. Claude Code's own permission prompt is a second, independent gate.
+Single use, 30 minutes, bound to the exact command text and working directory. A safety invariant (for example pushing the default branch) cannot be approved. Claude Code's own permission prompt is a second, independent gate only when the host asks: with `bypassPermissions`, `auto`, headless runs and unattended subagents JADE's gate is the only gate (section 4).
 
 Emergency bypass for one launch: `JADE_GATE_MODE=off claude` (typed by you; an agent typing it is blocked).
 
@@ -98,7 +98,10 @@ Add one line to the existing health script so silence is never mistaken for heal
 
 ## 4. Known coverage limits
 
-- Classification is syntactic. A command built at run time (base64, variable indirection, `eval` of fetched text) is not recognised. Tools the matcher does not name (browser and desktop automation MCP tools) are not gated. Claude Code's own permission prompts remain the backstop.
+- Classification is syntactic. A command built at run time (base64, variable indirection, `eval` of fetched text) is not recognised. Unnamed MCP tools are medium (recorded, not gated) unless their name says they mutate; browser and desktop automation MCP tools that click or type are not gated, but text typed into a shell is classified as a command.
+- **JADE's gate is the only gate whenever the host shows no permission prompt.** The hook event carries `permission_mode`. With `bypassPermissions` or `auto`, with `acceptEdits` (file edits), in headless `claude -p` runs and in unattended subagents, Claude Code asks nobody, so the host prompt is not a backstop and every classification gap above is a bypass. `jade check` prints this under `host permission prompt` together with how many gated calls of the last 7 days ran without a prompt. Run such agents in a sandbox or as a separate OS user, and read `jade ledger stats` for `would_block` and `gated` events.
+- The gate fails closed (docs/05 T17): an unreadable or locked ledger blocks high-risk calls, an overlay that does not load blocks everything but clearly read-only commands and ordinary file writes, and the whole handler answers within 6 s, below the 10 s host timeout. If the gate blocks everything, run `jade check`; a human can set `JADE_GATE_MODE=advisory` while fixing the cause.
+- An earlier run of a command whose outcome is unknown (SI-07) blocks the identical command until `jade decide outcome <decision> --type observed --success true|false --method "..."` records what really happened.
 - Provider answers are as good as the evidence passed in. The companion check flags summaries, not lies.
 - A model drift is informational by decision (follow upgrades): the new snapshot starts at default thresholds and earns changes with its own labels.
 

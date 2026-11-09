@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
 
@@ -23,6 +24,12 @@ SPLIT = shellnorm.SPLIT
 PREFIX = shellnorm.PREFIX
 WRITE_REDIRECT = re.compile(r">>?\s*\S")
 WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+SHELL_TOOLS = ("Bash", "PowerShell", "Monitor")  # built-in tools that run a command line: classified like Bash
+# Every built-in tool the PreToolUse matcher names (ops.pretool_matcher adds `mcp__.*`). Agent/Task need no gate: the tool calls a subagent
+# makes run the same hook. CronCreate/CronDelete only schedule a prompt that later runs under the same hooks, so they are not gated either.
+GATED_BUILTIN = (*SHELL_TOOLS, *WRITE_TOOLS, "RemoteTrigger")
+OLD_KEYS = {"old_string", "old_str"}  # text that is being removed is never scanned as content
+PATH_KEYS = ("source", "destination", "src", "dest", "dst", "from", "to", "old_path", "new_path", "dir", "directory", "folder")
 UNSAFE_GIT = shellnorm.UNSAFE_GIT  # marker prefix R-15 matches; carried only in the text a rule sees
 PATH_RULES = ("R-01", "R-04", "R-12", "R-13")  # the rules about where a write lands: they also see relative operands made absolute
 WRITE_KEYS = ("file_path", "notebook_path", "path", "filePath", "file", "filepath", "target_file", "file_name", "filename", "target")
@@ -39,6 +46,19 @@ def _strings(obj, key: str = ""):
     elif isinstance(obj, (list, tuple)):
         for v in obj:
             yield from _strings(v, key)
+
+
+def content_strings(obj, key: str = ""):
+    """Every string a call would put somewhere (file content, new text, any argument), never the text it removes."""
+    if isinstance(obj, str):
+        if key not in OLD_KEYS:
+            yield obj
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            yield from content_strings(v, str(k))
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            yield from content_strings(v, key)
 
 
 def write_paths(tool_input: dict) -> list[str]:
@@ -62,6 +82,15 @@ def is_mcp(tool: str) -> bool:
     return tool.startswith("mcp__")
 
 
+def is_gated(tool: str) -> bool:
+    """Tools the gate assesses at all; everything else returns before any classification."""
+    return tool in GATED_BUILTIN or is_mcp(tool)
+
+
+def runs_shell(tool: str, tool_input: dict) -> bool:
+    return tool in SHELL_TOOLS or (is_mcp(tool) and mcp_command(tool_input) is not None)
+
+
 def mcp_command(tool_input: dict) -> str | None:
     for key in risk().get("mcp_command_keys", ["command", "cmd", "script"]):
         if isinstance(tool_input.get(key), str) and tool_input[key].strip():
@@ -83,21 +112,44 @@ class Assessment:
     subject: str = ""
 
 
-@lru_cache(maxsize=1)
-def risk() -> dict:
-    r = loader.load_risk(overlay=paths.overlay("risk"), base=paths.policy_dir() / "risk.yaml")
+_BASE_ONLY = False  # see base_only()
+
+
+@lru_cache(maxsize=2)
+def _risk(with_overlay: bool) -> dict:
+    r = loader.load_risk(overlay=paths.overlay("risk") if with_overlay else None, base=paths.policy_dir() / "risk.yaml")
     r["_read_only"] = [re.compile(p) for p in r.get("read_only", [])]
     return r
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=2)
+def _safety(with_overlay: bool) -> dict:
+    return loader.load_safety(overlay=paths.overlay("safety") if with_overlay else None, base=paths.policy_dir() / "safety.yaml")
+
+
+def risk() -> dict:
+    return _risk(not _BASE_ONLY)
+
+
 def safety() -> dict:
-    return loader.load_safety(overlay=paths.overlay("safety"), base=paths.policy_dir() / "safety.yaml")
+    return _safety(not _BASE_ONLY)
 
 
 def reset_cache() -> None:
-    risk.cache_clear()
-    safety.cache_clear()
+    _risk.cache_clear()
+    _safety.cache_clear()
+
+
+@contextmanager
+def base_only():
+    """Use the shipped policy files only, without the machine-local overlays. The hook's degraded mode when an overlay fails to load:
+    the overlay can only add rules, so the shipped ones are a sound floor to classify against."""
+    global _BASE_ONLY
+    prev, _BASE_ONLY = _BASE_ONLY, True
+    try:
+        yield
+    finally:
+        _BASE_ONLY = prev
 
 
 skeleton = shellnorm.skeleton
@@ -160,7 +212,9 @@ def _absolute_operands(seg: str, dirs: tuple[str, ...]) -> str:
     Catches `cd /etc && sort -o pf.conf in`, `sort -o ../../etc/pf.conf in` and a path reached through a symlink.
     """
     out: list[str] = []
-    for tok in seg.split(" ")[:64]:
+    for n, tok in enumerate(seg.split(" ")[:64]):
+        if n == 0:
+            continue  # the program being run is not something the segment writes (`~/.local/bin/jade check`)
         if tok.startswith("-"):
             tok = tok.partition("=")[2]
         tok = tok.replace("\x01", " ")
@@ -186,37 +240,103 @@ def _first_match(text: str) -> dict:
     return risk()["rules"][-1]
 
 
-def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
-    """Classify one tool call. Raises on malformed policy; callers decide how to fail."""
-    if tool in WRITE_TOOLS:
-        subjects = write_paths(tool_input) or [""]
-        best_rule, envs = None, []
-        for subject in subjects:
-            norm = normalise_path(subject, cwd)
-            cands = [subject, *([norm] if norm and norm != subject else [])]
-            for c in cands:
-                r = _first_match(c)
-                if best_rule is None or LEVELS[r["level"]] > LEVELS[best_rule["level"]]:
-                    best_rule = r
-                envs.append(loader.environment_of(risk(), c))
-        env = "production" if "production" in envs else "staging" if "staging" in envs else "local"
-        a = _from_rule(best_rule, env)
-        if env == "production" and LEVELS[a.level] < LEVELS["high"]:
-            a.level, a.rule_id, a.rationale = "high", "R-ENV", "Write under a production path"
-        subject = "\n".join(subjects)
-        a.plan_hash, a.subject = plan_hash(tool, subject, ""), subject
-        return a
-    if is_mcp(tool) and mcp_command(tool_input) is None:
+def _raise_to(a: Assessment, other: Assessment) -> None:
+    """Let the more severe of two assessments of the same call decide the level, keep both sets of blocks."""
+    for inv in other.blocked:
+        if inv not in a.blocked:
+            a.blocked.append(inv)
+    if LEVELS[other.level] > LEVELS[a.level]:
+        a.level, a.rule_id, a.rationale, a.environment = other.level, other.rule_id, other.rationale, other.environment
+        a.reversibility, a.blast_radius, a.data_sensitivity = other.reversibility, other.blast_radius, other.data_sensitivity
+
+
+def _scan_content(a: Assessment, tool_input: dict) -> None:
+    """Invariants marked `scan_content` (SI-02, SI-05) apply to the text a non-shell call carries: file content, new text, any argument."""
+    invs = [i for i in safety()["invariants"] if i.get("scan_content") and "_re" in i and i["id"] not in a.blocked]
+    if not invs:
+        return
+    texts = list(content_strings(tool_input))
+    for inv in invs:
+        if any(inv["_re"].search(t) for t in texts):
+            a.blocked.append(inv["id"])
+
+
+def _assess_write(tool: str, tool_input: dict, cwd: str) -> Assessment:
+    subjects = write_paths(tool_input) or [""]
+    best_rule, envs = None, []
+    for subject in subjects:
+        norm = normalise_path(subject, cwd)
+        cands = [subject, *([norm] if norm and norm != subject else [])]
+        for c in cands:
+            r = _first_match(c)
+            if best_rule is None or LEVELS[r["level"]] > LEVELS[best_rule["level"]]:
+                best_rule = r
+            envs.append(loader.environment_of(risk(), c))
+    env = "production" if "production" in envs else "staging" if "staging" in envs else "local"
+    a = _from_rule(best_rule, env)
+    if env == "production" and LEVELS[a.level] < LEVELS["high"]:
+        a.level, a.rule_id, a.rationale = "high", "R-ENV", "Write under a production path"
+    subject = "\n".join(subjects)
+    a.plan_hash, a.subject = plan_hash(tool, subject, ""), subject
+    return a
+
+
+def _tool_rule(tool: str, command_decides: bool) -> dict:
+    """First `mcp_tools` rule that names the tool; a `generic` name heuristic is skipped when a command string decides."""
+    for m in risk().get("mcp_tools", []):
+        if re.search(m["match"], tool) and not (command_decides and m.get("generic")):
+            return m
+    return {"id": "R-99", "level": "low", "rationale": "Tool with no mutation rule", "blast_radius": "service"}
+
+
+def _rule_assessment(rule: dict) -> Assessment:
+    return Assessment(level=rule["level"], rule_id=rule["id"], rationale=rule["rationale"], environment="production" if rule["level"] == "critical" else "local",
+                      reversibility=rule.get("reversibility", "reversible"), blast_radius=rule.get("blast_radius", "service"))
+
+
+def _path_args(tool_input: dict) -> list[str]:
+    out = [str(tool_input[k]) for k in (*WRITE_KEYS, *PATH_KEYS) if isinstance(tool_input.get(k), str) and tool_input[k].strip()]
+    return [p for p in out if len(p) <= 4096]
+
+
+def _shell_input_strings(tool: str, tool_input: dict) -> list[str]:
+    """Arguments the tool types or pipes into a shell or another tool (risk.yaml mcp_shell_inputs)."""
+    out: list[str] = []
+    for m in risk().get("mcp_shell_inputs", []):
+        if re.search(m["match"], tool):
+            for key in m.get("keys", []):
+                vals = tool_input if key == "*" else {key: tool_input.get(key)}
+                out.extend(t for t in content_strings(vals) if t.strip() and len(t) <= 16384)
+    return out
+
+
+def _assess_tool(tool: str, tool_input: dict, cwd: str) -> Assessment:
+    """MCP tools and the built-in tools that carry no command line: classified by name, by the command they carry, by the paths they
+    write and by the text they type into a shell; the most severe reading decides."""
+    cmd = mcp_command(tool_input) if is_mcp(tool) else None
+    rule = _tool_rule(tool, command_decides=cmd is not None)
+    if cmd is not None:
+        a = _assess_shell(tool, cmd, cwd)
+        if not rule.get("generic"):
+            _raise_to(a, _rule_assessment(rule))
+    else:
+        a = _rule_assessment(rule)
         subject = canonical(tool_input)
-        rule = next((m for m in risk().get("mcp_tools", []) if re.search(m["match"], tool)), None)
-        if rule is None:
-            a = Assessment(level="low", rule_id="R-99", rationale="MCP tool with no mutation rule", environment="local", blast_radius="service")
-        else:
-            a = Assessment(level=rule["level"], rule_id=rule["id"], rationale=rule["rationale"], environment="production" if rule["level"] == "critical" else "local",
-                           reversibility=rule.get("reversibility", "reversible"), blast_radius=rule.get("blast_radius", "service"))
         a.plan_hash, a.subject = plan_hash(tool, subject, ""), f"{tool} {subject}"
-        return a
-    subject = mcp_command(tool_input) or str(tool_input.get("command") or "") if is_mcp(tool) else str(tool_input.get("command") or "")
+    if rule.get("paths"):
+        for p in _path_args(tool_input):
+            norm = normalise_path(p, cwd)
+            hit = next((r for r in (_path_rule(p), _path_rule(norm)) if r), None)
+            if hit:
+                _raise_to(a, _from_rule(hit, loader.environment_of(risk(), norm or p)))
+            if loader.environment_of(risk(), norm or p) == "production":
+                _raise_to(a, Assessment(level="high", rule_id="R-ENV", rationale="Write under a production path", environment="production"))
+    for text in _shell_input_strings(tool, tool_input):
+        _raise_to(a, _assess_shell(tool, text, cwd))
+    return a
+
+
+def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     best: dict | None = None
     active: list[str] = []
     for seg, dirs in shellnorm.segments_cwd(subject, cwd):
@@ -240,6 +360,19 @@ def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
         if any(inv["_re"].search(h) for h in haystacks):
             a.blocked.append(inv["id"])
     a.plan_hash, a.subject = plan_hash(tool, subject, cwd), subject
+    return a
+
+
+def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
+    """Classify one tool call. Raises on malformed policy; callers decide how to fail."""
+    if tool in WRITE_TOOLS:
+        a = _assess_write(tool, tool_input, cwd)
+    elif is_mcp(tool) or tool == "RemoteTrigger":
+        a = _assess_tool(tool, tool_input, cwd)
+    else:
+        a = _assess_shell(tool, str(tool_input.get("command") or ""), cwd)
+        return a
+    _scan_content(a, tool_input)
     return a
 
 

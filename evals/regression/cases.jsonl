@@ -35,3 +35,8 @@
 {"id": "R35", "class": "gate_sh_c_echo_is_low", "kind": "gate", "command": "sh -c 'echo hello'", "expect": "allow", "note": "F02 second pass control"}
 {"id": "R36", "class": "gate_git_pager_cat_is_low", "kind": "gate", "command": "GIT_PAGER=cat git log", "expect": "allow", "note": "N7 control"}
 {"id": "R37", "class": "gate_rebase_exec_classifies_the_command", "kind": "gate", "command": "git rebase --exec 'make test' main", "expect": "allow", "note": "F01 second pass control (medium, below the permit floor)"}
+{"id": "R38", "class": "read_the_ledger_dir_is_low", "kind": "gate", "command": "cat ~/.local/share/jade/pins.json", "expect": "allow", "note": "G00 control"}
+{"id": "R39", "class": "jade_cli_is_low", "kind": "gate", "command": "jade ledger stats", "expect": "allow", "note": "G00 control: the human-only CLI manages the artifacts"}
+{"id": "R40", "class": "mcp_read_tool_is_low", "kind": "gate_mcp", "tool": "mcp__GitLab__get_project", "input": {"id": 1}, "expect": "allow", "note": "G01 control"}
+{"id": "R41", "class": "write_ordinary_content_is_low", "kind": "gate_write", "path": "/tmp/case/a.txt", "content_parts": ["listen 127.0.0.1:11434"], "expect": "allow", "note": "G02 control"}
+{"id": "R42", "class": "shell_c_harmless_is_low", "kind": "gate", "command": "bash -c 'ls -la /tmp'", "expect": "allow", "note": "F41 control"}

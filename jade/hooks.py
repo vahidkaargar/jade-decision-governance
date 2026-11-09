@@ -1,7 +1,9 @@
 """Claude Code hook handlers. Enforcement and reminders only; capture happens at the adapter (ADR-04).
 
 PreToolUse is the side-effect boundary: exit 2 blocks the tool call and the reason goes to the model.
-Any internal error fails closed when the command looks high-risk and open otherwise (threat T17).
+Threat T17: the gate fails closed. When the classifier, the policy files, the ledger, git or the clock fail, a call that is high-risk (or,
+when nothing can be classified, anything that is not clearly read-only) is blocked, never waved through. The whole PreToolUse handler runs
+under an alarm (BUDGET_S) that is safely below the host's hook timeout, because a host that kills a hook proceeds with the tool call.
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ import fnmatch
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -17,12 +20,63 @@ from dataclasses import dataclass
 from . import paths, policy
 from .util import at_least, now, ts
 
-FALLBACK_HIGH = re.compile(
-    r"git push|\bgh (pr|release)\b|\bglab mr\b|(^|[;&| ])(ssh|scp|sftp) |\brsync\b.* \S+:|\brm -rf\b|\bpfctl\b|\bsudo\b|\blaunchctl\b"
-    r"|\bkubectl\b|\bterraform\b|\bhelm\b|docker (push|compose)|composio execute|(npm|cargo) publish|ovault secret|security (add|delete)-"
-    r"|\.claude/settings|/etc/|LaunchAgents|LaunchDaemons")
+BUDGET_S = 6.0          # whole PreToolUse handler; the installed host timeout is 10 s (ops.HOOKS)
+LEDGER_TIMEOUT_S = 1.5  # one wait for the ledger lock (open waits at most twice: busy timeout, then the schema step)
+GIT_TIMEOUT_S = 2.0     # one git call made to resolve a push destination
 BYPASS = re.compile(r"\bcurl\b.*openrouter\.ai/api/alpha/decisions")
 REMIND_WINDOW_S = 6 * 3600
+# Host permission modes in which Claude Code shows no prompt: JADE's gate is then the only gate (docs/05 T18). acceptEdits skips the prompt for file edits only.
+NO_PROMPT_MODES = ("bypassPermissions", "auto")
+NO_PROMPT_EDIT_MODES = ("acceptEdits",)
+
+
+def no_host_prompt(mode: str | None, tool: str) -> bool:
+    """True when the host would not have asked the human about this call, so no second gate stands behind JADE's."""
+    return mode in NO_PROMPT_MODES or (mode in NO_PROMPT_EDIT_MODES and tool in policy.WRITE_TOOLS)
+
+
+class HookBudgetExceeded(BaseException):  # noqa: N818 - BaseException so that no `except Exception` in the gate can swallow the alarm
+    """Raised by the PreToolUse alarm; only main() catches it."""
+
+
+# Cheap, policy-free fail-safe used when nothing else can be trusted (policy does not load, the handler crashed or ran out of time).
+# Linear regexes only: it must itself be safe to run on the input that made the classifier hang.
+_SAFE_VERB = (r"(?:ls|ll|cat|head|tail|wc|pwd|whoami|id|uname|which|type|stat|du|df|diff|cmp|basename|dirname|realpath|grep|egrep|fgrep|jq|cut|tr|echo|printf"
+              r"|true|false|git (?:status|log|diff|show|rev-parse|ls-files|blame))")
+_SAFE_CMD = re.compile(rf"{_SAFE_VERB}(?: [\w./:=@%+,~ -]*)?")
+_EXEC_FLAG = re.compile(r"--output|--pre\b|--exec|--upload-pack|-exec|--hostname-bin|--pager")
+_PROTECTED_PATH = re.compile(
+    r"(?i)\.claude|\.config/jade|\.local/share/jade|\.local/bin|/etc/|/library/launch|policies/|(?:^|/)jade/|jade\.sqlite|\.ssh|\.gnupg|\.aws|\.pem\b|id_rsa|id_ed25519"
+    r"|vault_key|agents\.md|\.cursor|\.zshrc|\.bashrc|\.zprofile|\.profile|sudoers|crontab|launchagents|launchdaemons")
+_MUTATING_TOOL = re.compile(
+    r"^mcp__.+?__(?:set|write|edit|create|update|delete|remove|move|rename|exec|execute|run|shell|apply|merge|deploy|install|uninstall|kill|terminate|patch|publish"
+    r"|push|commit|save|add|drop|truncate|restart|stop|start|send|post|put|accept|fork|link|discard|clean|interact|force|mcp-(?:exec|add|remove|config|create|activate)|code-mode)"
+    r"|kubectl_|exec_in_pod|helm_chart|^RemoteTrigger$|__(?:app_type|Type|type|Shortcut|computer_batch|app_batch|teach_batch|app_key|key)$")
+
+
+def failsafe_reason(event: dict) -> str | None:
+    """Why a gated call must be blocked when the policy cannot be consulted, or None when it is clearly harmless: a read-only command,
+    a file write outside the protected locations, a tool whose name says it only reads."""
+    tool = str(event.get("tool_name") or "")
+    if not policy.is_gated(tool):
+        return None
+    tin = event.get("tool_input")
+    if not isinstance(tin, dict):
+        return "the tool input is malformed"
+    if tool in policy.WRITE_TOOLS:
+        for p in policy.write_paths(tin) or [""]:
+            if _PROTECTED_PATH.search(p) or _PROTECTED_PATH.search(os.path.realpath(os.path.expanduser(p))):
+                return f"the write target {p[:120]!r} is a protected location"
+        return None
+    cmd = tin.get("command") if tool in policy.SHELL_TOOLS else next((tin[k] for k in ("command", "cmd", "script") if isinstance(tin.get(k), str)), None)
+    if cmd is not None or tool in policy.SHELL_TOOLS:
+        text = str(cmd or "").strip()
+        if len(text) <= 4096 and _SAFE_CMD.fullmatch(text) and not _EXEC_FLAG.search(text):
+            return None
+        return "the command is not clearly read-only"
+    if _MUTATING_TOOL.search(tool):
+        return f"{tool} can mutate state"
+    return None
 
 
 @dataclass
@@ -80,7 +134,9 @@ def _git(call: policy.shellnorm.GitCall, cwd: str, *args: str) -> str | None:
     if call.work_tree:
         argv += ["--work-tree", os.path.expanduser(call.work_tree)]
     try:
-        out = subprocess.run([*argv, *args], capture_output=True, text=True, timeout=3, cwd=cwd or None)
+        out = subprocess.run([*argv, *args], capture_output=True, text=True, timeout=GIT_TIMEOUT_S, cwd=cwd or None)
+    except subprocess.TimeoutExpired:
+        raise  # an unresolved destination is never "not main": the gate treats it as a failure (fail closed)
     except (OSError, subprocess.SubprocessError):
         return None
     return out.stdout.strip() or None if out.returncode == 0 else None
@@ -147,35 +203,66 @@ def _on_default_branch(cwd: str, command: str) -> bool:
     return False
 
 
+def _detail(event: dict, a: policy.Assessment | None = None, **more) -> dict:
+    d = {"session": event.get("session_id"), "tool": event.get("tool_name"), "permission_mode": event.get("permission_mode"),
+         "agent_id": event.get("agent_id"), **more}
+    if a is not None:
+        d["plan_hash"] = a.plan_hash
+    return d
+
+
+def _fail_closed(mode: str, why: str) -> HookResult:
+    return _verdict(mode, f"JADE gate: {why} Failing closed. Run `jade check` to see what is wrong; a human can bypass with JADE_GATE_MODE=advisory.")
+
+
+def _policy_failure(mode: str, event: dict, tool: str, tool_input: dict, cwd: str, exc: Exception) -> HookResult:
+    """The call could not be classified (the policy or an overlay does not load, a rule raised). Block it when it is high-risk by the
+    shipped rules or not clearly harmless; let a clearly read-only command or an ordinary file write through."""
+    why = failsafe_reason(event)
+    if why is None:
+        try:
+            with policy.base_only():
+                b = policy.assess(tool, tool_input, cwd)
+                if b.blocked or at_least(b.level, policy.permit_floor()):
+                    why = f"the shipped rules call it {b.level} risk ({b.rule_id})"
+        except Exception:  # noqa: BLE001, S110 - the policy-free check above already said this call looks harmless
+            pass
+    if why is None:
+        return HookResult()
+    return _fail_closed(mode, f"the policy could not be loaded or applied ({type(exc).__name__}: {str(exc)[:200]}), and {why}.")
+
+
 def pretool(event: dict, permit=None) -> HookResult:
     mode = paths.gate_mode()
     if mode == "off":
         return HookResult()
     tool = event.get("tool_name", "")
-    tool_input = event.get("tool_input") or {}
-    if tool != "Bash" and tool not in policy.WRITE_TOOLS and not policy.is_mcp(tool):
+    if not policy.is_gated(tool):
         return HookResult()
+    tool_input = event.get("tool_input") or {}
     cwd = event.get("cwd") or ""
     subject = policy.tool_subject(tool, tool_input)
-    if policy.is_mcp(tool) and not subject:
-        subject = json.dumps(tool_input, sort_keys=True, ensure_ascii=False)
     try:
         a = _classify(tool, tool_input, cwd)
-        runs_shell = tool == "Bash" or (policy.is_mcp(tool) and policy.mcp_command(tool_input) is not None)
-        if runs_shell and "SI-08" not in a.blocked and _on_default_branch(cwd, subject):
+    except Exception as e:  # noqa: BLE001 - fail closed for anything that is not clearly harmless
+        return _policy_failure(mode, event, tool, tool_input, cwd, e)
+    try:
+        if policy.runs_shell(tool, tool_input) and "SI-08" not in a.blocked and _on_default_branch(cwd, subject):
             a.blocked.append("SI-08")
-    except Exception as e:  # noqa: BLE001 - fail closed for anything that looks high-risk, open otherwise
-        if FALLBACK_HIGH.search(subject):
-            return _verdict(mode, f"JADE gate: internal error ({type(e).__name__}) while classifying a command that looks high-risk. "
-                                  "Failing closed. Run `jade check`; a human can bypass with JADE_GATE_MODE=advisory.")
-        return HookResult()
+    except Exception as e:  # noqa: BLE001 - git hung or failed: the push destination is unknown
+        if at_least(a.level, policy.permit_floor()):
+            return _fail_closed(mode, f"the destination of this {a.level}-risk call could not be resolved ({type(e).__name__}).")
     if a.blocked:
         _journal("gate", "safety_block", a, event)
         return _verdict(mode, f"JADE safety invariant {', '.join(a.blocked)} blocks this {tool} call. No permit can authorize it. "
                               f"Rule text: policies/safety.yaml. Do not rephrase the command to get around the invariant; ask the human.")
     if not at_least(a.level, policy.permit_floor()):
         return HookResult()
-    return _gate(mode, tool, a, event, permit)
+    try:
+        return _gate(mode, tool, a, event, permit)
+    except Exception as e:  # noqa: BLE001 - the ledger is unreadable, locked or full: no permit can be checked, so nothing high-risk runs
+        return _fail_closed(mode, f"this {tool} call is {a.level} risk ({a.rule_id}) and the permit ledger failed ({type(e).__name__}: {str(e)[:160]}), "
+                                  "so no permit can be checked.")
 
 
 def _verdict(mode: str, message: str) -> HookResult:
@@ -188,20 +275,46 @@ def _journal(entity: str, kind: str, a: policy.Assessment, event: dict) -> None:
     try:
         from . import ledger
 
-        db = ledger.open()
-        db.event(entity, kind, guard=f"{a.rule_id} {a.level} {','.join(a.blocked)}".strip(), actor="hook",
-                 detail={"session": event.get("session_id"), "plan_hash": a.plan_hash, "tool": event.get("tool_name")})
+        db = ledger.open(timeout=LEDGER_TIMEOUT_S)
+        db.event(entity, kind, guard=f"{a.rule_id} {a.level} {','.join(a.blocked)}".strip(), actor="hook", detail=_detail(event, a))
         db.close()
     except Exception:  # noqa: BLE001, S110 - journaling must never change the gate verdict
         pass
 
 
+def _si07_hold(db, a: policy.Assessment):
+    """SI-07: an earlier decision for this exact command whose outcome is unknown, or an irreversible one still executing. Such a command
+    is never started again until the outcome is reconciled; no permit is raised or consumed for it. Returns (decision_id, reason) or None."""
+    now_s = ts()
+    for r in db.all("SELECT decision_id, status, expires_at, doc_json FROM decisions WHERE plan_hash=? AND status IN ('OUTCOME_UNKNOWN','EXECUTING') "
+                    "ORDER BY updated_at DESC", (a.plan_hash,)):
+        if r.status == "OUTCOME_UNKNOWN" or r.expires_at <= now_s:
+            return r.decision_id, "has an unknown outcome (an unknown outcome is never success)"
+        try:
+            irreversible = json.loads(r.doc_json)["risk"]["reversibility"] == "irreversible"
+        except (ValueError, KeyError, TypeError):
+            irreversible = True
+        if irreversible:
+            return r.decision_id, "is still executing and is irreversible"
+    return None
+
+
 def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> HookResult:
     from . import decide, ledger, permits
 
-    db = ledger.open()
+    db = ledger.open(timeout=LEDGER_TIMEOUT_S)
     try:
+        db.event("gate", "gated", guard=f"{a.rule_id} {a.level}", actor="hook", detail=_detail(event, a))
         permits.sweep(db)
+        hold = _si07_hold(db, a)
+        if hold:
+            did, reason = hold
+            if mode != "advisory":
+                db.event("gate", "safety_block", guard=f"{a.rule_id} {a.level} SI-07", actor="hook", detail=_detail(event, a, decision_id=did))
+            return _verdict(mode, f"JADE safety invariant SI-07 blocks this {tool} call. An earlier run of this exact command (decision {did}) {reason}"
+                                  f"{' and still executing' if 'executing' in reason else ''}. It is not retried automatically and no permit is raised or used for it. "
+                                  f"Read the real state, then record it: jade decide outcome {did} --type observed --success true|false --method \"how you checked\". "
+                                  "Do not rephrase the command to get around the invariant; ask the human.")
         p = permit or permits.find_usable(db, a.plan_hash)
         if p is not None and permits.consume(db, p.permit_id, a.plan_hash):
             row = db.one("SELECT decision_id, status FROM decisions WHERE decision_id=?", (p.decision_id,))
@@ -211,7 +324,7 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
                 decide.step(db, row.decision_id, "execute", guard="PreToolUse saw the matching command; permit consumed", actor="hook", ttl_s=3600)
             return HookResult(0, f"JADE: permit {p.permit_id} consumed for this {tool} call.")
         if mode == "advisory":
-            db.event("gate", "would_block", guard=f"{a.rule_id} {a.level}", actor="hook", detail={"session": event.get("session_id"), "plan_hash": a.plan_hash})
+            db.event("gate", "would_block", guard=f"{a.rule_id} {a.level}", actor="hook", detail=_detail(event, a))
             return HookResult(0, f"[advisory, not blocked] JADE: {a.level} risk ({a.rule_id}: {a.rationale}) would need a permit.")
         pending = db.one("SELECT permit_id FROM permits WHERE plan_hash=? AND state='PENDING' AND expires_at>?", (a.plan_hash, ts()))
         if pending is None:
@@ -223,7 +336,9 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
                                 scope=(event.get("cwd") or "*")[:200], environment=a.environment)
             with db.tx() as con:
                 con.execute("UPDATE permits SET scope=? WHERE permit_id=?", (json.dumps({"tool": tool, "subject": a.subject[:4000], "cwd": event.get("cwd") or "",
-                                                                                 "rule": a.rule_id, "rationale": a.rationale}), p.permit_id))
+                                                                                 "rule": a.rule_id, "rationale": a.rationale,
+                                                                                 "permission_mode": event.get("permission_mode"), "agent_id": event.get("agent_id")}),
+                                                                                p.permit_id))
             pid = p.permit_id
         else:
             pid = pending.permit_id
@@ -241,7 +356,7 @@ def posttool(event: dict) -> HookResult:
     command = str((event.get("tool_input") or {}).get("command") or "")
     from . import decide, ledger
 
-    db = ledger.open()
+    db = ledger.open(timeout=LEDGER_TIMEOUT_S)
     try:
         if BYPASS.search(command) and "jade" not in command:
             db.event(event.get("session_id") or "session", "BYPASS", guard="raw Decisions API call outside the adapter", actor="hook")
@@ -276,7 +391,7 @@ def stop(event: dict) -> HookResult:
         return HookResult()
     from . import ledger
 
-    db = ledger.open()
+    db = ledger.open(timeout=LEDGER_TIMEOUT_S)
     try:
         rows = undisposed(db, session)
         if not rows:
@@ -296,7 +411,7 @@ def stop(event: dict) -> HookResult:
 def session_start(event: dict) -> HookResult:
     from . import decide, ledger, permits
 
-    db = ledger.open()
+    db = ledger.open(timeout=LEDGER_TIMEOUT_S)
     try:
         decide.sweep(db)
         permits.sweep(db)
@@ -322,21 +437,55 @@ def session_start(event: dict) -> HookResult:
 HANDLERS = {"pretool": pretool, "posttool": posttool, "stop": stop, "session-start": session_start}
 
 
+def _on_alarm(_signum, _frame):
+    raise HookBudgetExceeded
+
+
+def _arm(seconds: float) -> None:
+    try:
+        signal.signal(signal.SIGALRM, _on_alarm)
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+    except (ValueError, AttributeError, OSError):  # not the main thread, or no SIGALRM on this platform: the ledger and git timeouts still bound the hook
+        pass
+
+
+def _disarm() -> None:
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+    except (ValueError, AttributeError, OSError):
+        pass
+
+
+def _failsafe_exit(name: str, event: dict, what: str) -> int:
+    if name == "pretool" and paths.gate_mode() != "off":
+        why = failsafe_reason(event)
+        if why:
+            res = _fail_closed(paths.gate_mode(), f"{what}, and {why}.")
+            print(res.stderr, file=sys.stderr)
+            return res.exit_code
+    print(f"jade hook {name}: {what}; not blocking", file=sys.stderr)
+    return 0
+
+
 def main(name: str) -> int:
     raw = sys.stdin.read()
     try:
         event = json.loads(raw) if raw.strip() else {}
     except ValueError:
         event = {}
+    if not isinstance(event, dict):
+        event = {}
     try:
-        res = HANDLERS[name](event)
+        if name == "pretool":
+            _arm(BUDGET_S)
+        try:
+            res = HANDLERS[name](event)
+        finally:
+            _disarm()
+    except HookBudgetExceeded:
+        return _failsafe_exit(name, event, f"hook time budget ({BUDGET_S:g} s) exceeded")  # the host would kill the hook at its own timeout and proceed
     except Exception as e:  # noqa: BLE001 - last line of defence; see module docstring
-        subject = json.dumps(event.get("tool_input") or {})
-        if name == "pretool" and paths.gate_mode() == "enforce" and FALLBACK_HIGH.search(subject):
-            print(f"JADE gate: internal error ({type(e).__name__}: {e}); failing closed for a high-risk-looking call. Run `jade check`.", file=sys.stderr)
-            return 2
-        print(f"jade hook {name}: internal error ({type(e).__name__}: {e}); not blocking", file=sys.stderr)
-        return 0
+        return _failsafe_exit(name, event, f"internal error ({type(e).__name__}: {e})")
     if res.stdout:
         print(res.stdout)
     if res.stderr:

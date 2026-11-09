@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS improvements(candidate_id TEXT PRIMARY KEY, decision 
 MIGRATIONS = {"jev_calls": [("language", "TEXT")]}   # columns added after the first release: (name, type)
 DEDUP_TTL_S = 3600
 STATE_CAP = 32 * 1024
+DEFAULT_TIMEOUT_S = 10.0
 
 
 def _ns(row: sqlite3.Row | None):
@@ -54,10 +55,13 @@ def _ns(row: sqlite3.Row | None):
 
 
 class Ledger:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, timeout: float = DEFAULT_TIMEOUT_S):
+        """`timeout` bounds every wait for a lock: the busy timeout and the schema-step retry. The PreToolUse hook passes a
+        short one so that it answers before the host kills it (hooks.LEDGER_TIMEOUT_S)."""
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.con = sqlite3.connect(self.path, timeout=10, isolation_level=None)
+        self.timeout = float(timeout)
+        self.con = sqlite3.connect(self.path, timeout=self.timeout, isolation_level=None)
         self.con.row_factory = sqlite3.Row
         self._init()
         try:
@@ -68,7 +72,7 @@ class Ledger:
     def _init(self) -> None:
         """WAL switch and schema creation ignore the busy timeout when several processes open a fresh file at
         once, so retry them briefly instead of failing the caller."""
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + self.timeout
         while True:
             try:
                 self.con.execute("PRAGMA journal_mode=WAL")
@@ -167,10 +171,10 @@ class Ledger:
         self.con.close()
 
 
-def open(path: Path | str | None = None) -> Ledger:  # noqa: A001 - `ledger.open()` is the public name
+def open(path: Path | str | None = None, timeout: float = DEFAULT_TIMEOUT_S) -> Ledger:  # noqa: A001 - `ledger.open()` is the public name
     """Open the ledger. `path` may be a directory (uses <dir>/jade.sqlite) or a file; default is the JADE home."""
     p = Path(path) if path else paths.home()
     if p.is_dir() or p.suffix == "":
         p.mkdir(parents=True, exist_ok=True)
         p = p / "jade.sqlite"
-    return Ledger(p)
+    return Ledger(p, timeout)
