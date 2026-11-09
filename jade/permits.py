@@ -43,10 +43,23 @@ def _db(path):
     return (path, False) if isinstance(path, ledger.Ledger) else (ledger.open(path), True)
 
 
-def _ns(row):
+def _doc(row, *, validate: bool = True) -> dict | None:
+    """The permit document of a row, validated against its schema on every read (W-57), or None when the stored text is unreadable, does not match
+    the schema or names another permit. A permit without a document is never valid: every caller treats None as "not usable". `validate=False` only
+    parses (callers that give a more specific refusal first, then validate)."""
+    try:
+        return schemas.load("permit", _col(row, "doc_json"), id_field="permit_id", id_value=_col(row, "permit_id"), validate=validate)
+    except schemas.Unreadable:
+        return None
+
+
+def _ns(row, doc: dict | None = None):
     if row is None:
         return None
-    doc = json.loads(row.doc_json)
+    doc = doc if doc is not None else _doc(row)
+    if doc is None:
+        return None
+    doc = dict(doc)
     doc.update(state=row.state, uses=row.uses, expires_at=row.expires_at, issued_at=row.issued_at)
     return SimpleNamespace(**doc, ttl_s=row.ttl_s, action=row.action, scope=row.scope)
 
@@ -207,9 +220,9 @@ def pending_for(path, plan_hash: str, *, context: dict | None = None, fingerprin
     db, own = _db(path)
     try:
         for row in db.all("SELECT * FROM permits WHERE plan_hash=? AND state='PENDING' AND expires_at>? ORDER BY issued_at DESC", (plan_hash, ts())):
-            p = _ns(row)
-            if _same_request(row, json.loads(row.doc_json), ctx_of(p), context, fingerprints):
-                return p
+            doc = _doc(row)
+            if doc is not None and _same_request(row, doc, ctx_of(_ns(row, doc)), context, fingerprints):
+                return _ns(row, doc)
         return None
     finally:
         if own:
@@ -227,7 +240,10 @@ def request(path, action: str, plan_hash: str, risk: str = "high", ttl_s: int = 
         if row:
             return row
         for stale in db.all("SELECT permit_id, doc_json FROM permits WHERE plan_hash=? AND state='PENDING'", (plan_hash,)):
-            if not _current(json.loads(stale.doc_json), fingerprints):  # a request by another session stays: two agents must not keep revoking each other's
+            doc = _doc(stale)
+            if doc is None:   # a record that cannot be read is never shown to the human; a fresh request replaces it
+                revoke(db, stale.permit_id, "superseded: the stored record is unreadable or does not match the permit schema")
+            elif not _current(doc, fingerprints):  # a request by another session stays: two agents must not keep revoking each other's
                 revoke(db, stale.permit_id, "superseded: the policy or a recorded precondition changed since it was requested")
         return _create(db, "PENDING", action, plan_hash, ttl_s, risk, decision_id, scope, context, environment, f"agent:{user()}", fingerprints)
     finally:
@@ -338,7 +354,9 @@ def approve(path, permit_id: str, stdin_isatty: bool | None = None):
                 ctx = _loads(row["scope"])
                 if "subject" in ctx:  # a permit that carries a command is approved only when that command is what the plan hash covers
                     _verify(ctx, row["plan_hash"])
-                doc = json.loads(row["doc_json"])
+                doc = _doc(row)
+                if doc is None:
+                    raise PermitError(f"permit {permit_id} has an unreadable or invalid stored record and cannot be approved; revoke it and ask the agent to request it again")
                 doc.update(state="ISSUED", principal=f"human:{user()}", approval_reference=f"tty:{user()}@{ts()}", issued_at=ts(),
                            expires_at=ts_in(row["ttl_s"]))
                 doc.pop("seal", None)
@@ -389,9 +407,13 @@ def try_consume(path, permit_id: str, plan_hash: str, *, level: str, session: st
                 return "the plan hash differs"
             if row["expires_at"] <= ts():
                 return "the permit expired"
-            doc = json.loads(row["doc_json"])
+            doc = _doc(row, validate=False)
+            if doc is None:
+                return "the permit record is unreadable or does not match the permit schema"
             if (why := _static_refusal(db, row, doc, level)):
                 return why
+            if _doc(row) is None:   # the specific refusals above come first; a record that still fails its schema is never used
+                return "the permit record is unreadable or does not match the permit schema"
             if con.execute("SELECT 1 FROM events WHERE entity_id=? AND kind='permit_consumed'", (permit_id,)).fetchone():
                 return "the permit was already used"
             if doc.get("policy_version") != paths.policy_version():
@@ -432,11 +454,12 @@ def find_usable(path, plan_hash: str, *, level: str, session: str | None = None,
     try:
         other = None
         for row in db.all("SELECT * FROM permits WHERE plan_hash=? AND state='ISSUED' AND uses=0 AND expires_at>? ORDER BY issued_at DESC", (plan_hash, ts())):
-            if _static_refusal(db, row, json.loads(row.doc_json), level) is not None:
+            doc = _doc(row, validate=False)
+            if doc is None or _static_refusal(db, row, doc, level) is not None or _doc(row) is None:
                 continue
             if _caller_refusal(_loads(row.scope), session, agent) is None:
-                return _ns(row)
-            other = other or _ns(row)
+                return _ns(row, doc)
+            other = other or _ns(row, doc)
         return other
     finally:
         if own:
@@ -474,9 +497,10 @@ def sweep(path) -> int:
         with db.tx() as con:
             n = con.execute("UPDATE permits SET state='EXPIRED' WHERE state IN ('PENDING','ISSUED') AND expires_at<=?", (ts(),)).rowcount
             current = paths.policy_version()
-            for r in con.execute("SELECT permit_id, state, json_extract(doc_json,'$.policy_version') AS pv, "
+            for r in con.execute("SELECT permit_id, state, json_valid(doc_json) AS ok, CASE WHEN json_valid(doc_json) THEN json_extract(doc_json,'$.policy_version') END AS pv, "
                                  "(SELECT status FROM decisions d WHERE d.decision_id=permits.decision_id) AS dstatus FROM permits WHERE state IN ('PENDING','ISSUED')").fetchall():
-                why = f"its decision is {r['dstatus']}" if r["dstatus"] in TERMINAL_DECISION else "policy_version changed" if r["pv"] != current else None
+                why = (f"its decision is {r['dstatus']}" if r["dstatus"] in TERMINAL_DECISION else "its stored record is unreadable" if not r["ok"]
+                       else "policy_version changed" if r["pv"] != current else None)
                 if why:
                     con.execute("UPDATE permits SET state='REVOKED' WHERE permit_id=?", (r["permit_id"],))
                     db.event(r["permit_id"], "permit_revoked", prev=r["state"], next="REVOKED", guard=why, con=con)
@@ -491,7 +515,8 @@ def listing(path, states=("PENDING", "ISSUED")):
     db, own = _db(path)
     try:
         marks = ",".join("?" * len(states))
-        return [_ns(r) for r in db.all(f"SELECT * FROM permits WHERE state IN ({marks}) AND expires_at>? ORDER BY issued_at", (*states, ts()))]  # noqa: S608
+        rows = (_ns(r) for r in db.all(f"SELECT * FROM permits WHERE state IN ({marks}) AND expires_at>? ORDER BY issued_at", (*states, ts())))  # noqa: S608
+        return [p for p in rows if p is not None]   # a row whose record cannot be read is not listed; `jade check` names it
     finally:
         if own:
             db.close()

@@ -8,12 +8,15 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("JADE_CONFIG", str(tmp_path / "config"))
     monkeypatch.setenv("JADE_CLAUDE_SETTINGS", str(tmp_path / "settings.json"))
     monkeypatch.setenv("JADE_LAUNCH_AGENTS", str(tmp_path / "LaunchAgents"))   # never the real ~/Library/LaunchAgents
+    monkeypatch.setenv("JADE_MANAGED_SETTINGS", str(tmp_path / "managed-settings.json"))   # never the real /Library/Application Support/ClaudeCode
     monkeypatch.delenv("JADE_GATE_MODE", raising=False)
     monkeypatch.delenv("JADE_POLICY_DIR", raising=False)
+    monkeypatch.delenv("JADE_CHECKOUT", raising=False)
     monkeypatch.delenv("JADE_ACK_OVERRIDES", raising=False)
     monkeypatch.delenv("JADE_SESSION_ID", raising=False)
-    from jade import policy, questions, thresholds, util
+    from jade import paths, policy, questions, thresholds, util
 
+    monkeypatch.setattr(paths, "checkout_overlay_dir", lambda: tmp_path / "checkout-local")   # never this checkout's private policies/local (W-56)
     monkeypatch.setattr(util, "agent_ancestor", lambda: None)  # the test run itself may sit under an agent; tests of the real walk patch `ps`
     for fn in (policy.reset_cache, questions.reset_cache, thresholds.escalation.cache_clear):
         fn()
