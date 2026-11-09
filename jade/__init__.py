@@ -1,3 +1,3 @@
 """JADE: adaptive decision governance for agents that use the TypeSafe Jev decision model."""
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
