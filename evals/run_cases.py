@@ -1,7 +1,10 @@
-"""Replay the regression and adversarial case files through the real jade code paths (fixture provider,
-isolated home, no network). Exit non-zero on any mismatch.
+"""Replay the regression, adversarial, routing, judgment and calibration case files through the real jade code paths (fixture provider,
+isolated home, no network). Exit non-zero on any mismatch. Reports the pass rate per language slice (`lang` tag, else derived from the text).
 
-    uv run python evals/run_cases.py [evals/regression/cases.jsonl evals/adversarial/cases.jsonl]
+    uv run python evals/run_cases.py [evals/regression/cases.jsonl evals/adversarial/cases.jsonl ...]
+
+`known_gap` marks a case whose label is right and whose current behaviour is wrong (W-49): it passes while the behaviour is still the
+recorded one, and fails when the behaviour changes, so a fix has to remove the marker.
 """
 from __future__ import annotations
 
@@ -12,7 +15,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT = [ROOT / "evals" / "regression" / "cases.jsonl", ROOT / "evals" / "adversarial" / "cases.jsonl"]
+DEFAULT = [ROOT / "evals" / d / "cases.jsonl" for d in ("regression", "adversarial", "routing", "judgment", "calibration")]
 
 
 def run_case(c: dict) -> list[str]:
@@ -77,6 +80,10 @@ def run_case(c: dict) -> list[str]:
         problems += _run_judging(c)
     elif kind == "secret_stored":
         problems += _run_secret_stored(c)
+    elif kind == "route":
+        problems += _run_route(c)
+    elif kind == "judge_input":
+        problems += _run_judge_input(c)
     elif kind == "redact_keep":
         from jade import redact
 
@@ -86,6 +93,43 @@ def run_case(c: dict) -> list[str]:
         problems += _run_lifecycle(c)
     else:
         problems.append(f"unknown case kind {kind}")
+    return problems
+
+
+def _run_route(c: dict) -> list[str]:
+    """W-49 routing set: `route.preflight` on the case's inputs must give the hand-labelled `should_route`. No provider is involved."""
+    from jade import route
+
+    got = route.preflight(claim=c.get("claim", ""), evidence=c.get("evidence", ""), options=c.get("options"), command=c.get("command"), risk=c.get("risk", "low"),
+                          about_to_claim_done=c.get("about_to_claim_done", False), deterministic=c.get("deterministic", False)).route
+    return [] if got == c["should_route"] else [f"route {got}, expected {c['should_route']}"]
+
+
+def _run_judge_input(c: dict) -> list[str]:
+    """W-49 judgment and calibration sets, the half that needs no provider: the case's text goes through `ask.run` with a fixture provider and
+    must reach it byte for byte (Persian script, half-spaces and Persian digits survive redaction and the state cap), with no redaction and no
+    truncation. Whether Jev judges the case correctly needs a live call and is not measured here."""
+    from jade import adapter, ask
+
+    if c["family"] == "verify_claim":
+        spec, state = ask.verify_specs(companion=False), {"claim": c["claim"], "evidence": c["evidence"]}
+        prov = adapter.FixtureProvider(lambda s, q, m: {k: {"type": "noul", "noul": 0.5} for k in q})
+        r = ask.run(spec, state, provider=prov, session="case-session")
+    else:
+        state = {"context": c["context"]}
+        prov = adapter.FixtureProvider(lambda s, q, m: {k: {"type": "choice", "choice": {x.split("=", 1)[0]: 1 / len(c["options"]) for x in c["options"]}} for k in q})
+        r = ask.run([ask.adhoc_spec("choice", "Which option fits the context?", options=c["options"])], state, provider=prov, session="case-session")
+    problems = []
+    if len(prov.calls) != 1:
+        return [f"provider called {len(prov.calls)} times, expected 1"]
+    if prov.calls[0]["state"] != state:
+        problems.append("the state that reached the provider differs from the case")
+    if c["family"] == "strategy_choice":
+        want = {o.split("=", 1)[0].strip(): o.split("=", 1)[1].strip() for o in c["options"]}
+        if prov.calls[0]["questions"]["q"].get("criteria") != want:
+            problems.append("the options that reached the provider differ from the case")
+    if r.redactions or "truncated" in " ".join(r.warnings):
+        problems.append("a non-secret case was redacted or truncated")
     return problems
 
 
@@ -207,10 +251,34 @@ def _run_lifecycle(c: dict) -> list[str]:
     return problems
 
 
+def seeded(c: dict, home: str) -> dict:
+    """A case with `seed` (paths under `{tmp}`) gets those files created in its throwaway directory, and `{tmp}` in the case replaced by it: the
+    gate decides on whether a file already exists (R-18), so a case about editing one needs the file to be there."""
+    if not c.get("seed"):
+        return c
+    out = json.loads(json.dumps(c).replace("{tmp}", json.dumps(home)[1:-1]))
+    for rel in out["seed"]:
+        f = Path(rel)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("# existing file\n")
+    return out
+
+
+def _gap_status(c: dict, problems: list[str]) -> tuple[str, list[str]]:
+    """`known_gap` cases: still failing in the recorded way is a pass (shown as `gap`); passing means the gap closed, and a different
+    failure means the behaviour drifted: both fail so the marker is kept honest."""
+    if not problems:
+        return "FAIL", ["known_gap is set but the case now passes: remove known_gap and current_route"]
+    if c.get("kind") == "route" and problems != [f"route {c['current_route']}, expected {c['should_route']}"]:
+        return "FAIL", [f"known_gap drifted (recorded current_route {c['current_route']}): {problems[0]}"]
+    return "gap", []
+
+
 def main(files: list[str]) -> int:
-    failures = total = 0
+    failures = total = gaps = delivery_only = 0
+    by_lang: dict[str, list[int]] = {}
     for f in files or DEFAULT:
-        for line in Path(f).read_text().splitlines():
+        for line in Path(f).read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             c = json.loads(line)
@@ -222,11 +290,31 @@ def main(files: list[str]) -> int:
 
                 for fn in (policy.reset_cache, questions.reset_cache, thresholds.escalation.cache_clear):
                     fn()
-                problems = run_case(c)
+                problems = run_case(seeded(c, os.path.realpath(d)))
+            status = "ok  "
+            if c.get("known_gap"):
+                status, problems = _gap_status(c, problems)
+            elif problems:
+                status = "FAIL"
             total += 1
             failures += bool(problems)
-            print(f"{'FAIL' if problems else 'ok  '}  {c['id']} {c['class']}" + ("".join(f"\n      {p}" for p in problems)))
-    print(f"{total - failures}/{total} cases pass")
+            gaps += status == "gap"
+            lang = __import__("jade.evals", fromlist=["case_lang"]).case_lang(c)
+            tally = by_lang.setdefault(lang, [0, 0, 0, 0])   # passed, cases, known gaps, input-delivery-only cases
+            tally[1] += 1
+            tally[0] += not problems and status != "gap"
+            tally[2] += status == "gap"
+            tally[3] += c.get("kind") == "judge_input"
+            delivery_only += c.get("kind") == "judge_input"
+            print(f"{status}  {c['id']} {c['class']}" + ("".join(f"\n      {p}" for p in problems)))
+    print(f"{total - failures}/{total} cases pass ({gaps} known gaps)")
+    if delivery_only:
+        print(f"{delivery_only} judge_input cases check input delivery only: the text must reach a fixture provider unchanged. Their truth and best labels are "
+              "not read, so judgment quality is not measured offline (docs/04 section 5).")
+    print("by language (explicit lang tag, else derived from the case text; a known gap is listed apart and is not a pass):")
+    for lang in sorted(by_lang):
+        ok, n, g, d = by_lang[lang]
+        print(f"{lang:<8}{ok}/{n}" + (f"  ({g} known gap{'s' if g != 1 else ''})" if g else "") + (f"  ({d} input delivery only)" if d else ""))
     return 1 if failures else 0
 
 

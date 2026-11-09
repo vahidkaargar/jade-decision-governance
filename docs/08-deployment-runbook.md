@@ -43,6 +43,27 @@ What it does and does not do: the repository URL and scheme are constants; the r
 
 A release is a tag. Bump `version` in `pyproject.toml` and `__version__` in `jade/__init__.py`, move the `[Unreleased]` entries of `CHANGELOG.md` under a `## [X.Y.Z] - date` heading, merge to the default branch, then `git tag -a vX.Y.Z -m "X.Y.Z"` and push the tag. `.github/workflows/release.yml` runs on that push: it refuses a tag that differs from either version, runs `ruff` and the suite, builds the wheel and sdist with `uv build`, installs the wheel into an isolated directory and runs `jade --version`, `jade check --offline` and `jade setup --status` from it (`scripts/verify_install.sh`; only the `hooks installed` row may fail on a fresh machine), writes `SHA256SUMS`, and creates or updates the GitHub release with the three files and the CHANGELOG section as notes. Only that last job has `contents: write`. Run `sh scripts/verify_install.sh` yourself before tagging; it needs no network when uv's cache has the build backend and the dependencies (`UV_OFFLINE=0` allows downloads) and never touches your `~/.claude`, ledger or keychain. `tests/test_ledger_migration.py` opens a ledger with the 0.2.2 schema (`tests/fixtures/ledger_0_2_2.sql`) with the current code; when a release changes the ledger schema, snapshot the previous DDL the same way.
 
+### 1.3 Test and verification runs never use the live ledger (W-72)
+
+The installed hook and `jade` write to `~/.local/share/jade`. A synthetic command fed to them (a fake `terraform destroy`, a probe of a rule) leaves a real pending permit and a `WAITING_HUMAN` decision there, in the same queue as the approvals you owe. Three rules keep test noise out:
+
+| Who | Rule |
+|-----|------|
+| The test suite | `tests/conftest.py` fails any test that reaches the real JADE home (no `JADE_HOME`, or one that names it) before anything is created, opened or migrated. Every test gets its own temporary home. Run `uv run pytest`; never point a test at `~/.local/share/jade`. |
+| An agent brief that verifies code | Say so in the brief: "verify with `uv run pytest` or the Python API; do not pipe a synthetic command into the installed `jade hook ...` or `jade permit ...`". An agent cannot set `JADE_HOME` for a CLI probe: SI-11 blocks the assignment on purpose (docs/05 T19). A CLI or hook probe that must run is run by you in a terminal with `JADE_HOME=$(mktemp -d) JADE_CONFIG=$(mktemp -d) jade ...`. |
+| A probe that has to reach the live hook anyway | Prefix it with `JADE_SOURCE=test`. Every row the process writes (Jev calls, decisions, permits, events) carries `source = 'test'`. The gate decides exactly as without the tag. `jade ledger stats`, the miner, the calibration labels and the advisory-week counts leave tagged rows out, the SessionStart hook reports them as "test-tagged ... not real approvals" instead of "awaiting human approval", and `jade permit list` marks them `[test]`. Any other value of `JADE_SOURCE` is ignored. |
+
+The tag is a statistics label, not a security control: an agent can tag its own real rows, which hides them from the counts and the notice (a tag that is in force in the hook environment is listed by `jade check` and shown at SessionStart as a weakening override, so a persisted one is not silent) (not from `jade permit list`, `jade decide list` or the gate, which never read the tag). Do not approve a permit only because it carries or lacks the tag; read the command on the approval screen.
+
+To clear what a test run left behind, in your own terminal:
+
+```bash
+jade ledger purge --test-rows                       # removes every row tagged source=test, and writes one audit event with counts
+jade ledger purge --test-rows --id prm_x --id dec_x # first tags rows written before the tag existed (a permit, a decision, or both) as test, then removes them
+```
+
+`--id` takes the exact `prm_` or `dec_` id shown by `jade permit list` or `jade decide list`; it tags the permit or decision, the decision or permits it belongs to, and their events. Rows with no tag that you did not name are never removed. The command needs a human terminal and never reads or keeps command text. The daily `jade maintain` job does not run it.
+
 ## 2. Human-only steps
 
 These change what an agent may do on this machine. The runtime refuses them for an agent session on purpose (invariant SI-09, `docs/07` section 3), so run them in your own terminal. Order matters.
@@ -135,6 +156,8 @@ tail -1 ~/.local/share/jade/maintain.log                               # one JSO
 ```
 
 The plist sets `PATH` (the directory of `jade` and `jev`, then `/opt/homebrew/bin`, `/usr/local/bin` and the system directories) and `HOME`, because launchd starts agents with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`; `jade check` also looks for `jev` beside `jade` when PATH has none. `jade check` fails when this plist exists but launchd has not loaded it.
+
+The job's `purge` holds the ledger's write lock for the length of its transaction (0.67 s the first time it clears 30 days of text at 100k rows, 56 ms afterwards) and `VACUUM` for about 0.6 s; a hook waits at most 1.5 s for the lock and then blocks a high-risk call (docs/05 T17). Schedule the job away from working hours and re-run `evals/performance/ledger_load.py` (docs/04 4c) if the ledger passes about 300k rows. Back the ledger up with `sqlite3 ~/.local/share/jade/jade.sqlite ".backup <file>"`, not a file copy, which misses the `-wal` sidecar.
 
 Undo: `launchctl bootout "gui/$(id -u)/com.example.jade-maintain"` and delete the plist.
 

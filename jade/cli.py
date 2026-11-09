@@ -115,7 +115,7 @@ def _journal_invalid(reason: str) -> None:
 # ---- other commands ----------------------------------------------------------------------------------
 def _stats(a) -> int:
     db = ledger.open()
-    w = "ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?) AND COALESCE(primitive,'')<>'fast'"   # `fast` rows from an older version are not Jev calls
+    w = "ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?) AND COALESCE(primitive,'')<>'fast' AND " + ledger.live()   # `fast` rows from an older version are not Jev calls; rows of a `JADE_SOURCE=test` run are not live data (W-72)
     arg = (f"-{a.days} days",)
     one = lambda sql: db.one(sql, arg)  # noqa: E731
     total = one(f"SELECT COUNT(*) AS n FROM jev_calls WHERE {w}").n  # noqa: S608 - constant fragment
@@ -136,7 +136,7 @@ def _stats(a) -> int:
                     "repeat_share": round((r.repeats or 0) / total, 3), "error_share": round((r.errors or 0) / total, 3),
                     "non_accept_reminded_without_disposition": und, "share_of_non_accept": round(und / nonacc, 3) if nonacc else None,
                     "latency_ms": {"p50": pct(0.5), "p95": pct(0.95), "p99": pct(0.99)}, "cost_usd": r.cost, "calls_with_redactions": r.redacted,
-                    "events": {x.kind: x.n for x in db.all("SELECT kind, COUNT(*) AS n FROM events WHERE kind IN ('BYPASS','MODEL_DRIFT','INVALID_QUESTION','would_block','safety_block') GROUP BY kind")}})
+                    "events": {x.kind: x.n for x in db.all("SELECT kind, COUNT(*) AS n FROM events WHERE kind IN ('BYPASS','MODEL_DRIFT','INVALID_QUESTION','would_block','safety_block') AND " + ledger.live() + " GROUP BY kind")}})
     print(json.dumps(out, indent=1))
     return 0
 
@@ -147,7 +147,7 @@ def _permit(a) -> int:
     db = ledger.open()
     if a.action == "list":
         for p in permits.listing(db, ("PENDING", "ISSUED") if not a.all else ("PENDING", "ISSUED", "CONSUMED", "REVOKED", "EXPIRED")):
-            print(f"{p.permit_id}  {p.state:8} {p.risk_level:8} expires {p.expires_at}  {permits.printable(_subject(p))[:100].replace(chr(10), ' ')}")
+            print(f"{p.permit_id}  {p.state:8} {p.risk_level:8} expires {p.expires_at}{'  [test]' if getattr(p, 'source', None) == 'test' else ''}  {permits.printable(_subject(p))[:100].replace(chr(10), ' ')}")
         return 0
     if a.action == "request":
         cwd = a.cwd or str(Path.cwd())
@@ -531,6 +531,8 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("--days", type=int, default=14)
     pg = s.add_parser("purge")
     pg.add_argument("--older-than", type=_days, default=90, metavar="DAYS", help="retention window in days: 90 or 90d (default 90)")
+    pg.add_argument("--test-rows", action="store_true", help="instead of the retention purge, remove the rows a run under JADE_SOURCE=test left in the ledger")
+    pg.add_argument("--id", action="append", default=[], metavar="ID", help="with --test-rows: a permit or decision id written before the tag existed (repeatable)")
 
     c = sub.add_parser("check", help="probe ledger, policies, registry, hooks, shim and the provider; non-zero on any failure")
     c.add_argument("--offline", action="store_true")
@@ -660,9 +662,20 @@ def main(argv: list[str] | None = None) -> int:
             return _stats(a)
         from . import ops
 
+        if a.id and not a.test_rows:
+            print("jade: --id is only used with --test-rows", file=sys.stderr)
+            return 2
         if not is_human_tty():
-            print("jade: retention purge outside the daily job is run by a human at a terminal", file=sys.stderr)
+            print("jade: a purge outside the daily job is run by a human at a terminal", file=sys.stderr)
             return 1
+        if a.test_rows:
+            try:
+                n = ops.purge_test_rows(ledger.open(), a.id)
+            except ValueError as e:
+                print(f"jade: {e}", file=sys.stderr)
+                return 2
+            print(f"removed {sum(n.values())} test row(s): " + ", ".join(f"{k} {v}" for k, v in n.items()))
+            return 0
         print(f"purged state text from {ops.purge(ledger.open(), a.older_than)} row(s)")
         return 0
     if a.cmd == "check":

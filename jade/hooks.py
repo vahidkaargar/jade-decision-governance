@@ -300,7 +300,9 @@ def _si07_hold(db, a: policy.Assessment):
     (its canonical gated segments, so quoting, `&& true`, an env prefix, `sh -c`, a full program path or another cwd do not make it a new command);
     a different argument list is a different command. Returns (decision_id, reason) or None."""
     now_s = ts()
-    for r in db.all("SELECT decision_id, status, expires_at, doc_json FROM decisions WHERE (plan_hash=? OR hold_key=?) AND status IN ('OUTCOME_UNKNOWN','EXECUTING') "
+    held = "status IN ('OUTCOME_UNKNOWN','EXECUTING')"   # two lookups, one per key: with `plan_hash=? OR hold_key=?` the planner reads every held decision instead (W-58)
+    for r in db.all(f"SELECT decision_id, status, expires_at, doc_json, updated_at FROM decisions WHERE plan_hash=? AND {held} "  # noqa: S608 - constant fragment
+                    f"UNION SELECT decision_id, status, expires_at, doc_json, updated_at FROM decisions WHERE hold_key=? AND {held} "
                     "ORDER BY updated_at DESC", (a.plan_hash, a.hold_key or a.plan_hash)):
         if r.status == "OUTCOME_UNKNOWN" or r.expires_at <= now_s:
             return r.decision_id, "has an unknown outcome (an unknown outcome is never success)"
@@ -497,12 +499,18 @@ def session_start(event: dict) -> HookResult:
         decide.sweep(db)
         permits.sweep(db)
         out = _override_notice(db, event) + _shadow_notice(db, event)
-        pend = permits.listing(db, ("PENDING",))
+        pending = permits.listing(db, ("PENDING",))
+        pend = [p for p in pending if getattr(p, "source", None) != "test"]
         if pend:
             out.append(f"JADE: {len(pend)} permit(s) awaiting human approval: " + ", ".join(p.permit_id for p in pend[:5]))
-        waiting = db.one("SELECT COUNT(*) AS n FROM decisions WHERE status='WAITING_HUMAN'").n
+        waiting = db.one("SELECT COUNT(*) AS n FROM decisions WHERE status='WAITING_HUMAN' AND " + ledger.live()).n
         if waiting:
             out.append(f"JADE: {waiting} decision(s) in WAITING_HUMAN (`jade decide list --status WAITING_HUMAN`).")
+        tagged = db.one("SELECT (SELECT COUNT(*) FROM permits WHERE source='test') + (SELECT COUNT(*) FROM decisions WHERE source='test') AS n").n
+        if tagged:   # rows a verification run left under JADE_SOURCE=test: shown apart from real approvals, never as something to approve (W-72)
+            open_tagged = len(pending) - len(pend)
+            still = f" {open_tagged} of the permits are still PENDING and approvable whatever their tag: look at `jade permit list` before clearing them." if open_tagged else ""
+            out.append(f"JADE: {tagged} test-tagged permit/decision row(s) from a verification run; not real approvals.{still} A human clears them with `jade ledger purge --test-rows`.")
         today = f"{now():%Y-%m-%d}"
         for r in db.all("SELECT doc_json FROM work_items WHERE status IN ('open','in_progress','waiting_human')"):
             w = json.loads(r.doc_json)

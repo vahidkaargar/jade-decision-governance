@@ -91,6 +91,22 @@ rules:
     files_only: true
     match: "(?i:(?<![\\w.-])jade/(?:[\\w*?\\[\\]-]*\\.py\\b|_\\w+/|\\*|(?=\\s|$)))"
     rationale: "Changes JADE's own code (the gate, the permit and TTY checks, the ledger, the CLI)"
+  - id: R-18
+    level: high
+    reversibility: reversible
+    blast_radius: host
+    # CREATING a skill, command or agent instruction file (W-54, decided 2026-11-09): a new file under `.claude/skills|commands|agents/`, `.agents/`,
+    # `.cursor/skills|commands|agents/` or `.skills-archive/` is read by the agent as instructions the human never saw (T3). Editing a file that
+    # already exists stays low: the agent maintains its own skills daily. `creates_only` (jade/policy.py `_creates`): a path that resolves to an
+    # existing regular file is an edit; a path that does not exist, an existing directory (the call puts something into it), a glob, a variable or
+    # an unresolved relative path counts as a creation. `files_only` as for R-13: it looks at what a command writes (redirect targets, the
+    # destination of cp/mv/ln/install/rsync, `git clone` destinations, `curl -o`, `tar -C`, or the whole segment for a verb that may write any
+    # operand) and never at a read, a grep, an `ls`, a `git add`, or a path inside quoted prose or a heredoc body. A removal creates nothing.
+    # A Write/Edit/MultiEdit path is always a target. `CLAUDE.md` and the settings files stay R-13; the human installs a skill from a terminal.
+    files_only: true
+    creates_only: true
+    match: "(?i:(?<![\\w.-])\\.(?:claude/(?:skills|commands|agents)|agents|cursor/(?:skills|commands|agents)|skills-archive)/)"
+    rationale: "Creates a skill, command or agent instruction file the human has not seen (editing an existing one is not gated)"
   - id: R-14
     level: high
     reversibility: partially_reversible

@@ -11,13 +11,14 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+import stat as stat_mod
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
 
 from policies import loader
 
-from . import paths, shellnorm
+from . import inert, paths, shellnorm
 from .util import LEVELS, canonical, fold, sha256
 
 NULL_REDIRECT = shellnorm.NULL_REDIRECT
@@ -34,7 +35,7 @@ OLD_KEYS = {"old_string", "old_str"}  # text that is being removed is never scan
 PATH_KEYS = ("source", "destination", "src", "dest", "dst", "from", "to", "old_path", "new_path", "dir", "directory", "folder")
 UNSAFE_GIT = shellnorm.UNSAFE_GIT  # marker prefix R-15 matches; carried only in the text a rule sees
 HOOKS_BYPASS = "git:hooks-bypass "  # marker prefix R-17 matches: a `git -c core.hooksPath=...` command
-PATH_RULES = ("R-01", "R-04", "R-12", "R-13", "R-16")  # the rules about where a write lands: they also see relative operands made absolute
+PATH_RULES = ("R-01", "R-04", "R-12", "R-13", "R-16", "R-18")  # the rules about where a write lands: they also see relative operands made absolute
 WRITE_KEYS = ("file_path", "notebook_path", "path", "filePath", "file", "filepath", "target_file", "file_name", "filename", "target")
 CONTENT_KEYS = {"content", "new_string", "old_string", "new_str", "old_str", "new_source", "text", "contents", "data", "source", "patch"}
 
@@ -291,6 +292,25 @@ def _jade_package(path: str) -> str:
 NAME_OPTIONS = frozenset({"--name", "--project-name", "--package", "--app-name", "--title", "--namespace", "--label", "--hostname", "--user"})
 
 
+_SPELLED_ANCHOR = re.compile(r"^(?:\$HOME|\$\{HOME\}|\$PWD|\$\{PWD\}|\$\(pwd\))(?=/|$)")
+_ATTACHED_VALUE = re.compile(r"^-[A-Za-z](?=[/~$.])(.+)$")   # `-o/dir`, `-C$HOME/x`, `-t/dir`: a short option with its value attached
+_KEYED_VALUE = re.compile(r"^(?:of|if)=(.*)$")                # dd's `of=/path`
+URL_START = re.compile(r"^[A-Za-z][\w+.-]*://")
+
+
+def _operand_value(tok: str) -> str:
+    """The path a word of a command stands for: the value of `--opt=value`, of an attached `-o/dir` and of dd's `of=`, `$HOME` as `~` and `$PWD` or
+    `$(pwd)` as `.` (the directory the command runs in). Anything else comes back as it was, an option without a value as the empty string."""
+    if len(tok) > 1 and tok[0] == '"' and tok[-1] == '"' and _SPELLED_ANCHOR.match(tok[1:-1]):
+        tok = tok[1:-1]
+    if tok.startswith("-"):
+        m = None if tok.startswith("--") else _ATTACHED_VALUE.match(tok)
+        tok = m.group(1) if m else tok.partition("=")[2]
+    elif m := _KEYED_VALUE.match(tok):
+        tok = m.group(1)
+    return _SPELLED_ANCHOR.sub(lambda a: "~" if "HOME" in a.group(0) else ".", tok, count=1)
+
+
 def _absolute_operands(seg: str, dirs: tuple[str, ...], package: bool = False) -> str:
     """The operands of a segment as absolute, symlink-resolved paths, for every directory the segment may run in.
 
@@ -306,10 +326,8 @@ def _absolute_operands(seg: str, dirs: tuple[str, ...], package: bool = False) -
             continue  # the program being run is not something the segment writes (`~/.local/bin/jade check`)
         if n > 1 and toks[n - 1] in NAME_OPTIONS:
             continue  # `uv init --name jade`: a name, not a path
-        if tok.startswith("-"):
-            tok = tok.partition("=")[2]
-        tok = tok.replace("\x01", " ")
-        if not tok or tok.startswith(("$", "@", '"')) or tok in ("&&", "||") or "git:unsafe" in tok:
+        tok = _operand_value(tok.replace("\x01", " "))
+        if not tok or tok.startswith(("$", "@", '"')) or tok in ("&&", "||") or "git:unsafe" in tok or URL_START.match(tok):
             continue
         for d in dirs:
             if d or os.path.isabs(os.path.expanduser(tok)):
@@ -326,13 +344,49 @@ def _seen_by(rule: dict, text: str, files: str | None) -> str:
     return files if rule.get("files_only") and files is not None else text
 
 
-def _path_rule(text: str, files: str | None = None, alt: dict[str, str] | None = None) -> dict | None:
+URL_WORD = re.compile(r"^[A-Za-z][\w+.-]*:/")   # a word that STARTS with an address, `https://host/x` or, after path folding, `https:/host/x`: not a file. A `name:/` further inside a word is a directory called `name:`
+GLOB_OR_EXPANSION = re.compile(r"[$`*?\[\]{}]")
+# Verbs that only remove, retarget or re-mode what exists: they never create the file a `creates_only` rule is about.
+NON_CREATING = frozenset({"rm", "rmdir", "unlink", "shred", "chmod", "chown", "chgrp", "chflags", "xattr"})
+
+
+def _creates(rule: dict, text: str, dirs: tuple[str, ...] = ("",), whole: bool = False) -> bool:
+    """Does the call create something the `creates_only` rule names? `text` is what the call writes (a path when `whole`, else the words of a segment).
+
+    A word that matches the rule and resolves, in every directory the call may run in, to an existing regular file (a symlink to one counts) is an
+    edit. Everything else is a creation: a path that does not exist (a dangling symlink too), an existing directory (the call puts something into
+    it), a glob, a variable, a relative path with no known directory. A rule that matched but whose match no single word explains is a creation."""
+    seen = urls = False
+    for tok in [text] if whole else text.split(" "):
+        tok = _operand_value(re.sub(r"^[<>|&]+", "", tok.replace("\x01", " ").strip("\"'")))
+        if not tok or not rule["_re"].search(tok):
+            continue
+        if URL_WORD.search(tok):
+            urls = True
+            continue
+        seen = True
+        if GLOB_OR_EXPANSION.search(tok):
+            return True
+        for d in dirs or ("",):
+            if not d and not os.path.isabs(os.path.expanduser(tok)):
+                return True
+            p = normalise_path(tok, d)
+            if not (p and os.path.isfile(p)):
+                return True
+    return not (seen or urls)
+
+
+def _hit(rule: dict, text: str, dirs: tuple[str, ...] = ("",), whole: bool = False) -> bool:
+    return bool(rule["_re"].search(text)) and (not rule.get("creates_only") or _creates(rule, text, dirs, whole))
+
+
+def _path_rule(text: str, files: str | None = None, alt: dict[str, str] | None = None, dirs: tuple[str, ...] = ("",), whole: bool = False) -> dict | None:
     """The first path rule that matches. `alt` gives a rule its own `files` text (R-16 reads the operands without the directories that only look
-    like JADE's package, see `_jade_package`)."""
+    like JADE's package, see `_jade_package`; R-18 reads what the command creates, see `creation_view`)."""
     if not text and not alt:
         return None
     return next((r for r in risk()["rules"] if r["id"] in PATH_RULES and (t := alt[r["id"]] if alt and r["id"] in alt else _seen_by(r, text, files))
-                 and r["_re"].search(t)), None)
+                 and _hit(r, t, dirs, whole)), None)
 
 
 def _program_basename(text: str) -> str:
@@ -343,9 +397,9 @@ def _program_basename(text: str) -> str:
     return text[:head] + word.rsplit("/", 1)[-1] + sep + rest if "/" in word and not word.startswith(("-", ">")) else text
 
 
-def _first_match(text: str, files: str | None = None) -> dict:
+def _first_match(text: str, files: str | None = None, alt: dict[str, str] | None = None, dirs: tuple[str, ...] = ("",), whole: bool = False) -> dict:
     for r in risk()["rules"]:
-        if (t := _seen_by(r, text, files)) and r["_re"].search(t):
+        if (t := alt[r["id"]] if alt and r["id"] in alt else _seen_by(r, text, files)) and _hit(r, t, dirs, whole):
             return r
     return risk()["rules"][-1]
 
@@ -376,6 +430,25 @@ def _output_option_values(words: list[str]) -> list[str]:
     return out
 
 
+REDIRECT_OP = re.compile(r"^(?:\d*|&)>>?[|&]?$|^\d*<$")                      # `>`, `2>>`, `&>`, `<`: the target is the next word
+REDIRECT_WORD = re.compile(r"^(?:(?:\d*|&)>>?[|&]?\S+|\d*>&\d*|\d*<\S+)$")       # `2>/tmp/err`, `>&2`, `</dev/null`: a redirect, not an operand
+
+
+def operands(words: list[str]) -> list[str]:
+    """The operands of a command's words: no option, no redirect and no redirect target (`cp a b 2>/tmp/err` copies to `b`, not to `/tmp/err`)."""
+    out, skip = [], False
+    for w in words:
+        if skip:
+            skip = False
+        elif REDIRECT_OP.match(w):
+            skip = True
+        elif not w or w.startswith("-") or REDIRECT_WORD.match(w):
+            continue
+        else:
+            out.append(w)
+    return out
+
+
 def files_view(bare: str) -> str | None:
     """What a command writes, for the rules that care about files and not about mentions (R-13, R-16).
 
@@ -393,7 +466,7 @@ def files_view(bare: str) -> str | None:
         return " ".join([redirects, *_output_option_values(words[1:])]).strip()
     if any(p.search(bare) for p in risk()["_read_only"]) and not any(c.danger for c in _analyse(bare)[1]):
         return redirects
-    ops = [w for w in words[1:] if w and not w.startswith("-") and not w.startswith(">")]
+    ops = operands(words[1:])
     if verb in COPY_VERBS and ops and not any(w in ("-t", "--target-directory") or w.startswith("--target-directory=") or (w.startswith("-") and not w.startswith("--") and "t" in w[1:]) for w in words[1:]):
         return f"{ops[-1]} {redirects}".strip()
     if verb == "tar" and len(words) > 2:
@@ -403,6 +476,102 @@ def files_view(bare: str) -> str | None:
             if archive:
                 return f"{archive} {redirects}".strip()
     return None
+
+
+# Verbs that put a file at an operand they are given or at a name they derive from one: a bare relative word is resolved against the directory
+# the command runs in only for these. Any other verb names a skills directory only by naming a path to it (`npm test` run inside one creates nothing).
+WRITER_VERBS = frozenset({"touch", "cp", "mv", "install", "ln", "rsync", "scp", "tee", "mkdir", "mkfifo", "curl", "wget", "tar", "unzip", "7z", "7za", "7zz",
+                          "ditto", "dd", "truncate", "zip"})
+# Verbs that only list or show what they are given.
+LISTERS = frozenset({"eza", "exa", "lsd", "ls", "tree", "bat", "batcat", "less", "more", "stat", "file", "du", "wc", "head", "tail", "nl"})
+# `git <sub>` that puts files at a new place: every other verb works in a repository that is already there (an edit of files the agent keeps).
+CREATING_GIT = frozenset({"clone", "init", "worktree", "submodule"})
+_LISTING_UNZIP = re.compile(r"^-[A-Za-z]*[ltpvzZ][A-Za-z]*$")
+
+
+def _is_target_dir_option(w: str) -> bool:
+    return w == "--target-directory" or w.startswith("--target-directory=") or (w.startswith("-") and not w.startswith("--") and "t" in w[1:])
+
+
+def _skills_rule_re() -> re.Pattern:
+    return next(r for r in risk()["rules"] if r["id"] == "R-18")["_re"]
+
+
+def _relocates(src: str, dirs: tuple[str, ...]) -> bool:
+    """`mv` of something that already is a skill, command or agent: an existing path the rule names. It moves what is there and writes no new text."""
+    if GLOB_OR_EXPANSION.search(src):
+        return False
+    rx = _skills_rule_re()
+    for d in dirs or ("",):
+        if not d and not os.path.isabs(os.path.expanduser(src)):
+            return False
+        p = normalise_path(src, d)
+        if not (p and os.path.exists(p)):
+            return False
+        if not rx.search(p + "/" if os.path.isdir(p) else p):
+            return False
+    return True
+
+
+def _writes_into_cwd(verb: str, words: list[str], ops: list[str]) -> bool:
+    """A command that puts files in the directory it runs in without naming it: `tar -x`, `unzip`, `curl -O`, `wget`, `7z x`, `ln -s target`."""
+    opts = [w for w in words[1:] if w.startswith("-")]
+    if verb == "tar":
+        extract = any(re.fullmatch(r"-?[A-Za-z]*x[A-Za-z]*", w) for w in words[1:2]) or any(w in ("-x", "--extract", "--get") for w in opts) or \
+            any(re.fullmatch(r"-[A-Za-z]*x[A-Za-z]*", w) for w in opts)
+        return extract and not any(w in ("-C", "--directory") or w.startswith(("--directory=", "-C")) for w in words[1:])
+    if verb == "unzip":
+        return not any(_LISTING_UNZIP.match(w) or w == "-d" or w.startswith("-d") for w in opts)
+    if verb == "curl":
+        return any(w in ("--remote-name", "--remote-name-all") or re.fullmatch(r"-[A-Za-z]*O[A-Za-z]*", w) for w in opts)
+    if verb == "wget":
+        return not any(w in ("--spider", "--output-document", "--directory-prefix") or w.startswith(("--output-document=", "--directory-prefix=", "-O", "-P"))
+                       or re.fullmatch(r"-[A-Za-z]+[OP].*", w) for w in opts)
+    if verb in ("7z", "7za", "7zz"):
+        return len(words) > 2 and words[1] in ("x", "e") and not any(w.startswith("-o") for w in opts)
+    if verb == "ln":
+        return len(ops) == 1
+    return False
+
+
+def creation_view(bare: str, view: str | None, calls: list[shellnorm.GitCall], dirs: tuple[str, ...] = ("",)) -> str | None:
+    """What a command CREATES, for the `creates_only` rule (R-18): `files_view` narrowed by what the verb does with its operands.
+
+    A removal creates nothing (`rm -r ~/.claude/skills/old/`), neither does a lister or a git verb that works in the repository that is there (`git -C
+    ~/.agents/x pull`). `mv` creates only at its destination (the last operand, or the `-t` directory), and nothing when every source is a skill
+    that already exists (retiring or renaming one). `git clone` creates its destination, or a directory under the current one when it names none, so
+    the current directory and every `-C` directory count. `tar -x`, `unzip`, `curl -O`, `wget`, `7z x` and `ln -s target` put files in the directory
+    they run in, which counts. A verb that is not in WRITER_VERBS names a skills directory only by naming a path to it: a bare word is not resolved
+    against the current directory (`npm test` inside a skill is not a creation). Anything else is `files_view` (None: it may write any operand)."""
+    words = system_bare(bare).split(" ")
+    if words[0].rsplit("/", 1)[-1] == "rtk" and len(words) > 1:
+        words = words[1:]   # `rtk ls x` is `ls x`
+    verb = words[0].rsplit("/", 1)[-1]
+    ops = operands(words[1:])
+    redirects = " ".join(REDIRECT_TARGET.findall(bare))
+    if verb in NON_CREATING or verb in LISTERS:
+        return redirects
+    if verb == "zip":
+        return f"{ops[0]} {redirects}".strip() if ops else redirects   # the archive is written, what it holds is read
+    if verb == "mv" and ops and not any(_is_target_dir_option(w) for w in words[1:]):
+        if len(ops) > 1 and all(_relocates(s, dirs) for s in ops[:-1]):
+            return redirects
+        return f"{ops[-1]} {redirects}".strip()
+    clones = [c for c in calls if c.sub == "clone"]
+    if clones:
+        return " ".join([*(w for w in ops if w != "clone"), ".", *(d for c in clones for d in c.dirs), redirects]).strip()
+    if verb == "git" and calls and not any(c.sub in CREATING_GIT for c in calls):
+        return redirects
+    if verb == "unzip" and any(_LISTING_UNZIP.match(w) for w in words[1:]):
+        return redirects   # -l, -t, -p, -v, -z: it lists, tests or prints
+    if _writes_into_cwd(verb, words, ops):
+        return " ".join([*([view] if view is not None else [*ops, redirects]), "."]).strip()
+    if view is None and verb not in WRITER_VERBS:
+        rx = _skills_rule_re()
+        named = [w for w in words[1:] if w and not REDIRECT_WORD.match(w) and not REDIRECT_OP.match(w)
+                 and (rx.search(w) or _operand_value(w.strip("\"'")).startswith(("/", "~", "$", "@")))]
+        return " ".join([*named, redirects]).strip()
+    return view
 
 
 def _raise_to(a: Assessment, other: Assessment) -> None:
@@ -563,7 +732,7 @@ def _assess_write(tool: str, tool_input: dict, cwd: str) -> Assessment:
         norm = normalise_path(subject, cwd)
         cands = [subject, *([norm] if norm and norm != subject else [])]
         for c in cands:
-            r = _first_match(c)
+            r = _first_match(c, dirs=(cwd,), whole=True)
             if best_rule is None or LEVELS[r["level"]] > LEVELS[best_rule["level"]]:
                 best_rule = r
             envs.append(loader.environment_of(risk(), c))
@@ -636,7 +805,7 @@ def _assess_tool(tool: str, tool_input: dict, cwd: str) -> Assessment:
     if rule.get("paths"):
         for p in _path_args(tool_input):
             norm = normalise_path(p, cwd)
-            hit = next((r for r in (_path_rule(p), _path_rule(norm)) if r), None)
+            hit = next((r for r in (_path_rule(p, dirs=(cwd,), whole=True), _path_rule(norm, dirs=(cwd,), whole=True)) if r), None)
             if hit:
                 _raise_to(a, _from_rule(hit, loader.environment_of(risk(), norm or p)))
             if loader.environment_of(risk(), norm or p) == "production":
@@ -669,18 +838,22 @@ def classify_segment(seg: str, dirs: tuple[str, ...]) -> tuple[dict, str]:
     hooks_off = any("core.hookspath" in d for c in calls for d in c.danger)   # `git -c core.hooksPath=...` turns the pre-push guard off for this command (R-17)
     texts = [*([HOOKS_BYPASS + bare] if hooks_off else []), seg, bare, _pathfold(bare), *([UNSAFE_GIT + bare] if any(c.danger for c in calls) else [])]
     view = files_view(bare)  # what a `files_only` rule may look at: None = the whole segment
+    cview = creation_view(bare, view, calls, tuple(dirs) or ("",))  # what a `creates_only` rule may look at
     seg_best = None
+    dirs_t = tuple(dirs) or ("",)
     pairs = [(t, view if view is not None else _program_basename(t)) for t in dict.fromkeys(texts)]
     if view:
         pairs.append((bare, _pathfold(view)))
     for text, files in pairs:
-        rule = _first_match(text, files)
+        alt = {"R-18": cview if cview is not None else files} if cview != view else None
+        rule = _first_match(text, files, alt, dirs_t)
         if seg_best is None or LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
             seg_best = rule
     abs_ops = _absolute_operands(seg, dirs)
     abs_files = abs_ops if view is None else _absolute_operands("x " + view, dirs) if view else ""
     abs_pkg = _absolute_operands(seg if view is None else "x " + view, dirs, package=True) if view != "" else ""
-    if (rule := _path_rule(abs_ops, abs_files, {"R-16": abs_pkg})) and LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
+    abs_create = abs_files if cview == view else abs_ops if cview is None else _absolute_operands("x " + cview, dirs) if cview else ""
+    if (rule := _path_rule(abs_ops, abs_files, {"R-16": abs_pkg, "R-18": abs_create}, dirs_t)) and LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
         seg_best = rule
     return seg_best, real_bare
 
@@ -711,14 +884,58 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         raw = inv.get("match_on") == "raw"
         if views is None and (raw or "_qre" in inv):
             views = text_views(text_in)
-        haystacks = views if raw else active + [_bare(s) for s in active]
+        haystacks, qviews = (views if raw else active + [_bare(s) for s in active]), views
+        if inv.get("inert_data"):   # W-71: a name in a position that only holds data (a grep pattern, a commit message, an echo argument) is not a mention
+            masked = _masked(text_in, cwd)
+            if masked != text_in:
+                qviews = text_views(masked)
+                haystacks = qviews if raw else _active_of(masked)
         # `block_quoted`: the same invariant, also read in the quoted text the segmenter blanks (an alias whose value is the whole command, `env -S "..."`)
         if any(inv["_re"].search(h) for h in haystacks) or (raw and inv.get("block_globs") and _names_by_glob(inv["block_globs"], haystacks)) \
-                or ("_qre" in inv and any(inv["_qre"].search(v) for v in views)):
+                or ("_qre" in inv and any(inv["_qre"].search(v) for v in qviews)):
             a.blocked.append(inv["id"])
     _seal(a, tool, subject, cwd, subject)
     a.hold_key = sha256(canonical({"shell": sorted(set(gated_keys or keys))}))
     return a
+
+
+# Destinations of a heredoc that a shell, a tool or the human's habit runs or sources whatever the file is called: a hidden file (`~/.zsh_exports`,
+# `~/.aliases`, `~/.tmux.conf`), a script by extension, anything in a `bin` directory, the Claude settings files. SI-11's `scan_content_paths` names the
+# profiles and environment files; this adds what a name cannot list. The body of such a heredoc stays visible to SI-09, SI-10 and SI-11.
+_SOURCED_DEST = re.compile(r"(?i)(?:^|/)\.[^/]+$|\.(?:sh|bash|zsh|ksh|csh|fish|env|rc|profile)$|/s?bin/[^/]+$|(?:^|/)\.claude/settings[\w.-]*\.json$|(?:^|/)direnvrc$")
+_CD_WORD = re.compile(r"(?:^|[\s;&|(])(?:cd|pushd)(?:\s|$)")
+
+
+def _plain_destination(d: str, cwd: str, text: str, rx: re.Pattern | None) -> bool:
+    """True when a heredoc written to `d` is data: an ordinary file. False for the files above, for a file that is executable or has another hard link
+    (a hard link to a profile is the profile; `normalise_path` resolves symlinks only), and for a relative name in a command that also `cd`s (where it
+    lands is not known here: `cd ~/.config/environment.d && cat > 10-x.conf`)."""
+    if not d:
+        return False
+    if not os.path.isabs(os.path.expanduser(d)) and _CD_WORD.search(text):
+        return False
+    p = normalise_path(d, cwd)
+    if (rx and rx.search(p)) or _SOURCED_DEST.search(p):
+        return False
+    try:
+        st = os.stat(p)
+    except OSError:
+        return True
+    return not (stat_mod.S_ISREG(st.st_mode) and (st.st_nlink > 1 or st.st_mode & 0o111))
+
+
+def _masked(text: str, cwd: str) -> str:
+    """The command with the data positions blanked (inert.py). A heredoc written to a file that is not plain data (`_plain_destination`: a shell
+    profile, an environment file, a plist, a hidden or executable file, a hard link, a name after a `cd`) stays whole: a line such a file runs at the
+    next login is an effect whichever name it holds."""
+    rx = next((i["_paths_re"] for i in safety()["invariants"] if i["id"] == "SI-11" and "_paths_re" in i), None)
+    return inert.mask(text, lambda d: _plain_destination(d, cwd, text, rx))
+
+
+def _active_of(text: str) -> list[str]:
+    """The segments of a command that are not read-only, and each without its launcher prefixes: what a pattern that is not `match_on: raw` reads."""
+    segs = [seg for seg, _ in shellnorm.segments_cwd(text) if not is_read_only(seg)]
+    return segs + [_bare(s) for s in segs]
 
 
 def _segment_key(bare: str) -> str:

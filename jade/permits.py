@@ -53,6 +53,11 @@ def _doc(row, *, validate: bool = True) -> dict | None:
         return None
 
 
+def _source_of(row) -> str | None:
+    """The `source` tag of a permit row (`test` for a verification run, W-72); None for an untagged or older row."""
+    return row["source"] if isinstance(row, sqlite3.Row) and "source" in row.keys() else getattr(row, "source", None)  # noqa: SIM118 - Row.keys() is a method
+
+
 def _ns(row, doc: dict | None = None):
     if row is None:
         return None
@@ -61,7 +66,7 @@ def _ns(row, doc: dict | None = None):
         return None
     doc = dict(doc)
     doc.update(state=row.state, uses=row.uses, expires_at=row.expires_at, issued_at=row.issued_at)
-    return SimpleNamespace(**doc, ttl_s=row.ttl_s, action=row.action, scope=row.scope)
+    return SimpleNamespace(**doc, ttl_s=row.ttl_s, action=row.action, scope=row.scope, source=_source_of(row))
 
 
 def _loads(scope) -> dict:
@@ -178,10 +183,10 @@ def _create(path, state: str, action: str, plan_hash: str, ttl_s: int, risk: str
                                   scope=stored_scope, ttl_s=ttl_s, issued_at=doc["issued_at"], expires_at=doc["expires_at"])
             doc["seal"] = _seal_of(_seal_key(db, create=True), row, doc)
         with db.tx() as con:
-            con.execute("INSERT INTO permits(permit_id, decision_id, state, risk_level, plan_hash, action, scope, uses, ttl_s, doc_json, issued_at, expires_at) "
-                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            con.execute("INSERT INTO permits(permit_id, decision_id, state, risk_level, plan_hash, action, scope, uses, ttl_s, doc_json, issued_at, expires_at, source) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (doc["permit_id"], doc["decision_id"], state, risk, plan_hash, action, stored_scope, 0, ttl_s,
-                         json.dumps(doc, ensure_ascii=False), doc["issued_at"], doc["expires_at"]))
+                         json.dumps(doc, ensure_ascii=False), doc["issued_at"], doc["expires_at"], db.source))
             db.event(doc["permit_id"], "permit_" + state.lower(), next=state, guard=f"risk={risk}", actor=principal, con=con)
         return get(db, doc["permit_id"])
     finally:

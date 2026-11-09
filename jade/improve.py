@@ -298,7 +298,7 @@ def canary_verdict(res: dict, home: Path, db) -> tuple[bool, str]:
         return False, "the challenger's traffic share is above the canary fraction"
     since = f"-{int(policy().get('shadow', {}).get('duration_days', 7))} days"
     row = db.one("SELECT COUNT(*) AS n, SUM(error_kind IS NOT NULL) AS e FROM jev_calls WHERE ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?) "
-                 "AND COALESCE(primitive,'')<>'fast'", (since,))
+                 "AND COALESCE(primitive,'')<>'fast' AND " + ledger.live(), (since,))
     if row.n and (row.e or 0) / row.n > 0.05:
         return False, "canary rollback trigger: provider error rate above 5%"
     return True, "ok"
@@ -488,7 +488,7 @@ def start_canary(path, candidate_id: str, stdin_isatty: bool | None = None) -> d
 def patterns(db: ledger.Ledger, days: int = 7) -> list[dict]:
     """Ledger patterns worth a candidate or an observation. Counts only; no state text leaves the ledger."""
     since = f"-{days} days"
-    w = "ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?) AND COALESCE(primitive,'')<>'fast'"   # `fast` rows from an older version are not Jev calls
+    w = "ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?) AND COALESCE(primitive,'')<>'fast' AND " + ledger.live()   # `fast` rows from an older version are not Jev calls; tagged test rows are not live data (W-72)
     total = db.one(f"SELECT COUNT(*) AS n FROM jev_calls WHERE {w}", (since,)).n  # noqa: S608 - constant fragment
     if total == 0:
         return []
@@ -510,7 +510,7 @@ def patterns(db: ledger.Ledger, days: int = 7) -> list[dict]:
         if r.a / r.n > 0.5:
             out.append({"key": f"high_abstention_{r.question_id}", "target": "question_template", "instruction": False, "n": r.a, "total": r.n,
                         "baseline": r.question_id, "hypothesis": f"{r.question_id} abstained on {r.a} of {r.n} answers; the template or the required evidence needs work"})
-    byp = db.one("SELECT COUNT(*) AS n FROM events WHERE kind='BYPASS' AND ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?)", (since,)).n
+    byp = db.one("SELECT COUNT(*) AS n FROM events WHERE kind='BYPASS' AND " + ledger.live() + " AND ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?)", (since,)).n
     if byp:
         out.append({"key": "adapter_bypass", "target": "skill_reference", "instruction": True, "n": byp, "total": total,
                     "hypothesis": f"{byp} raw Decisions API call(s) bypassed the adapter"})

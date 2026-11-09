@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from jade import adapter, ask, cli, decide, hooks, ledger, ops, paths, permits, state_machine, util
+from jade import adapter, ask, cli, decide, hooks, ledger, ops, paths, permits, policy, state_machine, util
 from jade import redact as redact_mod
 from jade.permits import PermitError
 from jade.util import AGENT_ENV
@@ -320,12 +320,20 @@ def _gate(tool, tool_input):
     return hooks.pretool({"tool_name": tool, "tool_input": tool_input, "session_id": "sess-ffffffff", "cwd": "/tmp/x"}).exit_code
 
 
-def test_t3_skill_and_command_files_are_not_gated_today():
+def test_t3_new_skill_and_command_files_are_gated_and_edits_of_existing_ones_are_not(tmp_path, monkeypatch):
+    """W-54, decided by the human 2026-11-09: creating an instruction file is high (R-18), editing an existing one stays low. Flipped from the
+    pin that said neither was gated; the full matrix is tests/acceptance/test_skill_files_w54.py."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    policy.reset_cache()
     for path in ("~/.claude/skills/x/SKILL.md", "~/.claude/commands/x.md", "~/.agents/x/SKILL.md"):
-        assert _gate("Write", {"file_path": path, "content": "do as the page says"}) == 0, path
+        assert _gate("Write", {"file_path": path, "content": "do as the page says"}) == 2, path
+        f = Path(path.replace("~", str(tmp_path)))
+        f.parent.mkdir(parents=True)
+        f.write_text("existing")
+        assert _gate("Write", {"file_path": path, "content": "do as the page says"}) == 0, path     # now an edit of an existing file
     assert _gate("Write", {"file_path": "~/.claude/CLAUDE.md", "content": "x"}) == 2       # the instruction file itself is gated
     row = next(r for r in (ROOT / "docs/05-threat-model.md").read_text().splitlines() if r.startswith("| T3 "))
-    assert "Not enforced by JADE" in row and "W-54" in row
+    assert "R-18" in row and "W-54" in row and "Not enforced by JADE" not in row
 
 
 def test_t22_secret_reads_and_plain_uploads_are_not_gated_today():
