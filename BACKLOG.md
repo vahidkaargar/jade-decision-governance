@@ -27,6 +27,7 @@ No design decision is open. Status: IMPLEMENTED. Next are the human wiring steps
 | W-24 | P2 | open | human | 5 | Load the maintenance launchd job and hang `jade check` off the health command | W-22 | after W-22 | docs/08 sections 2.4 and 2.5 |
 | W-25 | P2 | open | human | 2 | Install skills/jade/SKILL.md where the agent tooling reads skills | W-13 | after W-22 | Copy the file per docs/08 section 2.6 |
 | W-26 | P2 | open | human | 2 | Review the router and CHR address list in the private overlay | — | on_session_start | Open ~/.config/jade/local/risk.local.yaml and correct it |
+| W-31 | P2 | open | agent | 2 | Close the residual command-classification gaps left after the A1 canonicalisation | — | first observed bypass or 2026-12-09 | Decide whether `curl\|sh`, `bash script.sh`, `python script.py`, `-C "$DIR"` and gitconfig aliases should floor at high; add evidence from would_block logs first |
 | W-12 | P3 | open | human | 1 | Update typesafe-ai plugin 0.5.7 -> 0.6.2 after diff review | — | 2026-12-01 | Diff upstream tag v0.6.2 vs installed; update if still docs-only |
 | W-16 | P3 | open | agent | 1 | Probe idempotency and retry-after on first 429 from OpenRouter decisions endpoint | — | first 429 observed | Record headers on first 429 in ledger; adjust adapter |
 | W-17 | P3 | open | human | 5 | Multi-host / multi-tenant JADE (production servers) | W-06 | request to run agents with Jev on another host | New ADR if a second host needs governed decisions |
@@ -34,6 +35,7 @@ No design decision is open. Status: IMPLEMENTED. Next are the human wiring steps
 | W-28 | P3 | open | agent | 1 | Rename the top-level `policies` package | — | before a PyPI release or a second consumer | Move under jade/ (or jade_policies) and update loader imports and tests |
 | W-29 | P3 | open | agent | 2 | Widen classification beyond syntax and named tools | W-23 | first observed bypass | Review BYPASS and would_block events; add rules or matchers |
 | W-30 | P3 | open | agent | 4 | Shadow runs for choice and score questions | — | first choice-question candidate | Extend improve.shadow when a choice question gets a challenger |
+| W-32 | P3 | open | agent | 2 | Scope the new protected-code path patterns of R-13 to file writes | — | first advisory-mode soak report | Measure would_block noise in advisory mode; if high, split R-13 into a write-only rule class or exempt git add/commit/diff |
 | W-07 | P1 | waiting_human | human | 2 | Rewrite ~/.claude/CLAUDE.md Jev section (exit codes, state file, abstention) | W-05 | W-05 done | Human runs: jade claude-md apply (docs/08 section 2.3) |
 | W-01 | P0 | done | human | 0 | Approve JADE design (DESIGN_READY gate) | — | on_session_start | Human reads docs/00-07 and answers BACKLOG §Human decisions Q1-Q7 |
 | W-02 | P0 | done | agent | 1 | Phase 1: jade package, SQLite ledger, OpenRouter adapter, redact(), jev shim | W-01 | W-01 done | Scaffold uv package; implement adapter against recorded fixtures first |

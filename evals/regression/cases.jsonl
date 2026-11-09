@@ -21,3 +21,10 @@
 {"id": "R21", "class": "gate_mcp_merge_is_high", "kind": "gate_mcp", "tool": "mcp__GitLab__accept_merge_request", "input": {"project_id": "1", "merge_request_iid": 2}, "expect": "block"}
 {"id": "R22", "class": "gate_mcp_read_is_low", "kind": "gate_mcp", "tool": "mcp__GitLab__get_project", "input": {"project_id": "1"}, "expect": "allow"}
 {"id": "R23", "class": "gate_mcp_shell_uses_command_rules", "kind": "gate_mcp", "tool": "mcp__MacOS-MCP__Shell", "input": {"command": "git push origin main"}, "expect": "block", "expect_blocked": ["SI-08"]}
+{"id": "R24", "class": "gate_git_global_option_push_main", "kind": "gate", "command": "git -C . push origin main", "expect": "block", "expect_blocked": ["SI-08"], "note": "F00/F35: git global options hid the push from R-10 and SI-08"}
+{"id": "R25", "class": "gate_git_global_option_hard_reset", "kind": "gate", "command": "git --no-pager reset --hard", "expect": "block", "note": "F00: global option before the subcommand"}
+{"id": "R26", "class": "gate_git_config_option_commit_is_low", "kind": "gate", "command": "git -c user.name=x commit -m hello", "expect": "allow", "note": "harmless -c stays low"}
+{"id": "R27", "class": "gate_git_global_option_status_is_low", "kind": "gate", "command": "git -C . status", "expect": "allow"}
+{"id": "R28", "class": "gate_sort_output_is_not_read_only", "kind": "gate", "command": "sort -o /etc/pf.conf in.txt", "expect": "block", "note": "F01: sort -o writes"}
+{"id": "R29", "class": "gate_sort_uniq_pipeline_is_low", "kind": "gate", "command": "sort in.txt | uniq -c | head", "expect": "allow"}
+{"id": "R30", "class": "gate_commit_heredoc_substitution_is_low", "kind": "gate", "command": "git commit -m \"$(cat <<'EOF'\nfix: don't push (git push)\nEOF\n)\"", "expect": "allow", "note": "F02 control: quoted heredoc inside $() stays inert"}

@@ -6,7 +6,9 @@ Any internal error fails closed when the command looks high-risk and open otherw
 
 from __future__ import annotations
 
+import fnmatch
 import json
+import os
 import re
 import subprocess
 import sys
@@ -19,7 +21,6 @@ FALLBACK_HIGH = re.compile(
     r"git push|\bgh (pr|release)\b|\bglab mr\b|(^|[;&| ])(ssh|scp|sftp) |\brsync\b.* \S+:|\brm -rf\b|\bpfctl\b|\bsudo\b|\blaunchctl\b"
     r"|\bkubectl\b|\bterraform\b|\bhelm\b|docker (push|compose)|composio execute|(npm|cargo) publish|ovault secret|security (add|delete)-"
     r"|\.claude/settings|/etc/|LaunchAgents|LaunchDaemons")
-BARE_PUSH = re.compile(r"^git(?: -C (\S+))? push\b(.*)$")
 BYPASS = re.compile(r"\bcurl\b.*openrouter\.ai/api/alpha/decisions")
 REMIND_WINDOW_S = 6 * 3600
 
@@ -35,22 +36,114 @@ def _classify(tool: str, tool_input: dict, cwd: str = "") -> policy.Assessment:
     return policy.assess(tool, tool_input, cwd)
 
 
-def _on_default_branch(cwd: str, command: str) -> bool:
-    """A bare `git push` (no refspec) while the current branch is main/master (invariant SI-08)."""
-    for seg in policy.segments(command):
-        m = BARE_PUSH.match(policy._bare(seg))
-        if not m:
-            continue
-        positional = [w for w in m.group(2).split() if not w.startswith("-")]
-        if len(positional) > 1:
-            continue
-        try:
-            out = subprocess.run(["git", "-C", m.group(1) or cwd or ".", "symbolic-ref", "--short", "-q", "HEAD"],
-                                 capture_output=True, text=True, timeout=3)
-        except (OSError, subprocess.SubprocessError):
-            return False
-        if out.stdout.strip() in ("main", "master"):
+DEFAULT_BRANCHES = ("main", "master")
+PUSH_VALUE_OPTS = {"-o", "--push-option", "--repo", "--receive-pack", "--exec"}
+
+
+def parse_push(args: list[str]) -> tuple[str | None, list[str], bool]:
+    """(remote, refspecs, pushes_every_branch) from the arguments after `git push`."""
+    pos: list[str] = []
+    repo: str | None = None
+    every = False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            pos.extend(args[i + 1:])
+            break
+        if a.startswith("--"):
+            name, eq, val = a.partition("=")
+            if name in ("--all", "--mirror", "--branches"):
+                every = True
+            if name in PUSH_VALUE_OPTS and not eq:
+                i += 1
+                val = args[i] if i < len(args) else ""
+            if name == "--repo":
+                repo = val
+        elif a.startswith("-") and len(a) > 1:
+            if a.find("o", 1) == len(a) - 1:  # `-o` last in a short cluster takes the next word as its value
+                i += 1
+        else:
+            pos.append(a)
+        i += 1
+    if repo is not None:
+        return repo, pos, every
+    return (pos[0] if pos else None), pos[1:], every
+
+
+def _git(call: policy.shellnorm.GitCall, cwd: str, *args: str) -> str | None:
+    argv = ["git"]
+    for d in call.dirs:
+        argv += ["-C", os.path.expanduser(d)]
+    if call.git_dir:
+        argv += ["--git-dir", os.path.expanduser(call.git_dir)]
+    if call.work_tree:
+        argv += ["--work-tree", os.path.expanduser(call.work_tree)]
+    try:
+        out = subprocess.run([*argv, *args], capture_output=True, text=True, timeout=3, cwd=cwd or None)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() or None if out.returncode == 0 else None
+
+
+def _short_ref(ref: str) -> str:
+    for prefix in ("refs/heads/", "heads/"):
+        if ref.startswith(prefix):
+            return ref[len(prefix):]
+    return ref
+
+
+def _push_hits_default(call: policy.shellnorm.GitCall, cwd: str) -> bool:
+    remote, refs, every = parse_push(call.args)
+    if every:
+        return True
+    current: list[str | None] = []
+
+    def cur() -> str | None:
+        if not current:
+            current.append(_git(call, cwd, "symbolic-ref", "--short", "-q", "HEAD"))
+        return current[0]
+
+    def on_default() -> bool:
+        return (cur() or "").lower() in DEFAULT_BRANCHES
+
+    if not refs:
+        return on_default()
+    targets = []
+    for ref in refs:
+        src, colon, dst = ref.lstrip("+").partition(":")
+        targets.append(_short_ref(dst if colon and dst else src))
+    for t in targets:
+        if t in ("HEAD", "@", ""):
+            if on_default():
+                return True
+        elif any(ch in t for ch in "$*?["):
+            if fnmatch.filter(DEFAULT_BRANCHES, t) or on_default():
+                return True
+        elif t.lower() in DEFAULT_BRANCHES:
             return True
+    # a remote whose default branch is not main/master (origin/HEAD -> origin/trunk)
+    if remote and re.fullmatch(r"[\w.-]+", remote):
+        head = _git(call, cwd, "symbolic-ref", "--short", "-q", f"refs/remotes/{remote}/HEAD")
+        default = head.split("/", 1)[1].lower() if head and "/" in head else ""
+        if default and any(t.lower() == default or (t in ("HEAD", "@", "") and (cur() or "").lower() == default) for t in targets):
+            return True
+    return False
+
+
+def _on_default_branch(cwd: str, command: str) -> bool:
+    """A `git push` whose destination is main/master or the current branch while that is main/master (invariant SI-08).
+
+    The classifier has already removed git global options, escapes and quoting (policy.segments), so `git -C d push origin HEAD`
+    and `git push origin HEAD:refs/heads/main` are seen as what they are. A destination that cannot be resolved
+    (`$BRANCH`) counts as the current branch.
+    """
+    for seg in policy.segments(command):
+        if policy.is_read_only(seg):
+            continue
+        for call in policy.git_calls(seg):
+            if call.sub == "push" and _push_hits_default(call, cwd):
+                return True
     return False
 
 
@@ -68,7 +161,8 @@ def pretool(event: dict, permit=None) -> HookResult:
         subject = policy.mcp_command(tool_input) or json.dumps(tool_input, sort_keys=True, ensure_ascii=False)
     try:
         a = _classify(tool, tool_input, cwd)
-        if (tool == "Bash" or policy.is_mcp(tool)) and "git" in subject and "push" in subject and "SI-08" not in a.blocked and _on_default_branch(cwd, subject):
+        runs_shell = tool == "Bash" or (policy.is_mcp(tool) and policy.mcp_command(tool_input) is not None)
+        if runs_shell and "SI-08" not in a.blocked and _on_default_branch(cwd, subject):
             a.blocked.append("SI-08")
     except Exception as e:  # noqa: BLE001 - fail closed for anything that looks high-risk, open otherwise
         if FALLBACK_HIGH.search(subject):

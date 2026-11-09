@@ -23,8 +23,8 @@ invariants:
     enforcement: "state machine guards (docs/02 section 2)"
   - id: SI-08
     description: "Never push to the default branch"
-    enforcement: "pattern below, plus the hook resolves a bare `git push` against the current branch"
-    block: "git push\\b[^|;&]*[ :+](main|master)(\\s|$)"
+    enforcement: "pattern below on the canonical command (git global options, escapes and quoting removed), plus the hook parses the push arguments: refspec destinations, HEAD and @ resolved against the current branch, --all and --mirror"
+    block: "git push\\b[^|;&]*[ :+](?:(?:refs/)?heads/)?(?i:main|master)(\\s|$)"
   - id: SI-09
     description: "The agent never approves its own permits and never changes its own governance wiring"
     enforcement: "these commands also refuse to run without an interactive human terminal"

@@ -4,6 +4,18 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+### Fixed
+- Gate bypasses found by the adversarial review (cluster A1: F00-F05, F35). One canonicalisation step, `jade/shellnorm.py`, now runs before every risk rule, safety invariant and the push resolver:
+  - git global options (`-C`, `-c`, `--git-dir`, `--work-tree`, `--no-pager`, `-P`, `--exec-path`, `--namespace` ...) no longer hide `git push`, `reset --hard`, `clean`, `branch -D` or SI-08; `git -c` keys that run programs (alias, core.sshCommand/pager/editor/fsmonitor/hooksPath, credential, url ...) and `--exec-path` are the new high rule R-15.
+  - Backslash escapes, line continuations, `$'...'` strings and adjacent quotes are resolved before matching; a `<<` inside quotes can no longer swallow the lines after it.
+  - Command substitutions inside double quotes, backtick spans and unquoted heredoc bodies are classified; a heredoc, here-string, pipe or process substitution that feeds `sh`/`bash`/`zsh`/interpreters, and the program text of `python -c`, `perl -e`, `node -e`, `awk` and `sed 'w ...'`, are searched for literal commands.
+  - The `read_only` list can no longer write: `sort -o`, `uniq IN OUT`, `sed` `w`/`e`/`-i`/`--in-place`, `awk`/`gawk` programs with `system`, redirects or `-i`, `git diff|log|show --output`, `find -fprint/-fls/-okdir`, `xxd -r` or two operands, `yq -i`, `tree -o`, `less -o`, `date -s`, `fd -x`.
+  - SI-08 parses `git push` arguments: refspec destinations, `refs/heads/` and `heads/` forms, `-o`/`--push-option`/`--repo` values, `--force-with-lease=...`, `HEAD`/`@`/empty refspec resolved against the real current branch (relative `-C` resolved against the event cwd), `--all` and `--mirror`; the remote's default branch name (`origin/HEAD`) counts too.
+  - Write, Edit, MultiEdit and NotebookEdit paths are expanded (`~`), resolved against the event cwd, symlink-resolved and matched case-insensitively (R-01 path, R-04 key files and R-13 are case-insensitive, as the macOS filesystem is); Bash path tokens are folded (`//`, `/./`, `x/../`).
+
+### Changed
+- Stricter, so a few previously allowed commands now need a permit (or are blocked): `git push --all` / `--mirror` and any push whose destination is main/master, `HEAD` or `@` while on main/master, or an unresolvable `$VAR` destination on main/master are SI-08 blocks; `git reset ... --hard` with options in any order, `git branch ... -D`, `git clean` with both `f` and `d` flags in any order are R-11; R-13 now also covers `policies/risk.yaml`, `evals/*/protected/**` and the gate and ledger code (`jade/permits|hooks|ledger|policy|shellnorm|decide|state_machine.py`), so even `git add jade/hooks.py` is high until W-32 scopes it to writes; `awk`, `sed`, `find`, `rg`, `fd` and friends are read-only only without their write or exec flags; harmless `git -c user.name=x ...` stays low.
+
 ## [0.2.0] - 2026-11-09
 
 ### Added

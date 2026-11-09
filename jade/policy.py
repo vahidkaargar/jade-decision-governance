@@ -1,30 +1,29 @@
 """Risk assessment of a proposed tool call against policies/risk.yaml and policies/safety.yaml.
 
 `policies.loader` holds the merge rules and raw first-match classification. This module adds what a
-real shell command needs: it classifies per simple command, ignores heredoc bodies and quoted prose,
+real shell command needs: it classifies per simple command after `shellnorm` has resolved escapes, quoting,
+git global options and hidden command text, ignores heredoc bodies and quoted prose that no shell would run,
 and treats read-only commands as low (see the `read_only` list in risk.yaml).
 """
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 
 from policies import loader
 
-from . import paths
+from . import paths, shellnorm
 from .util import LEVELS, canonical, sha256
 
-HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_]\w*)\1([^\n]*)\n.*?(?:\n[ \t]*\2[ \t]*(?=\n|$)|\Z)", re.S)
-SHELL_C = re.compile(r"(?:\b(?:ba|z|da|k|fi)?sh\s+(?:-\w+\s+)*-\w*c|\beval|\bsu\b[^|;&]*\s-c)\s+$")
-NULL_REDIRECT = re.compile(r"(\d*>&\d+|&>>?\s*/dev/null|\d*>>?\s*/dev/null|\d*<\s*/dev/null)")
-SPLIT = re.compile(r"\n|;|&&|\|\||\||&|\$\(|`|\(|\)|\{|\}")
-PREFIX = re.compile(
-    r"^(?:(?:[A-Za-z_]\w*=\S*|sudo(?:\s+-[A-Za-z]+(?:\s+\S+)?)*?|command|builtin|nohup|time|exec|noglob|do|then|else|if|while|until|!"
-    r"|env|xargs(?:\s+-(?:I\s*\S+|n\s*\d+|P\s*\d+|[0a-zA-Z]+))*)\s+)+")
+NULL_REDIRECT = shellnorm.NULL_REDIRECT
+SPLIT = shellnorm.SPLIT
+PREFIX = shellnorm.PREFIX
 WRITE_REDIRECT = re.compile(r">>?\s*\S")
 WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+UNSAFE_GIT = "git:unsafe-config "  # marker prefix R-15 matches; carried only in the text a rule sees
 
 
 def is_mcp(tool: str) -> bool:
@@ -69,52 +68,51 @@ def reset_cache() -> None:
     safety.cache_clear()
 
 
-def _strip_quotes(s: str) -> str:
-    """Blank quoted prose (anything with whitespace), unquote single words, and expose `sh -c "..."` bodies."""
-    out: list[str] = []
-    i, n = 0, len(s)
-    while i < n:
-        c = s[i]
-        if c == "\\" and i + 1 < n:
-            out.append(s[i:i + 2])
-            i += 2
-            continue
-        if c in "'\"":
-            j = i + 1
-            while j < n and s[j] != c:
-                j += 2 if (c == '"' and s[j] == "\\") else 1
-            body = s[i + 1:j]
-            if SHELL_C.search("".join(out)[-120:]):
-                out.append(" ; " + body + " ; ")
-            elif re.search(r"\s", body):
-                out.append('""')
-            else:
-                out.append(body)
-            i = j + 1
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
+skeleton = shellnorm.skeleton
+segments = shellnorm.segments
 
 
-def skeleton(command: str) -> str:
-    s = HEREDOC.sub(lambda m: "<<HEREDOC" + m.group(3), command)
-    s = _strip_quotes(s)
-    return NULL_REDIRECT.sub(" ", s)
-
-
-def segments(command: str) -> list[str]:
-    return [re.sub(r"\s+", " ", seg).strip() for seg in SPLIT.split(skeleton(command)) if seg.strip()]
+def _analyse(seg: str) -> tuple[str, list[shellnorm.GitCall]]:
+    """The segment without launcher prefixes (sudo, env, timeout ...) and with git global options removed."""
+    return shellnorm.git_calls(PREFIX.sub("", seg, count=1).strip())
 
 
 def _bare(seg: str) -> str:
-    return PREFIX.sub("", seg, count=1).strip()
+    return _analyse(seg)[0]
+
+
+def git_calls(seg: str) -> list[shellnorm.GitCall]:
+    return _analyse(seg)[1]
+
+
+def _pathfold(text: str) -> str:
+    """Lexical path clean-up (`//`, `/./`, `x/../`) so a protected path matches however it is spelled."""
+    t = re.sub(r"/{2,}", "/", text)
+    t = re.sub(r"/(?:\./)+", "/", t)
+    while (u := re.sub(r"/[^/\s]+/\.\./", "/", t)) != t:
+        t = u
+    return t
+
+
+def normalise_path(path: str, cwd: str = "") -> str:
+    """Absolute, symlink-resolved (deepest existing ancestor), `~`-expanded form of a write target."""
+    if not path:
+        return ""
+    p = os.path.expanduser(path)
+    if not os.path.isabs(p):
+        try:
+            p = os.path.join(cwd or os.getcwd(), p)
+        except OSError:
+            return ""
+    return re.sub(r"/{2,}", "/", os.path.realpath(p))
 
 
 def is_read_only(seg: str) -> bool:
     if WRITE_REDIRECT.search(seg):
         return False
-    bare = _bare(seg)
+    bare, calls = _analyse(seg)
+    if any(c.danger for c in calls):
+        return False
     return any(p.search(bare) for p in risk()["_read_only"])
 
 
@@ -134,8 +132,11 @@ def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
     """Classify one tool call. Raises on malformed policy; callers decide how to fail."""
     if tool in WRITE_TOOLS:
         subject = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
-        rule = _first_match(subject)
-        env = loader.environment_of(risk(), subject)
+        norm = normalise_path(subject, cwd)
+        cands = [subject, *([norm] if norm and norm != subject else [])]
+        rule = max((_first_match(c) for c in cands), key=lambda r: LEVELS[r["level"]])
+        envs = [loader.environment_of(risk(), c) for c in cands]
+        env = "production" if "production" in envs else "staging" if "staging" in envs else "local"
         a = _from_rule(rule, env)
         if env == "production" and LEVELS[a.level] < LEVELS["high"]:
             a.level, a.rule_id, a.rationale = "high", "R-ENV", "Write under a production path"
@@ -158,7 +159,9 @@ def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
         if is_read_only(seg):
             continue
         active.append(seg)
-        for text in {seg, _bare(seg)}:
+        bare, calls = _analyse(seg)
+        texts = [seg, bare, _pathfold(bare), *([UNSAFE_GIT + bare] if any(c.danger for c in calls) else [])]
+        for text in dict.fromkeys(texts):
             rule = _first_match(text)
             if best is None or LEVELS[rule["level"]] > LEVELS[best["level"]]:
                 best = rule

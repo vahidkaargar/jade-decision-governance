@@ -13,7 +13,7 @@ rules:
     level: critical
     reversibility: irreversible
     blast_radius: public
-    match: "\\b(pfctl|iptables|nft|ufw)\\b|/etc/pf\\.conf"
+    match: "\\b(pfctl|iptables|nft|ufw)\\b|(?i:/etc/pf\\.conf)"
     rationale: "Firewall change: human approval required"
   - id: R-02
     level: critical
@@ -32,7 +32,7 @@ rules:
     reversibility: irreversible
     blast_radius: org
     data_sensitivity: secret
-    match: "security (add|delete)-generic-password|ovault secret (set|import|rm|delete)|vault_key|id_(rsa|ed25519|ecdsa)\\b|\\.pem\\b|BEGIN [A-Z ]*PRIVATE KEY"
+    match: "security (add|delete)-generic-password|ovault secret (set|import|rm|delete)|(?i:vault_key|id_(rsa|ed25519|ecdsa)\\b|\\.pem\\b)|BEGIN [A-Z ]*PRIVATE KEY"
     rationale: "Key material or secret-store mutation"
   - id: R-10
     level: high
@@ -44,7 +44,7 @@ rules:
     level: high
     reversibility: irreversible
     blast_radius: repo
-    match: "git (reset --hard|push --force|branch -D|clean -fd)|\\brm -rf (?!/private/tmp|/tmp|\\$TMPDIR|\\./?(node_modules|dist|build|\\.venv|target)\\b)"
+    match: "git (reset\\b[^;&|]*--hard|push --force|branch\\b[^;&|]* -D\\b|clean\\b[^;&|]* -[a-zA-Z]*(f[a-zA-Z]*d|d[a-zA-Z]*f))|\\brm -rf (?!/private/tmp|/tmp|\\$TMPDIR|\\./?(node_modules|dist|build|\\.venv|target)\\b)"
     rationale: "Destroys local history or files"
   - id: R-12
     level: high
@@ -56,7 +56,7 @@ rules:
     level: high
     reversibility: reversible
     blast_radius: host
-    match: "\\.claude/(settings(\\.local)?\\.json|hooks/|CLAUDE\\.md)|\\bAGENTS\\.md\\b|\\.cursor/rules|\\.ai/rules\\.md|policies/(safety|promotion)\\.yaml|policies/local/|\\.config/jade/|\\.local/share/jade/|\\bjade (improve (promote|rollback)|ledger purge|label set)\\b"
+    match: "(?i:\\.claude/(settings(\\.local)?\\.json|hooks/|CLAUDE\\.md)|\\bAGENTS\\.md\\b|\\.cursor/rules|\\.ai/rules\\.md|policies/(safety|promotion|risk)\\.yaml|policies/local/|\\.config/jade/|\\.local/share/jade/|(?:^|[/\\s])jade/(permits|hooks|ledger|policy|shellnorm|decide|state_machine)\\.py\\b|evals/[^/\\s]+/protected/)|\\bjade (improve (promote|rollback)|ledger purge|label set)\\b"
     rationale: "Changes agent policy, hooks or protected targets"
   - id: R-14
     level: high
@@ -64,6 +64,12 @@ rules:
     blast_radius: service
     match: "(^|[;&|] *)(ssh|scp|sftp) (?!-keygen|-add|-agent|-copy-id)|\\brsync\\b.* \\S+:"
     rationale: "Any remote shell or copy (hosts in the overlay's critical list escalate to critical via a prepended rule)"
+  - id: R-15
+    level: high
+    reversibility: partially_reversible
+    blast_radius: host
+    match: "^git:unsafe-config "
+    rationale: "git -c (alias, pager, editor, sshCommand, fsmonitor, hooksPath, credential, url ...) or --exec-path can run a program or redirect a remote"
   - id: R-20
     level: medium
     reversibility: reversible
@@ -85,11 +91,26 @@ rules:
 # Classification works per simple command (pipeline segment). A segment whose command word matches one of
 # these patterns and that does not redirect output to a file only reads, so it is `low` whatever it mentions:
 # `grep pfctl notes.md` is not a firewall change. Heredoc bodies and quoted prose are ignored for the same reason.
+# git global options (`-C`, `-c`, `--no-pager` ...) are removed by jade/shellnorm.py before these patterns run, so
+# every git pattern here and every git rule above sees `git <subcommand> ...`.
 read_only:
-  - "^(cat|head|tail|less|more|bat|wc|ls|ll|stat|file|which|type|whereis|man|pwd|date|whoami|id|uname|printenv|echo|printf|true|false|test|\\[|grep|egrep|fgrep|rg|ag|ack|jq|yq|sort|uniq|cut|tr|column|nl|diff|cmp|comm|basename|dirname|realpath|readlink|du|df|ps|pgrep|lsof|netstat|sw_vers|md5|shasum|sha256sum|hexdump|xxd|strings|tree|fd|awk|gawk|cd|pushd|popd|export|set|unset|sleep|wait)\\b"
-  - "^sed\\b(?!.*\\s-[a-zA-Z]*i)"
-  - "^find\\b(?!.*\\s-(delete|exec|execdir|ok)\\b)"
-  - "^git( -C \\S+)? (status|log|diff|show|rev-parse|ls-files|ls-remote|blame|describe|shortlog|reflog|cat-file|fetch|remote( -v)?$|remote get-url|branch( -[avr]+| --list| --show-current)*$|tag( -l| --list)?$|stash list)\\b"
+  - "^(cat|head|tail|wc|ls|ll|stat|which|type|whereis|pwd|whoami|id|uname|printenv|echo|printf|true|false|test|\\[|grep|egrep|fgrep|jq|cut|tr|column|nl|diff|cmp|comm|basename|dirname|realpath|readlink|du|df|ps|pgrep|lsof|netstat|sw_vers|md5|shasum|sha256sum|hexdump|strings|cd|pushd|popd|export|set|unset|sleep|wait)\\b"
+  # Verbs that CAN write are read-only only without the flag or operand that makes them write (output file, in-place, exec, program text).
+  - "^sort\\b(?!.*(\\s-[a-zA-Z]*o|\\s--output|\\s--compress-program))"
+  - "^uniq\\b(?!(?:\\s+-\\S+)*\\s+(?!\\d+(?:\\s|$))[^-\\s]\\S*\\s+(?!\\d+(?:\\s|$))[^-\\s]\\S*)"
+  - "^xxd\\b(?!.*\\s-[a-zA-Z]*r)(?!(?:\\s+-\\S+)*\\s+(?!\\d+(?:\\s|$))[^-\\s]\\S*\\s+(?!\\d+(?:\\s|$))[^-\\s]\\S*)"
+  - "^(awk|gawk|mawk|nawk)\\b(?!.*(@script!|\\s-f\\b|\\s-i\\b|\\s--(file|include|load)))"
+  - "^(sed|gsed)\\b(?!.*(\\s-[a-zA-Z]*[iI]|\\s--in-place|@script!|\\s-[a-zA-Z]*f\\b|\\s--file))"
+  - "^find\\b(?!.*\\s-(delete|exec|execdir|ok|okdir|fprint0?|fprintf|fls)\\b)"
+  - "^(less|more)\\b(?!.*\\s-[a-zA-Z]*[oO])"
+  - "^(bat|man)\\b(?!.*(\\s--pager|\\s-[PHw]\\b|\\s--html))"
+  - "^(rg|ag|ack)\\b(?!.*(--pre\\b|--pager|--hostname-bin))"
+  - "^fd\\b(?!.*\\s(-x|-X|--exec|--exec-batch)\\b)"
+  - "^tree\\b(?!.*\\s-[a-zA-Z]*o)"
+  - "^yq\\b(?!.*(\\s-[a-zA-Z]*i|\\s--inplace))"
+  - "^date\\b(?!.*(\\s-[a-zA-Z]*s|\\s--set))"
+  - "^file\\b(?!.*\\s-[a-zA-Z]*C)"
+  - "^git (status|log|diff|show|rev-parse|ls-files|ls-remote|blame|describe|shortlog|reflog(?! (expire|delete))|cat-file|fetch|remote( -v)?$|remote get-url|branch( -[avr]+| --list| --show-current)*$|tag( -l| --list)?$|stash list)\\b(?!.*(--output\\b|--upload-pack|--receive-pack|--exec\\b))"
   - "^(gh|glab) (pr|mr|issue|run|repo|release|workflow) (view|list|status|checks|diff|watch)\\b"
   - "^docker (compose )?(ps|images|logs|inspect|info|version|stats|top)\\b"
   - "^launchctl (list|print)\\b"
