@@ -9,7 +9,7 @@ task-observer (v3.4.0, already active in every session) owns the loop *observe �
 
 Separation of duties: the component that proposes (miner) never scores (evaluator), and neither can install: question templates are promoted by writing a new registry version and flipping the champion pointer, which is itself journaled and reversible with `jade improve rollback`.
 
-Drift handling (Q6: follow upgrades): a changed resolved model string or question version opens an informational `MODEL_DRIFT`/`QUESTION_DRIFT` work item and starts a new calibration group at default thresholds. Nothing is frozen; the old group's thresholds are not inherited.
+Drift handling (Q6: follow upgrades): a changed resolved model string opens an informational `MODEL_DRIFT` work item (once per new string) and starts a new calibration group at default thresholds; a new question version starts its own group the same way, but no `QUESTION_DRIFT` item is opened (W-51). Nothing is frozen; the old group's thresholds are not inherited.
 
 ## 2. Work management
 
@@ -17,9 +17,9 @@ Contract: `schemas/work-item.schema.json`. Store: `work-items.jsonl` in this rep
 
 Rules:
 - Every unresolved item has owner, priority, dependencies, rationale, next action and a reactivation trigger. "Owner: human" items are the only ones that may block.
-- Deduplicate by normalised title + target; aging P2→P1 at 14 days idle, P3→P2 at 30 days.
-- Human questions are batched (10-minute window, or at turn end) and each carries context, impact, options, recommended default and consequence of no answer. A missing permission is typed `blocker`, never `ambiguity`.
-- Resumption: the `SessionStart` hook (Phase 2) prints items whose trigger is `on_session_start` or whose dependencies closed, plus any `WAITING_HUMAN` decisions, so the next session continues without re-discovery. Leases: an item `in_progress` for > 24 h without a history entry reverts to `open`.
+- Aging P2→P1 at 14 days idle, P3→P2 at 30 days (run by every `jade work` command that writes). Not built: de-duplication by normalised title and target, which needs an `add` command (W-51).
+- A human question carries context, impact, options, recommended default and consequence of no answer; a missing permission is typed `blocker`, never `ambiguity`. Batching in a 10-minute window is designed and not built (`group_window_s`, W-35).
+- Resumption: the `SessionStart` hook prints open items whose trigger is `on_session_start` or a date that has come, plus pending permits and any `WAITING_HUMAN` decisions, so the next session continues without re-discovery. Items whose dependencies have closed are not announced (W-51). Leases: an item `in_progress` with no update for more than a day reverts to `open` (`jade work`, the history keeps dates, not times).
 - Honest limitation: Claude Code has no resident agent. launchd can run `jade` maintenance (mining, drift checks, aging, rendering) but cannot reason or implement. "Continuous autonomy" here means *state survives and the next session resumes automatically*, nothing more.
 
 ## 3. Human-only boundaries (never automated)

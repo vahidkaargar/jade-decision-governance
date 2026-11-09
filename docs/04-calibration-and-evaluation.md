@@ -68,17 +68,19 @@ These numbers are heuristic (regex over transcripts). Phase 1's first job is to 
 
 ```
 evals/
-  baseline/      transcript-mined calls (dev only; leaky by construction)
-  routing/       labeled {task → should_call_jev, primitive, family}; partition by session
-  judgment/      verify/choice cases with observed outcomes; partition by task family AND by session (no session in two splits)
-  calibration/   held-out for threshold fitting
-  regression/    every past failure class (low-P→done, repeat, degenerate choice, provider error) as a replay
-  adversarial/   injected instructions in evidence, forged "approved" strings, Persian/English mixed, truncated evidence, stale context
-  performance/   latency/throughput harness: 1, 4, 8 parallel; batch 1/3/8; p50/p95/p99; 429 behaviour
+  baseline/      transcript-mined calls (dev only; leaky by construction)                       BUILT
+  regression/    every past failure class as a replayable case (`evals/run_cases.py`)            BUILT
+  adversarial/   injected instructions, forged approvals, gate bypass spellings, secrets         BUILT
+  performance/   latency/throughput harness: 1, 4, 8 parallel; batch 1/3/8; p50/p95/p99          BUILT
+  routing/       labeled {task → should_call_jev, primitive, family}; partition by session      PLANNED (W-49), empty directory
+  judgment/      verify/choice cases with observed outcomes; partition by family AND session    PLANNED (W-49), empty directory
+  calibration/   held-out for threshold fitting                                                 PLANNED (W-49), empty directory
   */protected/   never read by candidate generation; results only via `jade eval run --protected` (human-run)
 ```
 
-Splits: dev 50% / calibration 20% / validation 15% / protected test 15%, by session id hash. Minimum protected size before any promotion: 150 per family.
+The regression and adversarial cases are command and gate cases; none is tagged by language, so the Persian/English slice exists only for ledger rows (`jade eval run` reports `by_language`) and the adversarial set has no Persian-evidence cases yet (W-14, W-49).
+
+Splits: dev 50% / calibration 20% / validation 15% / protected test 15%, by session id hash (`jade/evals.py`). Minimum protected size before a promotion: the design target is 150 per family; the code enforces `protected_test.min_samples: 30` from `policies/promotion.yaml` (W-52 raises it when real labels exist).
 
 ## 6. Budgets derived from baseline
 
@@ -90,13 +92,13 @@ Splits: dev 50% / calibration 20% / validation 15% / protected test 15%, by sess
 | Provider error/unparsed | 9.4% | ≤ 2%, all typed | adapter |
 | Hot-path p95 added latency per decision | ≈ 0.5 s per call, serial; up to 56 calls/file | ≤ 1.0 s per decision (one batched request, p95 672 ms at batch 8, + ledger write) | batching replaces serial calls |
 | Cost | $0.013 / 14 days | ≤ $1 / month | not binding |
-| Routing false positive (Jev called when FAST sufficed) | unknown | measured on `evals/routing`; target set after first measurement | plan §12: no invented targets |
+| Routing false positive (Jev called when FAST sufficed) | unknown | to be measured on `evals/routing` once it exists (W-49); target set after first measurement | plan §12: no invented targets |
 
 ## 7. Metrics computed by `jade eval`
 
-Decision quality: false accept, false reject, abstain rate, selective risk vs coverage curve. Calibration: reliability diagram (10 bins), Brier, log loss, ECE with CI by bootstrap. Ranking (choice): top-1 accuracy, margin distribution. Routing: confusion matrix FAST/JEV/DEEP. Operations: p50/p95/p99 latency, provider error rate, calls per decision, cost per accepted verified decision. Process: time-to-resolution for WAITING_HUMAN, work items opened/closed, resumption success after crash (fault-injection test).
+Computed today (`jade/evals.py`, `jade eval run`): false accept, false reject, abstain rate, coverage and the selective risk at the operating point; reliability table (10 bins), Brier, log loss and ECE (point estimates); Wilson intervals; a paired bootstrap for the champion-versus-challenger comparison (`jade eval conditions`); subgroup slices by language (fa/en/unknown). Latency and cost come from `evals/performance/run.py` and `jade ledger stats`; crash resumption is covered by a fault-injection test (`tests/acceptance/test_phase2_enforce.py`).
 
-Paired comparisons (same cases, champion vs challenger), Wilson/bootstrap intervals, Holm correction across metrics, subgroup slices (fa/en, risk ≥ high).
+Designed, not built (W-52): the selective-risk-versus-coverage curve, a bootstrap interval on ECE, top-1 accuracy and the margin distribution for choice questions, the FAST/JEV/DEEP routing confusion matrix, Holm correction across metrics, calls per decision, cost per accepted verified decision, time-to-resolution for WAITING_HUMAN, and the slice for risk ≥ high. Until they exist the paired comparison reports each metric with its own interval and no multiplicity correction; read a single significant metric accordingly.
 
 ## 8. Baseline conditions to compare (Phase 3)
 

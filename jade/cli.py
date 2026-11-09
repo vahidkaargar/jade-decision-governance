@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -303,14 +304,22 @@ def _work(a) -> int:
     from . import work
 
     src = Path(a.file)
-    items = work.load(src)
+    try:
+        items = work.load(src)
+    except (OSError, ValueError) as e:
+        print(f"jade: {e}", file=sys.stderr)
+        return 1
     if a.action == "list":
         for w in items:
             if a.all or w["status"] not in ("done", "dropped"):
                 print(f"{w['id']}  {w['priority']} {w['status']:13} {w['owner']:7} {w.get('title', '')}")
         return 0
     if a.action == "set":
-        work.update(items, a.id, status=a.status, note=a.note or "", next_action=a.next, trigger=a.trigger)
+        try:
+            work.update(items, a.id, status=a.status, note=a.note or "", next_action=a.next, trigger=a.trigger)
+        except KeyError:
+            print(f"jade: no work item {a.id!r} in {a.file}", file=sys.stderr)
+            return 1
     aged = work.age(items)
     work.save(src, items)
     work.render(src, Path(a.out))
@@ -467,14 +476,16 @@ def _maintain(a) -> int:
     return 1 if out["check_failed"] else 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    if argv[:1] == ["ask"]:
-        return ask_main(argv[1:])
-    if argv[:1] == ["hook"] and len(argv) == 2:
-        from . import hooks
+def _days(value: str) -> int:
+    """`90` or `90d`: a number of days (docs/05 T15 writes the second form)."""
+    m = re.fullmatch(r"(\d+)d?", value.strip())
+    if not m:
+        raise argparse.ArgumentTypeError(f"invalid number of days: {value!r} (use 90 or 90d)")
+    return int(m.group(1))
 
-        return hooks.main(argv[1])
+
+def build_parser() -> argparse.ArgumentParser:
+    """The `jade` command tree (everything but `ask` and `hook`, which `main` hands off first). Also read by the docs test."""
     p = argparse.ArgumentParser(prog="jade", description="Adaptive decision governance for Jev. `jade ask -h` for questions.")
     p.add_argument("--version", action="version", version=__version__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -485,7 +496,7 @@ def main(argv: list[str] | None = None) -> int:
     st = s.add_parser("stats")
     st.add_argument("--days", type=int, default=14)
     pg = s.add_parser("purge")
-    pg.add_argument("--older-than", type=int, default=90, metavar="DAYS")
+    pg.add_argument("--older-than", type=_days, default=90, metavar="DAYS", help="retention window in days: 90 or 90d (default 90)")
 
     c = sub.add_parser("check", help="probe ledger, policies, registry, hooks, shim and the provider; non-zero on any failure")
     c.add_argument("--offline", action="store_true")
@@ -586,8 +597,18 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("maintain").add_argument("--offline", action="store_true")
     lp = sub.add_parser("launchd-plist")
     lp.add_argument("--label", default="com.jade.maintain")
+    return p
 
-    a = p.parse_args(argv)
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["ask"]:
+        return ask_main(argv[1:])
+    if argv[:1] == ["hook"] and len(argv) == 2:
+        from . import hooks
+
+        return hooks.main(argv[1])
+    a = build_parser().parse_args(argv)
     if a.cmd == "ledger":
         if a.action == "stats":
             return _stats(a)

@@ -72,6 +72,8 @@ def next_state(src: str, event: str, risk: str = "low", *, prev: str | None = No
         raise IllegalTransition("authorize at risk >= high needs an issued, unexpired, unused permit with the same plan hash")
     if event == "authorize_without_permit_high_risk" and not at_least(risk, "high"):
         raise IllegalTransition("risk below high needs no permit; use authorize")
+    if src == "ABSTAINED" and event == "escalate" and not at_least(risk, "medium") and revision_count < MAX_REVISIONS:
+        raise IllegalTransition("an abstention below risk medium is not escalated to the human until the revisions are used up; add evidence or cancel")
     if event in ("add_evidence", "revise") and revision_count >= MAX_REVISIONS:
         raise IllegalTransition(f"revision_count reached {MAX_REVISIONS}; escalate instead")
     return dst

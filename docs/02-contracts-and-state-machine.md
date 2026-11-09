@@ -5,11 +5,12 @@
 A *decision* is one governed judgment inside an agent task: "is this fix verified", "which strategy", "may I push". The agent (Claude Code) drives the lifecycle through `jade` CLI calls; the runtime journals every transition and refuses invalid ones. Execution itself happens in the harness (Bash/Edit/Write tools); JADE sees it at the `PreToolUse` boundary and records outcomes when the agent (or a hook) reports them.
 
 ```
-jade decide open      → RECEIVED → VALIDATED → CLASSIFIED
-jade ask / route      → EVALUATING → {ACCEPTED | ABSTAINED | REJECTED | NEEDS_EVIDENCE | NEEDS_REVISION}
-jade permit issue     → AUTHORIZED   (only from ACCEPTED, and only if a valid permit exists or risk < high)
-PreToolUse gate       → EXECUTING    (permit consumed)
-jade outcome record   → VERIFYING → {SUCCEEDED | FAILED | COMPENSATED | ROLLED_BACK | OUTCOME_UNKNOWN}
+jade decide open                  → RECEIVED → VALIDATED → CLASSIFIED
+jade ask --decision <id>          → EVALUATING → {ACCEPTED | ABSTAINED | REJECTED | NEEDS_EVIDENCE}   (`jade route` only advises; it moves nothing)
+jade decide event <id> authorize  → AUTHORIZED   (only from ACCEPTED; below risk high at once, at high and above only the PreToolUse gate
+                                                  authorizes, with an issued permit: `jade permit request`, human `jade permit approve`)
+PreToolUse gate                   → EXECUTING    (permit consumed)
+jade decide outcome <id> ...      → VERIFYING → {SUCCEEDED | FAILED | OUTCOME_UNKNOWN}; from FAILED, `jade decide event <id> compensate|rollback`
 ```
 
 Resumable side states: `WAITING_HUMAN`, `WAITING_DEPENDENCY`, `RETRY_SCHEDULED`. Terminal: `SUCCEEDED`, `FAILED`, `COMPENSATED`, `ROLLED_BACK`, `OUTCOME_UNKNOWN`, `REJECTED`, `CANCELLED`, `EXPIRED`.
@@ -26,20 +27,20 @@ Resumable side states: `WAITING_HUMAN`, `WAITING_DEPENDENCY`, `RETRY_SCHEDULED`.
 | EVALUATING | `jev_error` | provider UNAVAILABLE / RATE_LIMITED after retries, or INVALID_QUESTION | NEEDS_EVIDENCE (never ACCEPTED) | runtime |
 | EVALUATING | `deep_result` | reasoning model's structured verdict attached with evidence refs | ACCEPTED / REJECTED / NEEDS_REVISION | agent |
 | ABSTAINED / NEEDS_EVIDENCE | `add_evidence` | new `evidence_refs` ⇒ new `context_fingerprint`; revision_count < max (3) | EVALUATING | agent |
-| ABSTAINED | `escalate` | risk ≥ medium, or revision_count = max | WAITING_HUMAN | runtime |
+| ABSTAINED | `escalate` | risk ≥ medium, or revision_count = max (refused below that: `state_machine.next_state`) | WAITING_HUMAN | runtime |
 | NEEDS_REVISION | `revise` | plan changed ⇒ new `plan_hash`; revision_count < max | VALIDATED | agent |
 | NEEDS_REVISION | `escalate` | revision_count reached the max (the exit the `revise` refusal points to) | WAITING_HUMAN | agent |
 | ACCEPTED | `authorize` | risk < high **or** permit `ISSUED`, unexpired, unused, `plan_hash` equal, no safety-invariant match | AUTHORIZED | runtime |
 | ACCEPTED | `authorize` fails | permit missing/PENDING | WAITING_HUMAN | runtime |
 | AUTHORIZED | `execute` | PreToolUse hook sees matching command; permit nonce consumed in same transaction | EXECUTING | hook |
-| AUTHORIZED | `context_changed` | fingerprint of target state differs from precondition | NEEDS_REVISION (permit revoked) | runtime |
+| AUTHORIZED | `context_changed` | fingerprint of target state differs from precondition. The edge and the permit revocation exist; no code raises the event yet (a changed precondition makes the permit unusable at the gate instead: docs/05 T6, W-35) | NEEDS_REVISION (permit revoked) | runtime |
 | EXECUTING | `observe` | outcome record with `observation_type` | VERIFYING | agent/hook |
 | VERIFYING | `verified` | `observation_type=observed` and `success=true` | SUCCEEDED | runtime |
 | VERIFYING | `failed` | `success=false` | FAILED | runtime |
 | VERIFYING | `unknown` | `observation_type=unknown` | OUTCOME_UNKNOWN | runtime |
 | FAILED | `compensate` / `rollback` | compensation plan ref present | COMPENSATED / ROLLED_BACK | agent |
 | OUTCOME_UNKNOWN | `reconcile` | external state read and attached | VERIFYING | agent |
-| WAITING_HUMAN | `human_answer` | from TTY (`jade permit approve` / `jade decide answer`) | previous state re-entered | human |
+| WAITING_HUMAN | `human_answer` / `human_accept` / `human_reject` | from a human terminal: `jade permit approve` for a permit, `jade decide event <id> human_answer\|human_accept\|human_reject` for the decision | previous state re-entered / ACCEPTED / REJECTED | human |
 | any state that waits (everything non-terminal except EXECUTING, VERIFYING, OUTCOME_UNKNOWN) | `deadline` | `expires_at` passed (refused before) | EXPIRED, and the decision's open permits are revoked | runtime (sweep on SessionStart, daily, and at every gated PreToolUse) |
 | EXECUTING / VERIFYING | `deadline` | `expires_at` passed with no outcome | `observe` then `unknown`, or `unknown`: OUTCOME_UNKNOWN, never SUCCEEDED and never EXPIRED (SI-07) | runtime (sweep) |
 | any non-terminal | `cancel` | reason; revokes the decision's open permits. From EXECUTING, VERIFYING or OUTCOME_UNKNOWN it lifts the SI-07 hold, so it needs a human terminal | CANCELLED | agent/human |

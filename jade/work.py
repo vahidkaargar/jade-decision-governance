@@ -3,17 +3,32 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from pathlib import Path
 
 from . import schemas
 
-MARK = "\n## Items\n"  # a heading line: the text above may quote the words `## Items` in prose
+# The generated table starts at a line that is exactly the heading `## Items`. The hand-written text above it may quote the words in prose
+# or in a code span (`## Items`); only a heading line counts, and the very first line of the file counts too.
+ITEMS_HEADING = re.compile(r"^## Items[ \t]*$", re.M)
+MARK = "\n## Items\n"
 AGING = (("P2", "P1", 14), ("P3", "P2", 30))
+LEASE_DAYS = 1   # an item `in_progress` with no history entry for more than this many days goes back to `open` (the history keeps dates, not times)
 
 
 def load(path: Path) -> list[dict]:
-    return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+    """The work items of a JSON Lines file, each validated against the contract: a hand edit that breaks the schema fails here, not later."""
+    items = []
+    for n, line in enumerate(Path(path).read_text().splitlines(), 1):
+        if line.strip():
+            w = json.loads(line)
+            try:
+                schemas.validate("work-item", w)
+            except Exception as e:  # noqa: BLE001 - jsonschema's error type is not part of this module's contract
+                raise ValueError(f"{path}:{n}: not a valid work item ({str(e).splitlines()[0]})") from None
+            items.append(w)
+    return items
 
 
 def save(path: Path, items: list[dict]) -> None:
@@ -23,13 +38,19 @@ def save(path: Path, items: list[dict]) -> None:
 
 
 def age(items: list[dict], today: date | None = None) -> list[str]:
-    """P2 -> P1 after 14 idle days, P3 -> P2 after 30. Only open items age."""
+    """P2 -> P1 after 14 idle days, P3 -> P2 after 30 (docs/07 section 2). Only open items age. An item that has been `in_progress` for more
+    than a day with no history entry loses its lease and goes back to `open`; the change is recorded in its history. Returns the ids changed."""
     today = today or date.today()
     changed = []
     for w in items:
+        idle = (today - date.fromisoformat(w["updated_at"][:10])).days
+        if w["status"] == "in_progress" and idle > LEASE_DAYS:
+            w["status"], w["updated_at"] = "open", today.isoformat()
+            w["history"].append({"at": today.isoformat(), "change": f"lease expired: in_progress with no update for {idle} days, back to open"})
+            changed.append(w["id"])
+            continue
         if w["status"] not in ("open", "blocked", "waiting_human"):
             continue
-        idle = (today - date.fromisoformat(w["updated_at"][:10])).days
         for src, dst, days in AGING:
             if w["priority"] == src and idle >= days:
                 w["priority"], w["updated_at"] = dst, today.isoformat()
@@ -81,7 +102,7 @@ def table(items: list[dict]) -> str:
 def render(jsonl: Path, backlog: Path, today: date | None = None) -> str:
     """Rewrite everything from the `## Items` heading down; the hand-written part above it is kept."""
     items = load(jsonl)
-    head = backlog.read_text().split(MARK)[0] if backlog.exists() else "# Backlog\n\n"
+    head = ITEMS_HEADING.split(backlog.read_text(), maxsplit=1)[0] if backlog.exists() else "# Backlog\n\n"
     text = (head.rstrip("\n") + f"\n{MARK}\n" + table(items) +
             f"\n\nAging: P2 → P1 after 14 idle days; P3 → P2 after 30. Rendered by `jade work render` on {(today or date.today()).isoformat()}.\n")
     backlog.write_text(text)

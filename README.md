@@ -19,11 +19,11 @@ It governs how agents (Claude Code first) use [TypeSafe Jev](https://docs.typesa
 | Stage | State |
 |-------|-------|
 | DESIGN_READY | **Yes** — design approved by the maintainer 2026-11-09 |
-| IMPLEMENTED | **Yes** — `jade` 0.2.0: ledger, adapter, redaction, `jev` shim, question registry, permits, hook gate, calibration, bounded improvement loop; Phases 1–5 acceptance tests pass |
+| IMPLEMENTED | **Yes** — `jade` 0.2.1: ledger, adapter, redaction, `jev` shim, question registry, permits, hook gate, calibration, bounded improvement loop; Phases 1–5 acceptance tests pass. 0.2.1 is the release that closes the first independent adversarial review (see `CHANGELOG.md`); the residual risks it leaves are listed in `docs/05-threat-model.md` and tracked in `BACKLOG.md` |
 | VALIDATED | No — needs 14 days of real ledger data, labelled outcomes and one full improvement cycle (`docs/08` section 5) |
 | PRODUCTION_APPROVED | No — a human decision (`docs/08`) |
 
-What exists today: the design documents, the runtime, six JSON Schema contracts, five policy files with a tested loader, a 10-entry question registry, 76 replayable regression and adversarial cases, the baseline and performance tooling, and the phase acceptance tests. Wiring it into an agent harness is deliberately a human step: see `docs/08-deployment-runbook.md`.
+What exists today: the design documents, the runtime, six JSON Schema contracts, five policy files with a tested loader, a 10-entry question registry, replayable regression and adversarial cases (`evals/run_cases.py`), the baseline and performance tooling, and the phase acceptance tests. What does not exist yet is listed in `BACKLOG.md` (for example the routing and judgment eval sets, W-49, and several metrics of `docs/04` section 7, W-52); the documents mark each of those as planned. The gate is a syntactic classifier with known residual risks (`docs/05` T2, T3, T18, T19, T22): it is a strong guard rail for an agent that makes mistakes, not a boundary against one that is adversarial and runs as the same user. Wiring it into an agent harness is deliberately a human step: see `docs/08-deployment-runbook.md`.
 
 ## Why: the measured baseline
 

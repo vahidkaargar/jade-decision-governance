@@ -11,7 +11,7 @@ Policy files: `policies/routing.yaml`, `policies/risk.yaml`, `policies/escalatio
 1. **Deterministic?** Exit codes, file hashes, regex, schema validation, arithmetic, permission bits → FAST. No model call. Baseline impact: a share of the 684 verify calls were about test exit codes already visible in tool output.
 2. **Safety invariant hit?** → ESCALATE (blocked), regardless of evidence.
 3. **Evidence present?** A verify question with no raw evidence reference (tool output, diff, document) → NEEDS_EVIDENCE. Baseline: 97% of calls passed evidence inline on the command line, truncated and often a paraphrase. New default: `--state-file <path>` or stdin; the state must include the raw excerpt and its source.
-4. **Duplicate?** Same `question_id` + canonical state hash in session → return the cached answer and flag `repeat_without_new_evidence`. Baseline: 20% of calls were repeats. The flag is a ledger pattern the improvement plane mines.
+4. **Duplicate?** Same `question_id` + canonical state hash in session → return the cached answer and flag `repeat_without_new_evidence`. Baseline: 20% of calls were repeats. The flag is a ledger pattern the improvement plane mines. Implemented inside `jade ask` (the ledger's session dedup, one hour); `jade route` does not run this check and neither it nor the context-freshness check (PF-07) is in `route.preflight` (W-53).
 5. **Candidates valid?** Choice with < 2 eligible options after code-level eligibility filtering → NEEDS_REVISION (the API will happily pick the only option with confidence 1.0; S9).
 6. **Primitive suitable?** Atomic, bounded, answerable from state. Multi-step synthesis, architecture, open-ended "what should I do" → DEEP.
 7. **Context fresh?** else NEEDS_EVIDENCE.
@@ -22,7 +22,7 @@ Policy files: `policies/routing.yaml`, `policies/risk.yaml`, `policies/escalatio
 - **FAST** — code. Emits a decision with `evaluation_refs` pointing at the deterministic check.
 - **JEV** — one Decisions API request carrying every independent registry question for the task family (batching: verified S7; up to 8 questions, 0.68 s for 3). Questions cannot depend on each other's answers within a batch; a dependent question is a second request.
 - **DEEP** — the reasoning model (Claude) answers with a structured verdict and evidence refs. The HYBRID pattern lives here: DEEP decomposes, emits atomic JEV questions, and code combines them with explicit rules ("any serious violation" = max, not mean — sde_cascade cookbook).
-- **ESCALATE** — human. Questions are batched (10-minute window) and each carries context, impact, options, recommended default, and the consequence of no answer.
+- **ESCALATE** — human. An escalation carries context, impact, options, recommended default, and the consequence of no answer. Batching human questions in a 10-minute window is designed and not built (W-35).
 
 ## 4. Question registry
 

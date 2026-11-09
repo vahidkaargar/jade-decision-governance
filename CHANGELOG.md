@@ -2,7 +2,9 @@
 
 All notable changes to this project are documented here. Format: Keep a Changelog; versioning: SemVer once code ships.
 
-## [Unreleased]
+## [0.2.1] - 2026-11-09
+
+The first independent adversarial review of 0.2.0 found 48 defects and 18 coverage gaps; this release addresses them in seven clusters; what remains open is documented, not hidden (A1, A2 gate classification and failure behaviour, B permits and the decision lifecycle, C redaction and egress, D judging, adapter and improvement, E installation and health, F tests, docs and backlog). Everything below changes behaviour or documents a limit; items marked **Newly blocked**, **Newly refused** or **Newly failing** turn something that used to pass into a refusal. Permits approved before the upgrade must be requested again (the plan hash, the permit seal and `policy_version` all changed), and the gate matcher is wider: re-run `jade hooks install` in your own terminal and reload the maintain job (`jade launchd-plist`).
 
 ### Fixed
 - Installation and health (review cluster E: F37-F40, G05):
@@ -99,6 +101,16 @@ All notable changes to this project are documented here. Format: Keep a Changelo
   - `jade work render` no longer truncates the hand-written part of BACKLOG.md when it quotes the words `## Items` in prose.
   - Not changed, on purpose: a malformed overlay still blocks every command that is not clearly read-only (the overlay holds the machine-specific hosts, so the shipped rules are not a sufficient floor); SI-05 stays applied to read-only tools; `patch -p1 < p`, `git apply p`, a symlink made in the same command, an agent-allocated pty and `pyproject.toml` are documented residual risk (docs/05 T19, W-37).
 
+- Tests, documents and backlog (review cluster F: F42, F43, F46, G07, G09-G16):
+  - **Newly refused:** an agent (or the runtime) escalating an ABSTAINED decision below risk medium while revisions remain; docs/02 always said "risk >= medium, or the revisions used up", the state machine allowed it at any risk. The decision can still take new evidence, be cancelled or expire. Replay case R75.
+  - `jade ledger purge --older-than` takes `90` or `90d` (docs/05 T15 wrote the second form and argparse rejected it).
+  - `jade work` validates every item against the work-item contract when it loads the file (a hand edit that breaks the schema now exits 1 naming the line instead of failing later), reports an unknown id or a missing file as an error instead of a traceback, finds the `## Items` heading only as a whole line (also on the first line of the file; prose that quotes the words no longer cuts BACKLOG.md), and returns an item that has been `in_progress` for more than a day without an update to `open` (the lease docs/07 described). The command tree is built by `cli.build_parser()` so tests can read it.
+  - `policies/routing.yaml` gained comments only: the `cache:` block, `max_questions_per_request`, `max_parallel_requests`, PF-04 and PF-07 are declared and read by no code (W-53). The file changed, so `policy_version` changes and open permits must be requested again.
+  - Documents corrected where they described behaviour that does not exist, instead of leaving the claim: `jade permit issue`, `jade outcome record`, `jade decide answer`, `jade eval replay`, `jade ledger stats --since` (the commands are `permit request`, `decide outcome`, `decide event ... human_*`, `eval run|conditions|propose`, `--days`), the 30-minute cache (it is a one-hour session dedup), `max_questions` and `max_parallel` as mitigations (T13), `QUESTION_DRIFT`, title de-duplication and dependency-closed resumption (docs/07), the Holm correction, confusion matrix, top-1 and margin metrics and the 150-row protected minimum (docs/04; the code uses 30), the `evals/routing`, `judgment` and `calibration` sets, ADR status ("proposed" is "accepted and implemented"), ADR-08 `policy_version` (a hash of the policy files, not a git SHA), CONTRIBUTING, SECURITY and the README counts. Work items: W-09 retitled to what shipped (regression and adversarial sets), W-14 reopened (no case is tagged by language), W-21's title says 90 days, W-04's next action names the real flag.
+  - docs/05 gained T22 (secret reads and network egress, accepted risk), an honest T3 (writes to skill and command files are not gated, W-54) and section 5, the evidence per threat row: `tests/test_docs_truth.py` fails when a row has no entry, a cited test or case does not exist, or an accepted risk names no work item. The same test parses every `jade ...` command in the README, docs, skill, work items and runbook against the real parser.
+  - Mutation checks: each surviving mutant of review F42 (re-approving a REVOKED permit, lowering a decision's risk with `raise_risk_to`, the residual-secret refusal, every agent environment variable, the default permit lifetime, the purge window, the settings backup, the sweep, the auto-promotion list, the Stop hook guard, the raw API call record) and each mutation of `jade/work.py` was applied to a copy of the repository and is now killed by a test (`tests/acceptance/test_review_cluster_f.py`, `test_work_items.py`).
+  - Replay cases A126, A127 (T5) and R75; backlog items W-49 to W-61 for the gaps G09-G16, the unbuilt documented features and the decisions for the human (W-54).
+
 ### Changed
 - Second pass, stricter again: a `git push` whose HEAD resolves to main after a `cd` is an SI-08 block; `rm -r -f`, `rm -fr`, `rm --recursive --force` need a permit like `rm -rf`; `git clean -f -d`, `git branch --delete --force` need a permit; setting `GIT_SSH_COMMAND`, `GIT_PAGER`, `GIT_EDITOR` and similar to anything but a plain pager, editor, `true` or `ssh -i key` needs a permit (R-15); a `less`, `man`, `rg`, `bat`, `sed`, `awk`, `uniq`, `xxd` or `sort` invocation that can write is classified by where it writes, so `sed -n '1,5p' ~/.claude/settings.json` stays low but `sed -n 'w ~/.claude/settings.json' f` is high; a sed script with a command the allow-list does not know (for example `sed 's/a/b/w out'`) has its resolved words classified, which is only visible when it names a protected path.
 - Stricter, so a few previously allowed commands now need a permit (or are blocked): `git push --all` / `--mirror` and any push whose destination is main/master, `HEAD` or `@` while on main/master, or an unresolvable `$VAR` destination on main/master are SI-08 blocks; `git reset ... --hard` with options in any order, `git branch ... -D`, `git clean` with both `f` and `d` flags in any order are R-11; R-13 now also covers `policies/risk.yaml`, `evals/*/protected/**` and the gate and ledger code (`jade/permits|hooks|ledger|policy|shellnorm|decide|state_machine.py`), so even `git add jade/hooks.py` was high until the second A2 pass scoped it to writes (R-16); `awk`, `sed`, `find`, `rg`, `fd` and friends are read-only only without their write or exec flags; harmless `git -c user.name=x ...` stays low.
@@ -117,12 +129,10 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 - Calibration: labels, session-hash splits, metrics with Wilson and paired-bootstrap intervals, adjudication queue, threshold proposals, language slices.
 - Bounded improvement loop: ledger miner writing task-observer observations, offline replay, async shadow runner, 20% canary, champion/challenger pins, kill switch, rollback.
 - `jade check`, `jade maintain`, launchd plist generator, hook and CLAUDE.md installers that refuse to run for an agent.
+- Phase 0 design package: inventory and gap register, 12 ADRs, state machine, six JSON Schema contracts with examples, five policy files with a local-overlay mechanism, evaluation protocol, threat model, roadmap, backlog.
+- Baseline tooling: transcript miner, policy replay, live performance harness, OpenRouter probe.
+- Acceptance tests for Phases 1–5 (written as skeletons in the design commit; they run for real since the runtime landed).
 - 35 replayable regression and adversarial cases; `skills/jade/SKILL.md`; `docs/08-deployment-runbook.md`.
 
 ### Changed
 - Policies: read-only commands and quoted or heredoc text no longer trigger rules (found by false positives while building the classifier); `mcp_tools` rules added; SI-09 stops an agent from approving permits or changing its own wiring.
-
-### Added
-- Phase 0 design package: inventory and gap register, 12 ADRs, state machine, six JSON Schema contracts with examples, five policy files with a local-overlay mechanism, evaluation protocol, threat model, roadmap, backlog.
-- Baseline tooling: transcript miner, policy replay, live performance harness, OpenRouter probe.
-- Executable acceptance-test skeletons for Phases 1–5 (skip until the `jade` package exists).
