@@ -24,7 +24,8 @@
     "usage_limit": { "const": 1 },
     "uses": { "type": "integer", "minimum": 0, "maximum": 1 },
     "state": { "enum": ["PENDING", "ISSUED", "CONSUMED", "REVOKED", "EXPIRED"] },
-    "risk_level": { "$ref": "_defs.schema.json#/$defs/risk_level" }
+    "risk_level": { "$ref": "_defs.schema.json#/$defs/risk_level" },
+    "seal": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
   },
   "allOf": [
     { "if": { "properties": { "risk_level": { "enum": ["high", "critical"] }, "state": { "enum": ["ISSUED", "CONSUMED"] } }, "required": ["risk_level", "state"] },

@@ -182,4 +182,4 @@ mcp_shell_inputs:
   - { match: "^mcp__.+?__(app_type|Type|type|Shortcut|computer_batch|app_batch|teach_batch|app_key|key)$", keys: ["*"] }
   - { match: "^mcp__.+?__(mcp-exec|code-mode)$", keys: ["*"] }
 permit_required_at: high          # high and critical require an ISSUED permit at PreToolUse
-human_approval_required_at: high  # PENDING -> ISSUED only via an interactive TTY for high and critical
+human_approval_required_at: high  # from this level a permit must carry a human principal and tty reference (read by policy.human_floor; never above high)

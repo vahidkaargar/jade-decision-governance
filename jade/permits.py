@@ -6,23 +6,29 @@ in an interactive terminal. Nothing a model outputs can create an ISSUED high-ri
 What a permit is checked against at use (`try_consume`), all in one transaction: the plan hash of the command being run now, the risk level
 the classifier gives that command now (a permit never covers a more severe command than the one approved), a human principal and a tty
 approval reference whenever that level is high or critical, the policy version and every recorded precondition, the session and agent the
-request came from, and the decision it belongs to (a cancelled, expired or finished decision authorizes nothing).
+request came from, the decision it belongs to (a cancelled, expired or finished decision authorizes nothing), and a seal: an HMAC over
+the permit's fields made when it was issued with a key in the JADE home, so a row edited with SQL afterwards is refused. The key is a file
+the same OS user can read: the seal stops a casual or injected row edit and not a process that reads the key (docs/05 T19, W-41).
 """
 
 from __future__ import annotations
 
+import hmac
 import json
+import os
 import secrets
+import sqlite3
 import unicodedata
 from types import SimpleNamespace
 
 from . import ledger, paths, policy, schemas
 from .state_machine import TERMINAL as TERMINAL_DECISION
-from .util import at_least, human_tty_refusal, new_id, parse_ts, ts, ts_in, user
+from .util import at_least, canonical, human_tty_refusal, new_id, parse_ts, ts, ts_in, user
 
 DEFAULT_TTL_S = 1800
 MAX_SUBJECT = 20000        # the most command text a permit stores and the approval screen shows; a longer command is never approved
 LIVE_DECISION = ("WAITING_HUMAN", "AUTHORIZED")  # decision states in which a permit may be approved or consumed
+SEAL_KEY_FILE = "permit-seal.key"
 
 
 class PermitError(ValueError):
@@ -51,6 +57,53 @@ def _loads(scope) -> dict:
     except (TypeError, ValueError):
         return {}
     return ctx if isinstance(ctx, dict) else {}
+
+
+def _col(row, name: str):
+    return row[name] if isinstance(row, sqlite3.Row) else getattr(row, name)
+
+
+def _seal_key(db, create: bool = False) -> bytes | None:
+    """The permit seal key (32 random bytes, mode 600) next to the ledger. Only issuing and approving create it, never a check: a missing key
+    means no permit can be verified, not that a new one is made."""
+    f = db.path.parent / SEAL_KEY_FILE
+    try:
+        key = f.read_bytes()
+        return key if len(key) >= 32 else None
+    except OSError:
+        pass
+    if not create:
+        return None
+    try:
+        fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:  # another process created it between the read and now
+        return _seal_key(db)
+    key = secrets.token_bytes(32)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(key)
+    return key
+
+
+def _seal_of(key: bytes, row, doc: dict) -> str:
+    """HMAC-SHA256 over everything that decides what the permit authorizes and until when. `state` and `uses` are left out: they change by design
+    and are checked on their own (and a consumed permit has a `permit_consumed` event)."""
+    body = canonical({"permit_id": _col(row, "permit_id"), "decision_id": _col(row, "decision_id"), "risk": _col(row, "risk_level"),
+                      "plan_hash": _col(row, "plan_hash"), "action": _col(row, "action"), "scope": _col(row, "scope"), "ttl_s": _col(row, "ttl_s"),
+                      "issued_at": _col(row, "issued_at"), "expires_at": _col(row, "expires_at"),
+                      "principal": doc.get("principal"), "approval_reference": doc.get("approval_reference"), "policy_version": doc.get("policy_version"),
+                      "preconditions": doc.get("preconditions"), "nonce": doc.get("nonce"), "resource_scope": doc.get("resource_scope"),
+                      "environment": doc.get("environment"), "authorized_action": doc.get("authorized_action")})
+    return hmac.new(key, body.encode(), "sha256").hexdigest()
+
+
+def _seal_refusal(db, row, doc: dict) -> str | None:
+    key = _seal_key(db)
+    if key is None:
+        return "no permit seal key exists, so the permit cannot be verified (a permit approved before the seal was added must be approved again)"
+    have = doc.get("seal")
+    if not isinstance(have, str) or not hmac.compare_digest(have, _seal_of(key, row, doc)):
+        return "the permit row does not match its seal (it was edited after it was issued); it is not used"
+    return None
 
 
 def ctx_of(p) -> dict:
@@ -89,10 +142,15 @@ def _create(path, state: str, action: str, plan_hash: str, ttl_s: int, risk: str
     schemas.validate("permit", doc)
     db, own = _db(path)
     try:
+        stored_scope = json.dumps(ctx) if ctx else scope
+        if state == "ISSUED":
+            row = SimpleNamespace(permit_id=doc["permit_id"], decision_id=doc["decision_id"], risk_level=risk, plan_hash=plan_hash, action=action,
+                                  scope=stored_scope, ttl_s=ttl_s, issued_at=doc["issued_at"], expires_at=doc["expires_at"])
+            doc["seal"] = _seal_of(_seal_key(db, create=True), row, doc)
         with db.tx() as con:
             con.execute("INSERT INTO permits(permit_id, decision_id, state, risk_level, plan_hash, action, scope, uses, ttl_s, doc_json, issued_at, expires_at) "
                         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (doc["permit_id"], doc["decision_id"], state, risk, plan_hash, action, json.dumps(ctx) if ctx else scope, 0, ttl_s,
+                        (doc["permit_id"], doc["decision_id"], state, risk, plan_hash, action, stored_scope, 0, ttl_s,
                          json.dumps(doc, ensure_ascii=False), doc["issued_at"], doc["expires_at"]))
             db.event(doc["permit_id"], "permit_" + state.lower(), next=state, guard=f"risk={risk}", actor=principal, con=con)
         return get(db, doc["permit_id"])
@@ -115,9 +173,14 @@ def _fingerprints_of(doc: dict) -> dict[str, str]:
     return {p["kind"]: p["fingerprint"] for p in doc.get("preconditions", []) if p["kind"] != "policy_version"}
 
 
+def _current(doc: dict, fingerprints: dict[str, str] | None) -> bool:
+    """The permit was requested under the policy and the preconditions that hold now."""
+    return doc.get("policy_version") == paths.policy_version() and _fingerprints_of(doc) == {k: str(v) for k, v in (fingerprints or {}).items()}
+
+
 def _same_request(row, doc: dict, ctx: dict, want_ctx: dict | None, fingerprints: dict[str, str] | None) -> bool:
     """An existing PENDING permit may be shown again only when it is still the same request: same preconditions, same policy, same caller."""
-    if doc.get("policy_version") != paths.policy_version() or _fingerprints_of(doc) != {k: str(v) for k, v in (fingerprints or {}).items()}:
+    if not _current(doc, fingerprints):
         return False
     return not (want_ctx and want_ctx.get("bound")) or (ctx.get("session_id"), ctx.get("agent_id")) == (want_ctx.get("session_id"), want_ctx.get("agent_id"))
 
@@ -139,14 +202,16 @@ def pending_for(path, plan_hash: str, *, context: dict | None = None, fingerprin
 def request(path, action: str, plan_hash: str, risk: str = "high", ttl_s: int = DEFAULT_TTL_S, *, decision_id: str | None = None,
             scope: str = "*", environment: str = "local", context: dict | None = None, fingerprints: dict[str, str] | None = None):
     """Create a PENDING permit, or return the existing unexpired PENDING one for the same request. A PENDING permit for the same plan that is
-    no longer the same request (the repository moved, the policy changed, another session asks) is revoked: the human approves what is true now."""
+    no longer current (the repository moved, the policy changed) is revoked: the human approves what is true now. A PENDING permit of another
+    session or agent is left alone: each caller gets its own, and each id the human is shown stays valid."""
     db, own = _db(path)
     try:
         row = pending_for(db, plan_hash, context=context, fingerprints=fingerprints)
         if row:
             return row
-        for stale in db.all("SELECT permit_id FROM permits WHERE plan_hash=? AND state='PENDING'", (plan_hash,)):
-            revoke(db, stale.permit_id, "superseded by a new request for the same plan")
+        for stale in db.all("SELECT permit_id, doc_json FROM permits WHERE plan_hash=? AND state='PENDING'", (plan_hash,)):
+            if not _current(json.loads(stale.doc_json), fingerprints):  # a request by another session stays: two agents must not keep revoking each other's
+                revoke(db, stale.permit_id, "superseded: the policy or a recorded precondition changed since it was requested")
         return _create(db, "PENDING", action, plan_hash, ttl_s, risk, decision_id, scope, context, environment, f"agent:{user()}", fingerprints)
     finally:
         if own:
@@ -256,7 +321,9 @@ def approve(path, permit_id: str, stdin_isatty: bool | None = None):
                 doc = json.loads(row["doc_json"])
                 doc.update(state="ISSUED", principal=f"human:{user()}", approval_reference=f"tty:{user()}@{ts()}", issued_at=ts(),
                            expires_at=ts_in(row["ttl_s"]))
+                doc.pop("seal", None)
                 schemas.validate("permit", doc)
+                doc["seal"] = _seal_of(_seal_key(db, create=True), SimpleNamespace(**{**dict(row), "issued_at": doc["issued_at"], "expires_at": doc["expires_at"]}), doc)
                 con.execute("UPDATE permits SET state='ISSUED', doc_json=?, issued_at=?, expires_at=? WHERE permit_id=?",
                             (json.dumps(doc, ensure_ascii=False), doc["issued_at"], doc["expires_at"], permit_id))
                 db.event(permit_id, "permit_approved", prev="PENDING", next="ISSUED", guard=doc["approval_reference"], actor=doc["principal"], con=con)
@@ -268,13 +335,20 @@ def approve(path, permit_id: str, stdin_isatty: bool | None = None):
             db.close()
 
 
-def _static_refusal(doc: dict, level: str) -> str | None:
-    """Checks that need nothing but the permit and the level the command has now."""
+def _static_refusal(db, row, doc: dict, level: str) -> str | None:
+    """Checks that need nothing but the permit and the level the command has now: its risk is not below the command's, a human approved it
+    from a terminal when the command is at or above the human floor, and its seal matches its fields."""
     if not at_least(doc.get("risk_level", "low"), level):
         return f"the permit is for {doc.get('risk_level')} risk and this command is {level}"
-    if at_least(level, "high") or at_least(level, policy.permit_floor()):
+    if at_least(level, "high") or at_least(level, policy.permit_floor()) or at_least(level, policy.human_floor()):
         if not str(doc.get("principal", "")).startswith("human:") or not str(doc.get("approval_reference", "")).startswith("tty:"):
             return f"a {level} command needs a permit a human approved from a terminal"
+    return _seal_refusal(db, row, doc)
+
+
+def _caller_refusal(ctx: dict, session: str | None, agent: str | None) -> str | None:
+    if ctx.get("bound") and (ctx.get("session_id"), ctx.get("agent_id")) != (session, agent):
+        return "the permit was requested by another session or agent"
     return None
 
 
@@ -296,8 +370,10 @@ def try_consume(path, permit_id: str, plan_hash: str, *, level: str, session: st
             if row["expires_at"] <= ts():
                 return "the permit expired"
             doc = json.loads(row["doc_json"])
-            if (why := _static_refusal(doc, level)):
+            if (why := _static_refusal(db, row, doc, level)):
                 return why
+            if con.execute("SELECT 1 FROM events WHERE entity_id=? AND kind='permit_consumed'", (permit_id,)).fetchone():
+                return "the permit was already used"
             if doc.get("policy_version") != paths.policy_version():
                 con.execute("UPDATE permits SET state='REVOKED' WHERE permit_id=?", (permit_id,))
                 db.event(permit_id, "permit_revoked", prev="ISSUED", next="REVOKED", guard="policy_version changed since approval", con=con)
@@ -308,8 +384,8 @@ def try_consume(path, permit_id: str, plan_hash: str, *, level: str, session: st
                     db.event(permit_id, "permit_precondition_mismatch", guard=kind, con=con)
                     return f"the precondition {kind} changed since approval"
             ctx = _loads(row["scope"])
-            if ctx.get("bound") and (ctx.get("session_id"), ctx.get("agent_id")) != (session, agent):
-                return "the permit was requested by another session or agent"
+            if (why := _caller_refusal(ctx, session, agent)):
+                return why
             if (why := _decision_refusal(con, row["decision_id"])):
                 con.execute("UPDATE permits SET state='REVOKED' WHERE permit_id=?", (permit_id,))
                 db.event(permit_id, "permit_revoked", prev="ISSUED", next="REVOKED", guard=why, con=con)
@@ -329,14 +405,19 @@ def consume(path, permit_id: str, plan_hash: str, *, level: str, session: str | 
     return try_consume(path, permit_id, plan_hash, level=level, session=session, agent=agent, fingerprints=fingerprints) is None
 
 
-def find_usable(path, plan_hash: str, *, level: str):
-    """The newest ISSUED, unexpired, unused permit for this plan that could cover a command of this risk level."""
+def find_usable(path, plan_hash: str, *, level: str, session: str | None = None, agent: str | None = None):
+    """The newest ISSUED, unexpired, unused permit for this plan that could cover a command of this risk level and was requested by this session
+    and agent. When only another caller's permit qualifies it is returned too, so that using it says why it cannot be used."""
     db, own = _db(path)
     try:
+        other = None
         for row in db.all("SELECT * FROM permits WHERE plan_hash=? AND state='ISSUED' AND uses=0 AND expires_at>? ORDER BY issued_at DESC", (plan_hash, ts())):
-            if _static_refusal(json.loads(row.doc_json), level) is None:
+            if _static_refusal(db, row, json.loads(row.doc_json), level) is not None:
+                continue
+            if _caller_refusal(_loads(row.scope), session, agent) is None:
                 return _ns(row)
-        return None
+            other = other or _ns(row)
+        return other
     finally:
         if own:
             db.close()

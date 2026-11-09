@@ -1135,7 +1135,7 @@ def segments_cwd(command: str, cwd: str = "") -> list[tuple[str, tuple[str, ...]
                 new = prev or cur
             elif not re.search(r"[*?\[`]", os.path.expandvars(target)) and "$" not in os.path.expandvars(target):
                 t = os.path.expanduser(os.path.expandvars(_dec(target)))
-                new = os.path.realpath(t if os.path.isabs(t) else os.path.join(cur or os.getcwd(), t))
+                new = os.path.realpath((t if os.path.isabs(t) else os.path.join(cur or os.getcwd(), t)).replace("\x00", ""))
             if new != cur:
                 prev, cur = cur, new
                 seen.append(cur)

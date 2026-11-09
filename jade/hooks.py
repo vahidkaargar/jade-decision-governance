@@ -66,7 +66,7 @@ def failsafe_reason(event: dict) -> str | None:
         return "the tool input is malformed"
     if tool in policy.WRITE_TOOLS:
         for p in policy.write_paths(tin) or [""]:
-            if _PROTECTED_PATH.search(p) or _PROTECTED_PATH.search(os.path.realpath(os.path.expanduser(p))):
+            if _PROTECTED_PATH.search(p) or _PROTECTED_PATH.search(policy.real(os.path.expanduser(p))):
                 return f"the write target {p[:120]!r} is a protected location"
         return None
     cmd = tin.get("command") if tool in policy.SHELL_TOOLS else next((tin[k] for k in ("command", "cmd", "script") if isinstance(tin.get(k), str)), None)
@@ -134,8 +134,9 @@ def _git(call: policy.shellnorm.GitCall, cwd: str, *args: str) -> str | None:
         argv += ["--git-dir", os.path.expanduser(call.git_dir)]
     if call.work_tree:
         argv += ["--work-tree", os.path.expanduser(call.work_tree)]
+    argv = [w.replace("\x00", "") for w in [*argv, *args]]  # a shell ignores a NUL byte; subprocess refuses one
     try:
-        out = subprocess.run([*argv, *args], capture_output=True, text=True, timeout=GIT_TIMEOUT_S, cwd=cwd or None)
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=GIT_TIMEOUT_S, cwd=cwd or None)
     except subprocess.TimeoutExpired:
         raise  # an unresolved destination is never "not main": the gate treats it as a failure (fail closed)
     except (OSError, subprocess.SubprocessError):
@@ -312,7 +313,7 @@ def fingerprints(subject: str, cwd: str) -> dict[str, str]:
             continue
         for call in policy.git_calls(seg):
             if call.sub == "push":
-                heads += [f"{os.path.realpath(os.path.expanduser(d))}@{_git(call, d, 'rev-parse', 'HEAD') or 'none'}" for d in dirs]
+                heads += [f"{policy.real(os.path.expanduser(d))}@{_git(call, d, 'rev-parse', 'HEAD') or 'none'}" for d in dirs]
     return {"git_head": ";".join(sorted(set(heads)))} if heads else {}
 
 
@@ -336,7 +337,7 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
         cwd = event.get("cwd") or ""
         fp = fingerprints(a.plan_subject, cwd) if policy.runs_shell(tool, event.get("tool_input") or {}) else {}
         who = {"session": event.get("session_id"), "agent": event.get("agent_id")}
-        found = permit or permits.find_usable(db, a.plan_hash, level=a.level)
+        found = permit or permits.find_usable(db, a.plan_hash, level=a.level, **who)
         refusal = None
         if found is not None:
             try:

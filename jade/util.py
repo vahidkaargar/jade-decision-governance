@@ -52,10 +52,28 @@ def agent_env_present() -> bool:
     return any(os.environ.get(k) for k in AGENT_ENV)
 
 
-# Programs that run an agent: the executable's name, or a Node/Python entry point that names one. Case-sensitive on purpose: the Claude
-# desktop app is `Claude`, the agent CLI is `claude`, and a human's own terminal panel inside the app must not look like an agent.
+# Programs that run an agent: the executable's name, or an interpreter running a script whose path names one. Case-sensitive on purpose: the
+# Claude desktop app is `Claude`, the agent CLI is `claude`, and a human's own terminal panel inside the app must not look like an agent.
+# Only the executable and the script an interpreter runs are looked at, never the whole command line: `vim ~/claude-code/notes` or
+# `pytest /src/claude-code/tests` above a human's shell must not make that human an agent.
 _AGENT_PROGRAMS = frozenset({"claude", "claude-code", "codex", "cursor-agent", "aider"})
-_AGENT_ENTRY = re.compile(r"@anthropic-ai/claude-code|/claude-code/|/@openai/codex|cursor-agent")
+_INTERPRETERS = re.compile(r"^(?:node|nodejs|bun|deno|npx|bunx|pnpx|python[\d.]*|uv|uvx)$")
+_AGENT_ENTRY = re.compile(r"@anthropic-ai/claude-code|/\.?claude(?:-code)?/versions/|@openai/codex|cursor-agent")
+
+
+def _agent_word(cmd: str) -> str | None:
+    """The name of the agent this process command line starts, or None."""
+    words = cmd.split()
+    if not words:
+        return None
+    prog = os.path.basename(words[0])
+    if prog in _AGENT_PROGRAMS or _AGENT_ENTRY.search(words[0]):
+        return prog or "unnamed"
+    if _INTERPRETERS.match(prog):
+        script = next((w for w in words[1:] if not w.startswith("-")), "")
+        if os.path.basename(script) in _AGENT_PROGRAMS or _AGENT_ENTRY.search(script):
+            return os.path.basename(script)
+    return None
 
 
 def agent_ancestor() -> str | None:
@@ -79,10 +97,8 @@ def agent_ancestor() -> str | None:
     while pid in table and pid not in seen and pid > 1:
         seen.add(pid)
         ppid, cmd = table[pid]
-        words = cmd.split()
-        prog = os.path.basename(words[0]) if words else ""
-        if pid != os.getpid() and (prog in _AGENT_PROGRAMS or _AGENT_ENTRY.search(cmd)):
-            return f"it runs under an agent process ({prog or 'unnamed'}, pid {pid})"
+        if pid != os.getpid() and (name := _agent_word(cmd)):
+            return f"it runs under an agent process ({name}, pid {pid})"
         pid = ppid
     return None
 

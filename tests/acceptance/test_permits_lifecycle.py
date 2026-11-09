@@ -390,7 +390,9 @@ def test_g08_each_session_gets_its_own_pending_request(human_env):
     hooks.pretool(call(PUSH, session="sess-aaaaaaaa"))
     assert pending(db).permit_id == first.permit_id  # the same caller asking again sees the same request
     hooks.pretool(call(PUSH, session="sess-bbbbbbbb"))
-    assert pending(db).permit_id != first.permit_id and permits.get(db, first.permit_id).state == "REVOKED"
+    second = pending(db)
+    assert second.permit_id != first.permit_id and permits.get(db, first.permit_id).state == "PENDING"  # B does not revoke A's request (pass 2)
+    assert permits.ctx_of(second)["session_id"] == "sess-bbbbbbbb"
 
 
 # ---- F12: an agent cannot walk a decision to SUCCEEDED -----------------------------------------------------

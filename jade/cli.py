@@ -154,8 +154,8 @@ def _permit(a) -> int:
         why = human_tty_refusal()
         if why:
             raise permits.ApprovalRefused(f"permit approval needs a human at an interactive terminal; an agent session cannot approve ({why})")
-        if a.yes and permits.at_least(p.risk_level, "high"):
-            raise permits.PermitError("-y is not accepted for a high or critical permit: read the command, then type the code shown")
+        if a.yes:
+            raise permits.PermitError("-y is not accepted: read the command, then type the code shown")
         print(permits.review_text(p))  # raises instead of showing a command that was cut or does not match the plan hash
         code = p.plan_hash[:6]
         if input(f"Type {code} to approve, anything else to refuse: ").strip().lower() != code:
@@ -467,7 +467,7 @@ def main(argv: list[str] | None = None) -> int:
         x = pm.add_parser(name)
         x.add_argument("permit_id")
         if name == "approve":
-            x.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
+            x.add_argument("-y", "--yes", action="store_true", help="not accepted: approval always needs the code typed after the command is shown")
 
     d = sub.add_parser("decide").add_subparsers(dest="action", required=True)
     o = d.add_parser("open")

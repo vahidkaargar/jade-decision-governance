@@ -183,17 +183,23 @@ def _pathfold(text: str) -> str:
     return t
 
 
+def real(path: str) -> str:
+    """`os.path.realpath` of a path as a shell reads it: a NUL byte is dropped (bash ignores it in a command), so the classifier never
+    raises ValueError on one."""
+    return os.path.realpath(path.replace("\x00", ""))
+
+
 def normalise_path(path: str, cwd: str = "") -> str:
     """Absolute, symlink-resolved (deepest existing ancestor), `~`-expanded form of a write target."""
     if not path:
         return ""
-    p = os.path.expanduser(path)
+    p = os.path.expanduser(path.replace("\x00", ""))
     if not os.path.isabs(p):
         try:
             p = os.path.join(cwd or os.getcwd(), p)
         except OSError:
             return ""
-    return re.sub(r"/{2,}", "/", os.path.realpath(p))
+    return re.sub(r"/{2,}", "/", real(p))
 
 
 def is_read_only(seg: str) -> bool:
@@ -207,15 +213,16 @@ def is_read_only(seg: str) -> bool:
 
 def resolved_cwd(cwd: str = "") -> str:
     """The directory a command will run in, symlinks resolved: a permit for `/tmp/link` stops matching when the link is retargeted."""
-    return os.path.realpath(os.path.expanduser(cwd)) if cwd else ""
+    return real(os.path.expanduser(cwd)) if cwd else ""
 
 
 def plan_hash(tool: str, subject: str, cwd: str = "") -> str:
     """Hash of the exact thing a permit authorizes: tool, the command or path as written, and the resolved working directory.
 
     Whitespace is never folded: inside quotes (`rm -rf "my  dir"`), in a heredoc body (YAML, Python) and a newline versus a space it changes what
-    runs, and the human approved the text they saw. Only the ends are trimmed, which no shell reads."""
-    return sha256(canonical({"tool": tool, "subject": subject.strip(), "cwd": resolved_cwd(cwd)}))
+    runs, and the human approved the text they saw. Only a space, tab or newline at the ends is trimmed, which no shell reads as part of a word:
+    a no-break space, an ideographic space, a carriage return, a vertical tab or a control character at the end is part of the last word."""
+    return sha256(canonical({"tool": tool, "subject": subject.strip(" \t\n"), "cwd": resolved_cwd(cwd)}))
 
 
 def _seal(a: Assessment, tool: str, subject: str, cwd: str, shown: str) -> None:
@@ -405,7 +412,8 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     active: list[str] = []
     keys: list[str] = []
     gated_keys: list[str] = []
-    for seg, dirs in shellnorm.segments_cwd(subject, cwd):
+    text_in = subject.replace("\x00", "")  # a shell ignores a NUL byte in a command; the plan hash still covers the text as written
+    for seg, dirs in shellnorm.segments_cwd(text_in, cwd):
         if is_read_only(seg):
             continue
         active.append(seg)
@@ -428,11 +436,11 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         if LEVELS[seg_best["level"]] >= LEVELS[permit_floor()]:
             gated_keys.append(key)
     best = best or risk()["rules"][-1]
-    a = _from_rule(best, loader.environment_of(risk(), subject))
+    a = _from_rule(best, loader.environment_of(risk(), text_in))
     for inv in safety()["invariants"]:
         if "_re" not in inv:
             continue
-        haystacks = [fold(subject)] if inv.get("match_on") == "raw" else active + [_bare(s) for s in active]
+        haystacks = [fold(text_in)] if inv.get("match_on") == "raw" else active + [_bare(s) for s in active]
         if any(inv["_re"].search(h) for h in haystacks):
             a.blocked.append(inv["id"])
     _seal(a, tool, subject, cwd, subject)
@@ -469,3 +477,10 @@ def _from_rule(rule: dict, env: str) -> Assessment:
 
 def permit_floor() -> str:
     return risk().get("permit_required_at", "high")
+
+
+def human_floor() -> str:
+    """The level from which a permit must carry a human principal and a tty approval reference: `human_approval_required_at`, and never
+    above `high` (a high or critical command always needs a human, whatever the file says)."""
+    floor = risk().get("human_approval_required_at", "high")
+    return floor if floor in ("low", "medium") else "high"

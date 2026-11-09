@@ -104,7 +104,11 @@ def _run_lifecycle(c: dict) -> list[str]:
                 problems.append(f"variant exit {res.exit_code}, expected {want}")
         elif c["kind"] == "permit_forged":
             a = policy.assess("Bash", {"command": c["command"]}, "/tmp/case")
-            permits.issue(db, "forged.action", a.plan_hash, risk=c.get("claim_risk", "low"))
+            forged = permits.issue(db, "forged.action", a.plan_hash, risk=c.get("claim_risk", "low"))
+            if c.get("tamper"):  # then rewrite the row as a human's approval of a critical plan with raw SQL (the seal must catch it)
+                doc = json.loads(db.one("SELECT doc_json FROM permits WHERE permit_id=?", (forged.permit_id,)).doc_json)
+                doc.update(principal=f"human:{util.user()}", approval_reference=f"tty:{util.user()}@{util.ts()}", risk_level="critical")
+                db.con.execute("UPDATE permits SET risk_level='critical', doc_json=? WHERE permit_id=?", (json.dumps(doc), forged.permit_id))
             res = hooks.pretool(ev(c["command"]))
             if res.exit_code != want:
                 problems.append(f"gate exit {res.exit_code}, expected {want} with a forged {c.get('claim_risk', 'low')} permit")
