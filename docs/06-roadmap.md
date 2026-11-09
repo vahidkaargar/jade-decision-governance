@@ -1,6 +1,6 @@
 # 06 — Roadmap, acceptance tests, rollout and rollback
 
-Completion states (plan §16): **DESIGN_READY** → **IMPLEMENTED** → **VALIDATED** → **PRODUCTION_APPROVED**. Status 2026-11-09: **IMPLEMENTED**. Phases 1–5 are built and their acceptance tests pass; **VALIDATED** needs calendar time and real data (section "Implementation status" below); the harness wiring in `docs/08` is a human step.
+Completion states (plan §16): **DESIGN_READY** → **IMPLEMENTED** → **VALIDATED** → **PRODUCTION_APPROVED**. Status 2026-11-09: **IMPLEMENTED** and running live in advisory mode on the reference machine (hooks, CLAUDE.md section, skill, daily job, pre-push guard and remote ruleset installed by the human); not VALIDATED. Phases 1–5 are built and their acceptance tests pass; **VALIDATED** needs calendar time and real data (section "Implementation status" below); the harness wiring in `docs/08` is a human step.
 
 ## Phase 0 — Discover (done 2026-11-08)
 Inventory, live API probes, baseline mining, ADRs, contracts, policies, threat model, this roadmap. Evidence: `docs/00`, `evals/baseline/summary-2026-11-08.json`, `adapters/jev/probe_openrouter.py` output recorded in `docs/00` S1–S12.
@@ -50,9 +50,9 @@ Phase 1 ≈ 600–900 lines Python + tests; Phase 2 ≈ 1,200–1,800; Phase 3 �
 | Phase | Built and passing | Exit criterion still open |
 |-------|-------------------|---------------------------|
 | 1 Instrument | package, ledger, adapter, redaction, shim, dedup, stats; shim rollback drill timed (1.1 ms back, 0.1 ms forward) | 14 days of ledger data under real use (earliest 2026-11-23) |
-| 2 Enforce | registry + lint, preflight, exit codes, state machine, permits, TTY approval, gate for Bash/edits/MCP, Stop and SessionStart hooks, `jade check`, CLAUDE.md text | Hooks and CLAUDE.md applied by a human (`docs/08` 2.1-2.3); 14 ledger days with abstain/reject disposition at or below 5% and zero unsafe accepts at risk high or above |
+| 2 Enforce | registry + lint, preflight, exit codes, state machine, permits, TTY approval, gate for Bash/edits/MCP, Stop and SessionStart hooks, `jade check`, CLAUDE.md text | Done 2026-11-09 (advisory): hooks, CLAUDE.md section, skill. Open: enforce decision after the advisory week (W-23, about 2026-11-16); 14 ledger days with abstain/reject disposition at or below 5% and zero unsafe accepts at risk high or above |
 | 3 Calibrate | labels, splits, metrics (the subset docs/04 section 7 lists as computed), adjudication queue, threshold proposals, language slices for ledger rows, performance run; eval sets: regression and adversarial only (routing, judgment and calibration sets: W-49) | At least 200 labelled rows per group before any threshold change (none yet); budgets for repeats and errors need ledger days. Latency and cost budgets already met (below) |
 | 4 Improve | miner, offline replay, async shadow, 20% canary, pins, kill switch, rollback | One full cycle with a human decision; shadow needs 7 days and 100 live samples |
-| 5 Optimise | rollback drill, drift canary, launchd job generator, maintenance job | Job loaded by a human (`docs/08` 2.4); p95 re-measured on ledger data; audit review |
+| 5 Optimise | rollback drill, drift canary, launchd job generator, maintenance job | Job loaded 2026-11-09 (`docs/08` 2.4; first scheduled run 2026-11-10 to confirm, W-24); p95 re-measured on ledger data; audit review |
 
 Performance run 2026-11-09 (20 rounds, 323 timed calls, typesafe/jev-1.14-20261014, $0.0054): zero errors, no 429 at parallelism 8, p95 at most 639 ms. Budget in `docs/04` section 6 is 1.0 s per decision.

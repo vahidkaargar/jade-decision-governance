@@ -20,8 +20,11 @@ It governs how agents (Claude Code first) use [TypeSafe Jev](https://docs.typesa
 |-------|-------|
 | DESIGN_READY | **Yes** — design approved by the maintainer 2026-11-09 |
 | IMPLEMENTED | **Yes** — `jade` 0.2.2: ledger, adapter, redaction, `jev` shim, question registry, permits, hook gate, calibration, bounded improvement loop, standalone pre-push guard (`jade git-hook`); Phases 1–5 acceptance tests pass. 0.2.1 closed the first independent adversarial review and 0.2.2 the false-positive pass and the structural fix for "never push to the default branch" (see `CHANGELOG.md`). The command classifier is defence in depth, not the enforcement of that rule: the enforcement is the pre-push guard and branch protection on the remote, which only a human can install (`docs/08-deployment-runbook.md` section 2.7, W-68, W-69). The residual risks are listed in `docs/05-threat-model.md` and tracked in `BACKLOG.md` |
-| VALIDATED | No — needs 14 days of real ledger data, labelled outcomes and one full improvement cycle (`docs/08` section 5) |
+| LIVE (advisory) | **Yes, on the reference machine since 2026-11-09** — the four hooks are installed, the gate records `would_block` and never blocks risk rules (safety invariants still block), the daily maintenance job is loaded, the pre-push guard and the remote branch ruleset protect `main`. This is the soak state of `docs/08` section 2.1, not enforcement |
+| VALIDATED | No — needs 14 days of real ledger data, labelled outcomes and one full improvement cycle (`docs/08` section 5); earliest 2026-11-23 |
 | PRODUCTION_APPROVED | No — a human decision (`docs/08`) |
+
+Hardening batch 1 (merged 2026-11-09, `CHANGELOG.md` Unreleased) added the wiring checks: `jade check` now reports shadowed or disabled hooks in project, managed and plugin settings, lints the private overlay, compares the installed code with the checkout, validates permit and improvement rows, and the permit seal key is protected against Read, Grep and Glob as well as shell. After pulling a change like this, re-install the tool and, when the changelog says the hook matcher changed, re-run `jade hooks install` yourself (an agent cannot: SI-09).
 
 What exists today: the design documents, the runtime, six JSON Schema contracts, five policy files with a tested loader, a 10-entry question registry, replayable regression and adversarial cases (`evals/run_cases.py`), the baseline and performance tooling, and the phase acceptance tests. What does not exist yet is listed in `BACKLOG.md` (for example the routing and judgment eval sets, W-49, and several metrics of `docs/04` section 7, W-52); the documents mark each of those as planned. The gate is a syntactic classifier with known residual risks (`docs/05` T2, T3, T18, T19, T22): it is a strong guard rail for an agent that makes mistakes, not a boundary against one that is adversarial and runs as the same user. Wiring it into an agent harness is deliberately a human step: see `docs/08-deployment-runbook.md`.
 
@@ -75,7 +78,7 @@ tests/            contract, policy and overlay tests; tests/acceptance = the Pha
 Requires [uv](https://docs.astral.sh/uv/), Python 3.13+, and an OpenRouter key in the macOS Keychain (service `OPENROUTER_API_KEY`) or the environment.
 
 ```bash
-uv tool install .            # installs `jade` and the `jev` compatibility shim
+uv tool install .            # installs `jade` and the `jev` compatibility shim (after a later `git pull`: `uv tool install --reinstall .`)
 jev verify "The suite passed" --state-file test-output.txt
 echo $?                      # 0 accept, 3 abstain, 4 reject, 5 provider unavailable, 6 invalid question
 jade check                   # probes ledger, policies, registry, hooks and the provider
@@ -83,6 +86,14 @@ jade ledger stats            # what your agents actually did
 ```
 
 Only exit code 0 is a yes. Enforcement of risky tool calls is opt-in and human-wired: `docs/08-deployment-runbook.md`.
+
+Upgrade and verify in one go (run it yourself in a terminal; every row of `jade check` must say `ok`, and `jade check` exits non-zero on dead wiring):
+
+```bash
+cd /path/to/checkout && git pull --ff-only && uv tool install --reinstall . && jade hooks install && jade check
+```
+
+When testing JADE itself, never feed it synthetic dangerous commands through the installed hook: run every `jade` invocation with `JADE_HOME=$(mktemp -d)` so test permits and decisions stay out of your real ledger (backlog W-72).
 
 Never pushing to the default branch is enforced by git and the remote, not by reading shell: `jade git-hook script` prints a standalone pre-push guard, `jade git-hook check <repo>` says whether a repository runs it, and branch protection on the remote covers every other client. Both are installed by a human (`docs/08-deployment-runbook.md` section 2.7).
 
@@ -129,7 +140,7 @@ cp policies/local/safety.local.example.yaml ~/.config/jade/local/safety.local.ya
 
 (For development from a checkout, `policies/local/*.local.yaml` is gitignored; the installed tool reads `~/.config/jade/local/`.)
 
-Overlays can add hosts, paths, rules and invariants. They cannot remove a shipped invariant or lower a shipped high-risk rule (`policies/loader.py`, `tests/test_policy_overlay.py`).
+Overlays can add production hosts and paths (`environments`) and rules (`rules_prepend`, `rules_override`) and invariants (`invariants_append`). A top-level `hosts:` key is not read; to make a host critical, write an `R-Lxx` rule for it. `jade check` lints the overlay (rows `overlay lint`, `overlay files`) and names the file and rule, never the pattern or host. They cannot remove a shipped invariant or lower a shipped high-risk rule (`policies/loader.py`, `tests/test_policy_overlay.py`).
 
 ## Facts worth knowing before you build on Jev via OpenRouter
 
