@@ -649,5 +649,53 @@
    "Keychain99"
   ],
   "template": "security add-generic-password -a me -s FOO -w @@ -U"
+ },
+ {
+  "kind": "glued_github",
+  "secret": [
+   "xghp_A1b2C3d4E5f6G7h8",
+   "I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "saw @@ in the log"
+ },
+ {
+  "kind": "glued_openai",
+  "secret": [
+   "xsk-A1b2C3d4E5f6G7h8",
+   "I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "saw @@ in the log"
+ },
+ {
+  "kind": "glued_anthropic",
+  "secret": [
+   "xsk-ant-api03-A1b2C3d4E5f6G7h8",
+   "I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "saw @@ in the log"
+ },
+ {
+  "kind": "glued_slack",
+  "secret": [
+   "xxoxb-A1b2C3d4E5f6G7h8",
+   "I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "saw @@ in the log"
+ },
+ {
+  "kind": "glued_digits",
+  "secret": [
+   "123ghp_A1b2C3d4E5f6G7h8",
+   "I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "saw @@ in the log"
+ },
+ {
+  "kind": "glued_underscore",
+  "secret": [
+   "_ghp_A1b2C3d4E5f6G7h8",
+   "I9j0K1l2M3n4O5p6Q7r8"
+  ],
+  "template": "saw @@ in the log"
  }
 ]

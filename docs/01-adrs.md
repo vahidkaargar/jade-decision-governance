@@ -26,7 +26,7 @@ Format: Context → Decision → Alternatives rejected → Consequences. Status 
 
 **Context.** 907 calls in 14 days use the `jev verify|choice ...` syntax taught by CLAUDE.md; agents' memories and the user's muscle memory depend on it.
 
-**Decision.** `~/.local/bin/jev` becomes a thin wrapper that execs `jade ask --compat ...` with identical flags and output format, plus new exit codes (ADR-05). All journaling and policy live in `jade`. CLAUDE.md is updated once, at Phase 2, to describe the exit codes and the state-file flag.
+**Decision.** `~/.local/bin/jev` becomes a thin wrapper that runs `jade.compat` (`jade/compat.py`), which calls the same parser and code as `jade ask`, with identical flags and output format, plus new exit codes (ADR-05). All journaling and policy live in `jade`. CLAUDE.md is updated once, at Phase 2, to describe the exit codes and the state-file flag.
 
 **Intentional divergences from the original script** (tested in `tests/acceptance/test_judging_and_improvement.py`): `JEV_MODEL` is honoured (precedence `--model`, `JEV_MODEL`, `config.json`, built-in default). `noul`, `choice` and `score` send the same payload as the original. `verify` sends the registry question `q.verify_claim.supported_by_evidence` (state keys `claim`, `evidence`, `evidence_source` instead of `context`; richer true/false criteria) and, unless `--no-companion`, an `evidence_is_raw` question in the same request; a `verify` with no evidence exits 6 because the registry marks evidence as required (the original sent it). A `noul` whose true and false criteria are equal or blank exits 6. Output line, flags and `--raw`/`--dry-run` are unchanged; the exit codes are the new ones (ADR-05).
 

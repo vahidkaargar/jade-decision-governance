@@ -1,6 +1,7 @@
 """Docs truth (review F46): every `jade ...` command a document, skill, example or work item tells the reader to run
 must exist in the command tree. A fragment (a command with arguments left out) passes; an unknown command, an unknown
 flag, a value of the wrong type or a choice that does not exist fails."""
+import argparse
 import contextlib
 import io
 import json
@@ -13,6 +14,7 @@ import pytest
 from jade import cli
 
 ROOT = Path(__file__).resolve().parents[1]
+YAML = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "policies").rglob("*.yaml"))   # their header comments name commands too
 DOCS = ["README.md", "CONTRIBUTING.md", "SECURITY.md", "BACKLOG.md", "skills/jade/SKILL.md", "docs/claude-md-jev-section.md",
         *sorted(str(p.relative_to(ROOT)) for p in (ROOT / "docs").glob("0*.md"))]
 STOP = ("|", "...", "\u2192", "/", "then", "and", "does")
@@ -28,6 +30,7 @@ def _spans(text: str):
             continue
         if fenced:
             yield line.strip()
+            yield from re.findall(r"`([^`\n]+)`", line)   # a command quoted inline in a line of a diagram (`...; from FAILED, `jade decide event ...``)
         else:
             yield from re.findall(r"`([^`\n]+)`", line)
 
@@ -61,6 +64,32 @@ def _commands(span: str):
             yield argv
 
 
+def _options(parser) -> set[str]:
+    return {o for a in parser._actions for o in a.option_strings}
+
+
+def _unknown_flag(parser, argv: list[str]) -> str | None:
+    """The first `--flag` in argv that neither the parser nor the subcommand it reaches defines (before any subcommand: any subcommand's flag
+    counts, as in `jade ask --state-file`). argparse reports a missing argument before an unknown flag, so a fragment such as `jade ask --compat`
+    would otherwise pass."""
+    known, flags = _options(parser), []
+    for tok in argv:
+        sub = next((a for a in parser._actions if isinstance(a, argparse._SubParsersAction)), None)
+        if tok.startswith("-") and tok != "-":
+            flags.append(tok.split("=")[0])
+        elif sub is not None and tok in sub.choices:
+            parser = sub.choices[tok]
+            known |= _options(parser)
+    sub = next((a for a in parser._actions if isinstance(a, argparse._SubParsersAction)), None)
+    if sub is not None:   # no subcommand reached at this level: a flag of any of them is a fragment of a real command
+        for sp in sub.choices.values():
+            known |= _options(sp)
+    for flag in flags:
+        if flag not in known and not (flag.startswith("--") and any(k.startswith(flag) for k in known)):
+            return flag
+    return None
+
+
 def _check(argv: list[str]) -> str | None:
     if not argv or argv[0] in ("hook", "--version"):
         return None
@@ -73,12 +102,15 @@ def _check(argv: list[str]) -> str | None:
         except SystemExit:
             pass
     msg = err.getvalue().strip().splitlines()[-1] if err.getvalue().strip() else "?"
-    return None if any(f in msg for f in FRAGMENT) else msg
+    if any(f in msg for f in FRAGMENT):
+        bad = _unknown_flag(parser, argv[1:] if argv[0] == "ask" else argv)
+        return f"unrecognized flag {bad}" if bad else None
+    return msg
 
 
 def _cases():
     seen = set()
-    for rel in DOCS:
+    for rel in [*DOCS, *YAML]:
         p = ROOT / rel
         if p.exists():
             for span in _spans(p.read_text()):
@@ -107,13 +139,15 @@ def test_extractor_finds_the_commands_it_should():
 
 
 @pytest.mark.parametrize("argv", [["permit", "issue", "--action", "x"], ["outcome", "record"], ["decide", "answer"], ["eval", "replay", "x"],
-                                  ["ledger", "stats", "--since", "2026-01-01"], ["ledger", "purge", "--older-than", "soon"]])
+                                  ["ledger", "stats", "--since", "2026-01-01"], ["ledger", "purge", "--older-than", "soon"],
+                                  ["ask", "--compat"], ["ask", "verify", "--compat"], ["decide", "classify"], ["permit", "--nonsense"]])
 def test_checker_rejects_what_does_not_exist(argv):
     assert _check(argv) is not None
 
 
 @pytest.mark.parametrize("argv", [["permit", "approve"], ["gate", "advisory"], ["ledger", "stats", "--days", "14"], ["ask", "verify", "claim"],
-                                  ["ledger", "purge", "--older-than", "90d"], ["ledger", "purge", "--older-than", "90"]])
+                                  ["ledger", "purge", "--older-than", "90d"], ["ledger", "purge", "--older-than", "90"],
+                                  ["ask", "--state-file"], ["ask", "verify", "--no-companion"], ["decide", "open", "--command"]])
 def test_checker_accepts_what_exists(argv):
     assert _check(argv) is None
 
@@ -170,3 +204,16 @@ def test_the_version_is_one_number_everywhere():
     top = re.search(r"^## \[(\d[^\]]*)\]", (ROOT / "CHANGELOG.md").read_text(), re.M).group(1)
     assert top == version, "the newest CHANGELOG section is the released version"
     assert f"`jade` {version}" in (ROOT / "README.md").read_text()
+
+
+def test_inline_commands_in_a_fenced_diagram_line_are_extracted():
+    text = "```\njade decide outcome <id> ...  \u2192 VERIFYING; from FAILED, `jade decide event <id> compensate|rollback`\n```\n"
+    cmds = [a for span in _spans(text) for a in _commands(span)]
+    assert ["decide", "event", "x", "compensate"] in cmds
+    assert _check(["decide", "event", "x", "compensate"]) is None
+    assert any(_check(a) for a in [["decide", "answer"]])   # the same line naming a command that does not exist would fail the docs test
+
+
+def test_policy_yaml_headers_are_scanned_for_commands():
+    assert "policies/risk.yaml" in YAML
+    assert any(c.values[0].startswith("policies/") for c in _cases()) or not any(_commands(sp) for rel in YAML for sp in _spans((ROOT / rel).read_text()))

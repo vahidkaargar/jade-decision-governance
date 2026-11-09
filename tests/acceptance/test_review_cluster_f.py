@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from jade import adapter, ask, cli, decide, hooks, ledger, ops, paths, permits, state_machine, util
+from jade import redact as redact_mod
 from jade.permits import PermitError
 from jade.util import AGENT_ENV
 
@@ -335,3 +336,50 @@ def test_t22_secret_reads_and_plain_uploads_are_not_gated_today():
     assert hooks.pretool(call("scp notes.txt host:/tmp")).exit_code == 2                    # scp is R-14
     row = next(r for r in (ROOT / "docs/05-threat-model.md").read_text().splitlines() if r.startswith("| T22 "))
     assert "accepted risk" in row and "W-55" in row
+
+
+# ---- F42 (3), second pass: a token glued to a word character is neither sent nor left unmarked --------------------------
+BODY = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+GLUED = ["x" + "ghp_" + BODY, "x" + "sk-" + BODY, "x" + "sk-ant-api03-" + BODY, "xx" + "oxb-" + BODY, "123" + "ghp_" + BODY, "_" + "ghp_" + BODY,
+         "x" + "AKIA" + "ABCDEFGHIJKLMNOP", "foo_" + "eyJhbGciOiJIUzI1NiJ9" + ".eyJzdWIiOiIxMjM0NTY3ODkwIn0." + "abcdefghijk"]
+
+
+@pytest.mark.parametrize("tok", GLUED)
+def test_a_glued_token_never_reaches_the_provider(tok):
+    prov = adapter.FixtureProvider(lambda s, q, m: {k: {"type": "noul", "noul": 0.95} for k in q})
+    for state in ({"claim": "deployed", "evidence": f"saw {tok} in log"}, {"claim": f"deployed {tok}", "evidence": "raw output"}):
+        r = ask.run(ask.verify_specs(companion=False), state, provider=prov, session="s")
+        assert all(tok not in json.dumps(c) for c in prov.calls), state
+        assert r.exit_code in (0, 6)
+    assert redact_mod.redact(f"saw {tok}")[1] >= 1 and not redact_mod.residual(redact_mod.redact(f"saw {tok}")[0])
+    assert redact_mod.residual(f"saw {tok}")          # the second pass knows the glued form too
+    assert redact_mod.residual(canonical_key(tok))    # ... including in a dict key, which redact_obj does not rewrite
+
+
+def canonical_key(tok):
+    return json.dumps({tok: "x"})
+
+
+@pytest.mark.parametrize("text", ["disk-encryption-configuration-service-account", "task-2024-quarterly-report-final-draft-notes",
+                                  "pdf_conversion_pipeline_for_everything_here", "check_everythingisfinehere_ok", "xsk-ab"])
+def test_an_ambiguous_prefix_inside_a_slug_is_not_a_token(text):
+    assert redact_mod.redact(text) == (text, 0) and not redact_mod.residual(text)
+
+
+def test_redaction_of_glued_text_stays_linear():
+    import time
+    text = ("xsk-" + "ab" * 20 + "_") * 4000 + "ghp_" * 4000
+    t = time.perf_counter()
+    redact_mod.redact(text), redact_mod.residual(text)
+    assert time.perf_counter() - t < 5
+
+
+# ---- F42 (3), second pass: the payload half of the residual check is exercised -----------------------------------------
+def test_a_token_in_a_question_payload_is_refused_even_when_the_state_is_clean():
+    spec = ask.verify_specs(companion=False)[0]
+    spec.payload = {**spec.payload, GHP: "x"}   # a key: redact_obj rewrites values, not keys
+    state, hits, cut, leaked = ask.prepare([spec], {"claim": "deployed", "evidence": "raw output"})
+    assert leaked and not redact_mod.residual(json.dumps(state))
+    prov = adapter.FixtureProvider(lambda s, q, m: {k: {"type": "noul", "noul": 0.95} for k in q})
+    r = ask.run([spec], {"claim": "deployed", "evidence": "raw output"}, provider=prov, session="s")
+    assert r.exit_code == 6 and r.items[0].error_kind == "RESIDUAL_SECRET" and prov.calls == []

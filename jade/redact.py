@@ -18,13 +18,19 @@ from bisect import bisect_left
 from collections.abc import Callable
 
 _PK = "PRIVATE " + "KEY"
+# Token shapes, in two kinds. A DISTINCT prefix (`ghp_`, `AKIA`, `xoxb-`, `glpat-`, `eyJ`) followed by a long body is a credential wherever it
+# sits, so it carries no leading boundary: `xghp_...`, `123ghp_...` and `token_eyJ...` are redacted like the bare form. An AMBIGUOUS prefix
+# (`sk-`, `hf_`, `ck_`, `npm_`, `SK`, `pypi-`, `SG.`) also ends ordinary words and slugs (`task-`, `disk-`, `pdf_`, `check_`), so it counts at a word
+# boundary, and glued to a word character only when the whole match is mixed-case with a digit (`_glued_secret`): a random key is, a slug is not.
+_DISTINCT = (r"gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|glpat-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[a-z]-[A-Za-z0-9.%+/=-]{10,}"
+             r"|xapp-[0-9]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|whsec_[A-Za-z0-9]{20,}|ya29\.[A-Za-z0-9_-]{20,}|GOCSPX-[A-Za-z0-9_-]{20,}")
+_AMBIGUOUS = (r"sk-[A-Za-z0-9_-]{20,}|hf_[A-Za-z0-9]{30,}|npm_[A-Za-z0-9]{36}|[spr]k_(?:live|test)_[A-Za-z0-9]{20,}|ck_[A-Za-z0-9]{20,}"
+              r"|pypi-[A-Za-z0-9_-]{30,}|SK[0-9a-f]{32}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}")
 _TOKEN_SHAPES = (
-    r"\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|glpat-[A-Za-z0-9_-]{20,}"
-    r"|AKIA[0-9A-Z]{16}|xox[a-z]-[A-Za-z0-9.%+/=-]{10,}|xapp-[0-9]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|hf_[A-Za-z0-9]{30,}|npm_[A-Za-z0-9]{36}"
-    r"|[spr]k_(?:live|test)_[A-Za-z0-9]{20,}|whsec_[A-Za-z0-9]{20,}|ck_[A-Za-z0-9]{20,}|pypi-[A-Za-z0-9_-]{30,}"
-    r"|ya29\.[A-Za-z0-9_-]{20,}|GOCSPX-[A-Za-z0-9_-]{20,}|SK[0-9a-f]{32}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})"
+    _DISTINCT + r"|\b(?:" + _AMBIGUOUS + r")"
     r"|\b(?:https?://)?hooks\.slack(?:-gov)?\.com/(?:services|workflows|triggers)/[A-Za-z0-9/_-]{16,}"
     r"|\b(?:https?://)?(?:[a-z]+\.)?discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]{16,}")
+_GLUED = r"(?<=\w)(?:" + _AMBIGUOUS + ")"
 
 # Words that make a key name secret. STRONG ones match anywhere inside the name (`MYTOKEN`, `clientSecret`, `x-api-key`); WEAK ones
 # only as a whole `_`, `-` or `.` separated word (`DB_PASS`, `pwd`, but not `PASSED` or `BYPASS`).
@@ -62,8 +68,9 @@ PATTERNS: list[tuple[str, re.Pattern, str | Callable[[re.Match], str]]] = [
     ("authorization", re.compile(r"(?i)(authorization(?:\\?[\"'])?\s*[:=]\s*(?:\\?[\"'])?)" + _AUTH_VALUE), r"\1[REDACTED:authorization]"),
     ("cookie", re.compile(r"(?i)(\b(?:set-)?cookie\s*:[ \t]*)(?!\[?REDACTED:)[^\r\n]{3,}"), r"\1[REDACTED:cookie]"),
     ("bearer", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}"), "Bearer [REDACTED:bearer]"),
-    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,512}+\.[A-Za-z0-9_-]{8,8192}+\.[A-Za-z0-9_-]{8,2048}+"), "[REDACTED:jwt]"),
+    ("jwt", re.compile(r"eyJ[A-Za-z0-9_-]{8,512}+\.[A-Za-z0-9_-]{8,8192}+\.[A-Za-z0-9_-]{8,2048}+"), "[REDACTED:jwt]"),
     ("api_key", re.compile(_TOKEN_SHAPES), "[REDACTED:api_key]"),
+    ("api_key_glued", re.compile(_GLUED), "glued"),
     ("bot_token", re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{30,50}\b"), "[REDACTED:bot_token]"),
     ("signature", re.compile(r"(?i)((?:[?&;](?:sig|signature|x-amz-signature|x-amz-credential|x-amz-security-token)|[?&]key)=)(?!\[?REDACTED:)[A-Za-z0-9%+/=_.~-]{8,}"),
                   r"\1[REDACTED:signature]"),
@@ -87,8 +94,9 @@ PATTERNS: list[tuple[str, re.Pattern, str | Callable[[re.Match], str]]] = [
     ("email", re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b(?!:[A-Za-z0-9_~./-])"), "[REDACTED:email]"),
 ]
 # The patterns whose match is a credential beyond doubt: `residual()` is their union, so it can never disagree with redact().
-HIGH_CONFIDENCE = ("private_key", "jwt", "api_key")
-RESIDUAL = re.compile("|".join(f"(?:{p.pattern})" for name, p, _ in PATTERNS if name in HIGH_CONFIDENCE))
+HIGH_CONFIDENCE = ("private_key", "jwt", "api_key", "api_key_glued")
+_GLUED_RE = next(p for name, p, _ in PATTERNS if name == "api_key_glued")
+RESIDUAL = re.compile("|".join(f"(?:{p.pattern})" for name, p, _ in PATTERNS if name in HIGH_CONFIDENCE and name != "api_key_glued"))
 
 # A key that ends in one of these is not a credential (a count, a type, a location): `max_tokens`, `TOKEN_TYPE`, `token_url`, `secret_ref`, `password_file`.
 _NON_SECRET_KEY = re.compile(r"(?i)(?:count|counts|tokens|length|parallelism|limit|name)$")
@@ -119,6 +127,12 @@ _SCOPES = {
 def _secret_key(key: str) -> bool:
     key = key.replace(" ", "_")
     return _STRONG_KEY.fullmatch(key) is not None or _WEAK_KEY.fullmatch(key) is not None
+
+
+def _glued_secret(m: re.Match) -> str:
+    """An ambiguous prefix glued to a word character is a token only when it looks random: a digit, a capital and a lower-case letter."""
+    t = m.group(0)
+    return "[REDACTED:api_key]" if any(c.isdigit() for c in t) and any(c.isupper() for c in t) and any(c.islower() for c in t) else t
 
 
 def _benign(value: str) -> bool:
@@ -187,8 +201,8 @@ def redact(text: str, owner_emails: tuple[str, ...] = (), *, secrets_only: bool 
             fn = _email(owner_emails)
             n = sum(1 for m in pattern.finditer(text) if fn(m) != m.group(0))
             text = pattern.sub(fn, text)
-        elif repl == "assignment" or repl in _CLI:
-            fn = _assignment if repl == "assignment" else _CLI[repl]
+        elif repl in ("assignment", "glued") or repl in _CLI:
+            fn = _assignment if repl == "assignment" else _glued_secret if repl == "glued" else _CLI[repl]
             n = 0
 
             def _count(m: re.Match, fn=fn) -> str:
@@ -204,7 +218,7 @@ def redact(text: str, owner_emails: tuple[str, ...] = (), *, secrets_only: bool 
 
 
 def residual(text: str) -> bool:
-    return bool(RESIDUAL.search(text))
+    return bool(RESIDUAL.search(text)) or any(_glued_secret(m) != m.group(0) for m in _GLUED_RE.finditer(text))
 
 
 def redact_obj(obj, owner_emails: tuple[str, ...] = (), *, secrets_only: bool = False):

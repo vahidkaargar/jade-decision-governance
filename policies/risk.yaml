@@ -1,5 +1,5 @@
 # Risk classification: ordered precedence rules. First match wins. Evaluated by `jade hook pretool`
-# and `jade decide classify`. Patterns are Python `re` applied to the whitespace-normalised command
+# and by `jade decide open --command <command>`. Patterns are Python `re` applied to the whitespace-normalised command
 # (Bash) or the absolute path (Write/Edit). This file is GENERIC and public. Hosts, paths and extra
 # rules specific to one machine live in a gitignored overlay `policies/local/risk.local.yaml`
 # (see policies/local/risk.local.example.yaml and policies/loader.py for the merge rules).
