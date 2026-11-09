@@ -72,10 +72,10 @@ A broken release is not deleted or moved. Fix forward with a new patch tag (`jad
 **Verify the attached files.** `jade upgrade` installs from the tag with uv. To install a file you downloaded, check it against `SHA256SUMS` first:
 
 ```bash
-gh release download v0.3.1 --repo vahidkaargar/jade-decision-governance --dir jade-v0.3.1
-cd jade-v0.3.1
+gh release download v0.3.2 --repo vahidkaargar/jade-decision-governance --dir jade-v0.3.2
+cd jade-v0.3.2
 shasum -a 256 -c SHA256SUMS          # macOS; on Linux: sha256sum -c SHA256SUMS
-uv tool install --reinstall ./jade_decision_governance-0.3.1-py3-none-any.whl
+uv tool install --reinstall ./jade_decision_governance-0.3.2-py3-none-any.whl
 ```
 
 Both lines of `SHA256SUMS` (wheel and sdist) must print `OK`. The checksums come from the same release page as the files: they catch a damaged or partial download, not a compromised release. For that, compare the tag's commit with the repository history.
@@ -104,7 +104,7 @@ Known limits, each stated in full elsewhere:
 | Row | Failing means | Fix |
 |-----|---------------|-----|
 | `ledger writable` | The ledger cannot be opened or written (permissions, a full disk, a different user owns it) | Check the directory in the detail line is yours and has room. A locked ledger clears when the other process ends. Without a working ledger the gate fails closed for high-risk calls |
-| `policies load` | A shipped policy or an overlay does not parse or validate | If you have an overlay, move `~/.config/jade/local` aside and run again; if it then passes, the overlay is the fault (next rows). If not, reinstall: `uv tool install --reinstall git+https://github.com/vahidkaargar/jade-decision-governance@v0.3.1` |
+| `policies load` | A shipped policy or an overlay does not parse or validate | If you have an overlay, move `~/.config/jade/local` aside and run again; if it then passes, the overlay is the fault (next rows). If not, reinstall: `uv tool install --reinstall git+https://github.com/vahidkaargar/jade-decision-governance@v0.3.2` |
 | `ledger integrity` | A stored permit or improvement row does not match its schema | The detail names the id. Revoke a permit with `jade permit revoke <id>`; the row can no longer be used |
 | `code version` | You named a checkout (`JADE_CHECKOUT` or `checkout` in `config.json`) whose version is newer than the installed code | `jade upgrade`, or `uv tool install --reinstall <checkout>` when you develop from it; unset the checkout setting if you installed a release |
 | `overlay lint` | An overlay has an invalid pattern, an invariant without a block pattern, a rule that lowers a shipped high or critical one, or a key the loader does not merge | The detail names the file and the rule id or index. Fix or remove that entry in `~/.config/jade/local/*.local.yaml` |
