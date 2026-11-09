@@ -16,7 +16,7 @@ ROWS = [
     ("ABSTAINED", "escalate", "WAITING_HUMAN", "medium"), ("NEEDS_REVISION", "revise", "VALIDATED", "low"),
     ("NEEDS_REVISION", "escalate", "WAITING_HUMAN", "low"),
     ("ACCEPTED", "authorize", "AUTHORIZED", "low"), ("ACCEPTED", "authorize_without_permit_high_risk", "WAITING_HUMAN", "high"),
-    ("AUTHORIZED", "execute", "EXECUTING", "low"), ("AUTHORIZED", "context_changed", "NEEDS_REVISION", "low"),
+    ("AUTHORIZED", "execute", "EXECUTING", "low"),
     ("EXECUTING", "observe", "VERIFYING", "low"), ("VERIFYING", "verified", "SUCCEEDED", "low"), ("VERIFYING", "failed", "FAILED", "low"),
     ("VERIFYING", "unknown", "OUTCOME_UNKNOWN", "low"), ("FAILED", "compensate", "COMPENSATED", "low"), ("FAILED", "rollback", "ROLLED_BACK", "low"),
     ("OUTCOME_UNKNOWN", "reconcile", "VERIFYING", "low"), ("WAITING_HUMAN", "human_accept", "ACCEPTED", "low"),

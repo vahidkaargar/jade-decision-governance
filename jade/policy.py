@@ -11,6 +11,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+import shlex
 import stat as stat_mod
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -18,7 +19,7 @@ from functools import lru_cache
 
 from policies import loader
 
-from . import egress, inert, paths, shellnorm
+from . import blind, egress, gitalias, inert, paths, samecmd, shellnorm
 from .util import LEVELS, canonical, fold, sha256
 
 NULL_REDIRECT = shellnorm.NULL_REDIRECT
@@ -31,6 +32,9 @@ SHELL_TOOLS = ("Bash", "PowerShell", "Monitor")  # built-in tools that run a com
 # makes run the same hook. CronCreate/CronDelete only schedule a prompt that later runs under the same hooks, so they are not gated either.
 READ_TOOLS = ("Read", "Grep", "Glob")  # gated for one thing only: the permit seal key (SI-10, W-70); a read of another credential file is medium (R-30, W-55), recorded and not gated
 GATED_BUILTIN = (*SHELL_TOOLS, *WRITE_TOOLS, "RemoteTrigger", *READ_TOOLS)
+# The built-in tools whose end PostToolUse reports (ops.posttool_matcher adds `mcp__.*`): the gated tools that can run under a permit, so a permitted call is
+# closed (W-40). A read is never permitted, so nothing waits for its end.
+POST_TOOLS = (*SHELL_TOOLS, *WRITE_TOOLS, "RemoteTrigger")
 # Built-in tools decided not to gate (W-36): subagent and scheduling tools for the reasons above, and the web tools: a URL can carry data in its query and
 # the gate cannot tell that from a page request (the accepted line of docs/05 T22, W-55).
 # `jade check` lists a built-in tool the ledger saw that is in neither tuple, so a new tool gets a decision.
@@ -40,8 +44,10 @@ PATH_KEYS = ("source", "destination", "src", "dest", "dst", "from", "to", "old_p
 UNSAFE_GIT = shellnorm.UNSAFE_GIT  # marker prefix R-15 matches; carried only in the text a rule sees
 HOOKS_BYPASS = "git:hooks-bypass "  # marker prefix R-17 matches: a `git -c core.hooksPath=...` command
 EGRESS_MARK = egress.MARK  # marker prefix R-21 matches: curl, wget or nc sending a file, stdin or a variable to a host that is not this machine (W-55)
-RECORDED_RULES = ("R-30",)  # medium rules whose hits the hook journals (event `secret_read`): not gated, but counted so a soak report can size them
-PATH_RULES = ("R-01", "R-04", "R-12", "R-13", "R-16", "R-18")  # the rules about where a write lands: they also see relative operands made absolute
+RECORDED_RULES = ("R-30", "R-31", "R-32")  # rules below the permit floor whose hits the hook journals (events `secret_read`, `blind_spot`): not gated, but counted so a soak report can size them
+BLIND_MARK = blind.BLIND_MARK   # marker prefix R-31 matches: `blind:<label> <command>`, a command the classifier cannot read (W-31)
+FETCH_MARK = blind.FETCH_MARK   # marker prefix R-22 matches: fetched or decoded text that runs as code (W-31)
+PATH_RULES = ("R-01", "R-04", "R-12", "R-13", "R-16", "R-18", "R-24")  # the rules about where a write lands: they also see relative operands made absolute
 WRITE_KEYS = ("file_path", "notebook_path", "path", "filePath", "file", "filepath", "target_file", "file_name", "filename", "target")
 CONTENT_KEYS = {"content", "new_string", "old_string", "new_str", "old_str", "new_source", "text", "contents", "data", "source", "patch"}
 
@@ -77,6 +83,42 @@ def write_paths(tool_input: dict) -> list[str]:
     if known:
         return known
     return [v for v in _strings(tool_input) if v.strip() and len(v) <= 4096]
+
+
+def content_bound(tool: str, tool_input: dict) -> bool:
+    """True for a call whose plan hash does not cover everything it does (W-39): a Write, Edit, MultiEdit or NotebookEdit (the hash names the target path
+    only) and an MCP call that carries a command (the hash is the command only). The permit records a digest of the whole input for these; an MCP call
+    with no command already hashes its whole input (`_assess_tool`), and a shell call hashes the command."""
+    return tool in WRITE_TOOLS or (is_mcp(tool) and isinstance(tool_input, dict) and mcp_command(tool_input) is not None)
+
+
+def _leaves(obj, path: tuple = (), depth: int = 0):
+    if isinstance(obj, (dict, list, tuple)) and not obj:
+        yield path, obj   # an empty container is a value too: `{}` and an absent key are different inputs
+    elif isinstance(obj, dict) and depth < 32:
+        for k in sorted(obj, key=str):
+            yield from _leaves(obj[k], (*path, str(k)), depth + 1)
+    elif isinstance(obj, (list, tuple)) and depth < 32:
+        for i, v in enumerate(obj):
+            yield from _leaves(v, (*path, i), depth + 1)
+    else:
+        yield path, obj
+
+
+def content_view(tool_input) -> str:
+    """Everything a content-bound call carries, as text a human can read: for each value of the input in key order a header `@@ <key path> (<n> chars)`
+    and the text itself (any other value as JSON on the header line). The key path is a JSON list and the header length bounds the text, so the
+    rendering is one-to-one with the input (no value can imitate the next header): the digest of this text is the digest of the call's content, and
+    the approval screen shows exactly what was hashed."""
+    out = []
+    for path, v in _leaves(tool_input):
+        head = canonical(list(path))
+        out.append(f"@@ {head} ({len(v)} chars)\n{v}\n" if isinstance(v, str) else f"@@ {head} = {canonical(v)}\n")
+    return "".join(out)
+
+
+def content_sha(tool_input) -> str:
+    return sha256(content_view(tool_input))
 
 
 def tool_subject(tool: str, tool_input: dict) -> str:
@@ -161,7 +203,8 @@ class Assessment:
     plan_subject: str = ""  # exactly what plan_hash covers besides the tool: `subject` is what a human reads, this is what was hashed
     plan_cwd: str = ""
     hold_key: str = ""  # identity of the command for SI-07: the canonical gated segments, independent of quoting, separators, prefixes and cwd
-    recorded: bool = False  # R-30 only: a read-only command or a Read/Grep/Glob call named a credential file (a write that names one is R-30 too and is not counted)
+    blind: list[str] = field(default_factory=list)  # R-31 only: the labels of what the gate could not read (`script-file`, `eval-var` ...); never the command text
+    recorded: bool = False  # R-30 and R-31: a read-only command or a Read/Grep/Glob call named a credential file (a write that names one is R-30 too and is not counted)
 
 
 _BASE_ONLY = False  # see base_only()
@@ -202,6 +245,7 @@ def reset_cache() -> None:
     _risk.cache_clear()
     _safety.cache_clear()
     _routing.cache_clear()
+    _hidden.cache_clear()
 
 
 @contextmanager
@@ -394,8 +438,31 @@ def _creates(rule: dict, text: str, dirs: tuple[str, ...] = ("",), whole: bool =
     return not (seen or urls)
 
 
+def _is_checkout(d: str) -> bool:
+    """A directory that holds JADE's own package (`jade/__init__.py` and `jade/hooks.py`): the checkout of this project, whatever it is called."""
+    return os.path.isfile(os.path.join(d, "jade", "__init__.py")) and os.path.isfile(os.path.join(d, "jade", "hooks.py"))
+
+
+def _in_checkout(rule: dict, text: str, dirs: tuple[str, ...] = ("",), whole: bool = False) -> bool:
+    """Does a word the `checkout_only` rule names (R-24: `pyproject.toml`, `uv.lock`) resolve, in a directory the call may run in, to a file of JADE's checkout?
+
+    Every project has a `pyproject.toml`, so the name alone is no finding; the file of the project the gate protects is. A relative word with no known
+    directory is not resolved (nothing says whose file it is), and a glob or variable is never matched by the rule's own pattern."""
+    for tok in [text] if whole else text.split(" "):
+        tok = _operand_value(re.sub(r"^[<>|&]+", "", tok.replace("\x01", " ").strip("\"'")))
+        if not tok or not rule["_re"].search(tok) or URL_WORD.search(tok):
+            continue
+        for d in dirs or ("",):
+            if not d and not os.path.isabs(os.path.expanduser(tok)):
+                continue
+            if (p := normalise_path(tok, d)) and _is_checkout(os.path.dirname(p)):
+                return True
+    return False
+
+
 def _hit(rule: dict, text: str, dirs: tuple[str, ...] = ("",), whole: bool = False) -> bool:
-    return bool(rule["_re"].search(text)) and (not rule.get("creates_only") or _creates(rule, text, dirs, whole))
+    return bool(rule["_re"].search(text)) and (not rule.get("creates_only") or _creates(rule, text, dirs, whole)) \
+        and (not rule.get("checkout_only") or _in_checkout(rule, text, dirs, whole))
 
 
 def _path_rule(text: str, files: str | None = None, alt: dict[str, str] | None = None, dirs: tuple[str, ...] = ("",), whole: bool = False) -> dict | None:
@@ -791,7 +858,9 @@ def _assess_write(tool: str, tool_input: dict, cwd: str) -> Assessment:
     if env == "production" and LEVELS[a.level] < LEVELS["high"]:
         a.level, a.rule_id, a.rationale = "high", "R-ENV", "Write under a production path"
     subject = "\n".join(subjects)
-    _seal(a, tool, subject, "", subject)
+    # A relative path names a different file in each directory, so the permit binds the working directory too; an absolute or `~` path does not depend on it.
+    relative = any(x.strip() and not os.path.isabs(os.path.expanduser(x)) for x in subjects)
+    _seal(a, tool, subject, cwd if relative else "", subject)
     return a
 
 
@@ -887,17 +956,18 @@ def _use_identity(seg: str) -> str:
     return IDENTITY_FILE.sub("-i $KEY", seg) if bare.split(" ", 1)[0].rsplit("/", 1)[-1] in REMOTE_SHELL_VERBS else seg
 
 
-def classify_segment(seg: str, dirs: tuple[str, ...], proxied: bool = False) -> tuple[dict, str]:
+def classify_segment(seg: str, dirs: tuple[str, ...], proxied: bool = False, marks: tuple[str, ...] = ()) -> tuple[dict, str]:
     """The rule one simple command (a segment of `shellnorm.segments_cwd`) matches, and the command with launcher prefixes and git options gone.
 
     The command is looked at as written and with its operands made absolute for every directory it may run in; a `files_only` rule (R-13, R-16)
-    reads only what the command writes (`files_view`)."""
+    reads only what the command writes (`files_view`). `marks` are marker prefixes (`blind:script-file `, `fetch:exec `) that the caller found for this segment and that rules
+    read together with its text."""
     real_bare = _bare(seg)
     seg = _use_identity(seg)
     bare, calls = _analyse(seg)
     hooks_off = any("core.hookspath" in d for c in calls for d in c.danger)   # `git -c core.hooksPath=...` turns the pre-push guard off for this command (R-17)
     texts = [*([HOOKS_BYPASS + bare] if hooks_off else []), seg, bare, _pathfold(bare), *([UNSAFE_GIT + bare] if any(c.danger for c in calls) else []),
-             *([EGRESS_MARK + bare] if egress.sends_out(bare, proxied or bool(egress.PROXY_ENV.search(seg))) else [])]
+             *([EGRESS_MARK + bare] if egress.sends_out(bare, proxied or bool(egress.PROXY_ENV.search(seg))) else []), *(m + bare for m in marks)]
     view = files_view(bare)  # what a `files_only` rule may look at: None = the whole segment
     cview = creation_view(bare, view, calls, tuple(dirs) or ("",))  # what a `creates_only` rule may look at
     seg_best = None
@@ -919,6 +989,58 @@ def classify_segment(seg: str, dirs: tuple[str, ...], proxied: bool = False) -> 
     return seg_best, real_bare
 
 
+def _call_dir(call: shellnorm.GitCall, dirs: tuple[str, ...], cwd: str) -> str | None:
+    """The directory a git call runs in: the directory of the segment, then each `-C` in turn. None when one is written with a variable or a substitution."""
+    d = (dirs[0] if dirs else "") or cwd
+    for c in call.dirs:
+        if re.search(r"[$`\x06]", c):
+            return None
+        c = os.path.expanduser(c)
+        d = c if os.path.isabs(c) else os.path.join(d or os.getcwd(), c)
+    return d
+
+
+def hidden(text: str, cwd: str = "") -> tuple[list[str], frozenset[str]]:
+    """(commands, files) the text runs without writing them on the command line (W-31): the expansion of a git alias that a config file defines, and the text of a
+    script that the same command writes and then runs. Each is returned as a command for the classifier (and for SI-08) to read as if it had been typed; `files` are the
+    scripts whose text was read, so running one of them is not a blind spot. A command with no non-built-in git subcommand starts no process."""
+    extra, known = _hidden(text, cwd, os.environ.get("HOME", ""), os.environ.get("XDG_CONFIG_HOME", ""))
+    return [*extra, *samecmd.extras(text, cwd)], known   # not cached: it reads the patch files the command names, as they are now (W-37)
+
+
+@lru_cache(maxsize=8)
+def _hidden(text: str, cwd: str, _home: str, _xdg: str) -> tuple[tuple[str, ...], frozenset[str]]:
+    """`hidden`, once per command: the classifier and the SI-08 check both ask, and the git lookups behind it are bounded by the hook's time budget, not doubled by it.
+    The two environment values are in the key because they decide which config git reads."""
+    extra, known = blind.written_scripts(text)
+    extra = list(extra)
+    if "git" in text:
+        aliases = gitalias.Aliases()
+        for seg, dirs in shellnorm.segments_cwd(text, cwd):
+            if is_read_only(seg):
+                continue
+            for call in git_calls(seg):
+                if not gitalias.candidate(call.sub) or (d := _call_dir(call, dirs, cwd)) is None:
+                    continue
+                if (expansion := aliases.expand(call.sub, call.args, d)) is not None:
+                    extra.append(f"cd {shlex.quote(d)} && {expansion}" if d else expansion)
+    return tuple(extra), known
+
+
+def _computed_write(bare: str) -> bool:
+    """A segment that writes a path relative to the working directory: a redirect, the destination of `cp`, an output option, an in-place edit, a writer verb."""
+    view = files_view(bare)
+    if view is not None:
+        return blind.relative_words(view)
+    words = bare.split(" ")
+    verb = words[0].rsplit("/", 1)[-1]
+    if verb == "git":
+        return False
+    if verb in WRITER_VERBS and verb not in ("curl", "wget"):
+        return blind.relative_words(" ".join(operands(words[1:])))
+    return shellnorm.verb_effects(verb, words[1:])[0] and blind.relative_words(" ".join(operands(words[1:])))
+
+
 def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     best: dict | None = None
     active: list[str] = []
@@ -927,7 +1049,17 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     text_in = subject.replace("\x00", "")  # a shell ignores a NUL byte in a command; the plan hash still covers the text as written
     secret_read = False
     proxied = bool(egress.PROXY_ENV.search(text_in))   # a proxy variable anywhere in the command routes a send in any segment (`export https_proxy=...; curl ...`)
-    for seg, dirs in shellnorm.segments_cwd(text_in, cwd):
+    extra, known = hidden(text_in, cwd)
+    scan = text_in + "".join("\n" + e for e in extra)   # what the command runs that it does not write: git aliases, a script it writes and runs (W-31)
+    fetched: set[str] = set()   # files a curl or wget of this command writes
+    computed = False   # a `cd` to a directory only the running shell knows came before this segment
+    labels: list[str] = []
+    for seg, dirs in shellnorm.segments_cwd(scan, cwd):
+        if seg.startswith(BLIND_MARK):
+            labels.append(seg[len(BLIND_MARK):].split(" ", 1)[0])
+        cd = blind.cd_kind(PREFIX.sub("", seg, count=1).strip().split(" "))
+        if cd:
+            computed = cd == "computed"
         if is_read_only(seg):
             if sr := _secret_read(seg):
                 secret_read = True
@@ -935,7 +1067,18 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
                 best = sr   # a plain read of a credential file: medium, recorded and not gated (R-30, W-55)
             continue
         active.append(seg)
-        seg_best, bare = classify_segment(seg, dirs, proxied)
+        words = _bare(seg).split(" ")
+        marks: list[str] = []
+        if blind.stage_kind(words[0], words[1:]) == "fetch" or words[0].rsplit("/", 1)[-1] in ("curl", "wget"):
+            fetched.update(blind.downloads(words))   # a later segment that runs one of them runs fetched text (R-22)
+        elif fetched and blind.runs_file(words, fetched):
+            marks.append(FETCH_MARK)
+        elif fetched:
+            fetched.update(blind.copies_of(words, fetched))   # `mv a b; bash b`: the copy is the fetched file under another name
+        seg_labels = [lab for lab in (blind.script_label(words, known), "computed-cwd" if computed and _computed_write(_bare(seg)) else None) if lab]
+        labels.extend(seg_labels)
+        marks.extend(f"{BLIND_MARK}{lab} " for lab in seg_labels)
+        seg_best, bare = classify_segment(seg, dirs, proxied, tuple(marks))
         if best is None or LEVELS[seg_best["level"]] > LEVELS[best["level"]]:
             best = seg_best
         key = _segment_key(bare)
@@ -943,8 +1086,13 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         if LEVELS[seg_best["level"]] >= LEVELS[permit_floor()]:
             gated_keys.append(key)
     best = best or risk()["rules"][-1]
+    if labels and best["level"] == "low":   # R-31 is low, so it never wins a level comparison: nothing above low matched, and what the gate could not read is the finding
+        best = next(r for r in risk()["rules"] if r["id"] == "R-31")
     a = _from_rule(best, loader.environment_of(risk(), text_in))
     a.recorded = secret_read and bool(best.get("reads"))
+    if best["id"] in ("R-31", "R-32"):   # nothing higher matched: what the gate could not read is counted, by label and never by text (W-31)
+        a.recorded = True
+        a.blind = sorted(dict.fromkeys(labels))
     views: list[str] | None = None
     for inv in safety()["invariants"]:
         if "_re" not in inv:

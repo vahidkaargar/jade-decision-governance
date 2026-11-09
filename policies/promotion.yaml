@@ -16,7 +16,7 @@ offline_replay:
   subgroups: [language:fa, language:en, risk:high+]
   subgroup_min_samples: 30           # a subgroup with fewer labeled rows is not compared
 protected_test:
-  min_samples: 30                    # labeled rows in the protected split for the group or question; fewer cannot show non-inferiority
+  min_samples: 150                   # labeled rows in the protected split for the group or question (the design target of docs/04 section 5; W-52); fewer cannot show non-inferiority
   # non-inferior: false-accept rate <= champion, brier <= champion + margin, coverage >= champion - margin (margins above)
 shadow:
   duration_days: 7

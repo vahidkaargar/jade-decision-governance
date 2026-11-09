@@ -104,10 +104,10 @@ def _options(options) -> dict[str, str]:
     return out
 
 
-def build_choice(question_id: str | None, options, instructions: str | None = None, eligible: set[str] | None = None) -> dict:
+def build_choice(question_id: str | None, options, instructions: str | None = None, eligible: set[str] | None = None, version: int | None = None) -> dict:
     """Choice question. Rejects a set with fewer than two eligible options: the API answers a one-option
-    choice with confidence 1.0, which would look like certainty (inventory S9)."""
-    entry = get(question_id) if question_id and not question_id.startswith("q.adhoc.") else None
+    choice with confidence 1.0, which would look like certainty (inventory S9). `version` builds that registered version, not the active one."""
+    entry = get(question_id, version) if question_id and not question_id.startswith("q.adhoc.") else None
     opts = _options(options) if options else dict((entry or {}).get("template", {}).get("criteria") or {})
     if eligible is not None:
         opts = {k: v for k, v in opts.items() if k in eligible}
@@ -123,8 +123,8 @@ def build_choice(question_id: str | None, options, instructions: str | None = No
     return {"type": "choice", "instructions": text, "criteria": opts}
 
 
-def build_noul(question_id: str | None, instructions: str | None = None, true: str | None = None, false: str | None = None) -> dict:
-    entry = get(question_id) if question_id and not question_id.startswith("q.adhoc.") else None
+def build_noul(question_id: str | None, instructions: str | None = None, true: str | None = None, false: str | None = None, version: int | None = None) -> dict:
+    entry = get(question_id, version) if question_id and not question_id.startswith("q.adhoc.") else None
     tpl = (entry or {}).get("template", {})
     crit = tpl.get("criteria") or {}
     text, t, f = instructions or tpl.get("instructions"), true or crit.get("true"), false or crit.get("false")
@@ -135,8 +135,8 @@ def build_noul(question_id: str | None, instructions: str | None = None, true: s
     return {"type": "noul", "instructions": text, "criteria": {"true": t, "false": f}}
 
 
-def build_score(question_id: str | None, instructions: str | None = None, levels: list[str] | None = None) -> dict:
-    entry = get(question_id) if question_id and not question_id.startswith("q.adhoc.") else None
+def build_score(question_id: str | None, instructions: str | None = None, levels: list[str] | None = None, version: int | None = None) -> dict:
+    entry = get(question_id, version) if question_id and not question_id.startswith("q.adhoc.") else None
     tpl = (entry or {}).get("template", {})
     text, lv = instructions or tpl.get("instructions"), levels or tpl.get("criteria")
     if not text or not isinstance(lv, list) or len(lv) < 2:

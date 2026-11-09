@@ -18,7 +18,8 @@ import re
 import statistics
 import sys
 
-CMD = re.compile(r"\bjev\b(?:\s+--?[a-z-]+(?:\s+\S+)?)*\s+(?P<prim>verify|noul|choice|score)\s+(?P<rest>.*)", re.S)
+CMD = re.compile(r"\bjev\b(?:\s+--?[a-z-]+(?:\s+\S+)?)*\s+(?P<prim>verify|noul|choice|score)\b\s*(?P<rest>.*)", re.S)
+CMD_HEAD = re.compile(r"\bjev\b(?:\s+--?[a-z-]+(?:\s+\S+)?)*\s+(?P<prim>verify|noul|choice|score)\s+")
 IS_JEV = re.compile(r"\bjev\s+(--\S+\s+)*(verify|noul|choice|score)\b")
 P_RE = re.compile(r"P\(yes\)=([01](?:\.[0-9]+)?)")
 CH_RE = re.compile(r"choice=(\S+) confidence=([01](?:\.[0-9]+)?)")
@@ -28,6 +29,106 @@ QUOTED = re.compile(r"\s*(?:\"((?:[^\"\\]|\\.)*)\"|'([^']*)')")
 REPORTED = re.compile(r"P\(yes\)|jev|probabilit|confidence", re.I)
 DONE = re.compile(r"\b(done|verified|complete|fixed|passes|passed)\b", re.I)
 RESULT_KEYS = ("p", "choice", "score", "error")
+# Claude Code's stand-ins for a Bash result that carries no jev output. The first is exactly 31 characters, the lower end of the 31-36
+# character "no_parse" band of the first baseline (W-18).
+EMPTY_RE = re.compile(r"\A\s*(?:\(Bash completed with no output\))?\s*\Z")
+EXIT_ONLY_RE = re.compile(r"\A\s*(?:Error: )?Exit code \d+\s*\Z")
+BACKGROUND_RE = re.compile(r"\A\s*Command running in background")
+# `jev` in command position: after a separator or a control keyword, optional env assignments and wrappers, optional path. Matched on the
+# command with quoted text, heredoc bodies and comments blanked out, so a commit message or an echo that names `jev verify` is not a call.
+SEP = r"(?:^|[;&|(`{\n]|\$\()[ \t]*"
+_NOT_JEV = r"(?!(?:jev|verify|noul|choice|score)\b)"
+_OPTS = rf"(?:--?[A-Za-z][\w-]*(?:=\S+)?(?:\s+{_NOT_JEV}[\w@./:=-]+)?\s+)*"   # options of a wrapper, each with at most one value (`sudo -u x`, `nice -n 5`, `uv run --quiet`)
+WRAP = (r"(?:(?:(?:ba|z|da)?sh\s+(?:-\w+\s+)*-\w*c|eval|ssh\s+\S+)\s+|(?:then|do|else|elif|if|while|until|!|python3?(?:\s+-[IuB])*|perl\s+-e\s+\S+)\s+|"
+        rf"(?:\S*/)?(?:command|exec|time|nohup|env|sudo|doas|nice|caffeinate|xargs|uv\s+run|uvx)\s+{_OPTS}|"
+        rf"(?:\S*/)?g?timeout\s+{_OPTS}\d+[smhd]?\s+|"
+        r"\w+=\S*\s+)*")
+COMMAND_POS = re.compile(SEP + WRAP + r"(?:\S*/)?(?P<jev>jev)\b(?=(?:\s+--?[a-z-]+(?:\s+\S+)?)*\s+(?:verify|noul|choice|score)\b)", re.S)
+SHELL_ARG = re.compile(r"(?:\b(?:ba|z|da)?sh\s+(?:-\w+\s+)*-\w*c|\beval|\bssh\s+\S+)\s*$")
+HEREDOC = re.compile(r"<<-?[ \t]*(?:'([A-Za-z_]\w*)'|\"([A-Za-z_]\w*)\"|([A-Za-z_]\w*))")
+
+
+def mask_literals(cmd: str) -> str:
+    """The command with quoted text, heredoc bodies and comments replaced by spaces, same length so offsets still line up. Text that a shell
+    would run stays visible: `$(...)` and backticks inside double quotes, and the argument of `bash -c`, `eval` and `ssh host`."""
+    out, i, n = [], 0, len(cmd)
+    pending: list[str] = []   # heredoc terminators waiting for the end of this line
+
+    def blank(text: str) -> str:
+        return "".join(c if c == "\n" else " " for c in text)
+
+    while i < n:
+        c = cmd[i]
+        if c == "\n" and pending:
+            out.append(c)
+            i += 1
+            for tag in pending:
+                j = i
+                while j < n:
+                    end = cmd.find("\n", j)
+                    end = n if end < 0 else end
+                    if cmd[j:end].strip() == tag:
+                        break
+                    j = end + 1
+                out.append(blank(cmd[i:j]))
+                i = j
+            pending = []
+            continue
+        if c == "\\" and i + 1 < n:
+            out.append(c + cmd[i + 1])
+            i += 2
+            continue
+        if c == "#" and (i == 0 or cmd[i - 1] in " \t\n;&|("):
+            j = cmd.find("\n", i)
+            j = n if j < 0 else j
+            out.append(blank(cmd[i:j]))
+            i = j
+            continue
+        if c == "<" and cmd.startswith("<<", i) and not cmd.startswith("<<<", i):
+            m = HEREDOC.match(cmd, i)
+            if m:
+                pending.append(m.group(1) or m.group(2) or m.group(3))
+                out.append(cmd[i:m.end()])
+                i = m.end()
+                continue
+        if c in "'\"":
+            j, depth, shown = i + 1, 0, [" "]
+            while j < n:
+                d = cmd[j]
+                if c == '"' and d == "\\" and j + 1 < n:
+                    shown.append("  ")
+                    j += 2
+                    continue
+                if c == '"' and d == "$" and cmd.startswith("$(", j):
+                    depth += 1
+                    shown.append("$(")
+                    j += 2
+                    continue
+                if c == '"' and depth and d == ")":
+                    depth -= 1
+                    shown.append(d)
+                elif c == '"' and (depth or d == "`"):
+                    shown.append(d)
+                elif d == c and not depth:
+                    break
+                else:
+                    shown.append(d if d == "\n" else " ")
+                j += 1
+            body = cmd[i + 1:j]
+            if SHELL_ARG.search("".join(out)):
+                out.append(" " + body + " ")   # the shell runs this text
+            else:
+                out.append("".join(shown)[: len(body) + 1].ljust(len(body) + 1) + " ")
+            i = j + 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def real_call_starts(cmd: str) -> set[int]:
+    """Offsets of the `jev` words that are run, not merely written."""
+    return {m.start("jev") for m in COMMAND_POS.finditer(mask_literals(cmd))}
 
 
 def error_kind(text: str) -> str:
@@ -41,6 +142,17 @@ def error_kind(text: str) -> str:
     if text.startswith("HTTP"):
         return "http_error"
     return "other_error"
+
+
+def shape_kind(out: str) -> str:
+    """Bucket an output that holds no result and no `jev:` error line, by shape only."""
+    if EMPTY_RE.match(out):
+        return "empty_output"
+    if EXIT_ONLY_RE.match(out):
+        return "exit_status_only"
+    if BACKGROUND_RE.match(out):
+        return "background_job"
+    return "no_parse"
 
 
 def band(p: float) -> str:
@@ -57,22 +169,32 @@ def result_text(content) -> str:
 
 
 def rows_for_command(session: str, ts, cmd: str, out: str) -> list[dict]:
+    """One row per `jev` call the command runs. A command that only writes the words (a commit message, an echo, a grep, a heredoc) gets a
+    single row flagged `mention`, which carries no result: its output belongs to some other program (W-18)."""
+    real = real_call_starts(cmd)
+    heads = [m for m in CMD_HEAD.finditer(cmd) if m.start() in real]
+    mention = not heads
+    if mention:
+        first = CMD.search(cmd)
+        heads = [first] if first else []
     new = []
-    for m in CMD.finditer(cmd):
-        q = QUOTED.match(m.group("rest"))
+    for m in heads:
+        q = QUOTED.match(cmd, m.end()) if not mention else QUOTED.match(m.group("rest"))
         new.append({
             "session": session, "ts": ts, "primitive": m.group("prim"), "dry_run": "--dry-run" in cmd,
             "cmd_len": len(cmd), "state_stdin": " -s - " in cmd or "-s -\n" in cmd,
             "question": ((q.group(1) or q.group(2) or "")[:200] if q else ""), "out_len": len(out),
+            **({"mention": True} if mention else {}),
         })
+    new_real = [] if mention else new
     results = [("p", float(p)) for p in P_RE.findall(out)]
     results += [("choice", list(c)) for c in CH_RE.findall(out)] + [("score", list(s)) for s in SC_RE.findall(out)]
-    for row, (key, value) in zip(new, results, strict=False):
+    for row, (key, value) in zip(new_real, results, strict=False):
         row[key] = value
     errs = ERR_RE.findall(out)
-    for row in new:
+    for row in new_real:
         if not any(k in row for k in RESULT_KEYS):
-            row["error"] = error_kind(errs[0]) if errs else ("other_error" if "jev:" in out else "no_parse")
+            row["error"] = error_kind(errs[0]) if errs else ("other_error" if "jev:" in out else shape_kind(out))
     return new
 
 
@@ -114,7 +236,7 @@ def mine_file(path: str) -> list[dict]:
 
 
 def summarize(rows: list[dict], n_files: int) -> dict:
-    real = [r for r in rows if not r["dry_run"]]
+    real = [r for r in rows if not r["dry_run"] and not r.get("mention")]
     ps = sorted(r["p"] for r in real if "p" in r)
     low = [r for r in real if "p" in r and r["p"] < 0.7]
     with_p = [r for r in real if "p" in r and "reported_in_next_text" in r]
@@ -125,7 +247,8 @@ def summarize(rows: list[dict], n_files: int) -> dict:
         "transcript_files": n_files,
         "files_with_real_calls": len(per_file),
         "calls_total": len(rows),
-        "calls_dry_run": sum(r["dry_run"] for r in rows),
+        "calls_dry_run": sum(r["dry_run"] and not r.get("mention") for r in rows),
+        "calls_mention": sum(bool(r.get("mention")) for r in rows),
         "calls_real": len(real),
         "calls_per_file": {"median": statistics.median(per_file.values()) if per_file else 0, "max": max(per_file.values(), default=0)},
         "by_primitive": dict(collections.Counter(r["primitive"] for r in real)),

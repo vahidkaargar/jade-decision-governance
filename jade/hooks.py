@@ -284,7 +284,8 @@ def _on_default_branch(cwd: str, command: str) -> bool:
     `cd "$R" && git push`), `GIT_DIR=` / `GIT_WORK_TREE=` in the command, or a repository the same command creates (`git clone u r && git -C r push`) is unresolved
     (GitUnresolved), never "not main".
     """
-    segs = policy.segments_cwd(command, cwd)
+    extra, _ = policy.hidden(command, cwd)   # a git alias that expands to a push, a script the command writes and runs (W-31)
+    segs = policy.segments_cwd(command + "".join("\n" + e for e in extra), cwd)
     pushes = [(call, dirs) for seg, dirs in segs if not policy.is_read_only(seg) for call in policy.git_calls(seg) if call.sub == "push"]
     if not pushes:
         return False
@@ -356,7 +357,10 @@ def pretool(event: dict, permit=None) -> HookResult:
                               f"Rule text: policies/safety.yaml. Do not rephrase the command to get around the invariant; ask the human.")
     if not at_least(a.level, policy.permit_floor()):
         if a.rule_id in policy.RECORDED_RULES and a.recorded:
-            _journal("gate", "secret_read", a, event)   # W-55: counted (rule, tool, session), never the path or the command; the read itself is not gated
+            if a.rule_id in ("R-31", "R-32"):
+                _journal_blind(a, event)   # W-31: the label of what the gate could not read, once per session and label
+            else:
+                _journal("gate", "secret_read", a, event)   # W-55: counted (rule, tool, session), never the path or the command; the read itself is not gated
         return HookResult()
     try:
         return _gate(mode, tool, a, event, permit)
@@ -369,6 +373,24 @@ def _verdict(mode: str, message: str) -> HookResult:
     if mode == "advisory":
         return HookResult(0, "[advisory, not blocked] " + message)
     return HookResult(2, message)
+
+
+def _journal_blind(a: policy.Assessment, event: dict) -> None:
+    """W-31: event `blind_spot` for a command the gate rated R-31 (a script file, `eval "$VAR"`, a relative write after `cd $VAR` ...). The detail carries the label and
+    the session, never the command or a path; a label is journaled once per session, so a long session of `python3 x.py` is one row, not one per call."""
+    try:
+        from . import ledger
+
+        db = ledger.open(timeout=LEDGER_TIMEOUT_S)
+        try:
+            session = str(event.get("session_id") or "")[:200]
+            for label in a.blind:
+                db.event("gate", "blind_spot", guard=f"{a.rule_id} {a.level} {label}", actor="hook", key=f"blind_spot:{db.source or ''}:{session}:{label}",
+                         detail=_detail(event, a, blind=[label]))
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001, S110 - journaling must never change the gate verdict
+        pass
 
 
 def _journal(entity: str, kind: str, a: policy.Assessment, event: dict) -> None:
@@ -455,6 +477,21 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
         db.event("gate", "gated", guard=f"{a.rule_id} {a.level}", actor="hook", detail=_detail(event, a))
         decide.sweep(db)  # a decision past its deadline is EXPIRED before a permit is looked at (and its permits are revoked with it)
         permits.sweep(db)
+        cwd = event.get("cwd") or ""
+        tin = event.get("tool_input") or {}
+        fp = fingerprints(a.plan_subject, cwd) if policy.runs_shell(tool, tin) else {}
+        if isinstance(tin, dict) and policy.content_bound(tool, tin):   # W-39: the permit is for this content, not for any content sent to the same path or command
+            fp = {**fp, permits.CONTENT_KIND: policy.content_sha(tin)}
+        who = {"session": event.get("session_id"), "agent": event.get("agent_id")}
+        call_id = permits.call_id_of(event)
+
+        def replayed():
+            """W-40: this very call (same host call id, plan, content and caller) already spent a permit a moment ago: a second delivery of it is answered the same."""
+            again = permits.consumed_by_call(db, call_id, a.plan_hash, level=a.level, fingerprints=fp, **who)
+            return None if again is None else HookResult(0, f"JADE: permit {again.permit_id} was already consumed for this same {tool} call; it is not spent again.")
+
+        if (res := replayed()) is not None:
+            return res
         hold = _si07_hold(db, a)
         if hold:
             did, reason = hold
@@ -464,15 +501,12 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
                                   f"{' and still executing' if 'executing' in reason else ''}. It is not retried automatically and no permit is raised or used for it. "
                                   f"Read the real state, then record it: jade decide outcome {did} --type observed --success true|false --method \"how you checked\". "
                                   "Do not rephrase the command to get around the invariant; ask the human.")
-        cwd = event.get("cwd") or ""
-        fp = fingerprints(a.plan_subject, cwd) if policy.runs_shell(tool, event.get("tool_input") or {}) else {}
-        who = {"session": event.get("session_id"), "agent": event.get("agent_id")}
-        found = permit or permits.find_usable(db, a.plan_hash, level=a.level, **who)
+        found = permit or permits.find_usable(db, a.plan_hash, level=a.level, fingerprints=fp, **who)
         refusal = None
         if found is not None:
             try:
                 with db.tx():  # the permit and its decision move together: a decision that cannot advance leaves the permit unused
-                    refusal = permits.try_consume(db, found.permit_id, a.plan_hash, level=a.level, fingerprints=fp, **who)
+                    refusal = permits.try_consume(db, found.permit_id, a.plan_hash, level=a.level, fingerprints=fp, call_id=call_id, **who)
                     if refusal is None:
                         row = db.one("SELECT decision_id, status FROM decisions WHERE decision_id=?", (found.decision_id,))
                         if row and row.status == "WAITING_HUMAN":
@@ -484,6 +518,8 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
                 refusal = f"its decision could not advance ({e})"
             if refusal is None:
                 return HookResult(0, f"JADE: permit {found.permit_id} consumed for this {tool} call.")
+        if (res := replayed()) is not None:   # a parallel delivery of the same call spent the permit between the lookup above and the use
+            return res
         if mode == "advisory":
             db.event("gate", "would_block", guard=f"{a.rule_id} {a.level}", actor="hook", detail=_detail(event, a))
             return HookResult(0, f"[advisory, not blocked] JADE: {a.level} risk ({a.rule_id}: {a.rationale}) would need a permit.")
@@ -500,6 +536,13 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
         else:
             pid = pending.permit_id
         why = f" (Permit {found.permit_id} exists but cannot be used: {refusal}.)" if found is not None and refusal else ""
+        if ctx.get("redacted") and permits.keep_raw(db, pid, permits.raw_parts(tool, a, event)):   # W-43: the human allowed it, so the raw call is kept for their review only
+            return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}). This {tool} call needs a human-approved permit, and the {ctx['redacted']} secret-shaped "
+                                 f"value(s) in it are not stored in the ledger.{why}\n"
+                                 f"Permit {pid} is PENDING. Ask the human to review the whole command in their own terminal:  jade permit show {pid} --raw   and, if it is right, to approve it:  "
+                                 f"jade permit approve {pid}\n"
+                                 "Then retry the identical command (single use, 30 minutes). You cannot view the raw command or approve it yourself; "
+                                 "do not rephrase the command to avoid the gate. Continue with other work meanwhile.")
         if ctx.get("redacted"):
             return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}). This {tool} call needs a human-approved permit, and the {ctx['redacted']} secret-shaped "
                                  f"value(s) in it are not stored, so a human cannot review the whole command and the permit cannot be approved.{why}\n"
@@ -513,22 +556,55 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
         db.close()
 
 
+def _failed(resp) -> bool:
+    return isinstance(resp, dict) and bool(resp.get("is_error") or resp.get("isError") or resp.get("interrupted") or resp.get("error"))
+
+
+def _executing_decision(db, tool: str, tin: dict, event: dict, cwd: str):
+    """The decision a PostToolUse event ends, or None. A Bash call is found by its plan hash. Any other gated call (W-40) must also have been permitted
+    for this session, and for this content when the permit bound content (W-39): two writes to one path have one plan hash."""
+    from . import permits
+
+    if tool == "Bash":
+        command = str(tin.get("command") or "")
+        row = db.one("SELECT decision_id FROM decisions WHERE plan_hash=? AND status='EXECUTING' ORDER BY updated_at DESC", (policy.plan_hash("Bash", command, cwd),))
+        return row.decision_id if row else None
+    try:
+        a = _classify(tool, tin, cwd)
+    except Exception:  # noqa: BLE001 - the call cannot be matched to a decision: it stays EXECUTING and is held as unknown at its deadline (SI-07)
+        return None
+    sess = event.get("session_id")
+    sha = policy.content_sha(tin) if policy.content_bound(tool, tin) else None
+    for row in db.all("SELECT decision_id, session_id FROM decisions WHERE plan_hash=? AND status='EXECUTING' ORDER BY updated_at DESC", (a.plan_hash,)):
+        if isinstance(sess, str) and row.session_id != sess.ljust(8, "-"):
+            continue
+        bound = permits.content_of_decision(db, row.decision_id)
+        if sha is not None and bound is not None and bound != sha:
+            continue
+        return row.decision_id
+    return None
+
+
 def posttool(event: dict) -> HookResult:
-    if event.get("tool_name") != "Bash":
+    """The call returned: record the outcome of the decision it was permitted under. Bash and every other gated tool (Write, Edit, an MCP call ...) are
+    closed the same way (W-40); before, a permitted Write stayed EXECUTING until its deadline and was then held as unknown (SI-07). Only the exit status of
+    the call is known here, so the outcome is `observed` with indirect attribution, as for Bash."""
+    tool = event.get("tool_name")
+    if not isinstance(tool, str) or not (tool in policy.POST_TOOLS or policy.is_mcp(tool)):
         return HookResult()
-    command = str((event.get("tool_input") or {}).get("command") or "")
+    tin = event.get("tool_input")
+    tin = tin if isinstance(tin, dict) else {}
+    cwd = str(event.get("cwd") or "")
     from . import decide, ledger
 
     db = ledger.open(timeout=LEDGER_TIMEOUT_S)
     try:
-        if BYPASS.search(command) and "jade" not in command:
+        command = str(tin.get("command") or "")
+        if tool == "Bash" and BYPASS.search(command) and "jade" not in command:
             db.event(event.get("session_id") or "session", "BYPASS", guard="raw Decisions API call outside the adapter", actor="hook")
-        ph = policy.plan_hash("Bash", command, event.get("cwd") or "")
-        row = db.one("SELECT decision_id FROM decisions WHERE plan_hash=? AND status='EXECUTING' ORDER BY updated_at DESC", (ph,))
-        if row:
-            resp = event.get("tool_response")
-            failed = isinstance(resp, dict) and bool(resp.get("is_error") or resp.get("interrupted") or resp.get("error"))
-            decide.record_outcome(db, row.decision_id, "observed", not failed, "tool call returned (exit status only; the goal is not verified)",
+        did = _executing_decision(db, tool, tin, event, cwd)
+        if did:
+            decide.record_outcome(db, did, "observed", not _failed(event.get("tool_response")), "tool call returned (exit status only; the goal is not verified)",
                                   attribution="indirect")
     finally:
         db.close()
@@ -665,6 +741,23 @@ def _shadow_notice(db, event: dict) -> list[str]:
     return [f"JADE: settings of this project disable or shadow the JADE hooks ({'; '.join(found[:3])}); `jade check` lists every one. Remove the setting unless a human set it on purpose."]
 
 
+def _ready_notice(db, rows: list[dict], shown: set, room: int) -> list[str]:
+    """Open items whose dependencies are all done, told once each (W-51): the event key names the item and what it waited on, so a later session does not
+    repeat it. An item is journaled only when its line fits in the briefing, so one that was cut is told next time. Never blocks."""
+    lines: list[str] = []
+    try:
+        done = {r.id for r in db.all("SELECT id FROM work_items WHERE status='done'")}
+        for w in rows:
+            deps = w.get("dependencies") or []
+            if len(lines) >= room or w["id"] in shown or w.get("status") != "open" or not deps or not set(deps) <= done:
+                continue
+            if db.event(w["id"], "work_ready", guard="dependencies done", actor="hook", key=f"work_ready:{w['id']}:{','.join(sorted(deps))}"):
+                lines.append(f"JADE work item {w['id']} ({w.get('priority', '')}) is ready: its dependencies ({', '.join(deps)}) are done. {w.get('title', '')}. Next: {w.get('next_action', '')}")
+    except Exception:  # noqa: BLE001 - an announcement must never change the hook's answer
+        pass
+    return lines
+
+
 def session_start(event: dict) -> HookResult:
     from . import decide, ledger, permits
 
@@ -685,13 +778,22 @@ def session_start(event: dict) -> HookResult:
             open_tagged = len(pending) - len(pend)
             still = f" {open_tagged} of the permits are still PENDING and approvable whatever their tag: look at `jade permit list` before clearing them." if open_tagged else ""
             out.append(f"JADE: {tagged} test-tagged permit/decision row(s) from a verification run; not real approvals.{still} A human clears them with `jade ledger purge --test-rows`.")
+        try:   # a registry that cannot be read is informational, never a reason to lose the rest of the briefing (W-51)
+            from . import ops
+
+            ops.check_question_drift(db=db)
+        except Exception:  # noqa: BLE001, S110
+            pass
         today = f"{now():%Y-%m-%d}"
-        for r in db.all("SELECT doc_json FROM work_items WHERE status IN ('open','in_progress','waiting_human')"):
-            w = json.loads(r.doc_json)
+        rows = [json.loads(r.doc_json) for r in db.all("SELECT doc_json FROM work_items WHERE status IN ('open','in_progress','waiting_human')")]
+        shown = set()
+        for w in rows:
             trig = str(w.get("retry_or_revisit_trigger", ""))
             due = re.search(r"\d{4}-\d{2}-\d{2}", trig)
             if trig == "on_session_start" or (due and due.group(0) <= today):
                 out.append(f"JADE work item {w['id']} ({w.get('priority', '')}): {w.get('title', '')}. Next: {w.get('next_action', '')}")
+                shown.add(w["id"])
+        out.extend(_ready_notice(db, rows, shown, room=8 - len(out)))
         return HookResult(0, "", "\n".join(out[:8]))
     finally:
         db.close()

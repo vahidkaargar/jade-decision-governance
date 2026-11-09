@@ -42,7 +42,7 @@ def canonical(obj) -> str:
 
 
 def sha256(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()   # a lone surrogate hashes as itself, not as the `?` of another text
 
 
 def user() -> str:
@@ -141,6 +141,11 @@ def agent_ancestor(table: dict[int, Proc] | None = None, pid: int | None = None)
             return "the process table could not be read"
     if me not in table:
         return "the process table does not list this process"
+    return _agent_above(table, me)
+
+
+def _agent_above(table: dict[int, Proc], me: int) -> str | None:
+    """The agent process among the ancestors of `me` (not `me` itself), as a reason, or None."""
     seen: set[int] = set()
     cur = me
     while cur in table and cur not in seen and cur > 1:
@@ -149,6 +154,85 @@ def agent_ancestor(table: dict[int, Proc] | None = None, pid: int | None = None)
         if cur != me and (name := _agent_word(proc)):
             return f"it runs under an agent process ({name}, pid {cur})"
         cur = proc.ppid
+    return None
+
+
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ksh93", "mksh", "fish", "tcsh", "csh", "nu", "elvish", "xonsh", "ash"})
+
+
+def _interactive_shell(proc: Proc) -> str | None:
+    """None when `proc` is a shell that reads commands from a terminal (a login shell is `-zsh`; `zsh`, `zsh -l`, `bash --login -i`), else why it is not.
+    A shell given a command string (`-c`, also in a cluster: `-lc`, `-ic`), `--command` or a script file is a program, not a person typing."""
+    exe = proc.exe.strip()
+    if not exe:
+        return "its program is unknown"
+    name = os.path.basename(exe).lstrip("-")
+    if name not in _SHELLS:
+        return f"it is {name or 'unnamed'}, not an interactive shell"
+    skip = False
+    for word in proc.args.split():
+        if skip:   # the value of an option that takes one (`bash --init-file F`, `zsh -o vi`): not a script
+            skip = False
+            continue
+        if word in ("--init-file", "--rcfile", "-o", "+o", "-O", "+O"):
+            skip = True
+            continue
+        if word == "--command" or (word.startswith("-") and not word.startswith("--") and "c" in word[1:]):
+            return f"it is {name} run with a command string"
+        if not word.startswith(("-", "+")):
+            return f"it is {name} run on a script"
+    return None
+
+
+def _login_shell_below(table: dict[int, Proc], leader: int, me: int) -> bool:
+    """True when the session leader is `login` (Terminal.app and iTerm start `login -pf user` and it keeps the session) and the process below it on the way to `me` is an
+    interactive shell: the person's shell is a child of the leader, not the leader itself."""
+    cur, seen = me, set()
+    while cur in table and cur not in seen and cur > 1:
+        seen.add(cur)
+        if table[cur].ppid == leader:
+            return _interactive_shell(table[cur]) is None
+        cur = table[cur].ppid
+    return False
+
+
+def tty_session_refusal(table: dict[int, Proc] | None = None, pid: int | None = None, sid: int | None = None, ctty: bool | None = None) -> str | None:
+    """None when this process sits in a terminal session a person could be typing in, else the reason (W-37, docs/05 T2 and T19).
+
+    An agent that allocates its own pty (`pty.spawn`, `script`, `expect`) makes `isatty` true and, by clearing its environment, passes the variable check;
+    what it cannot make is a session led by an interactive shell: the process it spawns is the leader of the new session, and that is `jade` itself, `python`,
+    `script` or `sh -c "..."`. Checked here: stdin is the controlling terminal of this process's session (`os.tcgetpgrp` raises when it is not: a pty slave that
+    was handed down without `setsid`), the session leader is in the process table and is an interactive shell, and the ancestry of the leader is no agent
+    either (a process that double-forks away from its parent keeps its session, so the leader's parents still show the harness). Not covered: an agent that
+    starts its own interactive shell on a pty it drives and detaches from its parent, docs/05 T2. `table`, `pid`, `sid` and `ctty` let a test give a synthetic tree."""
+    import subprocess
+
+    me = os.getpid() if pid is None else pid
+    if ctty is None:
+        try:
+            os.tcgetpgrp(sys.stdin.fileno())
+            ctty = True
+        except (OSError, ValueError, AttributeError):
+            ctty = False
+    if not ctty:
+        return "stdin is not the controlling terminal of this process's session"
+    if sid is None:
+        try:
+            sid = os.getsid(me)
+        except OSError:
+            return "the session of this process could not be read"
+    if table is None:
+        try:
+            table = read_process_table()
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return "the process table could not be read"
+    leader = table.get(sid)
+    if leader is None:
+        return f"the leader of its session (pid {sid}) is not in the process table"
+    if (why := _interactive_shell(leader)) and not (os.path.basename(leader.exe.strip()).lstrip("-") == "login" and _login_shell_below(table, sid, me)):
+        return f"the leader of its session (pid {sid}) is not an interactive shell: {why}"
+    if name := _agent_above(table, sid):
+        return f"the leader of its session: {name}"
     return None
 
 
@@ -164,7 +248,7 @@ def human_tty_refusal(stdin_isatty: bool | None = None) -> str | None:
             stdin_isatty = False
     if not stdin_isatty:
         return "stdin and stdout are not an interactive terminal"
-    return agent_ancestor()
+    return agent_ancestor() or tty_session_refusal()
 
 
 def is_human_tty(stdin_isatty: bool | None = None) -> bool:

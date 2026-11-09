@@ -16,19 +16,28 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import unicodedata
+from pathlib import Path
 from types import SimpleNamespace
 
 from . import ledger, paths, policy, redact, schemas
 from .state_machine import TERMINAL as TERMINAL_DECISION
-from .util import at_least, canonical, human_tty_refusal, new_id, parse_ts, ts, ts_in, user
+from .util import at_least, canonical, human_tty_refusal, new_id, parse_ts, sha256, ts, ts_in, user
 
 DEFAULT_TTL_S = 1800
 MAX_SUBJECT = 20000        # the most command text a permit stores and the approval screen shows; a longer command is never approved
+MAX_CONTENT = 20000        # the most file or argument content a permit stores and the approval screen shows in full; more is never approved (W-39)
+CONTENT_PREVIEW = 2000     # what is stored of content longer than MAX_CONTENT, only so that the refusal can say what it was
+CONTENT_KIND = "file_sha"  # the precondition that binds the content of a Write, Edit or MCP call to its permit (W-39)
 LIVE_DECISION = ("WAITING_HUMAN", "AUTHORIZED")  # decision states in which a permit may be approved or consumed
 SEAL_KEY_FILE = "permit-seal.key"
+REVEAL_DIR = "reveal"      # W-43: next to the ledger, one mode-600 file per PENDING permit that carries a secret, only when the human turned `permit_reveal` on
+_PERMIT_ID = re.compile(r"prm_[0-9a-f]{12}")
+CALL_REPLAY_S = 120        # how long after a permit was spent the same host call (same `tool_use_id`) is answered again without a new permit (W-40)
+_CALL_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
 class PermitError(ValueError):
@@ -154,11 +163,112 @@ def make_context(tool: str, a: policy.Assessment, event: dict | None = None, *, 
         hits += n
         ctx["hash_subject"] = hash_clean[:MAX_SUBJECT * 2]
         ctx["truncated"] = ctx["truncated"] or len(a.plan_subject) > MAX_SUBJECT * 2
+    ti = ev.get("tool_input")
+    if isinstance(ti, dict) and policy.content_bound(tool, ti):   # W-39: the plan hash names the path or the command only, so what the call carries is recorded too
+        view = policy.content_view(ti)
+        shown, n = redact.redact(view, secrets_only=True)
+        hits += n
+        ctx["content"] = {"length": len(view), "sha256": sha256(view), "truncated": len(view) > MAX_CONTENT,
+                          "text": shown[:MAX_CONTENT] if len(view) <= MAX_CONTENT else shown[:CONTENT_PREVIEW]}
     if hits:
         ctx["redacted"] = hits
     if ev.get("session_id") is not None or ev.get("agent_id") is not None:  # a hook call: bind the permit to the caller
         ctx.update(bound=True, session_id=ev.get("session_id"), agent_id=ev.get("agent_id"), permission_mode=ev.get("permission_mode"))
     return ctx
+
+
+# ---- W-43: the raw call of a permit whose command carries a secret, for the human's review only ----------------------
+def reveal_enabled() -> bool:
+    """`permit_reveal: true` in the human's JADE config (default off). Until then a secret is never kept anywhere and such a permit cannot be approved."""
+    return paths.config().get("permit_reveal") is True
+
+
+def reveal_file(db, permit_id) -> Path | None:
+    """The file that holds the raw call of a permit, or None when the id is not a permit id (an id is never joined to a path unless it has the exact shape)."""
+    return db.path.parent / REVEAL_DIR / f"{permit_id}.json" if isinstance(permit_id, str) and _PERMIT_ID.fullmatch(permit_id) else None
+
+
+def raw_parts(tool: str, a: policy.Assessment, event: dict | None = None, *, subject: str | None = None) -> dict:
+    """What `make_context` redacts, unredacted: the text shown, the text the plan hash covers and the content of a content-bound call."""
+    parts = {"subject": a.subject if subject is None else subject, "hash_subject": a.plan_subject}
+    ti = (event or {}).get("tool_input")
+    if isinstance(ti, dict) and policy.content_bound(tool, ti):
+        parts["content"] = policy.content_view(ti)
+    return parts
+
+
+def stash_raw(db, permit, parts: dict) -> None:
+    """Write the raw call for `permit` (a PENDING permit) to a private file that lives as long as the permit can still be approved. Never the ledger."""
+    f = reveal_file(db, permit.permit_id)
+    if f is None:
+        raise OSError("not a permit id")
+    f.parent.mkdir(mode=0o700, exist_ok=True)
+    f.parent.chmod(0o700)
+    tmp = f.with_name(f".{f.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"permit_id": permit.permit_id, "expires_at": permit.expires_at, **parts}, fh, ensure_ascii=False)
+        os.replace(tmp, f)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def keep_raw(db, permit_id: str, parts: dict) -> bool:
+    """Keep the raw call of a PENDING permit for the human, if the human allows it. False (and nothing written) when it is off, the permit is not PENDING, or the
+    write failed: the caller then behaves as before W-43 and the permit cannot be approved."""
+    if not reveal_enabled():
+        return False
+    p = get(db, permit_id)
+    if p is None or p.state != "PENDING":
+        return False
+    f = reveal_file(db, permit_id)
+    try:
+        if f is not None and f.is_file():
+            return True
+        stash_raw(db, p, parts)
+        return True
+    except OSError:
+        return False
+
+
+def drop_raw(db, permit_id: str) -> None:
+    f = reveal_file(db, permit_id)
+    if f is not None:
+        try:
+            f.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def read_raw(db, permit_id: str) -> dict | None:
+    """The raw call kept for this permit, or None when there is none, it is unreadable, names another permit or is past the permit's expiry (an expired one is deleted)."""
+    f = reveal_file(db, permit_id)
+    if f is None:
+        return None
+    try:
+        doc = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or doc.get("permit_id") != permit_id or not isinstance(doc.get("expires_at"), str):
+        return None
+    if doc["expires_at"] <= ts():
+        drop_raw(db, permit_id)
+        return None
+    return doc
+
+
+def _sweep_raw(db) -> None:
+    """Delete every raw file whose permit is gone, no longer PENDING or past its time."""
+    d = db.path.parent / REVEAL_DIR
+    try:
+        files = list(d.glob("prm_*.json"))
+    except OSError:
+        return
+    for f in files:
+        row = db.one("SELECT state, expires_at FROM permits WHERE permit_id=?", (f.stem,))
+        if row is None or row.state != "PENDING" or row.expires_at <= ts():
+            drop_raw(db, f.stem)
 
 
 def _preconditions(fingerprints: dict[str, str] | None) -> list[dict]:
@@ -208,9 +318,19 @@ def _fingerprints_of(doc: dict) -> dict[str, str]:
     return {p["kind"]: p["fingerprint"] for p in doc.get("preconditions", []) if p["kind"] != "policy_version"}
 
 
-def _current(doc: dict, fingerprints: dict[str, str] | None) -> bool:
-    """The permit was requested under the policy and the preconditions that hold now."""
-    return doc.get("policy_version") == paths.policy_version() and _fingerprints_of(doc) == {k: str(v) for k, v in (fingerprints or {}).items()}
+def _current(doc: dict, fingerprints: dict[str, str] | None, ignore: tuple[str, ...] = ()) -> bool:
+    """The permit was requested under the policy and the preconditions that hold now (`ignore`: kinds left out of the comparison)."""
+    want = {k: str(v) for k, v in (fingerprints or {}).items() if k not in ignore}
+    return doc.get("policy_version") == paths.policy_version() and {k: v for k, v in _fingerprints_of(doc).items() if k not in ignore} == want
+
+
+def _other_callers_content(row, doc: dict, want_ctx: dict | None, fingerprints: dict[str, str] | None) -> bool:
+    """A PENDING permit of another session or agent that differs from this request only in the content of the call (W-39): it is that caller's own request, still
+    current for them, so it stays and each id the human is shown stays valid. The same caller sending other content replaces its own request."""
+    if not (want_ctx and want_ctx.get("bound")) or not _current(doc, fingerprints, ignore=(CONTENT_KIND,)):
+        return False
+    ctx = _loads(row.scope)
+    return bool(ctx.get("bound")) and (ctx.get("session_id"), ctx.get("agent_id")) != (want_ctx.get("session_id"), want_ctx.get("agent_id"))
 
 
 def _same_request(row, doc: dict, ctx: dict, want_ctx: dict | None, fingerprints: dict[str, str] | None) -> bool:
@@ -244,11 +364,11 @@ def request(path, action: str, plan_hash: str, risk: str = "high", ttl_s: int = 
         row = pending_for(db, plan_hash, context=context, fingerprints=fingerprints)
         if row:
             return row
-        for stale in db.all("SELECT permit_id, doc_json FROM permits WHERE plan_hash=? AND state='PENDING'", (plan_hash,)):
+        for stale in db.all("SELECT permit_id, doc_json, scope FROM permits WHERE plan_hash=? AND state='PENDING'", (plan_hash,)):
             doc = _doc(stale)
             if doc is None:   # a record that cannot be read is never shown to the human; a fresh request replaces it
                 revoke(db, stale.permit_id, "superseded: the stored record is unreadable or does not match the permit schema")
-            elif not _current(doc, fingerprints):  # a request by another session stays: two agents must not keep revoking each other's
+            elif not _current(doc, fingerprints) and not _other_callers_content(stale, doc, context, fingerprints):
                 revoke(db, stale.permit_id, "superseded: the policy or a recorded precondition changed since it was requested")
         return _create(db, "PENDING", action, plan_hash, ttl_s, risk, decision_id, scope, context, environment, f"agent:{user()}", fingerprints)
     finally:
@@ -281,30 +401,88 @@ def printable(text: str) -> str:
     return "".join(out)
 
 
-def verify_scope(p) -> dict:
+def verify_scope(p, raw: dict | None = None) -> dict:
     """The review context, after checking that it is what the plan hash covers. Raises PermitError when it is missing, was cut, or does not
     hash to the permit's plan hash: the human would be approving something other than what is on the screen."""
-    return _verify(ctx_of(p), p.plan_hash)
+    return _verify(ctx_of(p), p.plan_hash, {x["kind"]: x["fingerprint"] for x in p.preconditions}, raw)
 
 
-def _verify(ctx: dict, plan_hash: str) -> dict:
+def _with_raw(ctx: dict, raw: dict) -> dict:
+    """W-43: the review context with the secrets put back, after checking that the raw call on file is exactly what the ledger holds in redacted form: it redacts to
+    the stored text, and the checks that follow in `_verify` hash it to the plan hash and to the content digest."""
+    bad = PermitError("the raw command on file does not match what the permit holds (it was edited, or it was not written by the gate); it is not approved")
+    subj, hs, view = raw.get("subject"), raw.get("hash_subject"), raw.get("content")
+    if not isinstance(subj, str) or not isinstance(hs, str) or len(subj) != ctx.get("length") or redact.redact(subj, secrets_only=True)[0][:MAX_SUBJECT] != ctx["subject"]:
+        raise bad
+    out = {**ctx, "subject": subj[:MAX_SUBJECT], "revealed": ctx["redacted"]}
+    out.pop("redacted")
+    if "hash_subject" in ctx:
+        if redact.redact(hs, secrets_only=True)[0][:MAX_SUBJECT * 2] != ctx["hash_subject"]:
+            raise bad
+        out["hash_subject"] = hs[:MAX_SUBJECT * 2]
+    elif hs != subj:
+        raise bad
+    if isinstance(ctx.get("content"), dict):
+        if not isinstance(view, str):
+            raise bad
+        out["content"] = {**ctx["content"], "text": view if len(view) <= MAX_CONTENT else view[:CONTENT_PREVIEW]}   # `_verify_content` checks it against the digest
+    return out
+
+
+def _verify(ctx: dict, plan_hash: str, recorded: dict[str, str] | None = None, raw: dict | None = None) -> dict:
     if "subject" not in ctx or "tool" not in ctx:
         raise PermitError("this permit carries no command to review; ask the agent to request it again")
     if ctx.get("redacted"):
-        raise PermitError(f"the command contains {ctx['redacted']} secret-shaped value(s) that JADE does not store, so it cannot be shown in full and is not approved. "
-                          "Ask the agent to pass the secret in an environment variable or a file and request the command again without it")
+        if raw is None:
+            raise PermitError(f"the command or its content contains {ctx['redacted']} secret-shaped value(s) that JADE does not store, so it cannot be shown in full and is not approved. "
+                              "Ask the agent to pass the secret in an environment variable or a file and request the call again without it "
+                              "(or, if you want to review such a command yourself, turn `permit_reveal` on in the JADE config and have the agent request it again)")
+        ctx = _with_raw(ctx, raw)
     if ctx.get("truncated"):
         raise PermitError(f"the command is {ctx.get('length', '?')} characters and cannot be shown in full (limit {MAX_SUBJECT}); "
                           "it is not approved. Ask the agent to put it in a script file you can read, then request the script")
     if policy.plan_hash(ctx["tool"], ctx.get("hash_subject", ctx["subject"]), ctx.get("hash_cwd", "")) != plan_hash:
         raise PermitError("the command on file does not match the permit's plan hash (the permit was not created by the gate); it is not approved")
+    _verify_content(ctx, recorded)
     return ctx
 
 
-def review_text(p, now_s: str | None = None) -> str:
+def _verify_content(ctx: dict, recorded: dict[str, str] | None) -> None:
+    """W-39: a call whose plan hash covers the path or the command only is approved with its content in full on the screen, and that content is what the
+    permit's `file_sha` precondition holds. A request made before content was bound (no content on file) is refused for a Write-type tool; the agent asks again."""
+    c = ctx.get("content")
+    if c is None:
+        if ctx["tool"] in policy.WRITE_TOOLS:
+            raise PermitError("this permit was requested before the content of a write was bound to it, so the content cannot be reviewed; ask the agent to request it again")
+        return
+    if not isinstance(c, dict) or c.get("truncated"):
+        raise PermitError(f"the content of the call is {c.get('length', '?') if isinstance(c, dict) else '?'} characters and cannot be shown in full (limit {MAX_CONTENT}); "
+                          "it is not approved. Ask the agent to make the change in smaller pieces, or to put it in a file you can read and request that")
+    if sha256(str(c.get("text", ""))) != c.get("sha256") or len(str(c.get("text", ""))) != c.get("length"):
+        raise PermitError("the content on file does not match its digest (the permit was not created by the gate); it is not approved")
+    if recorded is not None and recorded.get(CONTENT_KIND) != c.get("sha256"):
+        raise PermitError("the content on file is not the content the permit's precondition holds (the permit was not created by the gate); it is not approved")
+
+
+def confirm_code(p) -> str:
+    """The code a human types to approve: the first 6 characters of the content digest when the permit binds content (the plan hash of two writes to one
+    path is the same whatever they write), else of the plan hash."""
+    for x in p.preconditions:
+        if x["kind"] == CONTENT_KIND:
+            return x["fingerprint"][:6]
+    return p.plan_hash[:6]
+
+
+def review_raw(db, p, now_s: str | None = None) -> str:
+    """W-43: the approval screen with the secrets the ledger does not store, from the raw call kept for this permit. Human terminal only (the CLI checks, SI-09
+    blocks it for an agent). A permit without a secret gets the ordinary screen."""
+    return review_text(p, now_s, raw=read_raw(db, p.permit_id) if ctx_of(p).get("redacted") else None)
+
+
+def review_text(p, now_s: str | None = None, raw: dict | None = None) -> str:
     """The whole approval screen: every character of the command (escaped), its length, the first 12 characters of the plan hash, the working
     directory, the rule, the age of the request and the decision's state. Raises PermitError instead of showing a partial command."""
-    ctx = verify_scope(p)
+    ctx = verify_scope(p, raw)
     age = ""
     try:
         secs = int((parse_ts(now_s or ts()) - parse_ts(p.issued_at)).total_seconds()) if p.state == "PENDING" else 0
@@ -312,11 +490,18 @@ def review_text(p, now_s: str | None = None) -> str:
     except ValueError:
         pass
     body = printable(ctx["subject"]).replace("\n", "\n  | ")
-    return (f"Permit   {p.permit_id}   risk {p.risk_level}   environment {p.environment}   {age}\n"
+    content = ""
+    if isinstance(ctx.get("content"), dict):
+        c = ctx["content"]
+        content = (f"Content  {c['length']} characters, sha256 {c['sha256'][:12]}, shown in full below; the permit covers exactly this content\n"
+                   f"  | {printable(c['text']).replace(chr(10), chr(10) + '  | ')}\n")
+    secrets = (f"Secrets  {ctx['revealed']} secret-shaped value(s) are shown below in full, for you only: the ledger stores them redacted, and the raw call is kept in a "
+               "private file that is deleted when this permit is approved, revoked or expires\n") if ctx.get("revealed") else ""
+    return (f"Permit   {p.permit_id}   risk {p.risk_level}   environment {p.environment}   {age}\n{secrets}"
             f"Rule     {printable(str(ctx.get('rule', '?')))}: {printable(str(ctx.get('rationale', '')))}\n"
             f"Tool     {printable(ctx['tool'])}   cwd {printable(str(ctx.get('cwd', '')))}\n"
             f"Plan     sha256 {p.plan_hash[:12]}   {ctx.get('length', len(ctx['subject']))} characters, shown in full below\n"
-            f"Command\n  | {body}\n"
+            f"Command\n  | {body}\n{content}"
             f"Approving allows exactly this call once within {p.ttl_s // 60} minutes.")
 
 
@@ -357,11 +542,11 @@ def approve(path, permit_id: str, stdin_isatty: bool | None = None):
                 refused = f"permit {permit_id} is revoked: {why}"
             else:
                 ctx = _loads(row["scope"])
-                if "subject" in ctx:  # a permit that carries a command is approved only when that command is what the plan hash covers
-                    _verify(ctx, row["plan_hash"])
                 doc = _doc(row)
                 if doc is None:
                     raise PermitError(f"permit {permit_id} has an unreadable or invalid stored record and cannot be approved; revoke it and ask the agent to request it again")
+                if "subject" in ctx:  # a permit that carries a command is approved only when that command (and its content, W-39) is what the permit covers
+                    _verify(ctx, row["plan_hash"], _fingerprints_of(doc), read_raw(db, permit_id) if ctx.get("redacted") else None)
                 doc.update(state="ISSUED", principal=f"human:{user()}", approval_reference=f"tty:{user()}@{ts()}", issued_at=ts(),
                            expires_at=ts_in(row["ttl_s"]))
                 doc.pop("seal", None)
@@ -371,7 +556,9 @@ def approve(path, permit_id: str, stdin_isatty: bool | None = None):
                             (json.dumps(doc, ensure_ascii=False), doc["issued_at"], doc["expires_at"], permit_id))
                 db.event(permit_id, "permit_approved", prev="PENDING", next="ISSUED", guard=doc["approval_reference"], actor=doc["principal"], con=con)
         if refused:
+            drop_raw(db, permit_id)
             raise PermitError(refused)
+        drop_raw(db, permit_id)   # W-43: approved, the raw call is no longer needed
         return get(db, permit_id)
     finally:
         if own:
@@ -395,11 +582,54 @@ def _caller_refusal(ctx: dict, session: str | None, agent: str | None) -> str | 
     return None
 
 
+def call_id_of(event: dict | None) -> str | None:
+    """The host's id of one tool call (`tool_use_id`), or None when the payload carries none or one of an unexpected shape. It is the same for every
+    delivery of one call, and different for the model's next attempt (W-40)."""
+    v = (event or {}).get("tool_use_id")
+    return v if isinstance(v, str) and _CALL_ID.fullmatch(v) else None
+
+
+def _call_key(db, call_id: str) -> str:
+    return f"permit_call:{db.source or ''}:{call_id}"
+
+
+def consumed_by_call(path, call_id: str | None, plan_hash: str, *, level: str, session: str | None = None, agent: str | None = None,
+                     fingerprints: dict[str, str] | None = None):
+    """The permit that was spent by this very call a moment ago, or None (W-40). The gate asks it before it looks for an unused permit, so that one call
+    delivered twice (the hook registered in two settings files, a host retry, two processes at once) is answered the same way both times and spends one
+    permit. Nothing about the permit is trusted because of the id: the permit must still be CONSUMED by an event carrying this id no more than
+    CALL_REPLAY_S ago, name the same plan hash, content and caller, be at least as severe as the call, be human-approved when the call needs that and
+    keep its seal. A different call (the model's retry has a new id), other content, another session or agent, or a late replay finds nothing."""
+    if call_id is None:
+        return None
+    db, own = _db(path)
+    try:
+        ev = db.one("SELECT entity_id, ts FROM events WHERE idempotency_key=? AND kind='permit_consumed'", (_call_key(db, call_id),))
+        if ev is None or ev.ts < ts_in(-CALL_REPLAY_S):
+            return None
+        row = db.one("SELECT * FROM permits WHERE permit_id=?", (ev.entity_id,))
+        if row is None or row.state != "CONSUMED" or row.plan_hash != plan_hash:
+            return None
+        doc = _doc(row, validate=False)
+        if doc is None or _static_refusal(db, row, doc, level) is not None or _doc(row) is None:
+            return None
+        if _caller_refusal(_loads(row.scope), session, agent) is not None:
+            return None
+        want, have = _fingerprints_of(doc), {k: str(v) for k, v in (fingerprints or {}).items()}
+        if any(have.get(k) != v for k, v in want.items()) or (CONTENT_KIND in have and CONTENT_KIND not in want):
+            return None   # the same preconditions try_consume checks: other content or a moved HEAD is not the call that was permitted
+        return _ns(row, doc)
+    finally:
+        if own:
+            db.close()
+
+
 def try_consume(path, permit_id: str, plan_hash: str, *, level: str, session: str | None = None, agent: str | None = None,
-                fingerprints: dict[str, str] | None = None) -> str | None:
+                fingerprints: dict[str, str] | None = None, call_id: str | None = None) -> str | None:
     """Atomically use an ISSUED, unexpired, unused permit for exactly this plan hash. Returns None when it was used (once, then never
     again), else why not. `level` is the risk the classifier gives this command now; `fingerprints` are the current values of the
-    preconditions recorded at request time (git HEAD and the like); `session` and `agent` identify the caller."""
+    preconditions recorded at request time (git HEAD and the like); `session` and `agent` identify the caller; `call_id` is the host's id of this call,
+    recorded with the use so that a second delivery of the same call can be answered (`consumed_by_call`, W-40)."""
     db, own = _db(path)
     try:
         with db.tx() as con:
@@ -429,7 +659,12 @@ def try_consume(path, permit_id: str, plan_hash: str, *, level: str, session: st
             for kind, fp in want.items():
                 if have.get(kind) != fp:
                     db.event(permit_id, "permit_precondition_mismatch", guard=kind, con=con)
+                    if kind == CONTENT_KIND:
+                        return "the content of this call differs from the content that was approved (the precondition file_sha changed since approval); a new permit is needed for it"
                     return f"the precondition {kind} changed since approval"
+            if CONTENT_KIND in have and CONTENT_KIND not in want:   # W-39: requested before content was bound: nothing says which content the human saw
+                db.event(permit_id, "permit_precondition_mismatch", guard=CONTENT_KIND, con=con)
+                return "the permit was requested before the content of a call was bound to it, so it does not cover this content; request it again"
             ctx = _loads(row["scope"])
             if (why := _caller_refusal(ctx, session, agent)):
                 return why
@@ -437,10 +672,14 @@ def try_consume(path, permit_id: str, plan_hash: str, *, level: str, session: st
                 con.execute("UPDATE permits SET state='REVOKED' WHERE permit_id=?", (permit_id,))
                 db.event(permit_id, "permit_revoked", prev="ISSUED", next="REVOKED", guard=why, con=con)
                 return f"the permit was revoked: {why}"
+            key = _call_key(db, call_id) if call_id else None
+            if key and con.execute("SELECT 1 FROM events WHERE idempotency_key=?", (key,)).fetchone():
+                return "another permit was already used for this call"   # one call spends one permit
             cur = con.execute("UPDATE permits SET state='CONSUMED', uses=1 WHERE permit_id=? AND state='ISSUED' AND uses=0", (permit_id,))
             if cur.rowcount != 1:
                 return "the permit was used concurrently"
-            db.event(permit_id, "permit_consumed", prev="ISSUED", next="CONSUMED", guard=f"plan_hash equal, {level}, unexpired, unused", actor="hook", con=con)
+            db.event(permit_id, "permit_consumed", prev="ISSUED", next="CONSUMED", guard=f"plan_hash equal, {level}, unexpired, unused", actor="hook", con=con,
+                     key=key)
             return None
     finally:
         if own:
@@ -452,20 +691,40 @@ def consume(path, permit_id: str, plan_hash: str, *, level: str, session: str | 
     return try_consume(path, permit_id, plan_hash, level=level, session=session, agent=agent, fingerprints=fingerprints) is None
 
 
-def find_usable(path, plan_hash: str, *, level: str, session: str | None = None, agent: str | None = None):
+def find_usable(path, plan_hash: str, *, level: str, session: str | None = None, agent: str | None = None,
+                fingerprints: dict[str, str] | None = None):
     """The newest ISSUED, unexpired, unused permit for this plan that could cover a command of this risk level and was requested by this session
-    and agent. When only another caller's permit qualifies it is returned too, so that using it says why it cannot be used."""
+    and agent. With `fingerprints` (the preconditions of this call now) a permit whose recorded preconditions match is preferred: two writes to one
+    path with different content have one plan hash, and the permit of the other content must not hide this one (W-39). When only a permit that does
+    not fit (another caller's, other preconditions) qualifies it is returned too, so that using it says why it cannot be used."""
     db, own = _db(path)
     try:
-        other = None
+        other = stale = None
+        have = None if fingerprints is None else {k: str(v) for k, v in fingerprints.items()}
         for row in db.all("SELECT * FROM permits WHERE plan_hash=? AND state='ISSUED' AND uses=0 AND expires_at>? ORDER BY issued_at DESC", (plan_hash, ts())):
             doc = _doc(row, validate=False)
             if doc is None or _static_refusal(db, row, doc, level) is not None or _doc(row) is None:
                 continue
-            if _caller_refusal(_loads(row.scope), session, agent) is None:
+            if _caller_refusal(_loads(row.scope), session, agent) is not None:
+                other = other or _ns(row, doc)
+            elif have is None or _fingerprints_of(doc) == have:
                 return _ns(row, doc)
-            other = other or _ns(row, doc)
-        return other
+            else:
+                stale = stale or _ns(row, doc)
+        return stale or other
+    finally:
+        if own:
+            db.close()
+
+
+def content_of_decision(path, decision_id: str) -> str | None:
+    """The content digest (`file_sha`) recorded on the permit a decision was executed under, or None when no permit of it bound content. PostToolUse
+    uses it to tell the call that was permitted from another write to the same path (W-40)."""
+    db, own = _db(path)
+    try:
+        row = db.one("SELECT * FROM permits WHERE decision_id=? AND state='CONSUMED' ORDER BY issued_at DESC", (decision_id,))
+        doc = _doc(row, validate=False) if row is not None else None
+        return _fingerprints_of(doc).get(CONTENT_KIND) if doc else None
     finally:
         if own:
             db.close()
@@ -478,6 +737,7 @@ def revoke(path, permit_id: str, reason: str = "revoked") -> bool:
             cur = con.execute("UPDATE permits SET state='REVOKED' WHERE permit_id=? AND state IN ('PENDING','ISSUED')", (permit_id,))
             if cur.rowcount:
                 db.event(permit_id, "permit_revoked", next="REVOKED", guard=reason, con=con)
+                drop_raw(db, permit_id)
             return bool(cur.rowcount)
     finally:
         if own:
@@ -490,6 +750,7 @@ def revoke_for_decision(db, con, decision_id: str, reason: str) -> int:
     for r in con.execute("SELECT permit_id, state FROM permits WHERE decision_id=? AND state IN ('PENDING','ISSUED')", (decision_id,)).fetchall():
         con.execute("UPDATE permits SET state='REVOKED' WHERE permit_id=?", (r["permit_id"],))
         db.event(r["permit_id"], "permit_revoked", prev=r["state"], next="REVOKED", guard=reason, con=con)
+        drop_raw(db, r["permit_id"])
         n += 1
     return n
 
@@ -510,7 +771,8 @@ def sweep(path) -> int:
                     con.execute("UPDATE permits SET state='REVOKED' WHERE permit_id=?", (r["permit_id"],))
                     db.event(r["permit_id"], "permit_revoked", prev=r["state"], next="REVOKED", guard=why, con=con)
                     n += 1
-            return n
+        _sweep_raw(db)
+        return n
     finally:
         if own:
             db.close()

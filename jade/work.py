@@ -85,6 +85,91 @@ def update(items: list[dict], wid: str, *, status: str | None = None, note: str 
     return w
 
 
+ACTIVE = ("open", "in_progress", "waiting_human", "blocked")   # a finished item never blocks a new one with the same title
+ID_PATTERN = re.compile(r"^W-([0-9]{2,4})$")
+ID_MAX = 9999   # schemas/work-item.schema.json: `^W-[0-9]{2,4}$`
+
+
+class DuplicateItem(ValueError):
+    """An active item with the same normalised title and target exists (W-51); `existing` is its id."""
+
+    def __init__(self, existing: str, title: str):
+        super().__init__(f"{existing} already tracks {title!r} (same normalised title and target); update it with `jade work set {existing}`")
+        self.existing = existing
+
+
+def normalise_title(title: str) -> str:
+    """Lower case, every run of non-alphanumerics a single space: `Fix  the Gate!` and `fix the gate` are one title."""
+    return " ".join(re.sub(r"[\W_]+", " ", str(title).casefold()).split())
+
+
+def _key(w: dict) -> tuple[str, frozenset]:
+    """Title and target. The work item has no target field: its evidence references are the target (what it is about)."""
+    return normalise_title(w.get("title", "")), frozenset(w.get("evidence_refs", []))
+
+
+def _find_duplicate(items: list[dict], title: str, evidence_refs) -> dict | None:
+    key = (normalise_title(title), frozenset(evidence_refs))
+    return next((x for x in items if x["status"] in ACTIVE and x.get("title") and _key(x) == key), None)
+
+
+def dedupe(items: list[dict]) -> tuple[list[dict], dict[str, str]]:
+    """(items to keep, {duplicate id: id it duplicates}). Of each group of active items with one normalised title and target the first stays;
+    finished items are never duplicates. Nothing is changed: the caller decides what to do with the skipped ones."""
+    seen: dict[tuple, str] = {}
+    keep, skipped = [], {}
+    for w in items:
+        k = _key(w)
+        if w["status"] in ACTIVE and w.get("title"):
+            if k in seen:
+                skipped[w["id"]] = seen[k]
+                continue
+            seen[k] = w["id"]
+        keep.append(w)
+    return keep, skipped
+
+
+def add(items: list[dict], *, title: str, impact: str, rationale: str, next_action: str, trigger: str, type: str = "followup",  # noqa: A002
+        priority: str = "P2", owner: str = "agent", dependencies=(), evidence_refs=(), parent: str | None = None, phase: int | None = None,
+        today: date | None = None) -> dict:
+    """Append a new open item with the next free id. Validates against the contract before anything changes, refuses a duplicate of an
+    active item (`DuplicateItem`) and a dependency or parent that does not exist (`ValueError`)."""
+    today_s = (today or date.today()).isoformat()
+    title = " ".join(str(title).split())
+    if not title:
+        raise ValueError("an item needs a title")
+    dependencies, evidence_refs = list(dependencies), list(evidence_refs)
+    ids = {x["id"] for x in items}
+    for ref in [*dependencies, *([parent] if parent else [])]:
+        if ref not in ids:
+            raise ValueError(f"{ref} is not a work item in this file")
+    dup = _find_duplicate(items, title, evidence_refs)
+    if dup:
+        raise DuplicateItem(dup["id"], title)
+    n = max((int(m.group(1)) for x in items if (m := ID_PATTERN.match(x["id"]))), default=0) + 1
+    if n > ID_MAX:
+        raise ValueError(f"no free id: the contract allows W-{ID_MAX} at most")
+    w = {"schema_version": "1.0.0", "id": f"W-{n:02d}", "parent": parent, "title": title, "type": type, "priority": priority, "status": "open", "owner": owner,
+         "dependencies": dependencies, "impact": impact, "rationale": rationale, "evidence_refs": evidence_refs, "next_action": next_action,
+         "retry_or_revisit_trigger": trigger, "created_at": today_s, "updated_at": today_s, "history": [{"at": today_s, "change": "created"}]}
+    if phase is not None:
+        w["phase"] = phase
+    try:
+        schemas.validate("work-item", w)
+    except Exception as e:  # noqa: BLE001 - jsonschema's error type is not part of this module's contract
+        where = "/".join(str(p) for p in getattr(e, "absolute_path", ()))
+        raise ValueError(f"not a valid work item ({where + ': ' if where else ''}{str(e).splitlines()[0]})") from None
+    items.append(w)
+    return w
+
+
+def ready(items: list[dict], closed: str | None = None) -> list[dict]:
+    """Open items that wait on other items, all of which are done. With `closed`, only those that name that item (what it just freed)."""
+    done = {x["id"] for x in items if x["status"] == "done"}
+    return [w for w in items if w["status"] == "open" and w["dependencies"] and set(w["dependencies"]) <= done
+            and (closed is None or closed in w["dependencies"])]
+
+
 def _cell(s) -> str:
     return str(s).replace("|", "\\|").replace("\n", " ")
 

@@ -21,7 +21,7 @@ def provider(shift: float = 0.0):
     return adapter.FixtureProvider(lambda s, q, m: {k: {"type": "noul", "noul": max(0.0, min(1.0, p_of(s) + shift))} for k in q})
 
 
-def seed(db: ledger.Ledger, *, hi: int = 120, lo: int = 165, mid: int = 14, hold: int = 40, val: int = 20, prefix: str = "s") -> None:
+def seed(db: ledger.Ledger, *, hi: int = 120, lo: int = 165, mid: int = 14, hold: int = 160, val: int = 20, prefix: str = "s") -> None:
     """Labeled calls spread over the splits. dev + calibration get `hi` clear accepts (true), `lo` clear rejects (false) and `mid` answers
     at P=0.75, 6 of them false claims: the default accept band (0.70) takes them, a stricter one (0.85) abstains. The protected and
     validation splits get clear accepts and rejects only."""

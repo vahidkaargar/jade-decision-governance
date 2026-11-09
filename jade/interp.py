@@ -37,6 +37,7 @@ LANGS = (
     (re.compile(r"^php\d*$"), "php"),
     (re.compile(r"^osascript$"), "applescript"),
     (re.compile(r"^lua\d*$"), "lua"),
+    (re.compile(r"^(?:pwsh|powershell|swift|rscript|tclsh|julia|groovy)$"), "generic"),   # no parser of their own: every string they hold is searched
 )
 
 

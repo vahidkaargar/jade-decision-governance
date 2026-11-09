@@ -62,7 +62,7 @@ Method: `evals/baseline/mine_transcripts.py` pairs each Bash `tool_use` whose co
 | Transcript files scanned / with Jev calls | 6,473 / 379 | Jev used in ~6% of transcripts (many files are subagents) |
 | Real calls (excl. 12 `--dry-run`) | 907 over 14 days ≈ 65/day | Median 2 calls per file, max 56 |
 | Primitive mix | verify 684 (75%), choice 223 (25%), noul-custom 0, score 0 | Two of four primitives never used; `verify` template dominates |
-| Parsed results | P(yes): 640 · choice: 182 · error/unparsed: 85 (9.4%) | 78 "no_parse" = output not matching any pattern (short outputs ~31–36 chars, likely shell/quoting errors) |
+| Parsed results | P(yes): 640 · choice: 182 · error/unparsed: 85 (9.4%) | 78 "no_parse" = output not matching any pattern, 31–36 characters each. **Not quoting errors** (W-18, below): most likely commands that only *mention* `jev` (unverified until the miner is re-run) |
 | P(yes) distribution | mean 0.60, median 0.64, p10 0.25, p90 0.88 | Bands: ≥0.85: 17% · 0.7–0.85: 26% · 0.5–0.7: 27% · 0.3–0.5: 17% · <0.3: 13% |
 | Share of verify results below the docs' 0.7 "yes" line | 365/640 = **57%** | Most verifications land in or below the abstention band |
 | Low-P (<0.7) calls followed by a done/verified/fixed claim in the next assistant message | 109/365 = **30%** (heuristic) | Includes P values as low as 0.02. This is the "accepting ~60% outputs" problem, measured. |
@@ -71,8 +71,10 @@ Method: `evals/baseline/mine_transcripts.py` pairs each Bash `tool_use` whose co
 | Choice confidence seen | mostly 0.8–1.0 | Options often shaped so one dominates |
 | State passed via stdin (`-s -`) | 23 (2.5%) | 97% pass evidence inline on the command line — truncated, quoting errors (`unrecognized arguments` 6×) |
 | Batching | 0 | CLI cannot |
-| Failures | 85 calls: 78 unparsable output, 6 CLI usage errors (shell quoting), 1 network timeout; a raw text search of the transcripts also shows `no key` and `No such file or directory` lines from the first days | Fail-open: a failed call never blocked anything |
+| Failures | 85 calls: 78 unparsable output (see W-18 below), 6 CLI usage errors (shell quoting), 1 network timeout; a raw text search of the transcripts also shows `no key` and `No such file or directory` lines from the first days | Fail-open: a failed call never blocked anything |
 | Cost | ≈ $0.013 for all 907 calls | Not a constraint |
+
+**The 78 unparsed outputs (W-18).** Not examined row by row: the private dataset was not read. From the committed code and a synthetic reproduction, the cause is ours, not the provider's. (1) A successful `jev` line is `P(yes)=0.64  [cost $0.000013]`, 29 characters, and every provider-side failure is a `jev: ...` line that the miner already buckets; neither can be a silent 31-36 character `no_parse`. (2) The miner paired the result with *any* Bash command whose text contained `jev verify|noul|choice|score`: a commit message, an `echo`, a `grep`, a file written by heredoc. Such a command prints something unrelated, or nothing, and Claude Code's placeholder for no output, `(Bash completed with no output)`, is exactly 31 characters, the bottom of the observed band. (3) The miner also kept only the first `jev` in a command, so a second call in the same command was never counted. The miner now flags mentions (`mention: true`, excluded from every real-call count, reported as `calls_mention`), emits one row per real call, and buckets a real call's non-answer by shape (`empty_output`, `exit_status_only`, `background_job`, residual `no_parse`). What is still unknown: how many of the 78 are mentions and how many are real calls with redirected or empty output, and what the 36-character end of the band is. Both need a re-run of `evals/baseline/mine_transcripts.py` over the transcripts, which prints counts only; until then the 9.4% error rate above is an upper bound on provider and parse failures, and the 907 real-call count may include mentions and omit second calls. G5's "6 quoting failures" stands; the 78 are not additional quoting failures.
 
 Baseline latency and cost budgets derived from these numbers are in `docs/04-calibration-and-evaluation.md` §6.
 

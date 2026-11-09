@@ -13,10 +13,10 @@ TERMINAL = {"SUCCEEDED", "COMPENSATED", "ROLLED_BACK", "REJECTED", "CANCELLED", 
 WAITING = {"WAITING_HUMAN", "WAITING_DEPENDENCY", "RETRY_SCHEDULED"}
 HUMAN_EVENTS = {"human_answer", "human_accept", "human_reject"}
 # An agent drives a decision only through the events below `agent_may`. The rest belong to someone else: a human at a terminal, the hook
-# (`execute` needs the matching command and a consumed permit at risk >= high; `context_changed` and `deadline` are raised by the runtime), or the
+# (`execute` needs the matching command and a consumed permit at risk >= high; `deadline` is raised by the runtime), or the
 # outcome record (`observe`, `verified`, `failed`, `unknown`, `reconcile` follow only from `jade decide outcome`, which stores the observation first).
 OUTCOME_EVENTS = {"observe", "verified", "failed", "unknown", "reconcile"}
-RUNTIME_EVENTS = {"deadline", "context_changed"}
+RUNTIME_EVENTS = {"deadline"}
 # `deadline` ends any state that is waiting for something that may never come. EXECUTING, VERIFYING and OUTCOME_UNKNOWN are not in it: a call that
 # started and never reported is unknown (SI-07), never expired, and an unknown outcome is left only by `reconcile` or a human `cancel`.
 EXPIRES = {"RECEIVED", "VALIDATED", "CLASSIFIED", "EVALUATING", "ABSTAINED", "NEEDS_EVIDENCE", "NEEDS_REVISION", "ACCEPTED", "AUTHORIZED", "FAILED",
@@ -36,7 +36,7 @@ T = {
     ("ABSTAINED", "escalate"): "WAITING_HUMAN", ("NEEDS_EVIDENCE", "escalate"): "WAITING_HUMAN",
     ("NEEDS_REVISION", "revise"): "VALIDATED", ("NEEDS_REVISION", "escalate"): "WAITING_HUMAN",
     ("ACCEPTED", "authorize"): "AUTHORIZED", ("ACCEPTED", "authorize_without_permit_high_risk"): "WAITING_HUMAN",
-    ("AUTHORIZED", "execute"): "EXECUTING", ("AUTHORIZED", "context_changed"): "NEEDS_REVISION",
+    ("AUTHORIZED", "execute"): "EXECUTING",
     ("EXECUTING", "observe"): "VERIFYING",
     ("VERIFYING", "verified"): "SUCCEEDED", ("VERIFYING", "failed"): "FAILED", ("VERIFYING", "unknown"): "OUTCOME_UNKNOWN",
     ("FAILED", "compensate"): "COMPENSATED", ("FAILED", "rollback"): "ROLLED_BACK", ("FAILED", "retry"): "RETRY_SCHEDULED",
@@ -143,7 +143,7 @@ def apply(path, ev: dict):
                         "WHERE decision_id=?",
                         (dst, src if dst in WAITING else row["prev_status"], rev, json.dumps(doc, ensure_ascii=False), ts(), expires,
                          doc.get("route"), ev["decision_id"]))
-            if dst in TERMINAL or ev["event"] == "context_changed":
+            if dst in TERMINAL:
                 from . import permits
 
                 permits.revoke_for_decision(db, con, ev["decision_id"], f"decision {dst} ({ev['event']})")

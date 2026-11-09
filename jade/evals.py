@@ -8,16 +8,18 @@ import json
 import math
 import random
 import re
+import statistics
 from pathlib import Path
 
 from . import ledger, paths
-from .util import is_human_tty, language, ts  # noqa: F401 - re-exported
+from .util import is_human_tty, language, now, parse_ts, ts  # noqa: F401 - re-exported
 
 SPLITS = (("dev", 50), ("calibration", 70), ("validation", 85), ("protected", 100))
 FIT_SOURCES = ("observed", "user_correction", "adjudicated")
 MIN_LABELED = 200
 FA_BUDGET = 0.05
 ADJUDICATION_PER_WEEK = 10
+ALPHA = 0.05   # family-wise level of the Holm correction over the paired metrics (policies/promotion.yaml offline_replay.alpha)
 
 
 class ProtectedSetAccessDenied(PermissionError):
@@ -83,7 +85,119 @@ def paired_bootstrap(a: list[int], b: list[int], rounds: int = 2000, seed: int =
         idx = [rng.randrange(n) for _ in range(n)]
         diffs.append(sum(a[i] - b[i] for i in idx) / n)
     diffs.sort()
-    return {"diff": sum(x - y for x, y in zip(a, b, strict=True)) / n, "ci95": [diffs[int(0.025 * rounds)], diffs[int(0.975 * rounds) - 1]], "n": n}
+    # two-sided bootstrap p for "no difference": the share of resampled differences on each side of zero, counting the observed one (so never 0)
+    below, above = (sum(1 for d in diffs if d <= 0) + 1) / (rounds + 1), (sum(1 for d in diffs if d >= 0) + 1) / (rounds + 1)
+    return {"diff": sum(x - y for x, y in zip(a, b, strict=True)) / n, "ci95": [diffs[int(0.025 * rounds)], diffs[int(0.975 * rounds) - 1]], "n": n,
+            "p": min(1.0, 2 * min(below, above))}
+
+
+def holm_adjust(pvals: dict[str, float]) -> dict[str, float]:
+    """Holm step-down adjusted p-values: a hypothesis is rejected at family-wise level alpha exactly when its adjusted p is at or below alpha
+    (the same rule as `improve.holm_rejected`). Without it, the smallest of several metrics compared at once looks significant by chance."""
+    m, out, run = len(pvals), {}, 0.0
+    for i, (name, p) in enumerate(sorted(pvals.items(), key=lambda kv: kv[1])):
+        run = max(run, min(1.0, (m - i) * p))
+        out[name] = run
+    return {k: out[k] for k in pvals}
+
+
+def risk_coverage_curve(preds: list[float], labels: list[int], points: int = 10) -> list[dict]:
+    """Selective risk against coverage. A row's confidence is max(p, 1-p) and its call is p >= 0.5; the curve keeps the most confident
+    `coverage` share of the rows and reports the error rate among them. A model whose confidence means something has a curve that rises
+    with coverage; a flat one says abstaining on the least confident rows buys nothing."""
+    n = len(preds)
+    if n == 0 or n != len(labels):
+        raise ValueError("preds and labels must be non-empty and the same length")
+    rows = sorted(((max(p, 1 - p), (p >= 0.5) != bool(y)) for p, y in zip(preds, labels, strict=True)), key=lambda r: -r[0])
+    out, seen = [], set()
+    for i in range(1, points + 1):
+        k = max(1, math.ceil(i * n / points))
+        if k in seen:
+            continue
+        seen.add(k)
+        conf = rows[k - 1][0]
+        # Rows with the same confidence have no order among themselves (an always-abstaining judge gives every row 0.5), so a cut inside such a
+        # group counts its share at the group's error rate, not at whichever rows happen to come first in the ledger.
+        above, tied = [bad for c, bad in rows if c > conf], [bad for c, bad in rows if c == conf]
+        errors = sum(above) + (k - len(above)) * sum(tied) / len(tied)
+        out.append({"coverage": round(i / points, 4), "n": k, "min_confidence": round(conf, 4), "selective_risk": errors / k})
+    return out
+
+
+def _ece(pairs: list[tuple[float, int]], bins: int = 10) -> float:
+    cells: list[list[tuple[float, int]]] = [[] for _ in range(bins)]
+    for p, y in pairs:
+        cells[min(bins - 1, int(p * bins))].append((p, y))
+    return sum(len(c) / len(pairs) * abs(sum(p for p, _ in c) / len(c) - sum(y for _, y in c) / len(c)) for c in cells if c)
+
+
+def ece_bootstrap(preds: list[float], labels: list[int], rounds: int = 500, seed: int = 7, bins: int = 10) -> dict:
+    """ECE with a percentile bootstrap 95% interval over the rows. ECE is biased upward on a small sample, so the interval can sit above the
+    point estimate there: read its width, and compare two models by whether their intervals overlap."""
+    n = len(preds)
+    if n == 0 or n != len(labels):
+        raise ValueError("preds and labels must be non-empty and the same length")
+    pairs = list(zip(preds, labels, strict=True))
+    rng, vals = random.Random(seed), []  # noqa: S311 - statistics, not security
+    for _ in range(rounds):
+        vals.append(_ece([pairs[rng.randrange(n)] for _ in range(n)], bins))
+    vals.sort()
+    return {"ece": _ece(pairs, bins), "ci95": [vals[int(0.025 * rounds)], vals[max(0, int(0.975 * rounds) - 1)]], "n": n, "rounds": rounds}
+
+
+def _margin(probs) -> float | None:
+    if not isinstance(probs, dict) or len(probs) < 2 or not all(isinstance(v, int | float) and not isinstance(v, bool) for v in probs.values()):
+        return None
+    top = sorted(probs.values(), reverse=True)
+    return float(top[0] - top[1])
+
+
+def choice_metrics(rows: list[dict]) -> dict:
+    """Choice questions. Each row is `{probabilities: {option: p}, label}` where `label` is 1 when the top option was the right one. Top-1
+    accuracy (with a Wilson interval) and the margin between the two most probable options; accuracy is also split at the median margin,
+    because a narrow margin that is no less accurate than a wide one means the probabilities carry no information about being right."""
+    kept = [(m, int(bool(r["label"]))) for r in rows if isinstance(r, dict) and "label" in r for m in [_margin(r.get("probabilities"))] if m is not None]
+    if not kept:
+        return {"n": 0}
+    n, hits = len(kept), sum(y for _, y in kept)
+    margins = [m for m, _ in kept]
+    med = statistics.median(margins)
+    narrow, wide = [y for m, y in kept if m <= med], [y for m, y in kept if m > med]
+    lo, hi = wilson(hits, n)
+    return {"n": n, "top1_accuracy": hits / n, "top1_ci95": [round(lo, 4), round(hi, 4)],
+            "margin": {"min": min(margins), "median": med, "mean": sum(margins) / n, "max": max(margins)},
+            "by_margin": {"narrow": {"n": len(narrow), "accuracy": sum(narrow) / len(narrow) if narrow else None},
+                          "wide": {"n": len(wide), "accuracy": sum(wide) / len(wide) if wide else None}}}
+
+
+def routing_confusion(pairs: list[tuple[str, str]]) -> dict:
+    """Confusion matrix of the router: `(expected, got)` pairs over `ROUTES`. `jev_false_positive_rate` is the share of FAST cases the router
+    sent to Jev (a call where FAST sufficed, docs/04 section 6); `jev_false_negative_rate` the share of JEV cases it did not send there."""
+    matrix: dict[str, dict[str, int]] = {}
+    for want, got in pairs:
+        if want not in ROUTES or got not in ROUTES:
+            raise ValueError(f"unknown route in ({want!r}, {got!r}); routes are {ROUTES}")
+        matrix.setdefault(want, {}).setdefault(got, 0)
+        matrix[want][got] += 1
+    n = len(pairs)
+    fast, jev = sum(matrix.get("FAST", {}).values()), sum(matrix.get("JEV", {}).values())
+    return {"n": n, "matrix": matrix, "accuracy": sum(row.get(w, 0) for w, row in matrix.items()) / n if n else None,
+            "recall": {w: row.get(w, 0) / sum(row.values()) for w, row in matrix.items()},
+            "jev_false_positive_rate": matrix.get("FAST", {}).get("JEV", 0) / fast if fast else None,
+            "jev_false_negative_rate": (jev - matrix.get("JEV", {}).get("JEV", 0)) / jev if jev else None}
+
+
+def routing_confusion_from_cases(cases: list[dict]) -> dict:
+    """`routing_confusion` over a routing case set (`evals/routing`): the hand-labelled `should_route` against what `route.preflight` gives on
+    the case's inputs. No provider is involved. Cases with a recorded `known_gap` show up off the diagonal, by design."""
+    from . import route
+
+    pairs = []
+    for c in cases:
+        got = route.preflight(claim=c.get("claim", ""), evidence=c.get("evidence", ""), options=c.get("options"), command=c.get("command"), risk=c.get("risk", "low"),
+                              about_to_claim_done=c.get("about_to_claim_done", False), deterministic=c.get("deterministic", False)).route
+        pairs.append((c["should_route"], got))
+    return routing_confusion(pairs)
 
 
 def load_protected(family: str, root: Path | None = None, stdin_isatty: bool | None = None) -> list[dict]:
@@ -172,10 +286,21 @@ def report(db: ledger.Ledger, include_protected: bool = False) -> dict:
         accept, reject = thresholds.bands("noul", fam, "low", g)
         m = metrics([r["p"] for r in rows], [r["label"] for r in rows], accept, reject)
         m["thresholds"] = {"accept": accept, "reject": reject}
+        preds, labs = [r["p"] for r in rows], [r["label"] for r in rows]
+        m["risk_coverage"] = risk_coverage_curve(preds, labs)
+        m["ece_ci95"] = [round(x, 4) for x in ece_bootstrap(preds, labs, rounds=max(100, min(500, 2_000_000 // len(rows))))["ci95"]]
+        hi_rows = [r for r in rows if r.get("risk") in ("high", "critical")]
+        if hi_rows:   # docs/04 section 6: unsafe accept must be 0 at risk >= high, so this slice is read at the (stricter) high band
+            hi_accept, hi_reject = thresholds.bands("noul", fam, "high", g)
+            m["risk_high"] = metrics([r["p"] for r in hi_rows], [r["label"] for r in hi_rows], hi_accept, hi_reject) | {"thresholds": {"accept": hi_accept, "reject": hi_reject}}
+        else:
+            m["risk_high"] = None
         m["distinct_claims"] = distinct_claims(rows)
         m["eligible_for_adjustment"] = m["distinct_claims"] >= MIN_LABELED
         out["groups"][g] = m
     out["note"] = "no labeled rows yet" if not groups else ""
+    out["choice"] = choice_metrics(choice_rows(db, include_protected))
+    out["operations"] = operations(db)
     by_lang: dict[str, list[dict]] = {}
     for rows in groups.values():
         for r in rows:
@@ -183,6 +308,50 @@ def report(db: ledger.Ledger, include_protected: bool = False) -> dict:
     out["by_language"] = {lang: {k: m[k] for k in ("n", "false_accept_rate", "coverage", "brier")}
                           for lang, rows in sorted(by_lang.items()) for m in [metrics([r["p"] for r in rows], [r["label"] for r in rows])]}
     return out
+
+
+def choice_rows(db: ledger.Ledger, include_protected: bool = False) -> list[dict]:
+    """Labelled choice answers: label 1 means the top option was right. Cached repeats and heuristic labels are left out, as in `labeled`."""
+    out = []
+    for r in db.all("SELECT c.call_id, c.answers_json, c.session_id, l.label FROM jev_calls c JOIN labels l ON l.call_id=c.call_id WHERE c.primitive='choice' "
+                    f"AND c.dedup_of IS NULL AND c.answers_json IS NOT NULL AND l.source<>'heuristic' AND {ledger.live('c')} ORDER BY c.rowid"):  # noqa: S608 - constant fragment
+        try:
+            probs = json.loads(r.answers_json).get("probabilities")
+        except (ValueError, AttributeError):
+            continue
+        if include_protected or bucket(r.session_id or "") != "protected":
+            out.append({"call_id": r.call_id, "probabilities": probs, "label": r.label})
+    return out
+
+
+def _nearest_rank(sorted_vals: list[float], q: float) -> float | None:
+    return sorted_vals[max(0, math.ceil(q * len(sorted_vals)) - 1)] if sorted_vals else None
+
+
+def operations(db: ledger.Ledger) -> dict:
+    """What the ledger says about effort: provider calls per decision, spend per verified decision (an observed success) and how long a
+    decision waits for a human. Rows a verification run wrote (`source=test`) are left out."""
+    per = db.all("SELECT d.decision_id, (SELECT COUNT(*) FROM jev_calls c WHERE c.decision_id=d.decision_id AND c.dedup_of IS NULL AND " + ledger.live("c") + ") AS n "
+                 "FROM decisions d WHERE " + ledger.live("d"))
+    counts = [r.n for r in per]
+    called = [n for n in counts if n]
+    cost = db.one("SELECT COALESCE(SUM(c.cost_usd),0) AS usd FROM jev_calls c JOIN decisions d ON d.decision_id=c.decision_id WHERE " + ledger.live("c") + " AND " + ledger.live("d")).usd
+    # a decision a gate permit settled (a shell command a human approved) reached SUCCEEDED without any verification: it is not a verified decision
+    verified = db.one("SELECT COUNT(*) AS n FROM decisions d WHERE d.status='SUCCEEDED' AND " + ledger.live("d") + " AND EXISTS (SELECT 1 FROM jev_calls c WHERE c.decision_id=d.decision_id "
+                      "AND c.dedup_of IS NULL AND " + ledger.live("c") + ")").n
+    waits, open_at = [], {}
+    for e in db.all("SELECT entity_id, prev_state, next_state, ts FROM events WHERE (next_state='WAITING_HUMAN' OR prev_state='WAITING_HUMAN') AND " + ledger.live() + " ORDER BY id"):
+        if e.prev_state == "WAITING_HUMAN" and e.entity_id in open_at:   # any way out of the wait ends it: an answer, a deadline or a cancel
+            waits.append((parse_ts(e.ts) - open_at.pop(e.entity_id)).total_seconds())
+        if e.next_state == "WAITING_HUMAN":
+            open_at[e.entity_id] = parse_ts(e.ts)
+    waits.sort()
+    return {"calls_per_decision": {"decisions": len(counts), "calls": sum(counts), "mean": sum(counts) / len(counts) if counts else None,
+                                   "mean_of_called": sum(called) / len(called) if called else None, "max": max(counts) if counts else None},
+            "cost_per_verified_decision": {"verified_decisions": verified, "total_cost_usd": round(cost, 6), "usd": round(cost / verified, 6) if verified else None},
+            "time_to_resolution_waiting_human": {"resolved": len(waits), "unresolved": len(open_at), "p50_s": _nearest_rank(waits, 0.5), "p95_s": _nearest_rank(waits, 0.95),
+                                                 "max_s": waits[-1] if waits else None,
+                                                 "oldest_unresolved_s": max((now() - t).total_seconds() for t in open_at.values()) if open_at else None}}
 
 
 def propose_threshold(rows: list[dict], budget: float = FA_BUDGET) -> dict | None:
@@ -208,14 +377,31 @@ def conditions(db: ledger.Ledger) -> dict:
         return {"n": 0, "note": "no labeled rows; conditions cannot be compared yet"}
     from . import thresholds
 
-    c1 = [1 if r["label"] == 0 else 0 for r in rows]
-    c3 = []
-    for r in rows:
-        accept, _ = thresholds.bands("noul", r["task_family"], r.get("risk") or "low")
-        c3.append(1 if (r["p"] >= accept and r["label"] == 0) else 0)
-    return {"n": len(rows), "unsafe_accept_rate": {"1_bare_jev": sum(c1) / len(rows), "3_jev_thresholds": sum(c3) / len(rows)},
-            "paired_3_minus_1": paired_bootstrap(c3, c1), "2_reasoning_only": "not measurable: no DEEP verdict labels",
-            "4_cascade": "not measurable: no DEEP verdict labels"}
+    accepted3 = [r["p"] >= thresholds.bands("noul", r["task_family"], r.get("risk") or "low")[0] for r in rows]
+    n = len(rows)
+    c1 = [1 if r["label"] == 0 else 0 for r in rows]   # (1) bare jev takes every answer as a yes, so every false claim is an unsafe accept
+    c3 = [1 if (acc and r["label"] == 0) else 0 for acc, r in zip(accepted3, rows, strict=True)]
+    safe3 = [1 if acc and r["label"] == 1 else 0 for acc, r in zip(accepted3, rows, strict=True)]
+    # Against bare jev, unsafe_accept, safe_accept and abstain can only move one way (bare jev accepts everything), so a judge that is noise or
+    # that abstains on everything still "wins" them: they are reported as differences and never tested. The tested family holds comparisons that
+    # can go either way: the accept/not-accept call being right (bare jev is right exactly on the true claims), and each accept metric against
+    # accepting the same share of rows at random (an uninformative judge, or one that abstains on everything, has a difference of zero there).
+    rate = sum(accepted3) / n
+    right3 = [1 if acc == (r["label"] == 1) else 0 for acc, r in zip(accepted3, rows, strict=True)]
+    right1 = [1 - x for x in c1]
+    descriptive = {"unsafe_accept": paired_bootstrap(c3, c1), "safe_accept": paired_bootstrap(safe3, [1 if r["label"] == 1 else 0 for r in rows]),
+                   "abstain": paired_bootstrap([0 if acc else 1 for acc in accepted3], [0] * n)}
+    per = {"correct_decision": (right3, right1, 1),
+           "unsafe_accept_vs_chance": (c3, [rate * x for x in c1], -1),
+           "safe_accept_vs_chance": (safe3, [rate * (1 - x) for x in c1], 1)}
+    cmp_ = {k: paired_bootstrap(a, b) for k, (a, b, _) in per.items()}
+    holm = holm_adjust({k: v["p"] for k, v in cmp_.items()})
+    paired = {k: v | {"holm_p": holm[k], "significant_after_holm": holm[k] <= ALPHA,
+                      "win": holm[k] <= ALPHA and v["diff"] * per[k][2] > 0} for k, v in cmp_.items()}
+    return {"n": n, "unsafe_accept_rate": {"1_bare_jev": sum(c1) / n, "3_jev_thresholds": sum(c3) / n},
+            "paired_3_minus_1": descriptive["unsafe_accept"], "paired_descriptive": descriptive, "paired_metrics": paired,
+            "multiple_testing": "holm", "alpha": ALPHA,
+            "2_reasoning_only": "not measurable: no DEEP verdict labels", "4_cascade": "not measurable: no DEEP verdict labels"}
 
 
 # ---- hand-written case sets (W-49, W-14) -------------------------------------------------------------

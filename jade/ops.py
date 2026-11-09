@@ -27,7 +27,12 @@ def pretool_matcher() -> str:
     return "|".join((*policy.GATED_BUILTIN, "mcp__.*"))
 
 
-HOOKS = {"PreToolUse": (pretool_matcher(), "pretool", 10), "PostToolUse": ("Bash", "posttool", 10),
+def posttool_matcher() -> str:
+    """The calls that can run under a permit (policy.POST_TOOLS and every MCP tool): PostToolUse closes the decision of each (W-40)."""
+    return "|".join((*policy.POST_TOOLS, "mcp__.*"))
+
+
+HOOKS = {"PreToolUse": (pretool_matcher(), "pretool", 10), "PostToolUse": (posttool_matcher(), "posttool", 10),
          "Stop": ("", "stop", 10), "SessionStart": ("", "session-start", 10)}
 JEV_HEADING = "## Jev: verify outputs and decide (global, all sessions)"
 
@@ -164,6 +169,44 @@ def check_drift(path, resolved_model: str, expected: list[str]):
         return SimpleNamespace(kind="MODEL_DRIFT", resolved_model=resolved_model, expected=list(expected), first_seen=first)
     finally:
         db.close()
+
+
+def check_question_drift(path=None, db: ledger.Ledger | None = None) -> list:
+    """QUESTION_DRIFT findings: (question_id, version) pairs the registry holds that this ledger has not seen, one event and one informational
+    work item each, never twice (W-51). A new question version starts its own calibration group at default thresholds, as a new model snapshot does
+    (docs/07 section 1). The first look at a ledger is a baseline: it records what the registry holds and opens nothing. Reads the registry through
+    `questions.entries()`, so an unreadable registry raises and the caller decides (the hook and `ask` treat it as informational)."""
+    from . import questions
+    from .util import sha256
+
+    current = {(e["question_id"], int(e["version"])) for e in questions.entries()}
+    own = db is None
+    db = db or ledger.open(_dir(path))
+    try:
+        raw = db.meta_get("known_question_versions")
+        known = {(q, v) for q, vs in json.loads(raw).items() for v in vs} if raw else None
+        if known is not None and current <= known:
+            return []
+        merged: dict[str, list[int]] = {}
+        for q, v in sorted((known or set()) | current):
+            merged.setdefault(q, []).append(v)
+        db.meta_set("known_question_versions", json.dumps(merged))
+        if known is None:
+            return []
+        found = []
+        for q, v in sorted(current - known):
+            if not db.event("question", "QUESTION_DRIFT", next=f"{q}@{v}", guard="question version added to the registry", key=f"question_drift:{q}@{v}"):
+                continue
+            wid = "RT-QD-" + sha256(f"{q}@{v}")[:8]
+            item = {"id": wid, "title": f"QUESTION_DRIFT: {q} now has version {v}", "type": "risk", "priority": "P3", "status": "open", "owner": "human",
+                    "next_action": "Informational. The new version is its own calibration group at default thresholds; check its template and pin it as champion or "
+                    "challenger when reviewed (docs/07 section 1).", "retry_or_revisit_trigger": "on_session_start", "created_at": ts()}
+            db.con.execute("INSERT OR REPLACE INTO work_items(id, status, doc_json, updated_at) VALUES(?,?,?,?)", (wid, "open", json.dumps(item), ts()))
+            found.append(SimpleNamespace(kind="QUESTION_DRIFT", question_id=q, version=v, work_item=wid))
+        return found
+    finally:
+        if own:
+            db.close()
 
 
 def expected_models(db: ledger.Ledger | None = None) -> list[str]:
@@ -648,7 +691,7 @@ def wiring_problems(probe: bool = True) -> list[str]:
         if h.get("type") != "command":
             problems.append(f"{event}: hook type {h.get('type')!r}, expected 'command'")
         if event != "PreToolUse" and (g.get("matcher") or "") != want[0]:
-            problems.append(f"{event}: matcher {g.get('matcher')!r}, expected {want[0]!r}")
+            problems.append(f"{event}: matcher {g.get('matcher')!r}, expected {want[0]!r}: re-run `jade hooks install` in a terminal")
         b = parsed.binary
         if not parsed.shell_safe:
             problems.append(f"{event}: command is not `<one word> hook {parsed.sub}` (an unquoted path with a space?): re-run `jade hooks install`")
