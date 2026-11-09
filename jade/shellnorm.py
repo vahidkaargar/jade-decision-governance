@@ -17,6 +17,7 @@ Nothing here executes anything. Honest limits are listed in docs/05-threat-model
 
 from __future__ import annotations
 
+import functools
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -1122,8 +1123,22 @@ class _Scan:
         return i
 
 
+@functools.lru_cache(maxsize=16)
+def _skeleton_top(command: str) -> str:
+    return _skeleton(command, 0, None)
+
+
 def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None) -> str:
-    """The command with quoting, escapes, comments, heredoc bodies and expansions resolved; separators are left for SPLIT."""
+    """The command with quoting, escapes, comments, heredoc bodies and expansions resolved; separators are left for SPLIT.
+
+    The top-level call is pure on a string, and one assessment asks for the same text several times (views, segments, masks),
+    so it is memoised: a 2 MB command is scanned once, not once per caller."""
+    if _depth == 0 and _budget is None:
+        return _skeleton_top(command)
+    return _skeleton(command, _depth, _budget)
+
+
+def _skeleton(command: str, _depth: int, _budget: list[int] | None) -> str:
     budget = _budget if _budget is not None else [BUDGET]
     budget[0] -= len(command)
     if _depth > MAX_DEPTH or budget[0] < 0:

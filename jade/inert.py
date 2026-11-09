@@ -106,6 +106,8 @@ class _Bail(Exception):
     """The text is not something this scanner reads exactly."""
 
 
+MASK_LIMIT = 200_000   # characters; an ordinary command is a few hundred
+
 _LAST_ARG = re.compile(r"\$_(?!\w)|!\$")   # `echo KEY && cat $_`: the shell hands the last word of the previous command to the next one
 
 
@@ -552,6 +554,8 @@ def _spans(cmds: list[Cmd], dest_ok: Callable[[str], bool] | None) -> list[Span]
 def mask(text: str, dest_ok: Callable[[str], bool] | None = None) -> str:
     """The command with its data positions blanked (see the module docstring), or the command itself when nothing is masked or it cannot be read
     exactly. `dest_ok(path)` is False for a file a heredoc must not be written to unseen (SI-11: a shell profile, an environment file, a plist)."""
+    if len(text) > MASK_LIMIT:
+        return text   # past this size the scan is not worth its cost; the whole text is matched, which is the stricter answer
     try:
         spans = _spans(_parse(text), dest_ok)
     except Exception:  # noqa: BLE001 - a text this scanner cannot read is matched whole, which is the stricter answer
