@@ -208,6 +208,7 @@ def is_read_only(seg: str) -> bool:
     bare, calls = _analyse(seg)
     if any(c.danger for c in calls):
         return False
+    bare = system_bare(bare)
     return any(p.search(bare) for p in risk()["_read_only"])
 
 
@@ -229,12 +230,31 @@ def _seal(a: Assessment, tool: str, subject: str, cwd: str, shown: str) -> None:
     a.plan_hash, a.subject, a.plan_subject, a.plan_cwd = plan_hash(tool, subject, cwd), shown, subject, cwd
 
 
-def _absolute_operands(seg: str, dirs: tuple[str, ...]) -> str:
+def _jade_package(path: str) -> str:
+    """`path` with every directory named `jade` that is not JADE's package spelled `jade~`, for R-16 only.
+
+    The checkout of this project is itself called `jade`, so a relative operand (`*.php`, `setup.py`, `.`) made absolute under that directory
+    reads like `.../jade/*.php`: a substring coincidence, not a write to jade/*.py. A directory named `jade` counts as the package when it holds
+    `__init__.py` and `hooks.py`, or when it does not exist (a path being created is judged as written, fail closed)."""
+    orig = path.split("/")
+    parts = list(orig)
+    for k, comp in enumerate(orig):
+        if comp.lower() == "jade":
+            d = "/".join(orig[:k + 1]) or "/"
+            if os.path.isdir(d) and not (os.path.exists(os.path.join(d, "__init__.py")) and os.path.exists(os.path.join(d, "hooks.py"))):
+                parts[k] = "jade~"
+    return "/".join(parts)
+
+
+def _absolute_operands(seg: str, dirs: tuple[str, ...], package: bool = False) -> str:
     """The operands of a segment as absolute, symlink-resolved paths, for every directory the segment may run in.
 
-    Catches `cd /etc && sort -o pf.conf in`, `sort -o ../../etc/pf.conf in` and a path reached through a symlink.
+    Catches `cd /etc && sort -o pf.conf in`, `sort -o ../../etc/pf.conf in` and a path reached through a symlink. A path that is an existing
+    directory ends in `/` (`cp x ~/.claude/hooks` writes into it); `package` reads it as R-16 does (`_jade_package`).
     """
     out: list[str] = []
+    if seg.startswith(shellnorm.TEXT_MARK):
+        return ""
     for n, tok in enumerate(seg.split(" ")[:64]):
         if n == 0:
             continue  # the program being run is not something the segment writes (`~/.local/bin/jade check`)
@@ -245,8 +265,11 @@ def _absolute_operands(seg: str, dirs: tuple[str, ...]) -> str:
             continue
         for d in dirs:
             if d or os.path.isabs(os.path.expanduser(tok)):
-                if (p := normalise_path(tok, d)) and p != tok:
-                    out.append(p)
+                if p := normalise_path(tok, d):
+                    if not p.endswith("/") and os.path.isdir(p):
+                        p += "/"
+                    if p != tok:
+                        out.append(_jade_package(p) if package else p)
     return " ".join(dict.fromkeys(out))
 
 
@@ -255,10 +278,21 @@ def _seen_by(rule: dict, text: str, files: str | None) -> str:
     return files if rule.get("files_only") and files is not None else text
 
 
-def _path_rule(text: str, files: str | None = None) -> dict | None:
-    if not text:
+def _path_rule(text: str, files: str | None = None, alt: dict[str, str] | None = None) -> dict | None:
+    """The first path rule that matches. `alt` gives a rule its own `files` text (R-16 reads the operands without the directories that only look
+    like JADE's package, see `_jade_package`)."""
+    if not text and not alt:
         return None
-    return next((r for r in risk()["rules"] if r["id"] in PATH_RULES and (t := _seen_by(r, text, files)) and r["_re"].search(t)), None)
+    return next((r for r in risk()["rules"] if r["id"] in PATH_RULES and (t := alt[r["id"]] if alt and r["id"] in alt else _seen_by(r, text, files))
+                 and r["_re"].search(t)), None)
+
+
+def _program_basename(text: str) -> str:
+    """The segment with the directory of the program it runs taken off (`~/.local/bin/jade check` is `jade check`): running a protected file is not
+    writing it. Launcher prefixes (sudo, env, VAR=x, uv run) are left alone."""
+    head = m.end() if (m := PREFIX.match(text)) else 0
+    word, sep, rest = text[head:].partition(" ")
+    return text[:head] + word.rsplit("/", 1)[-1] + sep + rest if "/" in word and not word.startswith(("-", ">")) else text
 
 
 def _first_match(text: str, files: str | None = None) -> dict:
@@ -269,19 +303,48 @@ def _first_match(text: str, files: str | None = None) -> dict:
 
 
 COPY_VERBS = {"cp", "rsync", "ln", "install", "scp"}
-REDIRECT_TARGET = re.compile(r">>?\s*(\S+)")
+REDIRECT_TARGET = re.compile(r">>?[|&]?\s*(\S+)")
+SYSTEM_BIN = re.compile(r"^/(?:usr/|opt/homebrew/|usr/local/)?s?bin/")
+# Options that name a file the program writes (ruff --output-file, pytest --junitxml, mypy --html-report, pylint --output, -o of bandit and pytest):
+# the one place an otherwise read-only command (`inert_for_files`) writes an operand-shaped path.
+OUTPUT_OPTION = re.compile(r"^(?:-o|--[\w-]*(?:output|report|cache-dir|junit|log-?file|result|basetemp|outfile|html|xml|json)[\w-]*)(?:=(.*))?$")
+
+
+def system_bare(bare: str) -> str:
+    """The command with a system directory taken off its program (`/usr/bin/grep` is `grep`): a program in a user directory is unknown and stays so."""
+    return SYSTEM_BIN.sub("", bare, count=1)
+
+
+def _output_option_values(words: list[str]) -> list[str]:
+    out = []
+    for i, w in enumerate(words):
+        if m := OUTPUT_OPTION.match(w):
+            if m.group(1) is not None:
+                out.append(m.group(1))
+            elif i + 1 < len(words) and not words[i + 1].startswith("-"):
+                out.append(words[i + 1])
+        elif re.match(r"^-o\S", w):
+            out.append(w[2:])
+    return out
 
 
 def files_view(bare: str) -> str | None:
-    """What a command writes, for the rules that care about files and not about mentions (R-16).
+    """What a command writes, for the rules that care about files and not about mentions (R-13, R-16).
 
-    "" = the command only reads its operands (`inert_for_files`), a string = the destinations that are known, None = it may write any operand,
-    so the whole segment counts."""
-    if any(p.search(bare) for p in risk()["_inert"]):
-        return ""
+    A string is the destinations that are known (empty: none), None means it may write any operand, so the whole segment counts. Known:
+
+    * a command that only reads its operands (`inert_for_files`, and every `read_only` verb) writes what it redirects into, and an inert
+      command also what its output options name (`ruff check --output-file jade/x.py`): `git show X > jade/hooks.py`, `cat a > policies/risk.yaml`;
+      the text it prints or the file it is given (a `cat > f <<EOF` body, a `printf` message) is data;
+    * cp, rsync, ln, install and scp: the destination; tar -c: the archive."""
+    bare = system_bare(bare)
     words = bare.split(" ")
     verb = words[0].rsplit("/", 1)[-1]
     redirects = " ".join(REDIRECT_TARGET.findall(bare))
+    if any(p.search(bare) for p in risk()["_inert"]):
+        return " ".join([redirects, *_output_option_values(words[1:])]).strip()
+    if any(p.search(bare) for p in risk()["_read_only"]) and not any(c.danger for c in _analyse(bare)[1]):
+        return redirects
     ops = [w for w in words[1:] if w and not w.startswith("-") and not w.startswith(">")]
     if verb in COPY_VERBS and ops and not any(w in ("-t", "--target-directory") or w.startswith("--target-directory=") or (w.startswith("-") and not w.startswith("--") and "t" in w[1:]) for w in words[1:]):
         return f"{ops[-1]} {redirects}".strip()
@@ -436,6 +499,30 @@ def _assess_tool(tool: str, tool_input: dict, cwd: str) -> Assessment:
     return a
 
 
+def classify_segment(seg: str, dirs: tuple[str, ...]) -> tuple[dict, str]:
+    """The rule one simple command (a segment of `shellnorm.segments_cwd`) matches, and the command with launcher prefixes and git options gone.
+
+    The command is looked at as written and with its operands made absolute for every directory it may run in; a `files_only` rule (R-13, R-16)
+    reads only what the command writes (`files_view`)."""
+    bare, calls = _analyse(seg)
+    texts = [seg, bare, _pathfold(bare), *([UNSAFE_GIT + bare] if any(c.danger for c in calls) else [])]
+    view = files_view(bare)  # what a `files_only` rule may look at: None = the whole segment
+    seg_best = None
+    pairs = [(t, view if view is not None else _program_basename(t)) for t in dict.fromkeys(texts)]
+    if view:
+        pairs.append((bare, _pathfold(view)))
+    for text, files in pairs:
+        rule = _first_match(text, files)
+        if seg_best is None or LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
+            seg_best = rule
+    abs_ops = _absolute_operands(seg, dirs)
+    abs_files = abs_ops if view is None else _absolute_operands("x " + view, dirs) if view else ""
+    abs_pkg = _absolute_operands(seg if view is None else "x " + view, dirs, package=True) if view != "" else ""
+    if (rule := _path_rule(abs_ops, abs_files, {"R-16": abs_pkg})) and LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
+        seg_best = rule
+    return seg_best, bare
+
+
 def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     best: dict | None = None
     active: list[str] = []
@@ -446,18 +533,7 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         if is_read_only(seg):
             continue
         active.append(seg)
-        bare, calls = _analyse(seg)
-        texts = [seg, bare, _pathfold(bare), *([UNSAFE_GIT + bare] if any(c.danger for c in calls) else [])]
-        view = files_view(bare)  # what a `files_only` rule (R-16) may look at: None = the whole segment
-        seg_best = None
-        for text in dict.fromkeys(texts):
-            rule = _first_match(text, view)
-            if seg_best is None or LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
-                seg_best = rule
-        abs_ops = _absolute_operands(seg, dirs)
-        abs_files = abs_ops if view is None else _absolute_operands("x " + view, dirs) if view else ""
-        if (rule := _path_rule(abs_ops, abs_files)) and LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
-            seg_best = rule
+        seg_best, bare = classify_segment(seg, dirs)
         if best is None or LEVELS[seg_best["level"]] > LEVELS[best["level"]]:
             best = seg_best
         key = _segment_key(bare)

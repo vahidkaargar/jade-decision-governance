@@ -56,11 +56,16 @@ rules:
     level: high
     reversibility: reversible
     blast_radius: host
-    # Hook wiring and JADE's own runtime artifacts, matched wherever the path appears in a non-read-only segment: the ledger (jade.sqlite and its
-    # -wal/-shm/-journal files, permits live in it), calibration/current.json, pins.json, the config and local overlays, the installed package and
-    # the uv tool dir, the jade and jev launchers, the policy files and the agent instruction files. The human-only CLI writes them from Python, not through
-    # a gated tool call. The repository's own Python code is R-16 (write targets only).
-    match: "(?i:\\.claude/(settings[\\w.-]*\\.json|hooks/|CLAUDE\\.md)|\\bAGENTS\\.md\\b|\\.cursor/rules|\\.ai/rules\\.md|policies/(?:[\\w-]+\\.(?:yaml|py)|local/)|\\.config/jade(?![\\w.-])|\\.local/share/jade(?![\\w.-])|jade\\.sqlite(?:-(?:wal|shm|journal))?(?![\\w.])|calibration/current\\.json|uv/tools/jade(?:-decision-governance)?(?![\\w-])|evals/[^/\\s]+/protected/|\\b(?:rm|mv|cp|ln|unlink|install|tee|dd|truncate|chmod|chown|sed|perl)\\b[^;&|]*\\.local/bin/(?:jade|jev)(?![\\w.-])|>>?\\s*\\S*\\.local/bin/(?:jade|jev)(?![\\w.-])|\\buv tool (?:uninstall|upgrade|reinstall)\\b[^;&|]*\\bjade|\\buv tool install\\b[^;&|]*\\bjade)|\\bjade (improve (promote|rollback)|ledger purge|label set)\\b"
+    # Hook wiring and JADE's own runtime artifacts: the ledger (jade.sqlite and its -wal/-shm/-journal files, permits live in it),
+    # calibration/current.json, pins.json, the config and local overlays, the installed package and the uv tool dir, the jade and jev launchers, the
+    # policy files and the agent instruction files. The human-only CLI writes them from Python, not through a gated tool call. The repository's own
+    # Python code is R-16 (write targets only).
+    # `files_only` (like R-16): the rule looks at what a command WRITES (the destination of cp/rsync/ln/install, the archive of tar -c, redirect
+    # targets, the output options of an otherwise read-only tool), or at the whole segment for a command that may write any operand, and never
+    # at a command named in `inert_for_files` or a `read_only` verb without a redirect: `git add AGENTS.md`, `cp ~/.claude/settings.json /tmp/b`,
+    # `printf 'policies/local/' > .gitignore` are not changes to a protected file. A Write/Edit path is always a target.
+    files_only: true
+    match: "(?i:\\.claude/(settings[\\w.-]*\\.json|hooks/|CLAUDE\\.md)|\\bAGENTS\\.md\\b|\\.cursor/rules|\\.ai/rules\\.md|policies/(?:[\\w-]+\\.(?:yaml|py)|local/)|\\.config/jade(?![\\w.-])|\\.local/share/jade(?![\\w.-])|jade\\.sqlite(?:-(?:wal|shm|journal))?(?![\\w.])|calibration/current\\.json|uv/tools/jade(?:-decision-governance)?(?![\\w-])|evals/[^/\\s]+/protected/|\\.local/bin/(?:jade|jev)(?![\\w.-])|\\buv tool (?:uninstall|upgrade|reinstall)\\b[^;&|]*\\bjade|\\buv tool install\\b[^;&|]*\\bjade)|\\bjade (improve (promote|rollback)|ledger purge|label set)\\b"
     rationale: "Changes agent policy, hooks, JADE's own ledger, config or installed code, or another protected target"
   - id: R-16
     level: high
@@ -132,6 +137,7 @@ read_only:
   - "^launchctl (list|print)\\b"
   - "^(kubectl|helm) (get|describe|logs|list|status|version|top)\\b"
   - "^systemctl (status|is-active|is-enabled|list-units)\\b"
+  - "^(for|select) \\S+ in\\b|^case\\b|^(done|fi|esac|elif)$"   # shell syntax: the commands in the body are segments of their own
   - "^(ssh|scp) -V$"
   - "^jade (ledger (stats|show)|permit (list|show|request)|question|check|work (list|render)|gate status|hooks status|eval|label (queue|auto)|decide (show|list)|route|ops (status|drift))\\b"
 # Commands that only READ their path operands (or touch the git index, not the file). R-16 (`files_only`) never fires on them, so `git add jade/hooks.py`,
@@ -141,8 +147,10 @@ inert_for_files:
   - "^git (add|status|diff|log|show|blame|ls-files|grep|commit|check-ignore|update-index|stash list|rev-parse|describe|shortlog)\\b"
   - "^git restore --staged\\b(?!.*(--worktree|\\s-[a-zA-Z]*W))"
   - "^git rm (-\\S+ )*--cached\\b"
-  - "^(uv run (-\\S+ )*|python[\\d.]* -m )?(ruff (check|rule|linter|config|version)\\b(?!.*(--fix|--add-noqa|--unsafe-fixes))|ruff format\\b(?=.*--(check|diff)\\b)|mypy|pytest|py_compile|compileall|flake8|pylint|pyright|bandit|vulture|pycodestyle|radon)\\b(?!.*--(?:cache-dir|junitxml|junit-xml|html-report|report)=?\\s*\\S*(?:jade/|policies/))"
+  - "^(uv run (-\\S+ )*|python[\\d.]* -m )?(ruff (check|rule|linter|config|version)\\b(?!.*(--fix|--add-noqa|--unsafe-fixes))|ruff format\\b(?=.*--(check|diff)\\b)|mypy|pytest|py_compile|compileall|flake8|pylint|pyright|bandit|vulture|pycodestyle|radon)\\b"
   - "^(open|code|cursor|subl|zed)\\b"
+  - "^[A-Za-z_]\\w*\\+?=\\S*( [A-Za-z_]\\w*\\+?=\\S*)*$"   # a variable assignment alone sets a shell variable (what it expands to is a segment of its own)
+  - "^mkdir\\b"   # creates directories, never the content of a file (`mkdir -p policies/local`, `mkdir -p jade`)
 # Tools that are not Bash are classified by tool name (the PreToolUse matcher names the built-in ones and `mcp__.*`). A tool whose
 # input carries a shell command (`command`, `cmd`, `script`) is classified by that command exactly like Bash, and also by the first
 # specific (non-generic) rule that names the tool; the higher level wins. First match wins in this list. A rule with `paths: true` also

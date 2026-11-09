@@ -18,16 +18,20 @@ Nothing here executes anything. Honest limits are listed in docs/05-threat-model
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass, field
+
+from . import interp
 
 MAX_DEPTH = 8
 MAX_NEST = 60
 BUDGET = 4_000_000     # characters the scanner may read across all nested levels; past it the rest is searched as plain text
 UNSAFE_MARK = "@unsafe!"   # prefix of the copy of a stage whose verb can write or run something, so rules see its resolved operands
 UNSAFE_GIT = "git:unsafe-config "
+TEXT_MARK = "@text!"   # prefix of a line the scanner extracted from a program (`import jade.cli`): words for the invariants to read, no operands to resolve
 
 NULL_REDIRECT = re.compile(r"(\d*>&\d+|&>>?\s*/dev/null|\d*>>?\s*/dev/null|\d*<\s*/dev/null)")
-SPLIT = re.compile(r"\n|;|&&|\|\||\||&|\$\(|`|\(|\)|\{|\}")
+SPLIT = re.compile(r"\n|;|&&|\|\||(?<!>)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\}")  # `>&`, `>|` and `&>` are redirections, not separators
 # Package runners that start the next word as a program: `uv run python -c ...` is `python -c ...` (its quoted code must be scanned, not read as prose).
 _RUN_OPT = r"(?:(?:-w|-p|--with|--with-requirements|--with-editable|--python|--project|--directory|--package|--group|--env-file|--extra|--from|--index|--index-url)\s+\S+|--?[A-Za-z][\w-]*(?:=\S+)?)"
 _RUNNER = (r"(?:uv(?:\s+tool)?\s+run|uvx|poetry\s+run|pdm\s+run|pipenv\s+run|rye\s+run|hatch\s+run|pipx\s+run|conda\s+run|npx|bunx|pnpm\s+(?:exec|dlx)"
@@ -46,6 +50,7 @@ STDIN_PATHS = {"/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"}
 CODE_FLAG = re.compile(r"-[a-zA-Z]*[ceEr]|--eval|--print|--command")
 SHELL_NAME = re.compile(r"^(?:ba|z|da|k|a|fi|c|tc)?sh$")
 PLAIN = re.compile(r"[^\\'\"$`<\n;(){}&|#]+")
+_INERT = re.compile(r"[;&|<>(){}`]")   # characters a quoted word may hold that the splitter and the redirect check would read as syntax
 
 HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|(\\?)([^\s;&|<>()'\"\\`$]+))")
 NEXT_STAGE = re.compile(
@@ -112,9 +117,9 @@ def _command_word(stage_text: str) -> tuple[str, list[str]]:
 
 
 def _stdin_kind(word: str, args: list[str]) -> str | None:
-    """'shell' or 'interp' when this command would run text arriving on stdin as code, else None."""
+    """'shell', or the language of an interpreter (`python`, `perl` ...), when this command would run text arriving on stdin as code, else None."""
     w = word.rsplit("/", 1)[-1].lower()
-    kind = "shell" if SHELL_RE.match(w) else "interp" if INTERP_RE.match(w) else None
+    kind = "shell" if SHELL_RE.match(w) else interp.language_of(w) if INTERP_RE.match(w) else None
     if kind is None:
         return None
     args = [a for a in args if not re.match(r"^(?:\d*[<>]|&>|<<)", a)]
@@ -369,7 +374,6 @@ UNIQ_VALUE = {"-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars"
 XXD_VALUE = {"-c", "-g", "-l", "-s", "-o", "-n", "-cols", "-groupsize", "-len", "-seek", "-offset", "-name"}
 FIND_EXEC = {"-exec", "-execdir", "-ok", "-okdir"}
 FIND_WRITE = {"-delete", "-fprint", "-fprint0", "-fprintf", "-fls"}
-AWK_RISKY = re.compile(r"system\s*\(|getline|>|\||close\s*\(")
 SED_SAFE_CMD = set("pdDnNPgGhHxlz=")
 SED_TEXT_CMD = set("aic")
 SED_FILE_READ = set("rRF")
@@ -631,8 +635,11 @@ def verb_effects(cmd: str, args: list[str]) -> tuple[bool, list[str], list[str]]
                 prog = a
                 break
             i += 1
-        if prog is not None and AWK_RISKY.search(prog):
-            unsafe, text = True, [prog]
+        if prog is not None:
+            fx = interp.awk_effects(prog)   # the literal commands and files of its system(), print | and print > ; any other string is data
+            unsafe = unsafe or bool(fx.commands or fx.writes or fx.dynamic)
+            code = [*fx.commands, *("tee " + shlex.quote(_enc(w)) for w in fx.writes)]
+            text = [prog] if fx.dynamic else []   # a target the program text does not contain: the whole program is searched, as before
     elif cmd == "find":
         unsafe = any(a in FIND_WRITE for a in args)
         for i, a in enumerate(args):
@@ -702,6 +709,8 @@ def shell_script(args: list[str]) -> tuple[str, list[str]] | None:
 def interp_code(args: list[str]) -> str | None:
     """The program text of `python -c`, `perl -e`, `node -p`, `ruby -e`, `php -r` ... (decoded), else None."""
     prev_flag = False
+    if args and _dec(args[0]) == "eval" and len(args) > 1:  # `deno eval '...'`
+        return _dec(args[1])
     for i, raw in enumerate(args):
         a = _dec(raw)
         if CODE_FLAG.fullmatch(a):
@@ -743,7 +752,15 @@ class _Scan:
     def _produced(self, raw: str, kind: str) -> str:
         """What `echo ... | sh` hands to the reader: the echoed words, parsed as shell for a shell, searched as text otherwise."""
         text = " ".join(_dec(w) for w in words_of(PRODUCER.sub("", raw, count=1)))
-        return self._sub(text) if kind == "shell" else _code(text)
+        return self._sub(text) if kind == "shell" else self._interp(kind, text)
+
+    def _interp(self, lang: str, body: str) -> str:
+        """What a program in `lang` does (interp.py): its literal commands as nested shell text, its literal write targets as the destination of a
+        `tee`, and the lines other rules read as written. Every other string in it is data and is dropped."""
+        fx = interp.effects(lang, body)
+        parts = [self._sub(c) for c in fx.commands]
+        parts += [self._sub("tee " + shlex.quote(_enc(p))) for p in fx.writes]
+        return " ; ".join(parts + [f"{TEXT_MARK} {t}" for t in fx.texts])
 
     def _backtick(self, i: int, in_dq: bool) -> tuple[str, int]:
         """Canonical text of the backtick span opening at s[i-1], and the index after it. An escaped backtick inside nests, as in the shell."""
@@ -808,7 +825,7 @@ class _Scan:
         elif INTERP_RE.match(cmd):
             prog = interp_code(args)
             if prog is not None:
-                deferred.append(_code(prog))
+                deferred.append(self._interp(interp.language_of(cmd) or "", prog))
         elif cmd == "git":
             for call in git_calls(bare)[1]:
                 u, c = git_effects(call)
@@ -903,7 +920,7 @@ class _Scan:
             tail = cur.rstrip()
             if hs_kind:
                 kind, hs_kind = hs_kind, None
-                deferred.append(self._sub(body) if kind == "shell" else _code(body))
+                deferred.append(self._sub(body) if kind == "shell" else self._interp(kind, body))
                 emit('""')
             elif tail.endswith(("-c", "-C", "=", "--git-dir", "--work-tree", "--namespace")) and (
                     ALIAS_TAIL.search(cur) or GIT_VALUE.search(cur)):
@@ -914,7 +931,7 @@ class _Scan:
             elif cur.lstrip().startswith(("cd ", "pushd ")):
                 emit(re.sub(r"\s", "\x01", plain))  # keep a directory with spaces readable for cwd tracking
             else:
-                emit('""' if re.search(r"\s", plain) else plain)
+                emit('""' if re.search(r"\s", plain) else _INERT.sub("\x06", plain))   # `awk 'NR>1'`: a quoted `>` is data, not a redirect
 
         while i < n:
             c = s[i]
@@ -1068,8 +1085,8 @@ class _Scan:
                 deferred.extend(_Scan(body, self.depth + 1, self.budget).walk(0, None)[2])
             if kind == "shell":
                 deferred.append(self._sub(body))
-            elif kind == "interp":
-                deferred.append(_code(body))
+            elif kind:
+                deferred.append(self._interp(kind, body))
         return i
 
 
@@ -1087,7 +1104,7 @@ def segments(command: str) -> list[str]:
     return [re.sub(r"\s+", " ", seg).strip() for seg in SPLIT.split(skeleton(command)) if seg.strip()]
 
 
-SEG_TOKEN = re.compile(r"(\n|;|&&|\|\||\||&|\$\(|`|\(|\)|\{|\})")
+SEG_TOKEN = re.compile(r"(\n|;|&&|\|\||(?<!>)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\})")
 
 
 def segments_cwd(command: str, cwd: str = "") -> list[tuple[str, tuple[str, ...]]]:
