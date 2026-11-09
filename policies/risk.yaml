@@ -107,6 +107,20 @@ rules:
     creates_only: true
     match: "(?i:(?<![\\w.-])\\.(?:claude/(?:skills|commands|agents)|agents|cursor/(?:skills|commands|agents)|skills-archive)/)"
     rationale: "Creates a skill, command or agent instruction file the human has not seen (editing an existing one is not gated)"
+  - id: R-21
+    level: high
+    reversibility: irreversible
+    blast_radius: public
+    data_sensitivity: secret
+    # Sending a file, standard input or a variable to a host that is not this machine (W-55, decided 2026-11-09, docs/05 T22). The agent can read a credential
+    # (R-30 records that, medium) but only a send makes it leave, so the send is what needs a permit. `^egress:upload ` is a marker that jade/policy.py adds
+    # to a segment when jade/egress.py finds one: `curl -d @f` / `--data-binary @f` / `--json @f` / `--data-urlencode name@f` / `-F f=@path` / `-T f` or a
+    # body that is a bare variable (`-d "$TOKEN"`), `wget --post-file` / `--body-file`, any `nc`/`ncat`/`netcat` that is not a port scan (`-z`). A send whose every
+    # destination is localhost, `*.localhost`, `*.test`, a loopback address, a body typed in the command, a header and a download are not matched.
+    # `gh gist create|edit` publishes the named files; `/dev/tcp/HOST/PORT` and `/dev/udp/...` is bash's own socket (a local host is exempt). scp, sftp, ssh and
+    # rsync to `host:` are R-14. Not covered (T22): clients this rule does not name, the Read-then-send done in a script, and the web tools.
+    match: "^egress:upload |\\bgh gist (?:create|edit)\\b|/dev/(?:tcp|udp)/(?!(?:localhost|127\\.0\\.0\\.1|::1)/)"
+    rationale: "Sends a file, standard input or a variable to a network destination (curl/wget upload, nc, gh gist, /dev/tcp): the data leaves this machine"
   - id: R-14
     level: high
     reversibility: partially_reversible
@@ -125,6 +139,21 @@ rules:
     blast_radius: repo
     match: "\\bgit (merge|rebase|reset(?! --hard)|stash drop)\\b"
     rationale: "Rewrites or discards local repo state, recoverable via reflog"
+  - id: R-30
+    level: medium
+    reversibility: reversible
+    blast_radius: file
+    data_sensitivity: secret
+    # A plain read of a credential file (W-55, decided 2026-11-09): `.env` and `.env.*` (not a name with a `.example|sample|template|dist|defaults|schema|tpl` part, `.env.local.example` included), `.npmrc`,
+    # `.pypirc`, `.netrc`, `.pgpass`, `.git-credentials`, `.aws/credentials`, `.docker/config.json`, `.kube/config`, `.config/gh/hosts.yml`, a private key
+    # named `id_rsa|id_ed25519|id_ecdsa|id_dsa` (not `.pub`), `*.pem|*.p12|*.pfx`, `vault_key`, and `security find-generic-password|find-internet-password`
+    # with `-w` or `-g`, alone or in a cluster such as `-ws` (the Keychain value) or `dump-keychain`. Recorded (the hook journals event `secret_read` with the rule and the tool, never the path or the
+    # command), not gated: a read by itself is how the agent does its work, and the send is R-21. `reads: true` makes jade/policy.py look at this rule for a command
+    # that only reads (cat, head, grep, sed ... are skipped by every other rule) and for the Read, Grep and Glob tools. The permit seal key stays SI-10. A key
+    # file name that is written (`cp`, `>`, `tee`) is R-04 (critical) first. Not matched: `*.key`, `.envrc`, `~/.ssh/config`, `known_hosts`, `~/.aws/config`.
+    reads: true
+    match: "(?i:(?<![\\w.-])\\.env(?![\\w.-]*\\.(?:example|sample|template|dist|defaults?|schema|tpl)(?![\\w-]))(?:\\.[\\w.-]+)?(?![\\w-])|(?<![\\w.-])\\.(?:npmrc|pypirc|netrc|pgpass|git-credentials)(?![\\w-])(?![\\w.-]*\\.(?:example|sample|template|dist|defaults?|schema|tpl)(?![\\w-]))|\\.aws/credentials(?![\\w-])|\\.docker/config\\.json|\\.kube/config(?![\\w-])|\\.config/gh/hosts\\.yml|(?<![\\w.-])id_(?:rsa|ed25519|ecdsa|dsa)(?!\\w|\\.pub\\b)|\\.(?:pem|p12|pfx)(?![\\w-])|\\bvault_key\\b|\\bsecurity\\s+(?:find-(?:generic|internet)-password\\b[^;&|]*\\s-[a-z]*[wg][a-z]*\\b|dump-keychain\\b))"
+    rationale: "Reads a credential file or a Keychain value: recorded, not gated (a send out of this machine is R-21)"
   - id: R-90
     level: low
     reversibility: reversible

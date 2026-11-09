@@ -11,7 +11,9 @@ import os
 import sys
 from dataclasses import dataclass, field
 
-from . import adapter, ledger, ops, paths, questions, redact, thresholds
+from policies.loader import RoutingError
+
+from . import adapter, ledger, ops, paths, questions, redact, route, thresholds
 from .util import LEVELS, canonical, session_id, sha256, state_language
 
 STATE_CAP = 32 * 1024
@@ -80,7 +82,15 @@ def resolve_model(model: str | None = None) -> str:
 
 
 def check_text(specs: list[Spec], state: dict) -> None:
-    """Text that cannot be encoded as UTF-8 (a lone surrogate from undecodable argv or stdin) cannot be sent or journaled: exit 6."""
+    """What makes a request unsendable before any text is touched, all of it exit 6: more questions than `routes.JEV.max_questions_per_request` lets one
+    request hold, a routing policy that cannot be read (the limits are not guessed), and text that cannot be encoded as UTF-8 (a lone surrogate from
+    undecodable argv or stdin) and so cannot be sent or journaled."""
+    try:
+        limit = route.limits().max_questions
+    except RoutingError as e:
+        raise questions.InvalidQuestion(f"the routing policy cannot be used ({e}); nothing was sent") from None
+    if len(specs) > limit:
+        raise questions.InvalidQuestion(f"{len(specs)} questions in one request; policies/routing.yaml allows at most {limit} (max_questions_per_request). Split the batch")
     try:
         canonical(state).encode()
         for s in specs:
@@ -153,7 +163,7 @@ def _run(specs: list[Spec], items: list[Item], state: dict, hits: int, warnings:
     if db:
         for i, it in enumerate(items):
             s = it.spec
-            it.call_id = db.begin_call(s.question_id, state_hash, session, version=s.version, claim_hash=sha256(canonical({"q": s.payload, "claim": state.get("claim")})),
+            it.call_id = db.begin_call(s.question_id, state_hash, session, version=s.version, claim_hash=claim_hash(s, state),
                                        primitive=s.primitive, task_family=s.family, request_model=model, decision_id=decision_id,
                                        state_bytes=len(state_text.encode()), state_text=state_text, risk=risk, redactions=hits, language=state_language(state),
                                        question_text=str(s.payload.get("instructions", ""))[:2000] + (" | " + str(state.get("claim", ""))[:500] if state.get("claim") else ""))
@@ -170,7 +180,16 @@ def _run(specs: list[Spec], items: list[Item], state: dict, hits: int, warnings:
     result = AskResult(items, 5, redactions=hits, warnings=warnings)
     todo = [it for it in items if not it.cached]
     res = None
-    if todo:
+    busy, cap = 0, None
+    if todo and db:
+        # `max_parallel_requests`: one batched request is one slot, counted over every process through the ledger (this call's own rows excluded). A
+        # call that finds the slots taken is not made: exit 5, no answer, never a yes. The count is a soft limit, two calls starting together can both pass.
+        cap = route.limits()
+        busy = db.in_flight_batches(cap.deadline_s * 2, exclude=tuple(it.call_id for it in items if it.call_id))
+    if todo and cap and busy >= cap.max_parallel:
+        res = adapter.Result(ok=False, error_kind="TOO_MANY_IN_FLIGHT", detail=f"{busy} requests in flight")
+        result.note = f"{busy} requests already in flight (limit {cap.max_parallel}, max_parallel_requests); nothing was sent. Retry in a few seconds"
+    elif todo:
         res = (provider or adapter.OpenRouterProvider()).ask(state, {it.spec.key: it.spec.payload for it in todo}, model)
         result.cost_usd, result.resolved_model, result.raw = res.cost_usd, res.resolved_model, res.raw
         if res.ok and not res.resolved_model:
@@ -244,6 +263,18 @@ def _run(specs: list[Spec], items: list[Item], state: dict, hits: int, warnings:
     return result
 
 
+def claim_hash(spec: Spec, state: dict) -> str:
+    return sha256(canonical({"q": spec.payload, "claim": state.get("claim")}))
+
+
+def find_repeat(db: ledger.Ledger, question_id: str, state: dict, *, options=None, session: str | None = None):
+    """The answered ledger row that asking this registry question on this state now would repeat, or None (PF-04). Hashes the state exactly as `run`
+    does, after the same redaction and cap, so a hit here is a hit there."""
+    spec = registry_spec(question_id, options=options)
+    prepared, _, _, _ = prepare([spec], dict(state))
+    return db.find_repeat(spec.question_id, spec.version, sha256(canonical(prepared)), claim_hash(spec, prepared), session or session_id())
+
+
 # ---- rendering -------------------------------------------------------------------------------------
 def render(ans: dict) -> str:
     """Exactly the legacy `jev` line for one answer."""
@@ -270,7 +301,8 @@ def explain(result: AskResult) -> list[str]:
     elif result.exit_code == 4:
         out.append(f"jade: REJECT, exit 4 ({it.verdict.reason if it.verdict else ''}). The claim is not supported by this evidence.{cid}")
     elif result.exit_code == 5:
-        out.append(f"jade: PROVIDER_UNAVAILABLE, exit 5 ({it.error_kind}). No answer was obtained; this is not a yes.{cid}")
+        out.append(f"jade: PROVIDER_UNAVAILABLE, exit 5 ({it.error_kind}{': ' + result.note if result.note and it.error_kind == 'TOO_MANY_IN_FLIGHT' else ''}). "
+                   f"No answer was obtained; this is not a yes.{cid}")
     elif result.exit_code == 6:
         out.append(f"jade: INVALID_QUESTION, exit 6 ({result.note or it.error_kind}). Fix the question; this is not a yes.{cid}")
     elif result.note:

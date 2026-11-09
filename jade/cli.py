@@ -121,7 +121,7 @@ def _stats(a) -> int:
     total = one(f"SELECT COUNT(*) AS n FROM jev_calls WHERE {w}").n  # noqa: S608 - constant fragment
     out = {"window_days": a.days, "calls": total}
     if total:
-        r = one(f"SELECT COUNT(DISTINCT substr(ts,1,10)) AS days, SUM(dedup_of IS NOT NULL) AS repeats, SUM(error_kind IS NOT NULL) AS errors, "  # noqa: S608
+        r = one(f"SELECT COUNT(DISTINCT substr(ts,1,10)) AS days, SUM(dedup_of IS NOT NULL) AS repeats, SUM(error_kind IS NOT NULL AND error_kind<>'TOO_MANY_IN_FLIGHT') AS errors, "  # noqa: S608
                 f"SUM(exit_code=0) AS accept, SUM(exit_code=3) AS abstain, SUM(exit_code=4) AS reject, SUM(exit_code IN (5,6)) AS no_answer, "
                 f"ROUND(SUM(cost_usd),6) AS cost, SUM(redactions>0) AS redacted, COUNT(DISTINCT session_id) AS sessions FROM jev_calls WHERE {w}")
         v = one(f"SELECT COUNT(*) AS n, ROUND(AVG(p),3) AS mean, SUM(p<0.70) AS below FROM jev_calls WHERE question_id='q.verify_claim.supported_by_evidence' "  # noqa: S608
@@ -135,8 +135,9 @@ def _stats(a) -> int:
                     "exit_codes": {"accept_0": r.accept, "abstain_3": r.abstain, "reject_4": r.reject, "no_answer_5_6": r.no_answer},
                     "repeat_share": round((r.repeats or 0) / total, 3), "error_share": round((r.errors or 0) / total, 3),
                     "non_accept_reminded_without_disposition": und, "share_of_non_accept": round(und / nonacc, 3) if nonacc else None,
+                    "dispositions": {x.disposition: x.n for x in db.all(f"SELECT disposition, COUNT(*) AS n FROM jev_calls WHERE disposition IS NOT NULL AND {w} GROUP BY disposition", arg)},  # noqa: S608
                     "latency_ms": {"p50": pct(0.5), "p95": pct(0.95), "p99": pct(0.99)}, "cost_usd": r.cost, "calls_with_redactions": r.redacted,
-                    "events": {x.kind: x.n for x in db.all("SELECT kind, COUNT(*) AS n FROM events WHERE kind IN ('BYPASS','MODEL_DRIFT','INVALID_QUESTION','would_block','safety_block') AND " + ledger.live() + " GROUP BY kind")}})
+                    "events": {x.kind: x.n for x in db.all("SELECT kind, COUNT(*) AS n FROM events WHERE kind IN ('BYPASS','MODEL_DRIFT','INVALID_QUESTION','would_block','safety_block','secret_read') AND " + ledger.live() + " GROUP BY kind")}})
     print(json.dumps(out, indent=1))
     return 0
 
@@ -251,41 +252,64 @@ def _ack(a) -> int:
     from . import hooks
 
     db = ledger.open()
-    ids = [r.call_id for r in hooks.undisposed(db, session_id(), only_unreminded=False)] if a.all else a.call_ids
-    if not ids:
+    if not a.all and not a.call_ids:
         print("nothing to acknowledge")
         return 0
-    with db.tx() as con:
-        con.executemany("UPDATE jev_calls SET disposition=?, disposition_note=? WHERE call_id=? AND disposition IS NULL", [(a.as_, a.note, i) for i in ids])
-    print(f"recorded disposition '{a.as_}' for {len(ids)} call(s)")
+    res = hooks.acknowledge(db, session_id(), a.call_ids, all_=a.all, disposition=a.as_, note=a.note, human=is_human_tty())
+    if res.refused:
+        print(f"jade: ack refused: {res.message}", file=sys.stderr)
+        return 1
+    print(f"recorded disposition '{a.as_}' for {res.count} call(s)" if res.count else "nothing to acknowledge")
     return 0
 
 
 def _question(a) -> int:
-    from . import schemas
-
-    bad = 0
-    for e in questions.entries():
-        problems = list(questions.lint(e))
-        try:
-            schemas.validate("question", e)
-        except Exception as ex:  # noqa: BLE001 - report every invalid entry
-            problems.append(f"schema: {str(ex).splitlines()[0]}")
-        if a.action == "list":
+    if a.action == "list":
+        for e in questions.entries():
             print(f"{e['question_id']}@{e['version']}  {e['primitive']:6} {e['task_family']}")
-        elif problems:
-            bad += 1
-            print(f"{e['question_id']}@{e['version']}:\n  " + "\n  ".join(problems))
-    if a.action == "lint":
-        print(f"{len(questions.entries())} entries, {bad} with problems")
-    return 1 if bad else 0
+        return 0
+    from policies.loader import RoutingError
+
+    try:
+        found = questions.validate_registry()
+    except RoutingError as e:   # the registry check reads the routing limits
+        print(f"jade: the routing policy cannot be used ({e})", file=sys.stderr)
+        return 1
+    for key, problems in found.items():
+        print(f"{key}:\n  " + "\n  ".join(problems))
+    print(f"{len(questions.entries())} entries, {len(found)} with problems")
+    return 1 if found else 0
 
 
 def _route(a) -> int:
+    from policies.loader import RoutingError
+
     from . import route
 
-    d = route.preflight(claim=a.claim or "", evidence=Path(a.evidence_file).read_text(errors="replace") if a.evidence_file else (a.evidence or ""),
-                        options=a.option, command=a.command, risk=a.risk, about_to_claim_done=a.done, deterministic=a.deterministic)
+    fresh = None
+    if (a.observed_at is None) != (a.ttl_s is None):
+        print("jade: --observed-at and --ttl-s go together", file=sys.stderr)
+        return 2
+    if a.observed_at is not None:
+        fresh = {"observed_at": a.observed_at, "ttl_s": a.ttl_s}
+    state = None
+    try:
+        if a.question_id:
+            state = {}
+            for f in a.field:
+                k, sep, v = f.partition("=")
+                if not sep:
+                    raise questions.InvalidQuestion("--field must be name=value or name=@file")
+                state[k.strip()] = _read_file(v[1:], f"field {k.strip()!r} file") if v.startswith("@") else v
+        d = route.preflight(claim=a.claim or "", evidence=Path(a.evidence_file).read_text(errors="replace") if a.evidence_file else (a.evidence or ""),
+                            options=a.option, command=a.command, risk=a.risk, about_to_claim_done=a.done, deterministic=a.deterministic,
+                            question_id=a.question_id, state=state, context_freshness=fresh)
+    except questions.InvalidQuestion as e:
+        print(f"jade: INVALID_QUESTION, exit 6 ({redact.redact(str(e))[0]})", file=sys.stderr)
+        return 6
+    except RoutingError as e:
+        print(f"jade: the routing policy cannot be used ({e})", file=sys.stderr)
+        return 1
     print(json.dumps(vars(d), indent=1))
     return 0
 
@@ -340,19 +364,28 @@ def _label(a) -> int:
     from . import evals
 
     db = ledger.open()
-    if a.action == "auto":
-        print(json.dumps(evals.auto_label(db)))
-    elif a.action == "queue":
+    if a.action == "queue":
         rows = evals.adjudication_queue(db)
         for r in rows:
             print(f"{r.call_id}  P={r.p:.2f} {r.verdict:8} {r.ts}  {r.q}")
         print(f"{len(rows)} to adjudicate (cap {evals.ADJUDICATION_PER_WEEK}/week): jade label set <call_id> yes|no")
-    else:
-        if not is_human_tty():
-            print("jade: adjudication labels are set by a human at a terminal", file=sys.stderr)
-            return 1
-        evals.set_label(db, a.call_id, 1 if a.value == "yes" else 0, "adjudicated", a.note or "")
-        print("labeled")
+        return 0
+    # W-59: a label is calibration input (docs/04, docs/05 T24). Writing one, or joining outcomes into labels, is a human's job at a terminal.
+    if not is_human_tty():
+        print("jade: calibration labels are written by a human at a terminal (adjudication is a human job, docs/04); an attempt from an agent session is journaled", file=sys.stderr)
+        db.event(session_id(), "LABEL_REFUSED", actor="agent", detail={"command": f"label {a.action}", "call_id": getattr(a, "call_id", None)})
+        return 1
+    if a.action == "auto":
+        n = evals.auto_label(db)
+        db.event(session_id(), "LABEL_AUTO", actor="human", detail=n)
+        print(json.dumps(n))
+        return 0
+    if db.get_call(a.call_id) is None:
+        print(f"jade: unknown call {a.call_id}", file=sys.stderr)
+        return 1
+    evals.set_label(db, a.call_id, 1 if a.value == "yes" else 0, "adjudicated", a.note or "")
+    db.event(a.call_id, "LABEL_SET", next=a.value, guard=a.note or "", actor="human", detail={"source": "adjudicated"})
+    print("labeled")
     return 0
 
 
@@ -584,6 +617,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--risk", default="low", choices=("low", "medium", "high", "critical"))
     r.add_argument("--done", action="store_true", help="the agent is about to claim completion")
     r.add_argument("--deterministic", action="store_true", help="a deterministic check can answer this")
+    r.add_argument("--question-id", help="PF-04: the registry question about to be asked; with --field, a repeat in this session routes to REUSE")
+    r.add_argument("--field", action="append", default=[], help="state field of that question: name=value or name=@file")
+    r.add_argument("--observed-at", help="PF-07: when the context was observed (ISO 8601, UTC when no zone is given); needs --ttl-s")
+    r.add_argument("--ttl-s", type=float, help="PF-07: how many seconds that observation stays good")
     f = sub.add_parser("fast", help="deterministic checks: exit-code EXPECT ACTUAL | file-exists PATH | regex PATTERN FILE")
     f.add_argument("kind", choices=("exit-code", "file-exists", "regex"))
     f.add_argument("args", nargs="+")

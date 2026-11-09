@@ -275,7 +275,7 @@ def test_routing_preflight_ids_unique_and_routes_known():
         for k in ("on_true", "on_false"):
             if k in p:
                 assert p[k] in known, p
-    assert routing["cache"]["never_cached"], "authorization must never be cached"
+    assert "cache" not in routing, "the cache block was read by no code and is deleted (W-53); the session dedup is the only reuse"
 
 
 def test_promotion_auto_scope_is_subset_of_allowed_targets():

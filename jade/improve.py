@@ -24,7 +24,8 @@ COMPUTED_RESULTS = (*REQUIRED_RESULTS, "offline_replay_pass", "min_live_samples_
                     # ... and the evidence they are derived from, written only by the evaluators (`replay_threshold`, `shadow`, `protected_check`, `start_canary`)
                     "champion", "challenger", "validation", "worse_subgroups", "distinct_claims", "n", "group", "accept", "reject", "question_id",
                     "shadow", "shadow_started_at", "protected", "canary", "promotion")
-EVALUATED = ("calibration_threshold", "question_template")   # targets with an evaluator; any other target cannot be promoted by this code
+EVALUATED = ("calibration_threshold", "question_template")   # targets with an evaluator; any other target cannot be promoted by this code (W-44)
+CANARY_FALSE_ACCEPT_MARGIN = 0.03   # the shipped `false_accept_rate > champion + 0.03` of policies/promotion.yaml canary.rollback_triggers; a test pins the two together
 SHADOW_IN_HOT_PATH = False
 
 
@@ -286,8 +287,53 @@ def audit_verdict(doc: dict, res: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _canary_false_accepts(db, qid: str, version: int, started: str, challenger: bool) -> tuple[int, int]:
+    """(false accepts, accepted) among the labeled, independent live answers of the question since the canary started: those of the canary
+    version (`challenger`) or of every other version (the champion). An accept is exit 0; heuristic labels are not evidence."""
+    row = db.one(f"SELECT COUNT(*) AS n, SUM(l.label=0) AS bad FROM jev_calls c JOIN labels l ON l.call_id=c.call_id WHERE c.question_id=? "  # noqa: S608 - constant fragment
+                 f"AND c.question_version{'=' if challenger else '<>'}? AND c.ts>=? AND c.primitive='noul' AND c.exit_code=0 AND c.p IS NOT NULL "
+                 f"AND c.dedup_of IS NULL AND l.source<>'heuristic' AND {ledger.live('c')}", (qid, version, started))
+    return int(row.bad or 0), int(row.n or 0)
+
+
+def canary_triggers(db, res: dict) -> list[str]:
+    """The rollback triggers of policies/promotion.yaml canary that have fired, each as a sentence, from the ledger rows of the canary
+    (live calls of the canary version since `canary.started_at`; the champion's rows over the same window are the baseline):
+    false_accept_rate > champion + 0.03; a resolved model the shadow run did not use; provider_error_rate > 0.05. A canary whose start
+    was not recorded has no window and fires every time (fail closed). With no labeled accepted canary answers the false-accept trigger
+    has nothing to measure and does not fire: it can only block once labels exist."""
+    can, sh = res.get("canary") or {}, res.get("shadow") or {}
+    qid, version, started = res.get("question_id"), can.get("version"), can.get("started_at")
+    if not qid or not isinstance(version, int) or not isinstance(started, str):
+        return ["the canary start time or version was not recorded, so no trigger can be evaluated"]
+    fired = []
+    bad_c, n_c = _canary_false_accepts(db, qid, version, started, True)
+    if n_c:
+        bad_h, n_h = _canary_false_accepts(db, qid, version, started, False)
+        champ = bad_h / n_h if n_h else 0.0   # no labeled champion traffic in the window: the challenger is held to no false accepts beyond the margin
+        if bad_c / n_c > champ + CANARY_FALSE_ACCEPT_MARGIN + 1e-9:
+            fired.append(f"canary rollback trigger: false_accept_rate {bad_c / n_c:.3f} ({bad_c} of {n_c} accepted) is above the champion's {champ:.3f} + {CANARY_FALSE_ACCEPT_MARGIN}")
+    seen = sorted(r.resolved_model for r in db.all("SELECT DISTINCT resolved_model FROM jev_calls WHERE question_id=? AND question_version=? AND ts>=? "
+                                                  f"AND resolved_model IS NOT NULL AND {ledger.live()}", (qid, version, started)))
+    stray = [m for m in seen if m not in (sh.get("resolved_models") or [])]
+    if stray:
+        if sh.get("resolved_models"):
+            fired.append(f"canary rollback trigger: resolved_model {', '.join(stray)} of live traffic differs from the shadowed model "
+                         f"({', '.join(sh['resolved_models'])}); a new calibration group, re-evaluate")
+        else:
+            fired.append(f"canary rollback trigger: resolved_model {', '.join(stray)} of live traffic cannot be compared: the shadow run predates the recorded model "
+                         "(it has no resolved_models); run `jade improve rollback`, then `jade improve shadow` again, then start the canary again")
+    since = f"-{int(policy().get('shadow', {}).get('duration_days', 7))} days"
+    row = db.one("SELECT COUNT(*) AS n, SUM(error_kind IS NOT NULL) AS e FROM jev_calls WHERE ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?) "
+                 "AND COALESCE(primitive,'')<>'fast' AND COALESCE(error_kind,'')<>'TOO_MANY_IN_FLIGHT' AND " + ledger.live(), (since,))   # a local throttle refusal sent nothing
+    if row.n and (row.e or 0) / row.n > 0.05:
+        fired.append("canary rollback trigger: provider error rate above 5%")
+    return fired
+
+
 def canary_verdict(res: dict, home: Path, db) -> tuple[bool, str]:
-    """A template reaches promotion only through a canary, at no more than the policy's traffic share, of the version that was shadowed."""
+    """A template reaches promotion only through a canary, at no more than the policy's traffic share, of the version that was shadowed,
+    with none of the canary's rollback triggers fired."""
     can, sh = res.get("canary"), res.get("shadow") or {}
     if not isinstance(can, dict) or can.get("version") != sh.get("challenger_version"):
         return False, "no canary of the shadowed version was started"
@@ -296,11 +342,9 @@ def canary_verdict(res: dict, home: Path, db) -> tuple[bool, str]:
         return False, "the pinned challenger is not the canary version"
     if not 0 < float(pin.get("challenger_fraction", 1)) <= ops.canary_fraction():
         return False, "the challenger's traffic share is above the canary fraction"
-    since = f"-{int(policy().get('shadow', {}).get('duration_days', 7))} days"
-    row = db.one("SELECT COUNT(*) AS n, SUM(error_kind IS NOT NULL) AS e FROM jev_calls WHERE ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?) "
-                 "AND COALESCE(primitive,'')<>'fast' AND " + ledger.live(), (since,))
-    if row.n and (row.e or 0) / row.n > 0.05:
-        return False, "canary rollback trigger: provider error rate above 5%"
+    fired = canary_triggers(db, res)
+    if fired:
+        return False, "; ".join(fired)
     return True, "ok"
 
 
@@ -468,6 +512,8 @@ def start_canary(path, candidate_id: str, stdin_isatty: bool | None = None) -> d
             raise PromotionBlocked(f"{doc['target_component']} has no canary stage")
         if doc["promotion_decision"] in ("promoted", "rolled_back", "rejected"):
             raise PromotionBlocked(f"candidate {candidate_id} is already {doc['promotion_decision']}")
+        if doc["promotion_decision"] == "canary":   # a restart would move `started_at` past the rows that fired a trigger, and a trigger only clears by `rollback`
+            raise PromotionBlocked(f"candidate {candidate_id} is already in canary; a canary is not restarted (`jade improve rollback` ends it, then shadow again)")
         if pol.get("canary", {}).get("requires_human_opt_in") and not (is_human_tty(stdin_isatty) or paths.config().get("auto_promotion_opt_in")):
             raise PromotionBlocked("a canary needs a human at a terminal or the human opt-in `auto_promotion_opt_in` in config.json")
         ok, why = shadow_verdict(res, pol)
@@ -497,11 +543,11 @@ def patterns(db: ledger.Ledger, days: int = 7) -> list[dict]:
     if rep / total > 0.03 and rep >= 5:
         out.append({"key": "repeat_without_new_evidence", "target": "skill_reference", "instruction": True, "n": rep, "total": total,
                     "hypothesis": f"{rep} of {total} calls repeated a question with identical state; guidance should say what counts as new evidence"})
-    und = db.one(f"SELECT COUNT(*) AS n FROM jev_calls WHERE exit_code IN (3,4) AND disposition IS NULL AND reminded=1 AND {w}", (since,)).n  # noqa: S608
+    und = db.one(f"SELECT COUNT(*) AS n FROM jev_calls WHERE exit_code IN (3,4) AND (disposition IS NULL OR disposition='dropped') AND reminded=1 AND {w}", (since,)).n  # noqa: S608 - `dropped` says nothing was done (W-59)
     if und >= 5:
         out.append({"key": "non_accept_without_disposition", "target": "skill_reference", "instruction": True, "n": und, "total": total,
-                    "hypothesis": f"{und} abstain/reject answers were reminded by the Stop hook and still have no disposition"})
-    for r in db.all(f"SELECT error_kind, COUNT(*) AS n FROM jev_calls WHERE error_kind IS NOT NULL AND {w} GROUP BY error_kind", (since,)):  # noqa: S608
+                    "hypothesis": f"{und} abstain/reject answers were reminded by the Stop hook and still have no disposition or were dropped"})
+    for r in db.all(f"SELECT error_kind, COUNT(*) AS n FROM jev_calls WHERE error_kind IS NOT NULL AND error_kind<>'TOO_MANY_IN_FLIGHT' AND {w} GROUP BY error_kind", (since,)):  # noqa: S608 - a local throttle refusal is not a provider error
         if r.n / total > 0.02 and r.n >= 3:
             out.append({"key": f"provider_error_{r.error_kind}", "target": "performance", "instruction": False, "n": r.n, "total": total,
                         "hypothesis": f"provider error {r.error_kind} on {r.n} of {total} calls exceeds the 2% budget"})
@@ -563,6 +609,8 @@ def shadow(db: ledger.Ledger, candidate_id: str, question_id: str, version: int,
 
     if frozen(db.path.parent):
         raise PromotionBlocked("kill switch FREEZE is present: shadow runs are disabled")
+    if (get(db, candidate_id) or {}).get("promotion_decision") == "canary":   # the canary's triggers read this run's recorded models: it is not replaced while the canary runs
+        raise PromotionBlocked(f"candidate {candidate_id} is in canary; its shadow evidence is not replaced (`jade improve rollback` ends the canary first)")
     entry = questions.get(question_id, version)
     if entry["primitive"] != "noul":
         raise PromotionBlocked("shadow comparison is implemented for noul questions")
@@ -573,12 +621,14 @@ def shadow(db: ledger.Ledger, candidate_id: str, question_id: str, version: int,
                                                "AND exit_code IN (0,3,4) AND ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?)", (question_id, f"-{days} days")))
     payload = questions.build_noul(question_id)
     n = agree = champ_acc = chall_acc = errors = unsafe = 0
-    cost, lats, disagreements = 0.0, [], []
+    cost, lats, disagreements, models = 0.0, [], [], set()
     for r in rows:
         res = provider.ask(json.loads(r.state_text), {"q": payload})
         if not res.ok or "q" not in res.answers or adapter.check_answer(res.answers["q"], payload):
             errors += 1
             continue
+        if res.resolved_model:
+            models.add(res.resolved_model)
         v = thresholds.judge(res.answers["q"], entry["task_family"], "low", version, res.resolved_model, primitive="noul")
         n += 1
         agree += v.exit_code == r.exit_code
@@ -594,7 +644,7 @@ def shadow(db: ledger.Ledger, candidate_id: str, question_id: str, version: int,
     out = {"question_id": question_id, "challenger_version": version, "n": n, "errors": errors, "agreement": round(agree / n, 3) if n else None,
            "champion_accept_rate": round(champ_acc / n, 3) if n else None, "challenger_accept_rate": round(chall_acc / n, 3) if n else None,
            "reject_to_accept": unsafe, "cost_usd": round(cost, 6), "p95_latency_ms": pct(lats), "champion_p95_latency_ms": pct(base),
-           "disagreements": disagreements, "min_live_samples_met": n >= int(policy().get("shadow", {}).get("min_live_samples", 100)), "ran_at": ts()}
+           "resolved_models": sorted(models), "disagreements": disagreements, "min_live_samples_met": n >= int(policy().get("shadow", {}).get("min_live_samples", 100)), "ran_at": ts()}
     prior = get(db, candidate_id) or {}
     started = (prior.get("results") or {}).get("shadow_started_at") or ts()
     attach_results(db, candidate_id, {"shadow": out, "question_id": question_id, "shadow_started_at": started}, stage="shadow", _computed=True)

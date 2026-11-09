@@ -18,7 +18,7 @@ from functools import lru_cache
 
 from policies import loader
 
-from . import inert, paths, shellnorm
+from . import egress, inert, paths, shellnorm
 from .util import LEVELS, canonical, fold, sha256
 
 NULL_REDIRECT = shellnorm.NULL_REDIRECT
@@ -29,12 +29,18 @@ WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 SHELL_TOOLS = ("Bash", "PowerShell", "Monitor")  # built-in tools that run a command line: classified like Bash
 # Every built-in tool the PreToolUse matcher names (ops.pretool_matcher adds `mcp__.*`). Agent/Task need no gate: the tool calls a subagent
 # makes run the same hook. CronCreate/CronDelete only schedule a prompt that later runs under the same hooks, so they are not gated either.
-READ_TOOLS = ("Read", "Grep", "Glob")  # gated for one thing only: the permit seal key (SI-10, W-70); every other read is ungated and classified low
+READ_TOOLS = ("Read", "Grep", "Glob")  # gated for one thing only: the permit seal key (SI-10, W-70); a read of another credential file is medium (R-30, W-55), recorded and not gated
 GATED_BUILTIN = (*SHELL_TOOLS, *WRITE_TOOLS, "RemoteTrigger", *READ_TOOLS)
+# Built-in tools decided not to gate (W-36): subagent and scheduling tools for the reasons above, and the web tools: a URL can carry data in its query and
+# the gate cannot tell that from a page request (the accepted line of docs/05 T22, W-55).
+# `jade check` lists a built-in tool the ledger saw that is in neither tuple, so a new tool gets a decision.
+UNGATED_BUILTIN = ("Agent", "Task", "CronCreate", "CronDelete", "WebFetch", "WebSearch")
 OLD_KEYS = {"old_string", "old_str"}  # text that is being removed is never scanned as content
 PATH_KEYS = ("source", "destination", "src", "dest", "dst", "from", "to", "old_path", "new_path", "dir", "directory", "folder")
 UNSAFE_GIT = shellnorm.UNSAFE_GIT  # marker prefix R-15 matches; carried only in the text a rule sees
 HOOKS_BYPASS = "git:hooks-bypass "  # marker prefix R-17 matches: a `git -c core.hooksPath=...` command
+EGRESS_MARK = egress.MARK  # marker prefix R-21 matches: curl, wget or nc sending a file, stdin or a variable to a host that is not this machine (W-55)
+RECORDED_RULES = ("R-30",)  # medium rules whose hits the hook journals (event `secret_read`): not gated, but counted so a soak report can size them
 PATH_RULES = ("R-01", "R-04", "R-12", "R-13", "R-16", "R-18")  # the rules about where a write lands: they also see relative operands made absolute
 WRITE_KEYS = ("file_path", "notebook_path", "path", "filePath", "file", "filepath", "target_file", "file_name", "filename", "target")
 CONTENT_KEYS = {"content", "new_string", "old_string", "new_str", "old_str", "new_source", "text", "contents", "data", "source", "patch"}
@@ -155,6 +161,7 @@ class Assessment:
     plan_subject: str = ""  # exactly what plan_hash covers besides the tool: `subject` is what a human reads, this is what was hashed
     plan_cwd: str = ""
     hold_key: str = ""  # identity of the command for SI-07: the canonical gated segments, independent of quoting, separators, prefixes and cwd
+    recorded: bool = False  # R-30 only: a read-only command or a Read/Grep/Glob call named a credential file (a write that names one is R-30 too and is not counted)
 
 
 _BASE_ONLY = False  # see base_only()
@@ -181,9 +188,20 @@ def safety() -> dict:
     return _safety(not _BASE_ONLY)
 
 
+@lru_cache(maxsize=1)
+def _routing() -> dict:
+    return loader.load_routing(paths.policy_dir() / "routing.yaml")
+
+
+def routing() -> dict:
+    """policies/routing.yaml, shipped file only (no overlay). Raises `loader.RoutingError` when it cannot be read or is malformed."""
+    return _routing()
+
+
 def reset_cache() -> None:
     _risk.cache_clear()
     _safety.cache_clear()
+    _routing.cache_clear()
 
 
 @contextmanager
@@ -654,16 +672,48 @@ def _grep_glob_keeps_the_key(names: list[str], globs: list[str]) -> bool:
     return any(_names_by_glob(names, text_views(w), relaxed=True) for w in pos) if pos else True
 
 
+def _secret_read(seg: str) -> dict | None:
+    """The `reads: true` rule (R-30) when a read-only command names a credential file. A command that may write is classified by `classify_segment`, where
+    the same rule sits among the others; this is the one place a command that only reads is looked at for what it reads."""
+    rule = next((r for r in risk()["rules"] if r.get("reads")), None)
+    if rule is None:
+        return None
+    bare = _bare(seg)
+    return rule if any(rule["_re"].search(t) for t in dict.fromkeys((seg, bare, _pathfold(bare)))) else None
+
+
+_CREDENTIAL_DIR = re.compile(r"(?i)(?:^|/)\.(?:aws|docker|kube|ssh|open-vault)/*$|(?:^|/)\.config/gh/*$")   # a directory a recursive Grep would read credentials from
+
+
+def _secret_path(tool: str, tool_input: dict, cwd: str) -> dict | None:
+    """R-30 for a Read, Grep or Glob call: a path, a glob or a Glob pattern that names a credential file, also after `~`, `..` and symlinks are resolved."""
+    rule = next((r for r in risk()["rules"] if r.get("reads")), None)
+    if rule is None:
+        return None
+    targets, globs = read_targets(tool, tool_input)
+    base = [t for t in targets if t.strip()]
+    texts = [*base, *globs, *(f"{b.rstrip('/')}/{g}" for b in base for g in globs)]
+    resolved = [n for t in base if (n := normalise_path(t, cwd))]
+    texts += resolved
+    if tool == "Grep" and any(_CREDENTIAL_DIR.search(t) for t in [*base, *resolved]):
+        return rule   # a Grep rooted at the credential directory itself (`~/.aws`) reads every file in it; one rooted at an ancestor stays accepted (T22)
+    return rule if any(rule["_re"].search(v) for t in texts for v in dict.fromkeys((t, _pathfold(t)))) else None
+
+
 def _assess_read(tool: str, tool_input: dict, cwd: str) -> Assessment:
     """Read, Grep and Glob are gated for the permit seal key only (SI-10, W-70): the call is blocked when it names the key file, resolves to it (a symlink or a
     hard link), searches the directory that holds it without a filter that leaves it out, or holds a glob that would match its name (six or more literal
     characters anywhere, any length when the search directory is the one that holds the key). Every other read, the other files of the JADE home included
-    (ledger, logs, pins), and every read of a repository's own files stays low: `jade ledger stats` is the way to read the ledger."""
-    a = Assessment(level="low", rule_id="R-READ", rationale="Read-only tool call; only the permit seal key is protected (SI-10)", blast_radius="file")
+    (ledger, logs, pins), and every read of a repository's own files stays low: `jade ledger stats` is the way to read the ledger. A path or glob that names
+    another credential file (`.env`, `~/.aws/credentials`, a private key, `*.pem`) is medium (R-30, W-55): the hook journals it and does not gate it."""
+    a = Assessment(level="low", rule_id="R-READ", rationale="Read-only tool call; only the permit seal key is blocked (SI-10) and a credential file is recorded (R-30)", blast_radius="file")
     subject = tool_subject(tool, tool_input)
     _seal(a, tool, subject, cwd, subject)
     inv = next((i for i in safety()["invariants"] if i["id"] == "SI-10"), None)
     if inv is None or not _reads_the_seal_key(inv, tool, tool_input, cwd):
+        if rule := _secret_path(tool, tool_input, cwd):
+            _raise_to(a, _from_rule(rule, "local"))
+            a.recorded = True
         return a
     a.level, a.rule_id, a.rationale = "critical", "SI-10", "Read of the permit seal key"
     a.reversibility, a.blast_radius, a.data_sensitivity = "irreversible", "service", "secret"
@@ -764,6 +814,16 @@ def _tool_rule(tool: str, command_decides: bool) -> dict:
     return {"id": "R-99", "level": "low", "rationale": "Tool with no mutation rule", "blast_radius": "service"}
 
 
+def tool_coverage(tool: str) -> str | None:
+    """None when a decision covers the tool: a built-in tool the gate names or is decided not to gate, or an MCP tool a specific `mcp_tools` rule names.
+    Otherwise why not: the id of the generic rule that classifies an MCP tool by its name alone (M-07 gated by a verb in the name, M-99 medium and
+    not gated), or `ungated` for a built-in tool nothing names. The tool name is all this reads."""
+    if not is_mcp(tool):
+        return None if tool in GATED_BUILTIN or tool in UNGATED_BUILTIN else "ungated"
+    rule = _tool_rule(tool, command_decides=False)
+    return rule["id"] if rule.get("generic") else None
+
+
 def _rule_assessment(rule: dict) -> Assessment:
     return Assessment(level=rule["level"], rule_id=rule["id"], rationale=rule["rationale"], environment="production" if rule["level"] == "critical" else "local",
                       reversibility=rule.get("reversibility", "reversible"), blast_radius=rule.get("blast_radius", "service"))
@@ -827,7 +887,7 @@ def _use_identity(seg: str) -> str:
     return IDENTITY_FILE.sub("-i $KEY", seg) if bare.split(" ", 1)[0].rsplit("/", 1)[-1] in REMOTE_SHELL_VERBS else seg
 
 
-def classify_segment(seg: str, dirs: tuple[str, ...]) -> tuple[dict, str]:
+def classify_segment(seg: str, dirs: tuple[str, ...], proxied: bool = False) -> tuple[dict, str]:
     """The rule one simple command (a segment of `shellnorm.segments_cwd`) matches, and the command with launcher prefixes and git options gone.
 
     The command is looked at as written and with its operands made absolute for every directory it may run in; a `files_only` rule (R-13, R-16)
@@ -836,7 +896,8 @@ def classify_segment(seg: str, dirs: tuple[str, ...]) -> tuple[dict, str]:
     seg = _use_identity(seg)
     bare, calls = _analyse(seg)
     hooks_off = any("core.hookspath" in d for c in calls for d in c.danger)   # `git -c core.hooksPath=...` turns the pre-push guard off for this command (R-17)
-    texts = [*([HOOKS_BYPASS + bare] if hooks_off else []), seg, bare, _pathfold(bare), *([UNSAFE_GIT + bare] if any(c.danger for c in calls) else [])]
+    texts = [*([HOOKS_BYPASS + bare] if hooks_off else []), seg, bare, _pathfold(bare), *([UNSAFE_GIT + bare] if any(c.danger for c in calls) else []),
+             *([EGRESS_MARK + bare] if egress.sends_out(bare, proxied or bool(egress.PROXY_ENV.search(seg))) else [])]
     view = files_view(bare)  # what a `files_only` rule may look at: None = the whole segment
     cview = creation_view(bare, view, calls, tuple(dirs) or ("",))  # what a `creates_only` rule may look at
     seg_best = None
@@ -864,11 +925,17 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     keys: list[str] = []
     gated_keys: list[str] = []
     text_in = subject.replace("\x00", "")  # a shell ignores a NUL byte in a command; the plan hash still covers the text as written
+    secret_read = False
+    proxied = bool(egress.PROXY_ENV.search(text_in))   # a proxy variable anywhere in the command routes a send in any segment (`export https_proxy=...; curl ...`)
     for seg, dirs in shellnorm.segments_cwd(text_in, cwd):
         if is_read_only(seg):
+            if sr := _secret_read(seg):
+                secret_read = True
+            if sr and (best is None or LEVELS[sr["level"]] > LEVELS[best["level"]]):
+                best = sr   # a plain read of a credential file: medium, recorded and not gated (R-30, W-55)
             continue
         active.append(seg)
-        seg_best, bare = classify_segment(seg, dirs)
+        seg_best, bare = classify_segment(seg, dirs, proxied)
         if best is None or LEVELS[seg_best["level"]] > LEVELS[best["level"]]:
             best = seg_best
         key = _segment_key(bare)
@@ -877,6 +944,7 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
             gated_keys.append(key)
     best = best or risk()["rules"][-1]
     a = _from_rule(best, loader.environment_of(risk(), text_in))
+    a.recorded = secret_read and bool(best.get("reads"))
     views: list[str] | None = None
     for inv in safety()["invariants"]:
         if "_re" not in inv:

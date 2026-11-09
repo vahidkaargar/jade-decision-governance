@@ -26,6 +26,11 @@ LEDGER_TIMEOUT_S = 1.5  # one wait for the ledger lock (open waits at most twice
 GIT_TIMEOUT_S = 2.0     # one git call made to resolve a push destination
 BYPASS = re.compile(r"\bcurl\b.*openrouter\.ai/api/alpha/decisions")
 REMIND_WINDOW_S = 6 * 3600
+# W-59: `jade ack` is an agent's claim about what it did, so it is scoped, journaled and rate limited when no human is at the terminal (docs/05 T24).
+ACK_RATE_WINDOW_S = 3600
+ACK_MAX_PER_WINDOW = 10   # `jade ack` commands per session per window; a session with more non-yes answers than this needs a human, not a louder ack
+ACK_ELIGIBLE_EXITS = (3, 4, 5, 6)
+ACK_NOTE_MAX = 500
 # Host permission modes in which Claude Code shows no prompt: JADE's gate is then the only gate (docs/05 T18). acceptEdits skips the prompt for file edits only.
 NO_PROMPT_MODES = ("bypassPermissions", "auto")
 NO_PROMPT_EDIT_MODES = ("acceptEdits",)
@@ -136,8 +141,30 @@ def parse_push(args: list[str]) -> tuple[str | None, list[str], bool]:
     return (pos[0] if pos else None), pos[1:], every
 
 
+class GitUnresolved(Exception):
+    """git could not answer (it hung, is missing, refused the directory or the repository is unreadable). Not the same as "no such ref":
+    the gate treats this as an unresolved push destination and fails closed at high risk, never as "not main"."""
+
+
+def _git_env() -> dict[str, str]:
+    """The environment for the hook's own git call: the agent's GIT_* variables (GIT_DIR, GIT_CONFIG_*, GIT_EXEC_PATH, GIT_SSH_COMMAND, ...) are
+    dropped, system and global config are not read, there is no pager and no prompt."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(LC_ALL="C", GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_PAGER="cat", GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
+    return env
+
+
 def _git(call: policy.shellnorm.GitCall, cwd: str, *args: str) -> str | None:
-    argv = ["git"]
+    """Run `git <args>` for a `git push` the agent wrote, in a directory the agent controls (W-60), and return its output.
+
+    Returns None only when git gave a definite "nothing there": no such ref (`symbolic-ref -q` exits 1 with nothing on stderr: a detached HEAD,
+    no recorded remote default) or no repository at all (a missing directory, "not a git repository": there is nothing to push from). Everything
+    else raises GitUnresolved: a timeout, a missing git, a repository git refuses (safe.directory, `dubious ownership`) or cannot read (a broken
+    config), a crash, empty output. The repository's own config is read by git whatever we do, so the
+    options that make git run a program from it are overridden (core.fsmonitor, core.hooksPath; no pager), the system and global config are
+    ignored, and the agent's GIT_* environment is dropped. safe.directory is deliberately not widened: an untrusted owner is "unresolved".
+    """
+    argv = ["git", "--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.devnull, "-c", "core.pager=cat"]
     for d in call.dirs:
         argv += ["-C", os.path.expanduser(d)]
     if call.git_dir:
@@ -145,13 +172,19 @@ def _git(call: policy.shellnorm.GitCall, cwd: str, *args: str) -> str | None:
     if call.work_tree:
         argv += ["--work-tree", os.path.expanduser(call.work_tree)]
     argv = [w.replace("\x00", "") for w in [*argv, *args]]  # a shell ignores a NUL byte; subprocess refuses one
-    try:
-        out = subprocess.run(argv, capture_output=True, text=True, timeout=GIT_TIMEOUT_S, cwd=cwd or None)
-    except subprocess.TimeoutExpired:
-        raise  # an unresolved destination is never "not main": the gate treats it as a failure (fail closed)
-    except (OSError, subprocess.SubprocessError):
+    if cwd and not os.path.isdir(cwd):
         return None
-    return out.stdout.strip() or None if out.returncode == 0 else None
+    try:
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=GIT_TIMEOUT_S, cwd=cwd or None, env=_git_env(), stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError, ValueError) as e:  # TimeoutExpired is a SubprocessError
+        raise GitUnresolved(type(e).__name__) from e
+    if out.returncode == 1 and not out.stdout.strip() and not out.stderr.strip():
+        return None
+    if out.returncode == 128 and re.search(r"not a git repository|cannot change to '", out.stderr):
+        return None
+    if out.returncode != 0 or not out.stdout.strip():
+        raise GitUnresolved(f"git exited {out.returncode}")
+    return out.stdout.strip()
 
 
 def _short_ref(ref: str) -> str:
@@ -176,7 +209,7 @@ def _push_hits_default(call: policy.shellnorm.GitCall, cwd: str) -> bool:
         return (cur() or "").lower() in DEFAULT_BRANCHES
 
     if not refs:
-        return on_default()
+        return on_default() or _config_sends_to_default(call, cwd, remote, cur)
     targets = []
     for ref in refs:
         src, colon, dst = ref.lstrip("+").partition(":")
@@ -199,19 +232,71 @@ def _push_hits_default(call: policy.shellnorm.GitCall, cwd: str) -> bool:
     return False
 
 
+def _short_matches_default(dst: str, on_default) -> bool:
+    """Does the destination of one refspec (`HEAD`, `refs/heads/main`, a glob) hit main/master, or the current branch while that is main/master?"""
+    dst = _short_ref(dst.lstrip("+").partition(":")[2] or dst.lstrip("+"))
+    if dst in ("HEAD", "@", ""):
+        return on_default()
+    if any(ch in dst for ch in "$*?["):
+        return bool(fnmatch.filter(DEFAULT_BRANCHES, dst)) or on_default()
+    return dst.lower() in DEFAULT_BRANCHES
+
+
+def _config_sends_to_default(call: policy.shellnorm.GitCall, cwd: str, remote: str | None, cur) -> bool:
+    """A `git push` or `git push <remote>` with no refspec goes where the repository's own config says (`remote.<r>.push`, else `push.default`: `upstream`
+    follows `branch.<b>.merge`, `matching` pushes every branch both sides have), not where the branch is named. The system and global config are ignored
+    (`_git_env`); a repository that sets any of these to reach main is an SI-08 hit. A branch name `git` cannot report (detached HEAD) has no config to follow."""
+    branch = cur()
+    if not branch:
+        return False
+    on_default = lambda: branch.lower() in DEFAULT_BRANCHES  # noqa: E731
+    name = remote if remote and re.fullmatch(r"[\w.-]+", remote) else (_git(call, cwd, "config", "--get", f"branch.{branch}.remote") or "origin")
+    if re.fullmatch(r"[\w.-]+", name):
+        pushes = _git(call, cwd, "config", "--get-all", f"remote.{name}.push")
+        if pushes:   # `remote.<r>.push` replaces push.default for a bare push
+            return any(_short_matches_default(line.strip(), on_default) for line in pushes.splitlines() if line.strip())
+    mode = (_git(call, cwd, "config", "--get", "push.default") or "simple").lower()
+    if mode == "matching":
+        return True
+    if mode in ("upstream", "tracking"):
+        merge = _git(call, cwd, "config", "--get", f"branch.{branch}.merge")
+        return bool(merge) and _short_ref(merge).lower() in DEFAULT_BRANCHES
+    return False
+
+
+_GIT_ENV_ASSIGN = re.compile(r"(?<![\w])GIT_(?:DIR|WORK_TREE|COMMON_DIR)=")
+_CD_VARIABLE = re.compile(r"(?:^|\s)(?:cd|pushd)\s+(?:-\S+\s+)*\S*[$`]")
+_REPO_CREATORS = ("clone", "init", "worktree")
+
+
+def _unfindable(call: policy.shellnorm.GitCall) -> bool:
+    """The directory or repository the push names is written with a variable or a substitution: git is run on text that is not a path."""
+    return any(re.search(r"[$`\x06]", d) for d in (*call.dirs, call.git_dir or "", call.work_tree or ""))
+
+
 def _on_default_branch(cwd: str, command: str) -> bool:
     """A `git push` whose destination is main/master or the current branch while that is main/master (invariant SI-08).
 
     The classifier has already removed git global options, escapes and quoting (policy.segments_cwd), so `git -C d push origin HEAD`
     and `git push origin HEAD:refs/heads/main` are seen as what they are, and each push is resolved in the directory it
-    runs in (`cd repo && git push` follows the cd). A destination that cannot be resolved (`$BRANCH`) counts as the current branch.
+    runs in (`cd repo && git push` follows the cd). A destination that cannot be resolved (`$BRANCH`) counts as the current branch. A repository that cannot
+    be found from here is "nothing to push from" only when the command names a real directory: a directory written with a variable (`git -C "$R" push`,
+    `cd "$R" && git push`), `GIT_DIR=` / `GIT_WORK_TREE=` in the command, or a repository the same command creates (`git clone u r && git -C r push`) is unresolved
+    (GitUnresolved), never "not main".
     """
-    for seg, dirs in policy.segments_cwd(command, cwd):
-        if policy.is_read_only(seg):
-            continue
-        for call in policy.git_calls(seg):
-            if call.sub == "push" and any(_push_hits_default(call, d) for d in dirs):
-                return True
+    segs = policy.segments_cwd(command, cwd)
+    pushes = [(call, dirs) for seg, dirs in segs if not policy.is_read_only(seg) for call in policy.git_calls(seg) if call.sub == "push"]
+    if not pushes:
+        return False
+    steered = bool(_GIT_ENV_ASSIGN.search(command)) or any(_CD_VARIABLE.search(seg) for seg, _ in segs)
+    creates = any(c.sub in _REPO_CREATORS for seg, _ in segs if not policy.is_read_only(seg) for c in policy.git_calls(seg))
+    for call, dirs in pushes:
+        if steered or _unfindable(call):
+            raise GitUnresolved("the repository of this push is named by a variable or the environment")
+        if creates and any(_git(call, d, "rev-parse", "--git-dir") is None for d in dirs):
+            raise GitUnresolved("the repository of this push does not exist yet: the same command creates it")
+        if any(_push_hits_default(call, d) for d in dirs):
+            return True
     return False
 
 
@@ -251,6 +336,7 @@ def pretool(event: dict, permit=None) -> HookResult:
     tool = event.get("tool_name", "")
     if not policy.is_gated(tool):
         return HookResult()
+    _note_unnamed_tool(tool)
     tool_input = event.get("tool_input") or {}
     cwd = event.get("cwd") or ""
     subject = policy.tool_subject(tool, tool_input)
@@ -269,6 +355,8 @@ def pretool(event: dict, permit=None) -> HookResult:
         return _verdict(mode, f"JADE safety invariant {', '.join(a.blocked)} blocks this {tool} call. No permit can authorize it. "
                               f"Rule text: policies/safety.yaml. Do not rephrase the command to get around the invariant; ask the human.")
     if not at_least(a.level, policy.permit_floor()):
+        if a.rule_id in policy.RECORDED_RULES and a.recorded:
+            _journal("gate", "secret_read", a, event)   # W-55: counted (rule, tool, session), never the path or the command; the read itself is not gated
         return HookResult()
     try:
         return _gate(mode, tool, a, event, permit)
@@ -294,6 +382,25 @@ def _journal(entity: str, kind: str, a: policy.Assessment, event: dict) -> None:
         pass
 
 
+def _note_unnamed_tool(tool: str) -> None:
+    """W-36: record the name (never the arguments) of an MCP tool no specific rule names, once per tool, so `jade check` has an inventory to read: a
+    medium or low call is otherwise never journaled. The entity is the tool, which the retention purge keeps; the key is per ledger source."""
+    try:
+        if not policy.is_mcp(tool) or policy.tool_coverage(tool) is None:
+            return
+        from . import ledger
+
+        db = ledger.open(timeout=LEDGER_TIMEOUT_S)
+        try:
+            rule = policy._tool_rule(tool, command_decides=False)
+            db.event(tool[:200], "tool_unnamed", guard=f"{rule['id']} {rule['level']}", actor="hook", key=f"tool_unnamed:{db.source or ''}:{tool[:200]}",
+                     detail={"tool": tool[:200]})
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001, S110 - the inventory must never change the gate verdict
+        pass
+
+
 def _si07_hold(db, a: policy.Assessment):
     """SI-07: an earlier decision for this exact command whose outcome is unknown, or an irreversible one still executing. Such a command
     is never started again until the outcome is reconciled; no permit is raised or consumed for it. "This exact command" is the command's hold_key
@@ -315,6 +422,17 @@ def _si07_hold(db, a: policy.Assessment):
     return None
 
 
+def _head_commit(call: policy.shellnorm.GitCall, cwd: str) -> str:
+    """HEAD commit for a permit fingerprint; `none` for an unborn branch or a directory git cannot read (it records that state, it decides nothing).
+    A hung git still raises: the gate fails closed."""
+    try:
+        return _git(call, cwd, "rev-parse", "HEAD") or "none"
+    except GitUnresolved as e:
+        if isinstance(e.__cause__, subprocess.TimeoutExpired):
+            raise
+        return "none"
+
+
 def fingerprints(subject: str, cwd: str) -> dict[str, str]:
     """Current values of the preconditions a permit records, for a command run in `cwd`. For every `git push` in it: the HEAD commit of the
     repository it runs in, so a permit approved for pushing one state is not used after the branch moved. A git call that hangs raises
@@ -325,7 +443,7 @@ def fingerprints(subject: str, cwd: str) -> dict[str, str]:
             continue
         for call in policy.git_calls(seg):
             if call.sub == "push":
-                heads += [f"{policy.real(os.path.expanduser(d))}@{_git(call, d, 'rev-parse', 'HEAD') or 'none'}" for d in dirs]
+                heads += [f"{policy.real(os.path.expanduser(d))}@{_head_commit(call, d)}" for d in dirs]
     return {"git_head": ";".join(sorted(set(heads)))} if heads else {}
 
 
@@ -426,6 +544,62 @@ def undisposed(db, session: str, only_unreminded: bool = True):
         "AND c.ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?) AND c.task_family IS NOT 'evidence_quality' AND COALESCE(c.primitive,'')<>'fast' "
         "AND NOT EXISTS (SELECT 1 FROM jev_calls d WHERE d.session_id=c.session_id AND d.claim_hash=c.claim_hash AND d.exit_code=0 AND d.rowid>c.rowid) "
         "ORDER BY c.rowid", (session, f"-{REMIND_WINDOW_S} seconds"))
+
+
+@dataclass
+class AckResult:
+    count: int = 0
+    refused: str | None = None   # reason code; None when the ack was applied (or there was nothing to ack)
+    message: str = ""
+
+
+def acknowledge(db, session: str, call_ids: list[str], *, all_: bool, disposition: str, note: str, human: bool) -> AckResult:
+    """Record a disposition for Jev answers that were not a yes (W-59, docs/05 T24).
+
+    A disposition is a claim about what the caller did, and nothing here can check it, so what it may reach is narrow: only answers with exit
+    3, 4, 5 or 6 that have no disposition yet, and, for an agent, only this session's. An agent needs a note and gets `ACK_MAX_PER_WINDOW`
+    acks per window. A human at a terminal may cross sessions and is not limited. Every applied ack is journaled (event `ACK`: actor, session,
+    disposition, note, call ids) and so is every refusal that is not a missing note (`ACK_REFUSED`). An ack touches `jev_calls.disposition` and
+    nothing else: no event, label, decision or permit."""
+    from . import redact
+
+    note = redact.redact((note or "").strip(), secrets_only=True)[0][:ACK_NOTE_MAX]
+    if not note:
+        return AckResult(refused="no_note", message="a disposition needs a --note saying what was done; the note is a claim and is journaled with your session")
+    actor = "human" if human else "agent"
+    with db.tx() as con:
+        def refuse(reason: str, message: str) -> AckResult:
+            db.event(session, "ACK_REFUSED", next=disposition, guard=message, actor=actor, detail={"reason": reason, "call_ids": list(call_ids)[:20]}, con=con)
+            return AckResult(refused=reason, message=message)
+
+        if not human:
+            n = db.one("SELECT COUNT(*) AS n FROM events WHERE kind='ACK' AND entity_id=? AND actor='agent' AND ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?)",
+                       (session, f"-{ACK_RATE_WINDOW_S} seconds")).n   # not `live()`: a JADE_SOURCE=test tag must not reset an agent's own counter
+            if n >= ACK_MAX_PER_WINDOW:
+                return refuse("rate_limit", f"rate limit: {n} acks by this session in the last hour (limit {ACK_MAX_PER_WINDOW}). A human acknowledges the rest at a terminal, or tell the user the answers stand unresolved")
+        if all_:
+            ids = [r.call_id for r in undisposed(db, session, only_unreminded=False)]
+        else:
+            ids, bad = [], []
+            for cid in dict.fromkeys(call_ids):
+                r = db.get_call(cid)
+                if r is None:
+                    bad.append(f"{cid}: unknown call")
+                elif not human and r.session_id != session:
+                    bad.append(f"{cid}: belongs to another session; a human acknowledges those at a terminal")
+                elif r.state != "DONE" or r.exit_code not in ACK_ELIGIBLE_EXITS:
+                    bad.append(f"{cid}: exit {r.exit_code}, not an abstain, reject or error answer, so there is nothing to acknowledge")
+                elif r.disposition is not None:
+                    bad.append(f"{cid}: already has disposition '{r.disposition}'")
+                else:
+                    ids.append(cid)
+            if bad:
+                return refuse("not_ackable", "; ".join(bad))
+        if not ids:
+            return AckResult()
+        con.executemany("UPDATE jev_calls SET disposition=?, disposition_note=? WHERE call_id=? AND disposition IS NULL", [(disposition, note, i) for i in ids])
+        db.event(session, "ACK", next=disposition, guard=note, actor=actor, detail={"call_ids": ids, "count": len(ids), "as": disposition}, con=con)
+    return AckResult(count=len(ids))
 
 
 def stop(event: dict) -> HookResult:

@@ -1,0 +1,834 @@
+[
+ {
+  "kind": "git_sha",
+  "parts": [
+   "b6589fc6ab0dc82cf120",
+   "99d1c2d40ab994e8410c"
+  ],
+  "template": "commit @@ merged"
+ },
+ {
+  "kind": "git_sha",
+  "parts": [
+   "356a192b7913b04c5457",
+   "4d18c28d46e6395428ab"
+  ],
+  "template": "commit @@ merged"
+ },
+ {
+  "kind": "git_sha",
+  "parts": [
+   "da4b9237bacccdf19c07",
+   "60cab7aec4a8359010b0"
+  ],
+  "template": "commit @@ merged"
+ },
+ {
+  "kind": "git_sha",
+  "parts": [
+   "77de68daecd823babbb5",
+   "8edb1c8e14d7106e83bb"
+  ],
+  "template": "commit @@ merged"
+ },
+ {
+  "kind": "git_sha",
+  "parts": [
+   "1b6453892473a467d073",
+   "72d45eb05abc2031647a"
+  ],
+  "template": "commit @@ merged"
+ },
+ {
+  "kind": "git_sha",
+  "parts": [
+   "ac3478d69a3c81fa62e6",
+   "0f5c3696165a4e5e6ac4"
+  ],
+  "template": "commit @@ merged"
+ },
+ {
+  "kind": "git_sha",
+  "parts": [
+   "c1dfd96eea8cc2b62785",
+   "275bca38ac261256e278"
+  ],
+  "template": "commit @@ merged"
+ },
+ {
+  "kind": "git_sha",
+  "parts": [
+   "902ba3cda1883801594b",
+   "6e1b452790cc53948fda"
+  ],
+  "template": "commit @@ merged"
+ },
+ {
+  "kind": "git_sha",
+  "parts": [
+   "fe5dbbcea5ce7e2988b8",
+   "c69bcfdfde8904aabc1f"
+  ],
+  "template": "commit @@ merged"
+ },
+ {
+  "kind": "git_sha",
+  "parts": [
+   "0ade7c2cf97f75d00997",
+   "5f4d720d1fa6c19f4897"
+  ],
+  "template": "commit @@ merged"
+ },
+ {
+  "kind": "git_sha",
+  "parts": [
+   "b1d5781111d84f7b3fe4",
+   "5a0852e59758cd7a87e5"
+  ],
+  "template": "commit @@ merged"
+ },
+ {
+  "kind": "git_sha",
+  "parts": [
+   "17ba0791499db908433b",
+   "80f37c5fbc89b870084b"
+  ],
+  "template": "commit @@ merged"
+ },
+ {
+  "kind": "sha256_file",
+  "parts": [
+   "5feceb66ffc86f38d952786c6d696c79",
+   "c2dbc239dd4e91b46729d73a27fb57e9"
+  ],
+  "template": "sha256 @@  jade-0.1.tar.gz"
+ },
+ {
+  "kind": "sha256_file",
+  "parts": [
+   "6b86b273ff34fce19d6b804eff5a3f57",
+   "47ada4eaa22f1d49c01e52ddb7875b4b"
+  ],
+  "template": "sha256 @@  jade-0.1.tar.gz"
+ },
+ {
+  "kind": "sha256_file",
+  "parts": [
+   "d4735e3a265e16eee03f59718b9b5d03",
+   "019c07d8b6c51f90da3a666eec13ab35"
+  ],
+  "template": "sha256 @@  jade-0.1.tar.gz"
+ },
+ {
+  "kind": "sha256_file",
+  "parts": [
+   "4e07408562bedb8b60ce05c1decfe3ad",
+   "16b72230967de01f640b7e4729b49fce"
+  ],
+  "template": "sha256 @@  jade-0.1.tar.gz"
+ },
+ {
+  "kind": "sha256_file",
+  "parts": [
+   "4b227777d4dd1fc61c6f884f48641d02",
+   "b4d121d3fd328cb08b5531fcacdabf8a"
+  ],
+  "template": "sha256 @@  jade-0.1.tar.gz"
+ },
+ {
+  "kind": "sha256_file",
+  "parts": [
+   "ef2d127de37b942baad06145e54b0c61",
+   "9a1f22327b2ebbcfbec78f5564afe39d"
+  ],
+  "template": "sha256 @@  jade-0.1.tar.gz"
+ },
+ {
+  "kind": "sha256_file",
+  "parts": [
+   "e7f6c011776e8db7cd330b54174fd76f",
+   "7d0216b612387a5ffcfb81e6f0919683"
+  ],
+  "template": "sha256 @@  jade-0.1.tar.gz"
+ },
+ {
+  "kind": "sha256_file",
+  "parts": [
+   "7902699be42c8a8e46fbbb4501726517",
+   "e86b22c56a189f7625a6da49081b2451"
+  ],
+  "template": "sha256 @@  jade-0.1.tar.gz"
+ },
+ {
+  "kind": "sha256_upper",
+  "parts": [
+   "5FECEB66FFC86F38D952786C6D696C79",
+   "C2DBC239DD4E91B46729D73A27FB57E9"
+  ],
+  "template": "digest @@"
+ },
+ {
+  "kind": "sha256_upper",
+  "parts": [
+   "6B86B273FF34FCE19D6B804EFF5A3F57",
+   "47ADA4EAA22F1D49C01E52DDB7875B4B"
+  ],
+  "template": "digest @@"
+ },
+ {
+  "kind": "sha256_upper",
+  "parts": [
+   "D4735E3A265E16EEE03F59718B9B5D03",
+   "019C07D8B6C51F90DA3A666EEC13AB35"
+  ],
+  "template": "digest @@"
+ },
+ {
+  "kind": "sha256_upper",
+  "parts": [
+   "4E07408562BEDB8B60CE05C1DECFE3AD",
+   "16B72230967DE01F640B7E4729B49FCE"
+  ],
+  "template": "digest @@"
+ },
+ {
+  "kind": "sha256_upper",
+  "parts": [
+   "4B227777D4DD1FC61C6F884F48641D02",
+   "B4D121D3FD328CB08B5531FCACDABF8A"
+  ],
+  "template": "digest @@"
+ },
+ {
+  "kind": "sha256_upper",
+  "parts": [
+   "EF2D127DE37B942BAAD06145E54B0C61",
+   "9A1F22327B2EBBCFBEC78F5564AFE39D"
+  ],
+  "template": "digest @@"
+ },
+ {
+  "kind": "uuid",
+  "parts": [
+   "6513270e-269e-4d37",
+   "-b2a7-4de452e6b438"
+  ],
+  "template": "request id @@ completed"
+ },
+ {
+  "kind": "uuid",
+  "parts": [
+   "d23f0824-128b-4f33",
+   "-8c5c-7fd0a6a3a450"
+  ],
+  "template": "request id @@ completed"
+ },
+ {
+  "kind": "uuid",
+  "parts": [
+   "9531985d-5d9d-49f8",
+   "-9818-e811892f902b"
+  ],
+  "template": "request id @@ completed"
+ },
+ {
+  "kind": "uuid",
+  "parts": [
+   "36f675cc-81e7-4ef5",
+   "-a8e2-5d940ed90475"
+  ],
+  "template": "request id @@ completed"
+ },
+ {
+  "kind": "uuid",
+  "parts": [
+   "6b0d549b-6f03-475a",
+   "-9600-a35a099950d8"
+  ],
+  "template": "request id @@ completed"
+ },
+ {
+  "kind": "uuid",
+  "parts": [
+   "8d116ece-1738-47d9",
+   "-bd9c-172411e20b8f"
+  ],
+  "template": "request id @@ completed"
+ },
+ {
+  "kind": "uuid_upper",
+  "parts": [
+   "90C192CF-D3AC-44AF",
+   "-8F21-DDB66CAD4A26"
+  ],
+  "template": "request id @@ completed"
+ },
+ {
+  "kind": "uuid_upper",
+  "parts": [
+   "A170B338-3926-4059",
+   "-B28C-105D1FB17C23"
+  ],
+  "template": "request id @@ completed"
+ },
+ {
+  "kind": "uuid_upper",
+  "parts": [
+   "0FD630F1-F29D-4DA9",
+   "-953F-48F1A09F76B5"
+  ],
+  "template": "request id @@ completed"
+ },
+ {
+  "kind": "uuid_upper",
+  "parts": [
+   "0CB1E29C-658C-4A14",
+   "-95E6-0AF593BD04CF"
+  ],
+  "template": "request id @@ completed"
+ },
+ {
+  "kind": "png_header",
+  "parts": [
+   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA",
+   "DUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+  ],
+  "template": "data @@"
+ },
+ {
+  "kind": "data_uri",
+  "parts": [
+   "data:image/png;base64,Qk1GAAAAAAAAADYAAAAoAAAAAQAAA",
+   "AEAAAABABgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/wAAAA=="
+  ],
+  "template": "img src=\"@@\""
+ },
+ {
+  "kind": "jpeg_header",
+  "parts": [
+   "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQE",
+   "BQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT"
+  ],
+  "template": "data @@"
+ },
+ {
+  "kind": "gif_header",
+  "parts": [
+   "R0lGODlhAQABAIAAAAAAAP///yH5",
+   "BAEAAAAALAAAAAABAAEAAAIBRAA7"
+  ],
+  "template": "data @@"
+ },
+ {
+  "kind": "zip_b64",
+  "parts": [
+   "UEsDBBQAAAAIAFNoJFcAAAAAAA",
+   "AAAAAAAAAIAAAAdGVzdC50eHQ="
+  ],
+  "template": "data @@"
+ },
+ {
+  "kind": "ssh_pub",
+  "parts": [
+   "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7vbqajDw4o6gJy8U",
+   "tmwnsJjNx9wGpHfNzR2v1xG5nX3pqZ0xV8cQ1w2sLzYtD user@host"
+  ],
+  "template": "@@"
+ },
+ {
+  "kind": "ssh_ed_pub",
+  "parts": [
+   "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMq",
+   "qnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+  ],
+  "template": "@@"
+ },
+ {
+  "kind": "cert_body",
+  "parts": [
+   "MIIDdzCCAl+gAwIBAgIEAgAAuTANBgkqhkiG9w0BAQUFAD",
+   "BaMQswCQYDVQQGEwJJRTESMBAGA1UEChMJQmFsdGltb3Jl"
+  ],
+  "template": "@@"
+ },
+ {
+  "kind": "npm_integrity",
+  "parts": [
+   "\"integrity\": \"sha512-Dp4sK3Zq0H6mX9yTl2b8gN5Wc1vRfJ7uQe",
+   "A0xYhL3kPzBn4oVsCtM6iEdG2jFw9rU1aS0lZ+qT8Oh7XcYnKmVg==\""
+  ],
+  "template": "@@"
+ },
+ {
+  "kind": "ssh_fingerprint",
+  "parts": [
+   "256 SHA256:uE0qRZ8xXcK3b9mYhF2tVd7LwJ",
+   "4nP6sAaQ1oGiBzTeU user@host (ED25519)"
+  ],
+  "template": "@@"
+ },
+ {
+  "kind": "go_sum",
+  "parts": [
+   "golang.org/x/sys v0.15.0 h1:h48lPFYp",
+   "sTvQJZF4EKyI4aLHaev3CxivZmv7yZig9pc="
+  ],
+  "template": "@@"
+ },
+ {
+  "kind": "docker_digest",
+  "parts": [
+   "ghcr.io/org/app@sha256:2d711642b726b04401627",
+   "ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+  ],
+  "template": "image: @@"
+ },
+ {
+  "kind": "pip_hash",
+  "parts": [
+   "--hash=sha256:a1fce4363854ff888cff4b8e7",
+   "875d600c2682390412a8cf79b37d0b11148b0fa"
+  ],
+  "template": "@@"
+ },
+ {
+  "kind": "path",
+  "parts": [
+   "/Users/someone/Documents/projects/example",
+   "/src/components/Button2/IndexHandler.tsx"
+  ],
+  "template": "changed @@ in the diff"
+ },
+ {
+  "kind": "path",
+  "parts": [
+   "src/Components/Button2/Inde",
+   "xHandler/useSessionState.ts"
+  ],
+  "template": "changed @@ in the diff"
+ },
+ {
+  "kind": "path",
+  "parts": [
+   "tests/acceptance/test_redaction_egress_pass2.py",
+   "::test_f14_f18_a_gated_command_stores_no_secret"
+  ],
+  "template": "changed @@ in the diff"
+ },
+ {
+  "kind": "path",
+  "parts": [
+   "~/Library/Application Support/Google/Chrome/Default/",
+   "Extensions/abcdefghijklmnopabcdefghijklmnop/1.2.3_0"
+  ],
+  "template": "changed @@ in the diff"
+ },
+ {
+  "kind": "path",
+  "parts": [
+   "node_modules/@types/react-dom/n",
+   "ode_modules/csstype/index.d.ts"
+  ],
+  "template": "changed @@ in the diff"
+ },
+ {
+  "kind": "path",
+  "parts": [
+   "jade/ledger/MigrationsV2/A",
+   "ddColumnToJevCalls2026.sql"
+  ],
+  "template": "changed @@ in the diff"
+ },
+ {
+  "kind": "path",
+  "parts": [
+   "C:\\Users\\Someone\\Documents\\Projects\\",
+   "Example2\\Source\\Models\\User2Model.cs"
+  ],
+  "template": "changed @@ in the diff"
+ },
+ {
+  "kind": "path",
+  "parts": [
+   "docs/05-threat-model.md#3-r",
+   "edaction-function-contract"
+  ],
+  "template": "changed @@ in the diff"
+ },
+ {
+  "kind": "path",
+  "parts": [
+   "Library/Caches/com.Exa",
+   "mple.App2/Cache.db-wal"
+  ],
+  "template": "changed @@ in the diff"
+ },
+ {
+  "kind": "path",
+  "parts": [
+   "build/Release-iphonesimulator/MyApp.app/",
+   "Frameworks/Alamofire.framework/Alamofire"
+  ],
+  "template": "changed @@ in the diff"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "testRedactionIsLinea",
+   "rOnAdversarialText2"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "ClaudeCodeSession",
+   "StartHook2Handler"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "HttpServerConfigur",
+   "ationBuilderV2Impl"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "UserAccountPrefe",
+   "renceRepository2"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "test_redaction_is_line",
+   "ar_on_adversarial_text"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "JADE-42-add-Entr",
+   "opy-detection-v2"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "feature/JADE-42-add-ent",
+   "ropy-detection-v2-final"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "release-2026-11-09-ho",
+   "tfix-Build7-candidate"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "getUserProfile",
+   "ById2WithRetry"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "IOMusicPlaybackSer",
+   "viceDelegate2Impl"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "AbstractSingleton",
+   "ProxyFactoryBean2"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "kubectl-get-pods-i",
+   "n-namespace-prod2"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "2026-11-09T10:15",
+   ":22.123456+00:00"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "web-5d8f7c",
+   "9b6-x7k2p"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "my-bucket-name-pr",
+   "od-2026-eu-west-1"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "com.mobogift.m",
+   "emserve.plist"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "MG-IT-Mac-min",
+   "i-2026-Build"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "VERY_LONG_ENVIRONME",
+   "NT_VARIABLE_NAME_2"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "pytest-asyncio-0.",
+   "23.5-py3-none-any"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "FlutterBackendIosPla",
+   "tformChannel2Handler"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "org.springframework.boot.autoc",
+   "onfigure.SpringBootApplication"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "ThisIsALongSentenc",
+   "eInCamelCase2Words"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "SomeVeryLongTypeNameFor",
+   "ProtocolBuffers3Message"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "NSURLSessionConfi",
+   "guration2Default"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "MAX_TOKENS_PER_R",
+   "EQUEST_LIMIT_V2"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "ident",
+  "parts": [
+   "IRO_BACKEND_QUEUE_",
+   "WORKER_POOL_SIZE_4"
+  ],
+  "template": "ran @@ and it passed"
+ },
+ {
+  "kind": "misc",
+  "parts": [
+   "1794181303123",
+   "456789012345"
+  ],
+  "template": "value @@ seen"
+ },
+ {
+  "kind": "misc",
+  "parts": [
+   "3.12.4.final.0-",
+   "build.20261109"
+  ],
+  "template": "value @@ seen"
+ },
+ {
+  "kind": "misc",
+  "parts": [
+   "jev_9f3a",
+   "2b1c4d5e"
+  ],
+  "template": "value @@ seen"
+ },
+ {
+  "kind": "misc",
+  "parts": [
+   "prm_a1b2",
+   "c3d4e5f6"
+  ],
+  "template": "value @@ seen"
+ },
+ {
+  "kind": "misc",
+  "parts": [
+   "dec_0123",
+   "456789ab"
+  ],
+  "template": "value @@ seen"
+ },
+ {
+  "kind": "misc",
+  "parts": [
+   "AAAAAAAAAAAAAAAA",
+   "AAAAAAAAAAAAAAAA"
+  ],
+  "template": "value @@ seen"
+ },
+ {
+  "kind": "misc",
+  "parts": [
+   "aaaaaaaaaaaaaaa",
+   "aaaaa1111111111"
+  ],
+  "template": "value @@ seen"
+ },
+ {
+  "kind": "misc",
+  "parts": [
+   "abcdefghijklmnopqr",
+   "stuvwxyz0123456789"
+  ],
+  "template": "value @@ seen"
+ },
+ {
+  "kind": "misc",
+  "parts": [
+   "ABCDEFGHIJKLMNOPQR",
+   "STUVWXYZ0123456789"
+  ],
+  "template": "value @@ seen"
+ },
+ {
+  "kind": "misc",
+  "parts": [
+   "AbCdEfGhIjKlM",
+   "nOpQrStUvWxYz"
+  ],
+  "template": "value @@ seen"
+ },
+ {
+  "kind": "misc",
+  "parts": [
+   "01234567890123456",
+   "78901234567890123"
+  ],
+  "template": "value @@ seen"
+ },
+ {
+  "kind": "misc",
+  "parts": [
+   "Lorem1ipsumDolorSitAme",
+   "tConsecteturAdipiscing"
+  ],
+  "template": "value @@ seen"
+ },
+ {
+  "kind": "git_sha_in_command",
+  "parts": [
+   "git push origin 86f7e437faa5a7fce15d1ddcb9eaeaea377667b8:refs/heads/topic"
+  ],
+  "template": "@@"
+ },
+ {
+  "kind": "pod_name_in_command",
+  "parts": [
+   "kubectl delete pod web-5d8f7c9b6-x7k2p -n prod"
+  ],
+  "template": "@@"
+ },
+ {
+  "kind": "long_path_in_command",
+  "parts": [
+   "rm -rf build/Release-iphonesimulator/MyApp.app/Frameworks/Alamofire.framework"
+  ],
+  "template": "@@"
+ },
+ {
+  "kind": "sha1_short_run",
+  "parts": [
+   "git log --oneline -3 e9d71f5ee7c9 84a516841ba7"
+  ],
+  "template": "@@"
+ },
+ {
+  "kind": "pytest_node_id",
+  "parts": [
+   "uv run pytest -q tests/acceptance/test_redaction_egress_pass2.py::test_f14_f18_a_gated_command_stores_no_secret"
+  ],
+  "template": "@@"
+ },
+ {
+  "kind": "iso_timestamp",
+  "parts": [
+   "at 2026-11-09T10:15:22.123456+00:00 the call returned"
+  ],
+  "template": "@@"
+ },
+ {
+  "kind": "lockfile_line",
+  "parts": [
+   "golang.org/x/sys v0.15.0 h1:h48lPFYpsTvQJZF4EKyI4aLHaev3CxivZmv7yZig9pc="
+  ],
+  "template": "@@"
+ },
+ {
+  "kind": "camel_identifier",
+  "parts": [
+   "def testRedactionIsLinearOnAdversarialText2(self): pass"
+  ],
+  "template": "@@"
+ }
+]

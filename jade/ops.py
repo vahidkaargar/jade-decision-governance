@@ -1036,11 +1036,20 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
                                             f"overlay {'yes' if paths.overlay('risk') else 'no'}"))
     except Exception as e:  # noqa: BLE001
         rows.append(("policies load", False, repr(e)))
+    try:
+        from . import route
+
+        problems = route.policy_problems()
+        lim = None if problems else route.limits()
+        rows.append(("routing policy", not problems, "; ".join(problems) if problems else f"{len(policy.routing()['preflight'])} checks, at most {lim.max_questions} questions "
+                     f"per request, {lim.max_parallel} requests in flight, deadline {lim.deadline_s:g} s"))
+    except Exception as e:  # noqa: BLE001
+        rows.append(("routing policy", False, repr(e)))
     rows.append(_integrity_row())
     rows.append(_code_row())
     rows += _overlay_rows()
     try:
-        bad = {e["question_id"]: questions.lint(e) for e in questions.entries() if questions.lint(e)}
+        bad = questions.validate_registry()
         rows.append(("question registry", not bad and bool(questions.entries()), f"{len(questions.entries())} entries" + (f", lint: {bad}" if bad else "")))
     except Exception as e:  # noqa: BLE001
         rows.append(("question registry", False, repr(e)))
@@ -1062,7 +1071,9 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
         rows.append(("pretool matcher", not gaps, "covers every gated tool" if not gaps else f"does not cover {', '.join(gaps)}: re-run `jade hooks install` in a terminal"))
     rows.append(_gate_mode_row())
     rows.append(_overrides_row())
+    rows.append(_ack_audit_row())
     rows.append(_permission_row())
+    rows.append(tool_coverage_row())
     rows.append(_maintain_row())
     shim = _find_jev()
     is_shim = bool(shim) and "jade" in (Path(shim).read_text(errors="replace")[:600] if Path(shim).is_file() else "")
@@ -1083,6 +1094,89 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
             bad_r = yes if not yes.ok else no
             rows.append(("provider canary", False, f"{bad_r.error_kind} {bad_r.http_status or ''} {bad_r.detail}"))
     return rows
+
+
+ACK_AUDIT_DAYS = 7
+ACK_STORM_MIN = 5   # agent-recorded `dropped` answers in the window before the share is judged
+
+
+def _ack_audit_row() -> tuple[str, bool, str]:
+    """W-59 (docs/05 T24): what agents said about answers that were not a yes. Fails on a storm of `dropped` (more than half of the agent acks, at least
+    ACK_STORM_MIN) or on any ack or label attempt refused in the window, because both are the first sign of an agent clearing a reminder it did not act on.
+    Rows tagged JADE_SOURCE=test are counted: the tag hides rows from statistics, not from this audit."""
+    try:
+        db = ledger.open(timeout=2)
+        try:
+            since = ts(now() - timedelta(days=ACK_AUDIT_DAYS))
+            by: dict[str, int] = {}
+            for r in db.all("SELECT next_state AS d, detail_json FROM events WHERE kind='ACK' AND actor='agent' AND ts>=?", (since,)):
+                by[r.d] = by.get(r.d, 0) + int(json.loads(r.detail_json or "{}").get("count", 0))
+            refused = {r.kind + (f" ({r.why})" if r.why else ""): r.n for r in db.all(
+                "SELECT kind, json_extract(detail_json,'$.reason') AS why, COUNT(*) AS n FROM events WHERE kind IN ('ACK_REFUSED','LABEL_REFUSED') AND actor='agent' AND ts>=? "
+                "GROUP BY kind, why", (since,))}
+        finally:
+            db.close()
+    except Exception as e:  # noqa: BLE001 - a health probe reports every failure
+        return ("ack audit", False, repr(e))
+    total, dropped = sum(by.values()), by.get("dropped", 0)
+    storm = dropped >= ACK_STORM_MIN and dropped * 2 > total
+    detail = (f"last {ACK_AUDIT_DAYS} days: agents acknowledged {total} answer(s) (dropped {dropped}" + "".join(f", {k} {v}" for k, v in sorted(by.items()) if k != "dropped") + "); "
+              + (f"refused attempts: {', '.join(f'{k} x{v}' for k, v in sorted(refused.items()))}" if refused else "no refused attempts"))
+    if storm:
+        detail += ". More than half were dropped: the agent is clearing the Stop-hook reminder without acting on it (docs/05 T24). Read the ACK events and the answers"
+    return ("ack audit", not storm and not refused, detail)
+
+
+TOOL_LIST_MAX = 12      # names listed per bucket before "+N more"
+TOOL_WINDOW_DAYS = 90   # the ledger's retention window; an unnamed tool is recorded once, so it is read without one
+
+
+def _names(tools) -> str:
+    tools = sorted(tools)
+    return ", ".join(tools[:TOOL_LIST_MAX]) + (f", +{len(tools) - TOOL_LIST_MAX} more" if len(tools) > TOOL_LIST_MAX else "")
+
+
+def tool_coverage_row() -> tuple[str, bool, str]:
+    """W-36 (docs/05 T18): tools no rule names, from the names the hook has recorded (events gated, would_block, safety_block and tool_unnamed) and the
+    built-in lists in jade/policy.py. Informational, never a failure. Names and counts only: an argument is never read here or stored by the hook.
+    The ledger holds no name for a call below the gate that no rule names, except the one event per unnamed MCP tool, and none for a built-in tool the
+    matcher does not name: the host never sends those to the hook, so `ungated` lists only built-in names an operator-widened matcher let through."""
+    from . import policy
+
+    try:
+        db = ledger.open(timeout=2)
+        try:
+            tools: set[str] = set()
+            since = ts(now() - timedelta(days=TOOL_WINDOW_DAYS))
+            for r in db.all("SELECT entity_id, kind, detail_json FROM events WHERE (kind='tool_unnamed' OR (kind IN ('gated','would_block','safety_block') AND ts>=?)) AND "
+                            + ledger.live(), (since,)):
+                try:
+                    name = r.entity_id if r.kind == "tool_unnamed" else json.loads(r.detail_json or "{}").get("tool")
+                except (ValueError, AttributeError):
+                    continue
+                if isinstance(name, str) and name:
+                    tools.add(name)
+        finally:
+            db.close()
+    except Exception as e:  # noqa: BLE001 - informational: an unreadable ledger is the ledger row's failure, not this one's
+        return ("tool coverage", True, f"unavailable ({type(e).__name__})")
+    if not tools:
+        return ("tool coverage", True, "no tool name recorded yet (the hook records gated tools and, once each, MCP tools no rule names)")
+    gaps: dict[str, set[str]] = {}
+    for t in tools:
+        why = policy.tool_coverage(t)
+        if why:
+            gaps.setdefault(why, set()).add(t)
+    mcp = sum(policy.is_mcp(t) for t in tools)
+    parts = [f"{len(tools)} tool name(s) recorded ({len(tools) - mcp} built-in, {mcp} MCP)"]
+    for rid, what in (("M-99", "MCP tool(s) no rule names (medium, recorded, not gated)"),
+                      ("M-07", "MCP tool(s) only the verb-in-name heuristic covers (high, gated; add a specific rule)"),
+                      ("ungated", "built-in tool(s) nothing gates or decides (add to GATED_BUILTIN or UNGATED_BUILTIN)")):
+        if rid in gaps:
+            parts.append(f"{len(gaps[rid])} {what} [{rid}]: {_names(gaps[rid])}")
+    if not gaps:
+        parts.append("no unnamed tool")
+    return ("tool coverage", True, "; ".join(parts))
 
 
 def _permission_row() -> tuple[str, bool, str]:

@@ -11,16 +11,16 @@ Policy files: `policies/routing.yaml`, `policies/risk.yaml`, `policies/escalatio
 1. **Deterministic?** Exit codes, file hashes, regex, schema validation, arithmetic, permission bits → FAST. No model call. Baseline impact: a share of the 684 verify calls were about test exit codes already visible in tool output.
 2. **Safety invariant hit?** → ESCALATE (blocked), regardless of evidence.
 3. **Evidence present?** A verify question with no raw evidence reference (tool output, diff, document) → NEEDS_EVIDENCE. Baseline: 97% of calls passed evidence inline on the command line, truncated and often a paraphrase. New default: `--state-file <path>` or stdin; the state must include the raw excerpt and its source.
-4. **Duplicate?** Same `question_id` + canonical state hash in session → return the cached answer and flag `repeat_without_new_evidence`. Baseline: 20% of calls were repeats. The flag is a ledger pattern the improvement plane mines. Implemented inside `jade ask` (the ledger's session dedup, one hour); `jade route` does not run this check and neither it nor the context-freshness check (PF-07) is in `route.preflight` (W-53).
+4. **Duplicate?** Same `question_id` + canonical state hash in session → return the cached answer and flag `repeat_without_new_evidence`. Baseline: 20% of calls were repeats. The flag is a ledger pattern the improvement plane mines. The ledger's session dedup (`dedup.ttl_s`, one hour) answers it inside `jade ask`; `jade route --question-id Q --field name=value ...` runs the same lookup before the call and routes a repeat to REUSE. It is not run when no question is named.
 5. **Candidates valid?** Choice with < 2 eligible options after code-level eligibility filtering → NEEDS_REVISION (the API will happily pick the only option with confidence 1.0; S9).
 6. **Primitive suitable?** Atomic, bounded, answerable from state. Multi-step synthesis, architecture, open-ended "what should I do" → DEEP.
-7. **Context fresh?** else NEEDS_EVIDENCE.
+7. **Context fresh?** `observed_at + ttl_s` must be after now, else NEEDS_EVIDENCE (`jade route --observed-at 2026-11-09T10:00:00Z --ttl-s 3600`). A timestamp that is missing, malformed, more than a minute in the future or paired with a non-positive TTL is not fresh. Not run when the caller describes no context.
 8. **Worth it?** Until Phase 3 data exists: always evaluate for risk ≥ medium; for low risk only when the agent is about to claim completion (the CLAUDE.md trigger).
 
 ## 3. Routes
 
 - **FAST** — code. Emits a decision with `evaluation_refs` pointing at the deterministic check.
-- **JEV** — one Decisions API request carrying every independent registry question for the task family (batching: verified S7; up to 8 questions, 0.68 s for 3). Questions cannot depend on each other's answers within a batch; a dependent question is a second request.
+- **JEV** — one Decisions API request carrying every independent registry question for the task family (batching: verified S7; up to 8 questions, 0.68 s for 3). `max_questions_per_request` (8) is enforced: `ask.check_text` refuses a larger batch with exit 6. `max_parallel_requests` (4) is enforced too: `ask.run` does not start a request while that many are in flight in the ledger, over every process (exit 5, `TOO_MANY_IN_FLIGHT`). Questions cannot depend on each other's answers within a batch; a dependent question is a second request.
 - **DEEP** — the reasoning model (Claude) answers with a structured verdict and evidence refs. The HYBRID pattern lives here: DEEP decomposes, emits atomic JEV questions, and code combines them with explicit rules ("any serious violation" = max, not mean — sde_cascade cookbook).
 - **ESCALATE** — human. An escalation carries context, impact, options, recommended default, and the consequence of no answer. Batching human questions in a 10-minute window is designed and not built (W-35).
 
@@ -38,7 +38,7 @@ Each entry validates against `schemas/question.schema.json`. Initial families an
 | `q.evidence.quality` | score | evidence_quality | Levels: none / summary only / partial raw / complete raw with source. Ranks, never gates. |
 | `q.routing.suitable_for_jev` | choice | routing | Used in evals to measure routing false positives/negatives, not in the hot path. |
 
-Quality gates (`jade question lint`): one concept; explicit true/false criteria; no sibling dependency; state fields named and referenced in backticks; a no-match path for open sets; banned leading tokens.
+Quality gates (`jade question lint`): one concept; explicit true/false criteria; no sibling dependency; state fields named and referenced in backticks; a no-match path for open sets; banned leading tokens. Only the gates `question_quality_gates` lists in `policies/routing.yaml` run. The lint also checks every entry against `schemas/question.schema.json`, that each dependency exists, that no two files hold one question and version, and the declared limit: a task family may not have more batch-eligible questions than `max_questions_per_request`. `jade check` runs the same checks, and a registry entry that breaks the schema is not served (exit 6).
 
 ## 5. State construction
 
