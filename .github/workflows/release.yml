@@ -1,0 +1,84 @@
+name: release
+# A push of a tag v<version> tests the tagged commit, builds the wheel and sdist, installs the wheel in an isolated directory and runs it
+# (scripts/verify_install.sh), then creates or updates the GitHub release for that tag with the wheel, the sdist and SHA256SUMS attached.
+# `jade upgrade` installs from this release. Cut one with: git tag -a vX.Y.Z -m "X.Y.Z" && git push origin vX.Y.Z (docs/08, release).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install uv (pinned)
+        run: pip install --quiet uv==0.13.6
+      - name: Sync dev environment
+        run: uv sync --frozen
+      - name: Lint
+        run: uv run ruff check .
+      - name: Contract and policy tests
+        run: uv run pytest -q
+      - name: Regression and adversarial case replay
+        run: uv run python evals/run_cases.py
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install uv (pinned)
+        run: pip install --quiet uv==0.13.6
+      - name: The tag names the package version
+        run: |
+          set -eu
+          want="${GITHUB_REF_NAME#v}"
+          have=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n 1)
+          code=$(python3 -c 'import re, pathlib; print(re.search(r"__version__ = \"([^\"]+)\"", pathlib.Path("jade/__init__.py").read_text()).group(1))')
+          [ "$have" = "$want" ] || { echo "tag $GITHUB_REF_NAME does not match pyproject.toml version $have" >&2; exit 1; }
+          [ "$code" = "$want" ] || { echo "tag $GITHUB_REF_NAME does not match jade.__version__ $code" >&2; exit 1; }
+      - name: Build the wheel and the sdist
+        run: uv build --out-dir dist
+      - name: Install the built wheel in an isolated directory and run it
+        env:
+          UV_OFFLINE: "0"
+          VERIFY_INSTALL_DIST: dist
+        run: sh scripts/verify_install.sh
+      - name: Write SHA256SUMS
+        run: |
+          set -eu
+          cd dist
+          sha256sum *.whl *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create or update the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          tag="$GITHUB_REF_NAME"
+          notes=$(mktemp)
+          # The notes are the CHANGELOG section of this version; the release is a prerelease when the version is not X.Y.Z.
+          awk -v v="${tag#v}" 'index($0, "## [" v "]") == 1 { on = 1; next } on && /^## \[/ { exit } on { print }' CHANGELOG.md > "$notes"
+          [ -s "$notes" ] || echo "Release $tag. See CHANGELOG.md." > "$notes"
+          pre=""
+          printf '%s' "${tag#v}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || pre="--prerelease"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release edit "$tag" --title "$tag" --notes-file "$notes" $pre
+            gh release upload "$tag" dist/*.whl dist/*.tar.gz dist/SHA256SUMS --clobber
+          else
+            gh release create "$tag" dist/*.whl dist/*.tar.gz dist/SHA256SUMS --title "$tag" --notes-file "$notes" --verify-tag $pre
+          fi
