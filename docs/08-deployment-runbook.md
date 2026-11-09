@@ -1,5 +1,7 @@
 # 08 — Deployment runbook
 
+Installing a release, upgrading, the versioning policy and a complete uninstall are in `docs/09-install-and-upgrade.md`; this runbook is the manual wiring and its undo.
+
 What is deployed, what only a human can do, how to verify each step, and how to undo it. Written for a single macOS host; paths are the defaults.
 
 ## 1. Already done by the agent (reversible, local)
@@ -24,9 +26,52 @@ Measured rollback drill (2026-11-09, real binaries): shim to original in 1.1 ms,
 
 The code version (`jade.__version__`, plus the git commit when run from a checkout; an installed package has no commit) is part of `policy_version`. Re-installing a different version therefore changes `policy_version`, which revokes unapproved-use permits bound to the old value, the same as a policy edit does. The `code version` row cannot see a change that keeps the version number: bump `version` in `pyproject.toml` and `jade/__init__.py` when a fix must reach the installed tool, and re-install.
 
+### 1.2 Upgrade from a release (REL-1)
+
+An install from a release (not from a checkout) is upgraded with `jade upgrade`, in your own terminal. Like `jade hooks install` it replaces the code that decides every gate call, so it refuses without an interactive terminal and for an agent ancestor, and SI-09 blocks it (and `jade setup`, section 2.0) in an agent's command. `jade upgrade --check` only reads and is not blocked.
+
+| Step | Command | Check |
+|------|---------|-------|
+| See what is installed | `jade version` (also `jade --version`; add `--json` for scripts) | code version, commit (the checkout's HEAD, or the commit uv recorded for a git install), ledger schema version, `policy_version` |
+| Look for a newer release | `jade upgrade --check` | installed against latest, plus the CHANGELOG headings in between; exit 1 when GitHub cannot be reached (offline, timeout, rate limit, no release yet) |
+| Install the latest release | `jade upgrade` | runs `uv tool install --reinstall git+https://github.com/vahidkaargar/jade-decision-governance@<tag>`, then `jade check --offline` from the new install |
+| Install a named release or commit, or roll back | `jade upgrade --ref v0.3.0` (a `vX.Y.Z` tag or a full 40-hex commit; a branch name is refused) | same as above; an older tag is reported as a rollback |
+
+What it does and does not do: the repository URL and scheme are constants; the ref must be a release tag (`vX.Y.Z`; a bare `X.Y.Z` is read as the tag `vX.Y.Z`) or a full commit; the install is an argument list, never a shell; the only network calls are to `api.github.com` and `raw.githubusercontent.com` over https with a 5 second timeout and no token. The upgrade itself opens no ledger and writes no configuration, and it never edits `~/.claude/settings.json`; the `jade check --offline` it runs afterwards is the first command of the new code, so it opens the ledger, may apply an additive migration and records `last_check` (docs/09 section 3). After the install it reads the hook rows of `jade check` (`hooks installed`, `hook wiring`, `pretool matcher`): when one fails, the next steps say to re-run `jade hooks install` and open a new Claude Code session; when none does, it says no hook change is needed. `jade check` without `--offline` runs the live provider canary; do that yourself afterwards. The new code changes `policy_version`, which revokes unapproved-use permits bound to the old value (section 1.1).
+
+### 1.3 Cut a release (REL-3)
+
+A release is a tag. Bump `version` in `pyproject.toml` and `__version__` in `jade/__init__.py`, move the `[Unreleased]` entries of `CHANGELOG.md` under a `## [X.Y.Z] - date` heading, merge to the default branch, then `git tag -a vX.Y.Z -m "X.Y.Z"` and push the tag. `.github/workflows/release.yml` runs on that push: it refuses a tag that differs from either version, runs `ruff` and the suite, builds the wheel and sdist with `uv build`, installs the wheel into an isolated directory and runs `jade --version`, `jade check --offline` and `jade setup --status` from it (`scripts/verify_install.sh`; only the `hooks installed` row may fail on a fresh machine), writes `SHA256SUMS`, and creates or updates the GitHub release with the three files and the CHANGELOG section as notes. Only that last job has `contents: write`. Run `sh scripts/verify_install.sh` yourself before tagging; it needs no network when uv's cache has the build backend and the dependencies (`UV_OFFLINE=0` allows downloads) and never touches your `~/.claude`, ledger or keychain. `tests/test_ledger_migration.py` opens a ledger with the 0.2.2 schema (`tests/fixtures/ledger_0_2_2.sql`) with the current code; when a release changes the ledger schema, snapshot the previous DDL the same way.
+
 ## 2. Human-only steps
 
 These change what an agent may do on this machine. The runtime refuses them for an agent session on purpose (invariant SI-09, `docs/07` section 3), so run them in your own terminal. Order matters.
+
+### 2.0 First run in one command: `jade setup`
+
+`jade setup` does sections 2.1, 2.3, 2.4 and 2.6 below, one step at a time, in your own terminal. Use it on a new machine; the manual commands stay the reference and the way to undo.
+
+```bash
+jade setup --status      # read-only (any caller): what is done and what is missing
+jade setup               # the wizard: each step shows the exact change and its undo, then asks y/N
+jade setup --yes         # same steps without the questions; still needs an interactive terminal
+```
+
+| Step | What it does (through the function the command in the section already uses) | Skipped when |
+|------|------|------|
+| 1 | Checks Python, `uv` and that the OpenRouter key exists (Keychain item `OPENROUTER_API_KEY`, or the environment variable). It never reads or prints the value; when it is missing it prints how you add it yourself | never (informational, a missing key does not fail the run) |
+| 2 | `jade gate advisory` (2.1) | `gate_mode` is already `advisory` or `enforce` in `~/.config/jade/config.json`; a configured enforce is never lowered |
+| 3 | `jade hooks install` (2.1) | all four hooks are installed and the PreToolUse matcher is current |
+| 4 | `jade claude-md apply` (2.3) | the Jev section already equals the shipped text; not applicable (and not an error) when CLAUDE.md or the section does not exist: add the output of `jade claude-md show` yourself |
+| 5 | Copies the skill (`skills/jade/SKILL.md`, shipped in the wheel as `jade/_skills`) to `~/.agents/jade/SKILL.md` and links `~/.claude/skills/jade` to `~/.agents/jade` | file and link already match. A different existing skill file is shown as a change, copied to `SKILL.md.bak-jade-<time>` next to it and replaced when you say y (this is how a release that improves the skill reaches you; `--yes` does the same). A link or a different path is never overwritten: the step is refused, the run exits 1 and says what to compare |
+| 6 | macOS only: writes `~/Library/LaunchAgents/com.jade.maintain.plist` from `jade launchd-plist`, then offers `launchctl bootstrap gui/<uid> <plist>` (2.4) as a second question | not macOS; a `jade maintain` job already exists and is loaded |
+| 7 | `jade check` offline (the live provider canary is yours to run) and a summary of what is active and what is not | never |
+
+Rules it keeps: it refuses without an interactive terminal, for an agent environment variable and for an agent ancestor (the same test as `jade permit approve`, docs/05 T2), before it reads or writes anything; `--yes` is not a way around that. A declined step changes nothing and the next steps continue. Each step records `setup.<step>` (outcome, time, version) and `setup.last_run` in the ledger meta; `--status` opens no ledger and writes nothing. A second run changes nothing (the ledger records are the only write). The exit code is 1 when a step failed or was refused, or the final check failed; a declined or not applicable step is exit 0.
+
+It does not set enforce mode. Advisory is the starting state (2.1); moving to enforce is your decision after the soak (2.2). To update the skill after `jade upgrade`, run `jade setup`: it shows the skill step as needed, asks, keeps the old copy as `SKILL.md.bak-jade-<time>` and writes the shipped one. Setup refuses to touch a skill file that is a symlink, and a `config.json` that is not a JSON object (it never rewrites a file it could not read: fix or move it, then run `jade setup` again).
+
+Undo: section 3, plus `rm ~/.claude/skills/jade ~/.agents/jade/SKILL.md`.
 
 ### 2.1 Start in advisory mode
 
@@ -37,14 +82,14 @@ jade hooks install
 
 `hooks install` backs up `~/.claude/settings.json` next to itself (`settings.json.bak-jade-<time>`; a second run in the same second gets a `-1` suffix, a backup is never overwritten), writes the file atomically (temp file in the same directory, then rename; a symlink stays a symlink and the target keeps its permission bits, a new file is 0600), adds four hook entries (PreToolUse for Bash, PowerShell, Monitor, file edits, RemoteTrigger and MCP tools; PostToolUse for Bash; Stop; SessionStart). An install made before the matcher grew shows `pretool matcher` as FAIL in `jade check`; run `jade hooks install` again, and leaves other hooks alone. Hooks are read at session start: open a new Claude Code session afterwards.
 
-In advisory mode the gate never blocks. It records a `would_block` event and prints what it would have done, so you can see the real false-positive rate before it can interrupt work.
+In advisory mode the gate never blocks. It records a `would_block` event (or a `safety_block` event when a safety invariant such as SI-08, a push to the default branch, would have stopped the call) and prints what it would have done, so you can see the real false-positive rate before it can interrupt work.
 
 Verify:
 
 ```bash
 jade hooks status        # four lines, all "installed"
 jade check               # every line "ok"; non-zero exit means dead wiring
-jade ledger stats        # events.would_block counts the calls the gate would have stopped
+jade ledger stats        # events.would_block and events.safety_block count the calls the gate would have stopped
 ```
 
 `jade check` fails (exit 1) on: a missing hook (`hooks installed`); a hook command whose binary is missing or not executable, `disableAllHooks` in `settings.json` or `settings.local.json`, a matcher or event that is not the one `hooks install` writes, and a registered command that does not decide when run once with a synthetic event (`hook wiring`: the PreToolUse command must block a `jade permit approve` call with SI-09, the other three must exit 0 without an internal error; the probe runs in a throwaway `JADE_HOME` with the gate forced to `enforce` and never touches your ledger); a project, managed or plugin settings file that disables or shadows the hooks (`settings shadowing`, W-47: `disableAllHooks`, `allowManagedHooksOnly`, a JADE hook command that is wrapped, redirected or sets a gate variable, a gate variable in an `env` block, or a file it cannot parse); gate mode `off`, or a `JADE_GATE_MODE` in the environment that differs from the configured mode (`gate mode`; `advisory` passes, it is the soak state); a weakening override (`gate overrides`: `JADE_POLICY_DIR`, `JADE_CONFIG`, `JADE_HOME` pointing away from their defaults, `JADE_GATE_MODE` below enforce, in this shell or in the `env` block of the Claude settings; a deliberate one in your own shell is silenced with `JADE_ACK_OVERRIDES=VAR,VAR`, an `env` block entry never is); `permissions.defaultMode` bypassPermissions or auto together with a gate that is advisory or off (`host permission prompt`: nothing stops a call); a `jade maintain` LaunchAgent in `~/Library/LaunchAgents` that launchd has not loaded (`maintain job`); `jev` neither on PATH nor beside `jade` (`jev shim`); an overlay the runtime reads that has an invalid or empty-matching pattern, an invariant without a block pattern, a `rules_override` that lowers a shipped critical or high rule, or a top-level key the loader does not merge (`overlay lint`, W-56; findings name the file and rule id or index, never the overlay text); a `*.local.yaml` in the checkout's `policies/local/` that the runtime is not reading, because it reads `~/.config/jade/local/` (`overlay files`). Not checked: project-level or managed settings files that shadow the user file (W-47).

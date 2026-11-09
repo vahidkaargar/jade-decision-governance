@@ -510,26 +510,37 @@ def markdown_headings(text: str):
         para.append((i, line.strip()))
 
 
-def claude_md_apply(target: Path | None = None, stdin_isatty: bool | None = None) -> Path:
-    """Replace the Jev section of the global CLAUDE.md with the shipped text. Human only; keeps a backup. The section runs from its heading to
-    the next heading of the same or a higher level (a `###` inside it belongs to it); headings inside code fences are not headings."""
-    _require_human("jade claude-md apply", stdin_isatty)
-    p = target or Path.home() / ".claude" / "CLAUDE.md"
-    text = p.read_text(encoding="utf-8")
+class SectionNotFound(ValueError):
+    """The Jev heading is not in the CLAUDE.md text."""
+
+
+def claude_md_render(text: str, where: str = "CLAUDE.md") -> str:
+    """`text` with its Jev section replaced by the shipped one (pure: reads nothing but the shipped section, writes nothing). The section runs from its
+    heading to the next heading of the same or a higher level (a `###` inside it belongs to it); headings inside code fences are not headings.
+    SectionNotFound when the heading is absent, ValueError when it appears twice. `where` only names the file in the messages."""
     title = JEV_HEADING.lstrip("# ").strip()
     heads = list(markdown_headings(text))
     starts = [(i, lvl) for i, lvl, t in heads if t == title and lvl == 2]
     if not starts:
-        raise ValueError(f"heading not found in {p}: {JEV_HEADING}")
+        raise SectionNotFound(f"heading not found in {where}: {JEV_HEADING}")
     if len(starts) > 1:
-        raise ValueError(f"heading found {len(starts)} times in {p} (lines {', '.join(str(i + 1) for i, _ in starts)}); remove the duplicate first")
+        raise ValueError(f"heading found {len(starts)} times in {where} (lines {', '.join(str(i + 1) for i, _ in starts)}); remove the duplicate first")
     first, level = starts[0]
     nxt = next((i for i, lvl, _t in heads if i > first and lvl <= level), None)
     lines = text.splitlines(keepends=True)
     start = sum(len(x) for x in lines[:first])
     end = len(text) if nxt is None else sum(len(x) for x in lines[:nxt])
+    return text[:start] + claude_md_section().rstrip("\n") + "\n\n" + text[end:]
+
+
+def claude_md_apply(target: Path | None = None, stdin_isatty: bool | None = None) -> Path:
+    """Replace the Jev section of the global CLAUDE.md with the shipped text. Human only; keeps a backup (see claude_md_render for the section's extent)."""
+    _require_human("jade claude-md apply", stdin_isatty)
+    p = target or Path.home() / ".claude" / "CLAUDE.md"
+    text = p.read_text(encoding="utf-8")
+    new = claude_md_render(text, str(p))
     backup = backup_file(p)
-    atomic_write(p, text[:start] + claude_md_section().rstrip("\n") + "\n\n" + text[end:])
+    atomic_write(p, new)
     return backup
 
 

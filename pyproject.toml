@@ -40,6 +40,7 @@ packages = ["jade", "policies"]
 [tool.hatch.build.targets.wheel.force-include]
 "schemas" = "jade/_schemas"
 "registry" = "jade/_registry"
+"skills" = "jade/_skills"
 "docs/claude-md-jev-section.md" = "jade/_docs/claude-md-jev-section.md"
 
 [tool.pytest.ini_options]

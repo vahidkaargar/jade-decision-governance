@@ -52,6 +52,7 @@ A prose rule with no threshold and no enforcement point does not hold. Details a
 | 6 | `docs/06-roadmap.md` | Phases 1–5, acceptance tests, rollout and rollback |
 | 7 | `docs/07-self-improvement-and-work-management.md` | Bounded improvement loop, durable work items, human-only boundaries |
 | 8 | `docs/08-deployment-runbook.md` | What is installed, the human-only wiring steps, rollback, coverage limits, the path to VALIDATED |
+| 9 | `docs/09-install-and-upgrade.md` | Versioning policy, the upgrade contract, the release process, supported platforms, troubleshooting by `jade check` row, full uninstall |
 | — | `BACKLOG.md` | Every open item: owner, priority, dependency, trigger, next action |
 | — | `docs/JADE_Claude_Code_Master_Plan.md` | The original handoff draft this repository completes |
 
@@ -70,27 +71,97 @@ adapters/jev/     OpenRouter Decisions API probe
 tests/            contract, policy and overlay tests; tests/acceptance = the Phase 1–5 acceptance checklist
 ```
 
-## Install and use
+## Quick start (Claude Code)
 
-Requires [uv](https://docs.astral.sh/uv/), Python 3.13+, and an OpenRouter key in the macOS Keychain (service `OPENROUTER_API_KEY`) or the environment.
+This is the first installable release. It runs in **advisory mode**: it records what it would have blocked and blocks nothing. It is not VALIDATED and not production approved (see Status). Every step that wires JADE into Claude Code is a human step in your own terminal; an agent cannot run it for you.
+
+**Requirements**
+
+- macOS or Linux (macOS is the tested platform; the maintenance job helper is macOS only, see `docs/09-install-and-upgrade.md` section 5)
+- Python 3.13 or newer and [uv](https://docs.astral.sh/uv/)
+- [Claude Code](https://docs.claude.com/en/docs/claude-code) (JADE installs its hooks in `~/.claude/settings.json`)
+- An OpenRouter key for the Jev calls: in the macOS Keychain (service `OPENROUTER_API_KEY`, account `$USER`) or in the `OPENROUTER_API_KEY` environment variable of the shell that starts Claude Code. The gate and the hooks work without a key; `jev` and the live `jade check` canary need it. `jade setup` never asks for the value and never prints it
+
+**1. Install** (pinned to a release tag; installs `jade` and the `jev` compatibility shim)
 
 ```bash
-uv tool install .            # installs `jade` and the `jev` compatibility shim
-jev verify "The suite passed" --state-file test-output.txt
-echo $?                      # 0 accept, 3 abstain, 4 reject, 5 provider unavailable, 6 invalid question
-jade check                   # probes ledger, policies, registry, hooks and the provider
-jade ledger stats            # what your agents actually did
+uv tool install git+https://github.com/vahidkaargar/jade-decision-governance@v0.3.0
+jade --version
 ```
 
-Only exit code 0 is a yes. Enforcement of risky tool calls is opt-in and human-wired: `docs/08-deployment-runbook.md`.
+If `uv` answers `Executable already exists: jev`, an older `jev` script sits in uv's tool bin directory and nothing was installed (not even `jade`). Move it aside (`mv ~/.local/bin/jev ~/.local/bin/jev.orig`) and run the install again, or add `--force` to overwrite it.
 
-Never pushing to the default branch is enforced by git and the remote, not by reading shell: `jade git-hook script` prints a standalone pre-push guard, `jade git-hook check <repo>` says whether a repository runs it, and branch protection on the remote covers every other client. Both are installed by a human (`docs/08-deployment-runbook.md` section 2.7).
+**2. Wire it into Claude Code**
+
+```bash
+jade setup --status      # read-only: what is done and what is missing
+jade setup               # asks y/N before each change: advisory gate, hooks, skill, maintenance job, and the Jev section of an existing CLAUDE.md
+```
+
+`jade setup` needs an interactive terminal and refuses inside an agent. It backs up `settings.json` and `CLAUDE.md` before it edits them, and it never sets enforce mode. Open a new Claude Code session afterwards: hooks are read at session start.
+
+**3. Verify**
+
+```bash
+jade check --offline     # every row ok; a non-zero exit means dead wiring (docs/09 section 6 explains each row)
+jade check               # the same plus the live provider canary: it needs your OpenRouter key and fails with NO_KEY without one, which is not dead wiring
+```
+
+**4. First use**
+
+```bash
+jev verify "The suite passed" --state-file test-output.txt
+echo $?                  # 0 accept, 3 abstain, 4 reject, 5 provider unavailable, 6 invalid question
+jade ledger stats        # what your agents actually did, including the would_block and safety_block events
+```
+
+Only exit code 0 is a yes. Give `jev` raw evidence (a log, a diff, a command's output), not your own summary. Claude Code finds out about `jev` from the skill `jade setup` installs. `jade setup` only replaces the `## Jev` section of an existing `~/.claude/CLAUDE.md`; when you have none, or none with that heading, it skips the step and you add the output of `jade claude-md show` to your CLAUDE.md yourself.
+
+**What advisory mode does and does not protect**
+
+- It does: journal and redact every Jev call, map a probability to accept, abstain or reject, record a `would_block` event (`safety_block` for a safety invariant such as a push to the default branch) for every call the gate would stop in enforce mode and print `[advisory, not blocked]` with the reason, remind the agent at Stop about an abstain or reject it has not dealt with, and refuse to let an agent approve its own permit.
+- It does not: block any command, edit or tool call. A `git push` to the default branch, `terraform destroy` or `rm -rf` runs as it would without JADE. The gate is also a syntactic classifier with known gaps (`docs/05-threat-model.md` T18, T19, T22): a guard rail for an agent that makes mistakes, not a boundary against one that is hostile and runs as your user.
+- Pushes to the default branch are stopped by git and the remote, not by JADE's shell reading: install the pre-push guard and turn on branch protection (`docs/08-deployment-runbook.md` section 2.7).
+- Moving to enforce mode (`jade gate enforce`) is your decision after you have read `jade ledger stats` and `jade decide list` for a week or more (`docs/08-deployment-runbook.md` section 2.2).
+
+**Upgrade** (in your own terminal; the ledger, your overlays, `settings.json` and `CLAUDE.md` are not touched)
+
+```bash
+jade upgrade --check     # installed against latest release, plus the CHANGELOG headings in between (read-only)
+jade upgrade             # installs the latest release with uv, then runs jade check from the new install
+```
+
+Re-run `jade hooks install` and open a new Claude Code session only when the output says a hook row failed. After an upgrade `jade setup --status` shows whether the shipped skill or CLAUDE.md text changed. Details and the upgrade contract: `docs/09-install-and-upgrade.md`.
+
+**Roll back and uninstall**
+
+```bash
+jade gate advisory       # stop blocking, keep recording
+jade hooks uninstall     # remove JADE's hook entries from ~/.claude/settings.json
+jade upgrade --ref vX.Y.Z   # install an older release (reported as a rollback)
+```
+
+Full rollback table: `docs/08-deployment-runbook.md` section 3. Complete removal, step by step, in the right order: `docs/09-install-and-upgrade.md` section 7.
+
+**Report a problem**
+
+Open an issue at https://github.com/vahidkaargar/jade-decision-governance/issues with the output of `jade version` and `jade check --offline` (check the text for paths you do not want to share), the command you ran and what you expected. A bug that lets an agent act without a human approval, or leaks text redaction should have removed, goes to a private security advisory instead: `SECURITY.md`.
+
+More commands, in a checkout or installed:
+
+```bash
+jade version             # code version, commit, ledger schema version, policy_version (also `jade --version`)
+jade setup --status      # what setup has and has not done
+```
+
+Never pushing to the default branch is enforced by git and the remote, not by reading shell: `jade git-hook script` prints a standalone pre-push guard, `jade git-hook check <repo>` says whether a repository runs it, and branch protection on the remote covers every other client. Both are installed by a human (`docs/08-deployment-runbook.md` section 2.7). The rest of the manual wiring and each undo are in `docs/08-deployment-runbook.md`.
 
 ## Develop
 
 Requires uv and Python 3.13+.
 
 ```bash
+uv tool install .                    # install your checkout instead of a release (`uv tool install --reinstall .` after changes)
 uv sync
 uv run pytest -q                      # contract, policy, overlay and phase acceptance tests
 uv run python evals/run_cases.py      # regression + adversarial case replay
@@ -122,6 +193,7 @@ uv run python evals/performance/run.py --rounds 3
 The shipped `policies/risk.yaml` and `policies/safety.yaml` are generic. Your production hosts, deploy scripts and retired services go in gitignored overlays:
 
 ```bash
+# run from a checkout of this repository; the same two example files are in the installed package (`policies/local/` in its site-packages directory)
 mkdir -p ~/.config/jade/local
 cp policies/local/risk.local.example.yaml   ~/.config/jade/local/risk.local.yaml
 cp policies/local/safety.local.example.yaml ~/.config/jade/local/safety.local.yaml
