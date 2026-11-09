@@ -267,7 +267,7 @@ def test_an_id_that_spent_one_permit_cannot_spend_a_second(home):
 # ---- concurrent processes against one JADE_HOME ---------------------------------------------------------
 def run_parallel(events):
     """Start one `jade hook pretool` process per event, feed them all together, return their exit codes (the processes use this test's JADE_HOME)."""
-    cmd = [sys.executable, "-m", "jade.cli", "hook", "pretool"]
+    cmd = [sys.executable, "-m", "jade.cli", "hook", "pretool"]   # callers reopen the ledger afterwards: a connection opened before the other processes wrote can hold a stale WAL snapshot (seen on Linux)
     procs = [subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=dict(os.environ)) for _ in events]
     for proc, ev in zip(procs, events, strict=True):
         proc.stdin.write(json.dumps(ev))
@@ -284,6 +284,7 @@ def run_parallel(events):
 def test_parallel_processes_delivering_one_call_all_pass_and_spend_one_permit(home, family):
     db, p = approved(pre(family))
     codes = run_parallel([pre(family)] * 6)
+    db = ledger.open()
     assert codes == [0] * 6
     assert count(db, "permit_consumed") == 1 and permits.get(db, p.permit_id).state == "CONSUMED"
     assert db.one("SELECT COUNT(*) AS n FROM events WHERE entity_id=? AND next_state='EXECUTING'", (p.decision_id,)).n == 1
@@ -294,6 +295,7 @@ def test_parallel_processes_delivering_different_calls_spend_one_permit_for_one_
     db, p = approved(pre("write"))
     evs = [pre("write", tool_use_id=f"toolu_synthetic_parallel_{i:04d}") for i in range(6)]
     codes = run_parallel(evs)
+    db = ledger.open()
     assert sorted(codes) == [0, 2, 2, 2, 2, 2]
     assert count(db, "permit_consumed") == 1
     winner = evs[codes.index(0)]
@@ -305,6 +307,7 @@ def test_parallel_processes_delivering_different_calls_spend_one_permit_for_one_
 def test_the_decision_and_the_permit_move_together_under_parallel_calls(home):
     db, p = approved(pre("mcp"))
     run_parallel([pre("mcp")] * 4 + [pre("mcp", tool_use_id="toolu_synthetic_mcp_0002")] * 2)
+    db = ledger.open()
     states = {r.permit_id: r.state for r in db.all("SELECT permit_id, state FROM permits")}
     assert states[p.permit_id] == "CONSUMED"
     assert status_of(db, p.decision_id) == "EXECUTING" and decide.get(db, p.decision_id)["status"] == "EXECUTING"
