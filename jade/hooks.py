@@ -51,6 +51,7 @@ _PROTECTED_PATH = re.compile(
 _MUTATING_TOOL = re.compile(
     r"^mcp__.+?__(?:set|write|edit|create|update|delete|remove|move|rename|exec|execute|run|shell|apply|merge|deploy|install|uninstall|kill|terminate|patch|publish"
     r"|push|commit|save|add|drop|truncate|restart|stop|start|send|post|put|accept|fork|link|discard|clean|interact|force|mcp-(?:exec|add|remove|config|create|activate)|code-mode)"
+    r"|__(?:\w+_)?run_code"
     r"|kubectl_|exec_in_pod|helm_chart|^RemoteTrigger$|__(?:app_type|Type|type|Shortcut|computer_batch|app_batch|teach_batch|app_key|key)$")
 
 
@@ -74,7 +75,7 @@ def failsafe_reason(event: dict) -> str | None:
         if len(text) <= 4096 and _SAFE_CMD.fullmatch(text) and not _EXEC_FLAG.search(text):
             return None
         return "the command is not clearly read-only"
-    if _MUTATING_TOOL.search(tool):
+    if _MUTATING_TOOL.search(tool) or _MUTATING_TOOL.search("__".join((tool.rpartition("__")[0], policy.snake(tool.rpartition("__")[2])))):
         return f"{tool} can mutate state"
     return None
 
@@ -284,10 +285,12 @@ def _journal(entity: str, kind: str, a: policy.Assessment, event: dict) -> None:
 
 def _si07_hold(db, a: policy.Assessment):
     """SI-07: an earlier decision for this exact command whose outcome is unknown, or an irreversible one still executing. Such a command
-    is never started again until the outcome is reconciled; no permit is raised or consumed for it. Returns (decision_id, reason) or None."""
+    is never started again until the outcome is reconciled; no permit is raised or consumed for it. "This exact command" is the command's hold_key
+    (its canonical gated segments, so quoting, `&& true`, an env prefix, `sh -c`, a full program path or another cwd do not make it a new command);
+    a different argument list is a different command. Returns (decision_id, reason) or None."""
     now_s = ts()
-    for r in db.all("SELECT decision_id, status, expires_at, doc_json FROM decisions WHERE plan_hash=? AND status IN ('OUTCOME_UNKNOWN','EXECUTING') "
-                    "ORDER BY updated_at DESC", (a.plan_hash,)):
+    for r in db.all("SELECT decision_id, status, expires_at, doc_json FROM decisions WHERE (plan_hash=? OR hold_key=?) AND status IN ('OUTCOME_UNKNOWN','EXECUTING') "
+                    "ORDER BY updated_at DESC", (a.plan_hash, a.hold_key or a.plan_hash)):
         if r.status == "OUTCOME_UNKNOWN" or r.expires_at <= now_s:
             return r.decision_id, "has an unknown outcome (an unknown outcome is never success)"
         try:

@@ -40,3 +40,9 @@
 {"id": "R40", "class": "mcp_read_tool_is_low", "kind": "gate_mcp", "tool": "mcp__GitLab__get_project", "input": {"id": 1}, "expect": "allow", "note": "G01 control"}
 {"id": "R41", "class": "write_ordinary_content_is_low", "kind": "gate_write", "path": "/tmp/case/a.txt", "content_parts": ["listen 127.0.0.1:11434"], "expect": "allow", "note": "G02 control"}
 {"id": "R42", "class": "shell_c_harmless_is_low", "kind": "gate", "command": "bash -c 'ls -la /tmp'", "expect": "allow", "note": "F41 control"}
+{"id": "R43", "class": "git_add_of_jade_code_is_low", "kind": "gate", "command": "git add jade/hooks.py", "expect": "allow", "note": "G00 pass 2 control: R-16 looks at write targets"}
+{"id": "R44", "class": "ruff_check_of_jade_code_is_low", "kind": "gate", "command": "uv run ruff check jade/policy.py", "expect": "allow", "note": "G00 pass 2 control"}
+{"id": "R45", "class": "copy_of_jade_code_out_is_low", "kind": "gate", "command": "cp jade/hooks.py /tmp/hooks.bak", "expect": "allow", "note": "G00 pass 2 control: judged by the destination"}
+{"id": "R46", "class": "interface_only_mcp_tool_is_low", "kind": "gate_mcp", "tool": "mcp__ccd_sidebar__set_pinned", "input": {"pinned": true}, "expect": "allow", "note": "G01 pass 2 control"}
+{"id": "R47", "class": "camel_case_read_tool_is_low", "kind": "gate_mcp", "tool": "mcp__x__getThing", "input": {}, "expect": "allow", "note": "G01 pass 2 control"}
+{"id": "R48", "class": "uv_run_pytest_is_low", "kind": "gate", "command": "uv run pytest -q", "expect": "allow", "note": "launcher prefix control"}

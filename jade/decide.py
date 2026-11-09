@@ -41,9 +41,9 @@ def open_decision(db: ledger.Ledger, objective: str, *, command: str | None = No
     }
     schemas.validate("decision", doc)
     with db.tx() as con:
-        con.execute("INSERT INTO decisions(decision_id, status, risk_level, rule_id, route, session_id, plan_hash, doc_json, created_at, updated_at, expires_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                    (doc["decision_id"], "CLASSIFIED", level, a.rule_id, route, doc["session_id"], a.plan_hash or None,
+        con.execute("INSERT INTO decisions(decision_id, status, risk_level, rule_id, route, session_id, plan_hash, hold_key, doc_json, created_at, updated_at, expires_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (doc["decision_id"], "CLASSIFIED", level, a.rule_id, route, doc["session_id"], a.plan_hash or None, a.hold_key or a.plan_hash or None,
                      json.dumps(doc, ensure_ascii=False), ts(), ts(), doc["timestamps"]["expires_at"]))
         db.event(doc["decision_id"], "open", prev=None, next="VALIDATED", guard="schema valid", actor="agent", con=con)
         db.event(doc["decision_id"], "classify", prev="VALIDATED", next="CLASSIFIED", guard=f"{a.rule_id}: {a.rationale}", con=con)

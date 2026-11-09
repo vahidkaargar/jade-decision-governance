@@ -17,7 +17,7 @@ from functools import lru_cache
 from policies import loader
 
 from . import paths, shellnorm
-from .util import LEVELS, canonical, sha256
+from .util import LEVELS, canonical, fold, sha256
 
 NULL_REDIRECT = shellnorm.NULL_REDIRECT
 SPLIT = shellnorm.SPLIT
@@ -31,7 +31,7 @@ GATED_BUILTIN = (*SHELL_TOOLS, *WRITE_TOOLS, "RemoteTrigger")
 OLD_KEYS = {"old_string", "old_str"}  # text that is being removed is never scanned as content
 PATH_KEYS = ("source", "destination", "src", "dest", "dst", "from", "to", "old_path", "new_path", "dir", "directory", "folder")
 UNSAFE_GIT = shellnorm.UNSAFE_GIT  # marker prefix R-15 matches; carried only in the text a rule sees
-PATH_RULES = ("R-01", "R-04", "R-12", "R-13")  # the rules about where a write lands: they also see relative operands made absolute
+PATH_RULES = ("R-01", "R-04", "R-12", "R-13", "R-16")  # the rules about where a write lands: they also see relative operands made absolute
 WRITE_KEYS = ("file_path", "notebook_path", "path", "filePath", "file", "filepath", "target_file", "file_name", "filename", "target")
 CONTENT_KEYS = {"content", "new_string", "old_string", "new_str", "old_str", "new_source", "text", "contents", "data", "source", "patch"}
 
@@ -48,17 +48,17 @@ def _strings(obj, key: str = ""):
             yield from _strings(v, key)
 
 
-def content_strings(obj, key: str = ""):
-    """Every string a call would put somewhere (file content, new text, any argument), never the text it removes."""
+def content_strings(obj, key: str = "", skip: frozenset[str] = frozenset()):
+    """Every string a call would put somewhere (file content, new text, any argument), never the text it removes or the keys named in `skip`."""
     if isinstance(obj, str):
-        if key not in OLD_KEYS:
+        if key not in OLD_KEYS and key.lower() not in skip:
             yield obj
     elif isinstance(obj, dict):
         for k, v in obj.items():
-            yield from content_strings(v, str(k))
+            yield from content_strings(v, str(k), skip)
     elif isinstance(obj, (list, tuple)):
         for v in obj:
-            yield from content_strings(v, key)
+            yield from content_strings(v, key, skip)
 
 
 def write_paths(tool_input: dict) -> list[str]:
@@ -110,6 +110,7 @@ class Assessment:
     blocked: list[str] = field(default_factory=list)
     plan_hash: str = ""
     subject: str = ""
+    hold_key: str = ""  # identity of the command for SI-07: the canonical gated segments, independent of quoting, separators, prefixes and cwd
 
 
 _BASE_ONLY = False  # see base_only()
@@ -119,6 +120,7 @@ _BASE_ONLY = False  # see base_only()
 def _risk(with_overlay: bool) -> dict:
     r = loader.load_risk(overlay=paths.overlay("risk") if with_overlay else None, base=paths.policy_dir() / "risk.yaml")
     r["_read_only"] = [re.compile(p) for p in r.get("read_only", [])]
+    r["_inert"] = [re.compile(p) for p in r.get("inert_for_files", [])]
     return r
 
 
@@ -227,17 +229,48 @@ def _absolute_operands(seg: str, dirs: tuple[str, ...]) -> str:
     return " ".join(dict.fromkeys(out))
 
 
-def _path_rule(text: str) -> dict | None:
+def _seen_by(rule: dict, text: str, files: str | None) -> str:
+    """The text a rule looks at: a `files_only` rule sees the write targets of the segment (`files`) when they are known, else the whole text."""
+    return files if rule.get("files_only") and files is not None else text
+
+
+def _path_rule(text: str, files: str | None = None) -> dict | None:
     if not text:
         return None
-    return next((r for r in risk()["rules"] if r["id"] in PATH_RULES and r["_re"].search(text)), None)
+    return next((r for r in risk()["rules"] if r["id"] in PATH_RULES and (t := _seen_by(r, text, files)) and r["_re"].search(t)), None)
 
 
-def _first_match(text: str) -> dict:
+def _first_match(text: str, files: str | None = None) -> dict:
     for r in risk()["rules"]:
-        if r["_re"].search(text):
+        if (t := _seen_by(r, text, files)) and r["_re"].search(t):
             return r
     return risk()["rules"][-1]
+
+
+COPY_VERBS = {"cp", "rsync", "ln", "install", "scp"}
+REDIRECT_TARGET = re.compile(r">>?\s*(\S+)")
+
+
+def files_view(bare: str) -> str | None:
+    """What a command writes, for the rules that care about files and not about mentions (R-16).
+
+    "" = the command only reads its operands (`inert_for_files`), a string = the destinations that are known, None = it may write any operand,
+    so the whole segment counts."""
+    if any(p.search(bare) for p in risk()["_inert"]):
+        return ""
+    words = bare.split(" ")
+    verb = words[0].rsplit("/", 1)[-1]
+    redirects = " ".join(REDIRECT_TARGET.findall(bare))
+    ops = [w for w in words[1:] if w and not w.startswith("-") and not w.startswith(">")]
+    if verb in COPY_VERBS and ops and not any(w in ("-t", "--target-directory") or w.startswith("--target-directory=") or (w.startswith("-") and not w.startswith("--") and "t" in w[1:]) for w in words[1:]):
+        return f"{ops[-1]} {redirects}".strip()
+    if verb == "tar" and len(words) > 2:
+        flags = words[1]
+        if (re.fullmatch(r"-?[a-zA-Z]*c[a-zA-Z]*", flags) and "f" in flags) or "--create" in words[1:]:  # creating an archive: only the archive is written
+            archive = words[2] if re.fullmatch(r"-?[a-zA-Z]*f[a-zA-Z]*", flags) and not words[2].startswith("-") else None
+            if archive:
+                return f"{archive} {redirects}".strip()
+    return None
 
 
 def _raise_to(a: Assessment, other: Assessment) -> None:
@@ -250,14 +283,16 @@ def _raise_to(a: Assessment, other: Assessment) -> None:
         a.reversibility, a.blast_radius, a.data_sensitivity = other.reversibility, other.blast_radius, other.data_sensitivity
 
 
-def _scan_content(a: Assessment, tool_input: dict) -> None:
-    """Invariants marked `scan_content` (SI-02, SI-05) apply to the text a non-shell call carries: file content, new text, any argument."""
-    invs = [i for i in safety()["invariants"] if i.get("scan_content") and "_re" in i and i["id"] not in a.blocked]
-    if not invs:
-        return
-    texts = list(content_strings(tool_input))
+def _scan_content(a: Assessment, tool_input: dict, read_only: bool = False) -> None:
+    """Invariants marked `scan_content` (SI-02, SI-05) apply to the text a non-shell call carries: file content, new text, any argument.
+
+    The text is folded first (`util.fold`). An invariant with `scan_read_only: false` skips a tool whose name only reads, and one with `scan_skip_keys`
+    skips those keys (a page URL or a search term is not a bind address)."""
+    invs = [i for i in safety()["invariants"] if i.get("scan_content") and "_re" in i and i["id"] not in a.blocked
+            and not (read_only and i.get("scan_read_only") is False)]
     for inv in invs:
-        if any(inv["_re"].search(t) for t in texts):
+        skip = frozenset(str(k).lower() for k in inv.get("scan_skip_keys", []))
+        if any(inv["_re"].search(fold(t)) for t in content_strings(tool_input, "", skip)):
             a.blocked.append(inv["id"])
 
 
@@ -281,10 +316,21 @@ def _assess_write(tool: str, tool_input: dict, cwd: str) -> Assessment:
     return a
 
 
+def snake(name: str) -> str:
+    """`setSetting` -> `set_setting`, `SetSetting` -> `set_setting`: the verb heuristics were written for snake and kebab names.
+    A single capitalised word (`Move`, `Shell`) is left as it is."""
+    if not re.search(r"[a-z0-9][A-Z]", name):
+        return name
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", "_", name).lower()
+
+
 def _tool_rule(tool: str, command_decides: bool) -> dict:
-    """First `mcp_tools` rule that names the tool; a `generic` name heuristic is skipped when a command string decides."""
+    """First `mcp_tools` rule that names the tool (as spelled, or with a camelCase name read as snake_case); a `generic` name heuristic is
+    skipped when a command string decides."""
+    head, sep, last = tool.rpartition("__")
+    forms = list(dict.fromkeys((tool, head + sep + snake(last))))
     for m in risk().get("mcp_tools", []):
-        if re.search(m["match"], tool) and not (command_decides and m.get("generic")):
+        if any(re.search(m["match"], f) for f in forms) and not (command_decides and m.get("generic")):
             return m
     return {"id": "R-99", "level": "low", "rationale": "Tool with no mutation rule", "blast_radius": "service"}
 
@@ -315,6 +361,10 @@ def _assess_tool(tool: str, tool_input: dict, cwd: str) -> Assessment:
     write and by the text they type into a shell; the most severe reading decides."""
     cmd = mcp_command(tool_input) if is_mcp(tool) else None
     rule = _tool_rule(tool, command_decides=cmd is not None)
+    if rule["id"] == "M-99" and isinstance(tool_input.get("action"), str) and re.fullmatch(r"[\w-]{1,40}", tool_input["action"]):
+        # one tool, many verbs (`herd processes {action: start}`): the action is the name's verb
+        by_action = _tool_rule(f"{tool}__{tool_input['action']}", command_decides=cmd is not None)
+        rule = rule if by_action["id"] == "M-99" else by_action
     if cmd is not None:
         a = _assess_shell(tool, cmd, cwd)
         if not rule.get("generic"):
@@ -339,28 +389,49 @@ def _assess_tool(tool: str, tool_input: dict, cwd: str) -> Assessment:
 def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     best: dict | None = None
     active: list[str] = []
+    keys: list[str] = []
+    gated_keys: list[str] = []
     for seg, dirs in shellnorm.segments_cwd(subject, cwd):
         if is_read_only(seg):
             continue
         active.append(seg)
         bare, calls = _analyse(seg)
         texts = [seg, bare, _pathfold(bare), *([UNSAFE_GIT + bare] if any(c.danger for c in calls) else [])]
+        view = files_view(bare)  # what a `files_only` rule (R-16) may look at: None = the whole segment
+        seg_best = None
         for text in dict.fromkeys(texts):
-            rule = _first_match(text)
-            if best is None or LEVELS[rule["level"]] > LEVELS[best["level"]]:
-                best = rule
-        if (rule := _path_rule(_absolute_operands(seg, dirs))) and (best is None or LEVELS[rule["level"]] > LEVELS[best["level"]]):
-            best = rule
+            rule = _first_match(text, view)
+            if seg_best is None or LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
+                seg_best = rule
+        abs_ops = _absolute_operands(seg, dirs)
+        abs_files = abs_ops if view is None else _absolute_operands("x " + view, dirs) if view else ""
+        if (rule := _path_rule(abs_ops, abs_files)) and LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
+            seg_best = rule
+        if best is None or LEVELS[seg_best["level"]] > LEVELS[best["level"]]:
+            best = seg_best
+        key = _segment_key(bare)
+        keys.append(key)
+        if LEVELS[seg_best["level"]] >= LEVELS[permit_floor()]:
+            gated_keys.append(key)
     best = best or risk()["rules"][-1]
     a = _from_rule(best, loader.environment_of(risk(), subject))
     for inv in safety()["invariants"]:
         if "_re" not in inv:
             continue
-        haystacks = [subject] if inv.get("match_on") == "raw" else active + [_bare(s) for s in active]
+        haystacks = [fold(subject)] if inv.get("match_on") == "raw" else active + [_bare(s) for s in active]
         if any(inv["_re"].search(h) for h in haystacks):
             a.blocked.append(inv["id"])
     a.plan_hash, a.subject = plan_hash(tool, subject, cwd), subject
+    a.hold_key = sha256(canonical({"shell": sorted(set(gated_keys or keys))}))
     return a
+
+
+def _segment_key(bare: str) -> str:
+    """One simple command with launcher prefixes and git global options gone (the caller passes `_bare`), the program named without its directory,
+    whitespace collapsed: `/usr/local/bin/fly  deploy` and `FOO=1 fly deploy` are the same command."""
+    words = bare.split(" ")
+    words[0] = words[0].rsplit("/", 1)[-1]
+    return " ".join(w for w in words if w)
 
 
 def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
@@ -370,9 +441,9 @@ def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
     elif is_mcp(tool) or tool == "RemoteTrigger":
         a = _assess_tool(tool, tool_input, cwd)
     else:
-        a = _assess_shell(tool, str(tool_input.get("command") or ""), cwd)
-        return a
-    _scan_content(a, tool_input)
+        return _assess_shell(tool, str(tool_input.get("command") or ""), cwd)
+    a.hold_key = a.hold_key or a.plan_hash
+    _scan_content(a, tool_input, read_only=is_mcp(tool) and mcp_command(tool_input) is None and _tool_rule(tool, False).get("id") in ("M-06", "M-06a"))
     return a
 
 

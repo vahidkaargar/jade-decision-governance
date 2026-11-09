@@ -8,7 +8,7 @@ from pathlib import Path
 
 from . import schemas
 
-MARK = "## Items"
+MARK = "\n## Items\n"  # a heading line: the text above may quote the words `## Items` in prose
 AGING = (("P2", "P1", 14), ("P3", "P2", 30))
 
 
@@ -82,7 +82,7 @@ def render(jsonl: Path, backlog: Path, today: date | None = None) -> str:
     """Rewrite everything from the `## Items` heading down; the hand-written part above it is kept."""
     items = load(jsonl)
     head = backlog.read_text().split(MARK)[0] if backlog.exists() else "# Backlog\n\n"
-    text = (head.rstrip("\n") + f"\n\n{MARK}\n\n" + table(items) +
+    text = (head.rstrip("\n") + f"\n{MARK}\n" + table(items) +
             f"\n\nAging: P2 → P1 after 14 idle days; P3 → P2 after 30. Rendered by `jade work render` on {(today or date.today()).isoformat()}.\n")
     backlog.write_text(text)
     return text

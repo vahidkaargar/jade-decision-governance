@@ -11,13 +11,19 @@ invariants:
   - id: SI-02
     description: "Local model servers and backends never bind a public address"
     scan_content: true     # also checked on the content a Write/Edit/MultiEdit/NotebookEdit or MCP call carries (new text only, never old_string)
-    block: "(OLLAMA_HOST|HOST|BIND|LISTEN)=(0\\.0\\.0\\.0|\\[::\\]|\\*)|--host[= ](0\\.0\\.0\\.0|\\[::\\])|\\b(0\\.0\\.0\\.0|\\*):[0-9]{2,5}\\b"
+    scan_read_only: false  # ... but not on the arguments of a tool whose name only reads (a search query or a page URL is not a bind)
+    scan_skip_keys: [url, uri, href, link, query, q, search, search_query, pattern, regex]  # nor on a URL or a search term (navigate http://0.0.0.0:3000)
+    # env/yaml/json key = wildcard (HOST=, "host": , bind_address:), --host/--bind/--listen/--address, gunicorn -b, wildcard:port in any spelling
+    # (0.0.0.0:p, [::]:p, *:p), `bind 0.0.0.0` (redis), `listen 0.0.0.0;` (nginx, default port), and Ollama's own port published on every interface
+    # (`11434:11434`; the loopback form `127.0.0.1:11434:11434` passes).
+    block: '(?i:(?<![a-z0-9])(?:OLLAMA_HOST|HOST|BIND\w*|LISTEN\w*|ADDR(?:ESS)?)[\x22\x27]?\s*[=:]\s*[\x22\x27]?(?:0\.0\.0\.0|\[::\]|::(?![\w:])|\*)(?![\w.-])|--(?:host|bind|listen|address|addr)[= ]\s*[\x22\x27]?(?:0\.0\.0\.0|\[::\]|::(?![\w:]))|(?<!\S)-[bH]\s+[\x22\x27]?(?:0\.0\.0\.0|\[::\])|(?<![\w.])(?:0\.0\.0\.0|\[::\]|\*):[0-9]{2,5}\b|\b(?:bind|listen)\s+[\x22\x27]?(?:0\.0\.0\.0|\[::\]|\*)(?=[\s;,\x22\x27]|$)|(?<![\w.:])(?:11434:\d{2,5}|\d{2,5}:11434)\b(?!:))'
   - id: SI-05
     description: "Secrets never in state, logs, chat or files"
     enforcement: "redact() before provider call and ledger write; block on residual match"
     match_on: raw          # the whole command including heredoc bodies and quoted text
     scan_content: true     # also checked on file content and on every string argument of a non-Bash tool call (new text only, never old_string)
-    block: "(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|gho_[A-Za-z0-9]{30,}|glpat-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY)"
+    # Folded before matching: NFKC, zero-width and soft-hyphen characters dropped, Unicode dashes read as "-". Applies to every tool, read-only ones included: a key sent as a search term still leaves the machine.
+    block: "(sk-[A-Za-z0-9]{20,}|(?<![A-Za-z0-9])sk-(?=[A-Za-z0-9_-]*\\d)[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|glpat-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY)"
   - id: SI-06
     description: "No autonomous production release"
     enforcement: "R-03 and overlay deploy rules => critical => PENDING permit; never auto-ISSUED"
@@ -30,8 +36,8 @@ invariants:
     block: "git push\\b[^|;&]*[ :+](?:(?:refs/)?heads/)?(?i:main|master)(\\s|$)"
   - id: SI-09
     description: "The agent never approves its own permits and never changes its own governance wiring"
-    enforcement: "these commands also refuse to run without an interactive human terminal"
-    block: "\\bjade (permit approve|hooks (install|uninstall)|claude-md apply|gate (off|advisory|enforce))\\b|\\bJADE_GATE_MODE="
+    enforcement: "these commands also refuse to run without an interactive human terminal; the pattern also covers calling the same code from Python (`from jade import cli`, `import jade.permits`, `python -m jade.cli`, `python jade/cli.py`), which would skip the CLI text but not the TTY check, and opening the ledger or the decision machine that way"
+    block: "\\bjade (permit approve|hooks (install|uninstall)|claude-md apply|gate (off|advisory|enforce))\\b|\\bJADE_GATE_MODE=|\\bjade\\.(?:cli|ops|permits|improve|evals|ledger|decide)\\b|\\bfrom jade import\\b[^;\\n]*\\b(?:cli|ops|permits|improve|evals|ledger|decide)\\b|\\bpython[\\d.]*(?: -\\S+)* \\S*jade/(?:cli|__main__)\\.py\\b"
 protected_targets:
   - policies/safety.yaml
   - policies/promotion.yaml

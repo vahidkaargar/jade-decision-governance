@@ -50,17 +50,30 @@ rules:
     level: high
     reversibility: partially_reversible
     blast_radius: host
-    match: "\\b(launchctl (bootstrap|bootout|load|unload|enable|disable|kickstart)|systemctl (start|stop|restart|enable)|crontab -|docker (compose )?(up|down|rm)|brew services)\\b|(?i:/library/launchagents/.*\\.plist)"
+    match: "\\b(launchctl (bootstrap|bootout|load|unload|enable|disable|kickstart|remove|stop|kill|submit|unsetenv)|systemctl (start|stop|restart|enable)|crontab -|docker (compose )?(up|down|rm)|brew services)\\b|(?i:/library/launchagents/.*\\.plist)"
     rationale: "Service lifecycle on this host"
   - id: R-13
     level: high
     reversibility: reversible
     blast_radius: host
-    # Agent policy, hook wiring and JADE's own runtime artifacts: the ledger (jade.sqlite and its -wal/-shm/-journal files, permits live in it),
-    # calibration/current.json, pins.json, the config and local overlays, the installed package and the uv tool dir, the jade and jev
-    # launchers, and the code and policy files of this repository. The human-only CLI writes them from Python, not through a gated tool call.
-    match: "(?i:\\.claude/(settings[\\w.-]*\\.json|hooks/|CLAUDE\\.md)|\\bAGENTS\\.md\\b|\\.cursor/rules|\\.ai/rules\\.md|policies/(?:[\\w-]+\\.(?:yaml|py)|local/)|\\.config/jade(?![\\w.-])|\\.local/share/jade(?![\\w.-])|jade\\.sqlite(?:-(?:wal|shm|journal))?(?![\\w.])|calibration/current\\.json|uv/tools/jade(?:-decision-governance)?(?![\\w-])|(?:^|[/\\s])jade/(?:(?:permits|hooks|ledger|policy|shellnorm|decide|state_machine|ops|paths)\\.py\\b|_\\w+/)|evals/[^/\\s]+/protected/|\\b(?:rm|mv|cp|ln|unlink|install|tee|dd|truncate|chmod|chown|sed|perl)\\b[^;&|]*\\.local/bin/(?:jade|jev)(?![\\w.-])|>>?\\s*\\S*\\.local/bin/(?:jade|jev)(?![\\w.-])|\\buv tool (?:uninstall|upgrade|reinstall)\\b[^;&|]*\\bjade|\\buv tool install\\b[^;&|]*\\bjade)|\\bjade (improve (promote|rollback)|ledger purge|label set)\\b"
+    # Hook wiring and JADE's own runtime artifacts, matched wherever the path appears in a non-read-only segment: the ledger (jade.sqlite and its
+    # -wal/-shm/-journal files, permits live in it), calibration/current.json, pins.json, the config and local overlays, the installed package and
+    # the uv tool dir, the jade and jev launchers, the policy files and the agent instruction files. The human-only CLI writes them from Python, not through
+    # a gated tool call. The repository's own Python code is R-16 (write targets only).
+    match: "(?i:\\.claude/(settings[\\w.-]*\\.json|hooks/|CLAUDE\\.md)|\\bAGENTS\\.md\\b|\\.cursor/rules|\\.ai/rules\\.md|policies/(?:[\\w-]+\\.(?:yaml|py)|local/)|\\.config/jade(?![\\w.-])|\\.local/share/jade(?![\\w.-])|jade\\.sqlite(?:-(?:wal|shm|journal))?(?![\\w.])|calibration/current\\.json|uv/tools/jade(?:-decision-governance)?(?![\\w-])|evals/[^/\\s]+/protected/|\\b(?:rm|mv|cp|ln|unlink|install|tee|dd|truncate|chmod|chown|sed|perl)\\b[^;&|]*\\.local/bin/(?:jade|jev)(?![\\w.-])|>>?\\s*\\S*\\.local/bin/(?:jade|jev)(?![\\w.-])|\\buv tool (?:uninstall|upgrade|reinstall)\\b[^;&|]*\\bjade|\\buv tool install\\b[^;&|]*\\bjade)|\\bjade (improve (promote|rollback)|ledger purge|label set)\\b"
     rationale: "Changes agent policy, hooks, JADE's own ledger, config or installed code, or another protected target"
+  - id: R-16
+    level: high
+    reversibility: reversible
+    blast_radius: host
+    # JADE's own code in a checkout (every jade/*.py, so the TTY gate in util.py and its callers in cli.py/ops.py/improve.py are covered too).
+    # `files_only`: the rule matches the WRITE TARGETS of a command (the
+    # destination of cp/rsync/ln/install, the archive of tar -c, redirect targets), or the whole segment for a command that may write any
+    # operand, and never a segment named in `inert_for_files` below (git add, ruff check, pytest ... only read their operands). A Write/Edit
+    # path is always a target.
+    files_only: true
+    match: "(?i:(?<![\\w.-])jade/(?:[\\w*?\\[\\]-]*\\.py\\b|_\\w+/|\\*|(?=\\s|$)))"
+    rationale: "Changes JADE's own code (the gate, the permit and TTY checks, the ledger, the CLI)"
   - id: R-14
     level: high
     reversibility: partially_reversible
@@ -121,10 +134,19 @@ read_only:
   - "^systemctl (status|is-active|is-enabled|list-units)\\b"
   - "^(ssh|scp) -V$"
   - "^jade (ledger (stats|show)|permit (list|show|request)|question|check|work (list|render)|gate status|hooks status|eval|label (queue|auto)|decide (show|list)|route|ops (status|drift))\\b"
+# Commands that only READ their path operands (or touch the git index, not the file). R-16 (`files_only`) never fires on them, so `git add jade/hooks.py`,
+# `ruff check jade/policy.py` and `uv run pytest jade/x.py` stay low. Everything else that names a protected code or policy file is gated, because an
+# unknown command may write any operand; cp, rsync, ln, install and tar -c are narrowed to their destination by jade/policy.py instead.
+inert_for_files:
+  - "^git (add|status|diff|log|show|blame|ls-files|grep|commit|check-ignore|update-index|stash list|rev-parse|describe|shortlog)\\b"
+  - "^git restore --staged\\b(?!.*(--worktree|\\s-[a-zA-Z]*W))"
+  - "^git rm (-\\S+ )*--cached\\b"
+  - "^(uv run (-\\S+ )*|python[\\d.]* -m )?(ruff (check|rule|linter|config|version)\\b(?!.*(--fix|--add-noqa|--unsafe-fixes))|ruff format\\b(?=.*--(check|diff)\\b)|mypy|pytest|py_compile|compileall|flake8|pylint|pyright|bandit|vulture|pycodestyle|radon)\\b(?!.*--(?:cache-dir|junitxml|junit-xml|html-report|report)=?\\s*\\S*(?:jade/|policies/))"
+  - "^(open|code|cursor|subl|zed)\\b"
 # Tools that are not Bash are classified by tool name (the PreToolUse matcher names the built-in ones and `mcp__.*`). A tool whose
 # input carries a shell command (`command`, `cmd`, `script`) is classified by that command exactly like Bash, and also by the first
 # specific (non-generic) rule that names the tool; the higher level wins. First match wins in this list. A rule with `paths: true` also
-# applies the path rules (R-01/R-04/R-12/R-13 and production paths) to the tool's path arguments. A `generic` rule is a name heuristic
+# applies the path rules (R-01/R-04/R-12/R-13/R-16 and production paths) to the tool's path arguments. A `generic` rule is a name heuristic
 # and is skipped when a command string decides. A tool nothing names is M-99 (medium, recorded and listed by `jade check`, not gated).
 mcp_tools:
   - { id: M-01, level: critical, blast_radius: org, reversibility: irreversible, rationale: "Cluster change through an MCP server",
@@ -138,12 +160,17 @@ mcp_tools:
       match: "^mcp__.+?__(set_session_(permission_mode|model|effort|fast_mode|output_style)|set_(setting|config_value|remote_control|session_connector_enabled)|(create|update|delete|run)_scheduled_task|mcp-(add|remove|config-set|create-profile|activate-profile)|send_message|start_session|move_to_cloud|stop_session|archive_session|clear_session|set_auto_merge|bind_pr|reconnect_session_connector)$" }
   - { id: M-05, level: high, blast_radius: host, reversibility: partially_reversible,
       rationale: "Runs another tool or arbitrary code by name through a gateway, or starts an agent outside this session's hooks: the gate cannot see what it calls",
-      match: "^(RemoteTrigger|mcp__.+?__(mcp-exec|code-mode|run_code_unsafe))$" }
+      match: "^(RemoteTrigger|mcp__.+?__(?:\\w+_)?(?:mcp-exec|code-mode|run_code_unsafe|run_code|executeCode|execute_code))$" }
+  - { id: M-06a, level: low, blast_radius: file, rationale: "Interface-only MCP tool (sidebar, panes, window layout, session title, PR monitor toggle, terminal tabs): changes how the app looks, not what runs",
+      match: "^mcp__ccd_(?:sidebar|view|window)__|^mcp__ccd_session_mgmt__set_session_title$|^mcp__ccd_pr__set_monitor$|^mcp__terminal__(?:open|stop)_terminal_tab$" }
   - { id: M-06, level: low, blast_radius: file, rationale: "MCP tool with a read-only name",
       match: "^mcp__.+?__(?:get|list|read|search|find|query|describe|show|status|info|ping|logs?|view|fetch|resolve|snapshot|screenshot|scrape|wait|explain|check|count|version|inspect|dump|stat|tree|take|hover|start_search|stop_search|smart_search|skills_get|skills_search|rules_always|rules_search|query-docs|resolve-library-id)(?:[_-]|$)" }
   - { id: M-07, level: high, blast_radius: host, reversibility: partially_reversible, paths: true, generic: true,
       rationale: "MCP tool whose name says it mutates, executes or sends, and that no specific rule names",
       match: "^mcp__.+?__(?:set|write|edit|create|update|delete|remove|move|rename|exec|execute|run|shell|apply|merge|deploy|install|uninstall|kill|terminate|patch|publish|push|commit|save|add|drop|truncate|restart|stop|start|send|post|put)(?:[_-]|$)" }
+  - { id: M-08, level: medium, blast_radius: service, reversibility: partially_reversible,
+      rationale: "Runs a script in a page, uploads a local file or drives the browser: recorded, deliberately not gated (a permit per page action would stall browser automation; residual risk in docs/05 T18)",
+      match: "^mcp__.+?__(?:javascript_tool|(?:browser_)?evaluate|execute_javascript|(?:browser_)?file_upload|upload_image|app_key|computer)$" }
   - { id: M-99, level: medium, blast_radius: service, generic: true,
       rationale: "MCP tool with no rule and no read-only name: recorded, not gated (add a rule when it can mutate)",
       match: "^mcp__" }

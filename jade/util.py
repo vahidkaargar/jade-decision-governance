@@ -72,6 +72,21 @@ def session_id() -> str:
     return f"cwd-{sha256(os.getcwd())[:12]}-{now():%Y%m%d}"
 
 
+_INVISIBLE = dict.fromkeys([*range(0x200B, 0x2010), *range(0x202A, 0x202F), *range(0x2060, 0x2065), 0xFEFF, 0x00AD, 0x180E, 0x034F], None)
+_DASHES = {**dict.fromkeys(range(0x2010, 0x2016), "-"), 0x2212: "-", 0xFE58: "-", 0xFE63: "-", 0xFF0D: "-"}
+
+
+def fold(text: str) -> str:
+    """The text as a pattern should see it: NFKC, no zero-width or soft-hyphen characters, every Unicode dash read as `-`.
+
+    A secret or bind address written with a non-breaking hyphen or an invisible character is still that secret to the program that reads it."""
+    if text.isascii():
+        return text
+    import unicodedata
+
+    return unicodedata.normalize("NFKC", text).translate(_INVISIBLE).translate(_DASHES)
+
+
 def at_least(level: str, floor: str) -> bool:
     return LEVELS[level] >= LEVELS[floor]
 

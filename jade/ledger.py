@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS labels(call_id TEXT PRIMARY KEY, label INTEGER NOT NU
 CREATE TABLE IF NOT EXISTS work_items(id TEXT PRIMARY KEY, status TEXT, doc_json TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS improvements(candidate_id TEXT PRIMARY KEY, decision TEXT, doc_json TEXT NOT NULL, updated_at TEXT NOT NULL);
 """
-MIGRATIONS = {"jev_calls": [("language", "TEXT")]}   # columns added after the first release: (name, type)
+MIGRATIONS = {"jev_calls": [("language", "TEXT")], "decisions": [("hold_key", "TEXT")]}   # columns added after the first release: (name, type)
 DEDUP_TTL_S = 3600
 STATE_CAP = 32 * 1024
 DEFAULT_TIMEOUT_S = 10.0
