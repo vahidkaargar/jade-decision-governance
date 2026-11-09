@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import random
+import re
 from pathlib import Path
 
 from . import ledger, paths
@@ -120,7 +121,7 @@ def auto_label(db: ledger.Ledger) -> dict:
         set_label(db, target, 1 if d.status == "SUCCEEDED" else 0, "observed", "outcome join")
         n["observed"] += 1
     for r in db.all("SELECT a.call_id FROM jev_calls a JOIN jev_calls b ON b.session_id=a.session_id AND b.claim_hash=a.claim_hash AND b.rowid>a.rowid "
-                    "WHERE a.exit_code=0 AND b.exit_code=4 AND a.primitive='noul' AND a.call_id NOT IN (SELECT call_id FROM labels)"):
+                    "WHERE a.exit_code=0 AND b.exit_code=4 AND a.primitive='noul' AND " + ledger.live("a") + " AND a.call_id NOT IN (SELECT call_id FROM labels)"):
         set_label(db, r.call_id, 0, "heuristic", "accepted, then rejected with new evidence in the same session")
         n["heuristic"] += 1
     return n
@@ -131,7 +132,7 @@ def adjudication_queue(db: ledger.Ledger, limit: int = ADJUDICATION_PER_WEEK) ->
     done = db.one("SELECT COUNT(*) AS n FROM labels WHERE source='adjudicated' AND ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now','-7 days')").n
     room = max(0, limit - done)
     return db.all("SELECT call_id, p, verdict, question_id, substr(COALESCE(question_text,''),1,160) AS q, ts FROM jev_calls "
-                  "WHERE p IS NOT NULL AND primitive='noul' AND dedup_of IS NULL AND task_family='verify_claim' "
+                  "WHERE p IS NOT NULL AND primitive='noul' AND dedup_of IS NULL AND task_family='verify_claim' AND " + ledger.live() + " "
                   "AND call_id NOT IN (SELECT call_id FROM labels) ORDER BY ABS(p-0.70) LIMIT ?", (room,))
 
 
@@ -147,7 +148,7 @@ def labeled(db: ledger.Ledger, fit_only: bool = True, include_protected: bool = 
     src = "AND l.source<>'heuristic'" if fit_only else ""
     rows = db.all("SELECT c.call_id, c.p, c.task_family, c.question_id, c.question_version, c.resolved_model, c.session_id, c.risk, c.language, c.claim_hash, c.state_hash, "
                   "l.label, l.source FROM jev_calls c JOIN labels l ON l.call_id=c.call_id WHERE c.p IS NOT NULL AND c.primitive='noul' "
-                  f"AND c.dedup_of IS NULL AND c.resolved_model IS NOT NULL {src} ORDER BY c.rowid")  # noqa: S608 - constant fragment
+                  f"AND {ledger.live('c')} AND c.dedup_of IS NULL AND c.resolved_model IS NOT NULL {src} ORDER BY c.rowid")  # noqa: S608 - constant fragment
     seen, out = set(), []
     for r in rows:
         key = (r.claim_hash, r.state_hash, r.task_family, r.question_version, r.resolved_model) if r.claim_hash else r.call_id
@@ -215,3 +216,188 @@ def conditions(db: ledger.Ledger) -> dict:
     return {"n": len(rows), "unsafe_accept_rate": {"1_bare_jev": sum(c1) / len(rows), "3_jev_thresholds": sum(c3) / len(rows)},
             "paired_3_minus_1": paired_bootstrap(c3, c1), "2_reasoning_only": "not measurable: no DEEP verdict labels",
             "4_cascade": "not measurable: no DEEP verdict labels"}
+
+
+# ---- hand-written case sets (W-49, W-14) -------------------------------------------------------------
+# evals/routing, evals/judgment and evals/calibration hold small hand-written JSONL sets with a fixed schema. They are synthetic: they can
+# prove the schema, the split discipline, the offline paths and the language slices; they cannot calibrate a threshold or stand in for the
+# labelled ledger rows that W-04, W-27 and W-52 need (docs/04 section 5).
+ROUTES = ("FAST", "JEV", "DEEP", "ESCALATE", "NEEDS_EVIDENCE", "NEEDS_REVISION")
+CASE_LANGS = ("fa", "en", "mixed")
+CASE_SETS = {"routing": ("RT", "route", ("dev", "validation")), "judgment": ("JG", "judge_input", ("dev", "validation")),
+             "calibration": ("CL", "judge_input", ("calibration",))}
+_TEXT_FIELDS = ("claim", "evidence", "command", "context", "text", "template", "options", "content_parts")
+_SAFE_HOST = re.compile(r"(?:^|\.)(?:test|example|invalid|localhost|local)$|^(?:127\.\d+\.\d+\.\d+|0\.0\.0\.0)$|^(?:192\.0\.2|198\.51\.100|203\.0\.113)\.\d+$", re.I)
+_URL_HOST = re.compile(r"[a-z][a-z0-9+.-]*://(?:[^/\s@'\"]*@)?(\[[0-9a-f:]+\]|[^/\s:'\"?#]+)", re.I)
+_IPV4 = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])")
+
+
+def case_parts(c: dict) -> list[str]:
+    """The text fields of a case, one string each, with a secret placeholder (`@@`) removed. `ask.run` sends them as separate state fields,
+    so a redaction check must look at them one at a time (a claim ending in `pass` and an evidence banner starting `===` are not `pass = ===`)."""
+    parts: list[str] = []
+    for k in _TEXT_FIELDS:
+        v = c.get(k)
+        parts += [str(x) for x in v] if isinstance(v, list) else [str(v)] if v else []
+    return [p.replace("@@", "") for p in parts]
+
+
+def case_text(c: dict) -> str:
+    """All the text of a case, in field order. What `lang` describes."""
+    return "\n".join(case_parts(c))
+
+
+def case_lang(c: dict) -> str:
+    """A case's slice: its explicit `lang` tag, else the script-based tag of its text (`fa`, `en`, `mixed` or `unknown`)."""
+    return c.get("lang") or language(case_text(c))
+
+
+def text_problems(text: str) -> list[str]:
+    """What must never be committed in a case file: a secret-shaped string, a URL whose host is not reserved (.test, .example, .invalid,
+    localhost, loopback) and an IPv4 address outside the documentation ranges."""
+    from . import redact
+
+    out = []
+    if redact.redact(text, secrets_only=True)[1] or redact.residual(text):
+        out.append("secret-shaped text")
+    out += [f"host {m.group(1)!r} is not a reserved name" for m in _URL_HOST.finditer(text) if not _SAFE_HOST.search(m.group(1).strip("[]"))]
+    out += [f"host address {m.group(1)} is not in a documentation range" for m in _IPV4.finditer(text) if not _SAFE_HOST.search(m.group(1))]
+    return out
+
+
+def load_cases(path: Path) -> list[dict]:
+    rows = []
+    for n, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except ValueError as e:
+            raise ValueError(f"{path}: line {n} is not JSON ({e})") from None
+    return rows
+
+
+def _option_keys(options) -> list[str]:
+    return [str(o).split("=", 1)[0].strip() for o in options] if isinstance(options, list) else []
+
+
+def validate_cases(family: str, cases: list[dict]) -> list[str]:
+    """Schema and split checks for one set (`routing`, `judgment` or `calibration`). Returns the problems; empty means the set is valid."""
+    prefix, kind, splits = CASE_SETS[family]
+    problems: list[str] = []
+    ids: set[str] = set()
+    sess: dict[str, str] = {}
+    for n, c in enumerate(cases, 1):
+        if not isinstance(c, dict):
+            problems.append(f"{family} case {n}: not a JSON object")
+            continue
+        cid = c.get("id")
+        w = f"{family} {cid}"
+        if not isinstance(cid, str) or not cid.startswith(prefix):
+            problems.append(f"{w}: id must be a string starting with {prefix}")
+        elif cid in ids:
+            problems.append(f"{w}: duplicate id")
+        ids.add(str(cid))
+        if c.get("kind") != kind:
+            problems.append(f"{w}: kind must be {kind}")
+        if not isinstance(c.get("class"), str) or not c.get("class"):
+            problems.append(f"{w}: class is required")
+        if c.get("lang") not in CASE_LANGS:
+            problems.append(f"{w}: lang must be one of {CASE_LANGS}")
+        elif c["lang"] != language(case_text(c)):
+            problems.append(f"{w}: lang {c['lang']} but the text reads as {language(case_text(c))}")
+        s, sp = c.get("session"), c.get("split")
+        if not isinstance(s, str) or not s:
+            problems.append(f"{w}: session is required")
+        else:
+            if sp != bucket(s):
+                problems.append(f"{w}: split {sp!r} but the session hash gives {bucket(s)!r}")
+            if sess.setdefault(s, sp) != sp:
+                problems.append(f"{w}: session {s} is in two splits")
+            if bucket(s) == "protected" or sp == "protected":
+                problems.append(f"{w}: protected-split cases are never committed (T10)")
+            elif bucket(s) not in splits:
+                problems.append(f"{w}: a {family} case belongs in {'/'.join(splits)}, not {bucket(s)}")
+        problems += [f"{w}: {p}" for part in case_parts(c) for p in text_problems(part)]
+        problems += _validate_body(family, c, w)
+    return problems
+
+
+def _validate_body(family: str, c: dict, w: str) -> list[str]:
+    out = []
+    fam, opts = c.get("family"), c.get("options")
+    if fam not in ("verify_claim", "strategy_choice"):
+        out.append(f"{w}: family must be verify_claim or strategy_choice")
+    if opts is not None and (not isinstance(opts, list) or not all(isinstance(o, str) and "=" in o for o in opts)):
+        out.append(f"{w}: options must be a list of 'key=description' strings")
+    if family == "routing":
+        if c.get("should_route") not in ROUTES:
+            out.append(f"{w}: should_route must be one of {ROUTES}")
+        if c.get("should_call_jev") is not (c.get("should_route") == "JEV"):
+            out.append(f"{w}: should_call_jev must be true exactly when should_route is JEV")
+        if c.get("risk") not in ("low", "medium", "high", "critical"):
+            out.append(f"{w}: risk must be low, medium, high or critical")
+        if not isinstance(c.get("claim"), str) or not c["claim"].strip():
+            out.append(f"{w}: claim is required")
+        if fam == "strategy_choice" and not opts:
+            out.append(f"{w}: a strategy_choice routing case needs options")
+        gap, cur = c.get("known_gap"), c.get("current_route")
+        if gap is not None and (not isinstance(gap, str) or cur not in ROUTES or cur == c.get("should_route")):
+            out.append(f"{w}: known_gap needs a reason and a current_route that differs from should_route")
+        if gap is None and cur is not None:
+            out.append(f"{w}: current_route is only allowed with known_gap")
+        return out
+    if not isinstance(c.get("why"), str) or not c["why"].strip():
+        out.append(f"{w}: why is required (the reason for the label, so an adjudicator can check it)")
+    if fam == "strategy_choice":
+        if family == "calibration":
+            out.append(f"{w}: the calibration set holds verify_claim cases only (a choice has no probability of being true to calibrate)")
+        if not isinstance(c.get("context"), str) or not c["context"].strip() or not isinstance(opts, list) or len(opts) < 2:
+            out.append(f"{w}: a choice case needs a context and at least two options")
+        elif c.get("best") not in _option_keys(opts):
+            out.append(f"{w}: best must be one of the option keys")
+    else:
+        if not isinstance(c.get("truth"), bool):
+            out.append(f"{w}: truth must be true or false (the claim is directly supported by the evidence)")
+        for k in ("claim", "evidence"):
+            if not isinstance(c.get(k), str) or not c[k].strip():
+                out.append(f"{w}: {k} is required")
+    return out
+
+
+def cross_check(sets: dict[str, list[dict]]) -> list[str]:
+    """Checks across sets: a session belongs to one set (so no session is in two splits), ids are unique across sets, and every language
+    slice is non-empty (a calibration slice must also hold both outcomes, or its false-accept rate is undefined)."""
+    out, owner, ids = [], {}, {}
+    for name, rows in sets.items():
+        rows = [c for c in rows if isinstance(c, dict)]   # a line that is not an object is reported by validate_cases
+        for c in rows:
+            sk, ik = repr(c.get("session")), repr(c.get("id"))   # a list or an object is a valid JSON value and an unhashable one
+            if owner.setdefault(sk, name) != name:
+                out.append(f"session {c.get('session')} is in two sets ({owner[sk]} and {name})")
+            if ids.setdefault(ik, name) != name:
+                out.append(f"id {c.get('id')} is in two sets ({ids[ik]} and {name})")
+        for lang in CASE_LANGS:
+            sl = [c for c in rows if c.get("lang") == lang]
+            if not sl:
+                out.append(f"{name}: the {lang} slice is empty")
+            elif name == "calibration" and {c.get("truth") for c in sl} != {True, False}:
+                out.append(f"{name}: the {lang} slice must hold both true and false labels")
+    return out
+
+
+def validate_sets(root: Path) -> list[str]:
+    """Validate `evals/routing`, `evals/judgment` and `evals/calibration` under `root`."""
+    sets, problems = {}, []
+    for name in CASE_SETS:
+        f = Path(root) / name / "cases.jsonl"
+        if not f.exists():
+            problems.append(f"{name}: {f} does not exist")
+            continue
+        try:
+            sets[name] = load_cases(f)
+        except ValueError as e:
+            problems.append(str(e))
+            continue
+        problems += validate_cases(name, sets[name])
+    return problems + cross_check(sets)

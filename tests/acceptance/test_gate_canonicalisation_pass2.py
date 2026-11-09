@@ -462,3 +462,12 @@ def test_probe_rm_without_both_flags_or_with_scratch_targets_is_unchanged(cmd):
 def test_probe_cd_to_a_computed_directory_is_a_documented_limit():
     # No way to know where `cd $NOPE/x` lands; the relative operand stays unresolved and is classified as written.
     assert assess("cd $NOPE/x && sort -o settings.json in").level == "low"
+
+
+def test_n1_huge_command_is_not_masked_and_cost_stays_bounded():
+    from jade import inert
+
+    big = "cat <<'EOF'\n" + "x " * 150_000 + "\nEOF"
+    assert len(big) > inert.MASK_LIMIT
+    assert inert.mask(big) == big  # too large to scan: matched whole, the stricter answer
+    assert _timed(big) < 5.0
