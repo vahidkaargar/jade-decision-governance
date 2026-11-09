@@ -159,6 +159,7 @@ def test_exit_codes_and_not_a_yes(capsys):
 def test_duplicate_detection(tmp_path):
     db = ledger.open(tmp_path / "l.sqlite")
     a = db.begin_call("q.x", "a" * 64, session="s1")
+    db.finish_call(a, exit_code=0, answers_json={"type": "noul", "noul": 0.9})   # only an answered call anchors a repeat
     b = db.begin_call("q.x", "a" * 64, session="s1")
     c = db.begin_call("q.x", "a" * 64, session="s2")
     d = db.begin_call("q.x", "b" * 64, session="s1")

@@ -7,15 +7,17 @@ at most 2, exponential with jitter, total deadline 20 s.
 
 from __future__ import annotations
 
+import http.client
 import json
+import math
 import os
 import random
 import subprocess
+import threading
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .util import user
 
@@ -44,17 +46,50 @@ class Result:
     raw: dict | None = None
 
 
+def _num(x) -> bool:
+    """A finite real number. A bool is an int in Python and is not a probability."""
+    return isinstance(x, int | float) and not isinstance(x, bool) and math.isfinite(x)
+
+
+def _prob(x) -> bool:
+    return _num(x) and 0 <= x <= 1
+
+
 def _valid_answer(a) -> bool:
+    """Shape of one answer, whatever was asked: probabilities are finite numbers in [0, 1], a bool is no number, a choice is one of
+    its own probabilities and no other option is more probable (the API's `choice` is the argmax)."""
     if not isinstance(a, dict):
         return False
     t = a.get("type")
+    if "confidence" in a and not _prob(a["confidence"]):
+        return False
     if t == "noul":
-        return isinstance(a.get("noul"), int | float) and 0 <= a["noul"] <= 1
+        return _prob(a.get("noul"))
     if t == "choice":
-        return isinstance(a.get("choice"), str) and isinstance(a.get("probabilities"), dict)
+        probs = a.get("probabilities")
+        if not isinstance(a.get("choice"), str) or not isinstance(probs, dict) or a["choice"] not in probs:
+            return False
+        if not all(isinstance(k, str) and _prob(v) for k, v in probs.items()):
+            return False
+        return probs[a["choice"]] >= max(probs.values()) - 1e-9
     if t == "score":
-        return isinstance(a.get("score"), int | float)
+        return _num(a.get("score"))
     return False
+
+
+def check_answer(answer, payload: dict) -> str | None:
+    """Why `answer` does not answer the question `payload`, or None when it does. The answer's own `type` is never trusted to pick the
+    judgement: a noul question answered as a score, a choice that was not offered, or a probability outside [0, 1] is MALFORMED (ADR-05)."""
+    prim = payload.get("type")
+    if not _valid_answer(answer):
+        return "the answer is malformed (type, range or shape)"
+    if answer["type"] != prim:
+        return f"asked a {prim} question, got a {answer['type']} answer"
+    if prim == "choice":
+        offered = set(payload.get("criteria") or {})
+        if answer["choice"] not in offered or set(answer["probabilities"]) - offered:
+            return "the answer names an option that was not offered"
+    return None
 
 
 def parse_response(status: int | None, body, exception: str | None = None) -> Result:
@@ -64,7 +99,7 @@ def parse_response(status: int | None, body, exception: str | None = None) -> Re
     if isinstance(body, str | bytes):
         try:
             body = json.loads(body)
-        except ValueError:
+        except (ValueError, RecursionError):
             body = {"_unparsed": str(body)[:200]}
     body = body if isinstance(body, dict) else {}
     detail = ""
@@ -79,10 +114,13 @@ def parse_response(status: int | None, body, exception: str | None = None) -> Re
     answers = body.get("answers")
     if not isinstance(answers, dict) or not answers or not all(_valid_answer(a) for a in answers.values()):
         return Result(ok=False, error_kind="MALFORMED", http_status=status, detail="response has no usable answers", raw=body)
-    usage = body.get("usage") or {}
-    return Result(ok=True, answers=answers, resolved_model=body.get("model"), request_id=body.get("id"),
-                  provider=body.get("provider"), input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"),
-                  cost_usd=usage.get("cost"), http_status=status, raw=body)
+    usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
+    tok = lambda v: v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None  # noqa: E731
+    cost = usage.get("cost")
+    text = lambda v: v if isinstance(v, str) and v.strip() else None  # noqa: E731
+    return Result(ok=True, answers=answers, resolved_model=text(body.get("model")), request_id=text(body.get("id")),
+                  provider=text(body.get("provider")), input_tokens=tok(usage.get("input_tokens")), output_tokens=tok(usage.get("output_tokens")),
+                  cost_usd=float(cost) if _num(cost) and cost >= 0 else None, http_status=status, raw=body)
 
 
 def parse_fixture(path: str | Path) -> Result:
@@ -102,16 +140,60 @@ def get_key() -> str:
     return os.environ.get("OPENROUTER_API_KEY", "").strip()
 
 
+MAX_BODY = 4 * 1024 * 1024
+
+
 def http_transport(payload: dict, key: str, timeout: float):
-    """Returns (status, body_text, headers). Raises OSError/TimeoutError on transport failure."""
-    req = urllib.request.Request(URL, data=json.dumps(payload).encode(), method="POST",
-                                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
-                                          "X-Title": "jade-decision-governance"})
+    """Returns (status, body_text, headers). Raises OSError/TimeoutError/HTTPException on transport failure.
+
+    `timeout` is a wall-clock limit for the whole exchange, not for one socket operation: a timer shuts the socket at the deadline,
+    so a server that trickles a byte at a time (or stalls just under a per-read timeout) cannot hold the caller past it."""
+    parts = urlsplit(URL)
+    cls = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+    deadline = time.monotonic() + timeout
+    conn = cls(parts.hostname, parts.port, timeout=max(0.05, timeout))
+    expired = threading.Event()
+
+    def cut() -> None:
+        expired.set()
+        sock = conn.sock
+        if sock is not None:
+            try:
+                sock.shutdown(2)
+            except OSError:
+                pass
+
+    timer = threading.Timer(max(0.0, timeout), cut)
+    timer.daemon = True
+    timer.start()
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 - fixed https URL
-            return r.status, r.read().decode("utf-8", "replace"), dict(r.headers)
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8", "replace"), dict(e.headers or {})
+        conn.request("POST", parts.path or "/", body=json.dumps(payload).encode(),
+                     headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json", "X-Title": "jade-decision-governance"})
+        resp = conn.getresponse()
+        chunks, size = [], 0
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0 or expired.is_set():
+                raise TimeoutError("deadline reached")
+            if conn.sock is not None:
+                conn.sock.settimeout(left)
+            chunk = resp.read1(8192)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_BODY:
+                raise OSError("response body too large")
+            chunks.append(chunk)
+        if expired.is_set():
+            raise TimeoutError("deadline reached")
+        return resp.status, b"".join(chunks).decode("utf-8", "replace"), dict(resp.getheaders())
+    except OSError:
+        if expired.is_set():
+            raise TimeoutError("deadline reached") from None
+        raise
+    finally:
+        timer.cancel()
+        conn.close()
 
 
 class OpenRouterProvider:
@@ -130,20 +212,25 @@ class OpenRouterProvider:
         while True:
             attempt += 1
             remaining = self.deadline_s - (time.monotonic() - start)
+            if remaining <= 0:
+                return result or Result(ok=False, error_kind="UNAVAILABLE", detail="deadline reached before a request could start", attempts=attempt)
             t0 = time.monotonic()
+            status, headers = None, {}
             try:
-                status, body, headers = self.transport(payload, key, max(1.0, remaining))
+                status, body, headers = self.transport(payload, key, remaining)
                 result = parse_response(status, body)
-            except (OSError, TimeoutError, ValueError) as e:
-                status, headers = None, {}
-                result = parse_response(None, None, type(e).__name__)
+            except Exception as e:  # noqa: BLE001 - every failure of the exchange is a typed result, never a traceback and never a yes
+                kind = "MALFORMED" if status is not None else "UNAVAILABLE"
+                result = Result(ok=False, error_kind=kind, http_status=status, detail=f"{'response' if status is not None else 'transport'}: {type(e).__name__}")
             result.latency_ms = (time.monotonic() - t0) * 1000
             result.attempts = attempt
+            if result.ok and time.monotonic() - start > self.deadline_s + 0.25:   # a late answer is not accepted
+                result = Result(ok=False, error_kind="UNAVAILABLE", detail="response arrived after the deadline", latency_ms=result.latency_ms, attempts=attempt)
             retryable = result.error_kind == "RATE_LIMITED" or status == 529
             if result.ok or not retryable or attempt > MAX_RETRIES:
                 return result
             wait = min(8.0, 0.5 * 2 ** (attempt - 1)) + random.uniform(0, 0.25)  # noqa: S311 - jitter, not security
-            retry_after = {k.lower(): v for k, v in headers.items()}.get("retry-after")
+            retry_after = {str(k).lower(): v for k, v in (headers or {}).items()}.get("retry-after")
             if retry_after and str(retry_after).isdigit():
                 wait = max(wait, float(retry_after))
             if time.monotonic() - start + wait >= self.deadline_s:

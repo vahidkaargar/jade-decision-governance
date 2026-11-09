@@ -88,8 +88,10 @@ def build_noul(question_id: str | None, instructions: str | None = None, true: s
     tpl = (entry or {}).get("template", {})
     crit = tpl.get("criteria") or {}
     text, t, f = instructions or tpl.get("instructions"), true or crit.get("true"), false or crit.get("false")
-    if not (text and t and f):
+    if not (text and t and f and str(text).strip() and str(t).strip() and str(f).strip()):
         raise InvalidQuestion("noul needs instructions and both true/false criteria")
+    if " ".join(str(t).split()).lower() == " ".join(str(f).split()).lower():
+        raise InvalidQuestion("noul needs distinct true and false criteria")
     return {"type": "noul", "instructions": text, "criteria": {"true": t, "false": f}}
 
 
@@ -124,9 +126,9 @@ def lint(entry: dict) -> list[str]:
     if prim == "noul":
         if not isinstance(crit, dict) or not crit.get("true") or not crit.get("false") or crit.get("true") == crit.get("false"):
             problems.append("explicit_positive_and_negative_criteria: noul needs distinct true and false criteria")
-    if prim == "choice" and not entry.get("no_match_option") and not any(d.endswith(".any_fits") for d in entry.get("dependencies", [])):
+    if prim == "choice" and not entry.get("no_match_option"):
         if not (isinstance(crit, dict) and len(crit) >= 2):
-            problems.append("no_match_or_companion_presence_question_for_open_sets: open choice needs no_match_option or an any_fits companion")
+            problems.append("no_match_option_for_open_sets: an open choice needs a no_match_option (selecting it is ABSTAIN)")
     if prim == "score" and not (isinstance(crit, list) and len(crit) >= 2):
         problems.append("explicit_positive_and_negative_criteria: score needs at least two ordered levels")
     if entry.get("dependencies") and entry.get("batch_eligibility"):

@@ -94,7 +94,7 @@ Add one line to the existing health script so silence is never mistaken for heal
 | Restore the old `jev` | section 1 undo |
 | Stop the job | `launchctl bootout ...` |
 | Freeze all improvement activity | `jade improve freeze` (human removes it with `jade improve unfreeze`) |
-| Revert a promoted candidate | `jade improve rollback <candidate>`; thresholds revert to defaults by deleting `~/.local/share/jade/calibration/current.json` |
+| Revert a promoted candidate | `jade improve rollback <candidate>`: a template goes back to the exact champion it replaced (the registry default when it had none), a threshold goes back to the band the group had before. It refuses when the pins no longer match the promotion, under `FREEZE` unless a human is at the terminal, and for loosening a promoted stricter threshold unless a human is at the terminal; the audit trail records the real actor (`human:terminal` or `runtime:agent`). Deleting `~/.local/share/jade/calibration/current.json` still resets every threshold to the defaults |
 
 ## 4. Known coverage limits
 
@@ -112,6 +112,6 @@ Mechanical criteria, all measured from the ledger (`docs/06` exit lines):
 1. 14 days of ledger data under enforce mode: `jade ledger stats --days 14` reproduces `docs/04` section 4.
 2. Abstain or reject answers without a disposition no more than 5% of non-accepts; zero unsafe accepts for risk high or above.
 3. At least 200 labelled rows in a calibration group before any threshold change: `jade label queue`, `jade label set`, `jade eval run`, `jade eval propose`.
-4. One full improvement cycle: `jade improve mine`, `jade eval propose`, `jade improve shadow`, a human `jade improve promote`.
+4. One full improvement cycle. Threshold: `jade eval propose` (replays on dev and calibration, holds out validation), a human `jade improve protected <candidate>`, a human `jade improve promote`. Question template: `jade improve shadow` (at least 7 days, 100 live samples), a human `jade improve protected`, `jade improve canary` (a human, or the standing `auto_promotion_opt_in`), then `jade improve promote`. `promote` recomputes the results; nothing is attached by hand.
 
 PRODUCTION_APPROVED is yours: it means enforce mode with critical rules on this machine, decided by you after the above.

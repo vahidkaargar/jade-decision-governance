@@ -9,6 +9,7 @@ import random
 import sqlite3
 import time
 from contextlib import contextmanager
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS improvements(candidate_id TEXT PRIMARY KEY, decision 
 """
 MIGRATIONS = {"jev_calls": [("language", "TEXT")], "decisions": [("hold_key", "TEXT")]}   # columns added after the first release: (name, type)
 DEDUP_TTL_S = 3600
+STALE_EVALUATING_S = 600   # a provider call ends within 20 s; a row older than this belongs to a process that died
 STATE_CAP = 32 * 1024
 DEFAULT_TIMEOUT_S = 10.0
 
@@ -169,10 +171,14 @@ class Ledger:
         call_id = new_id("call")
         with self.tx() as con:
             dedup_of = None
+            self._sweep_stale(con)
             if session:
+                # The anchor of a repeat is an answered call: DONE with an answer (exit 0, 3 or 4). An errored, rejected or still
+                # EVALUATING original is no anchor, so a later success becomes the new original and stays visible to calibration.
                 for row in con.execute(
                         "SELECT call_id, ts FROM jev_calls WHERE session_id=? AND question_id=? AND question_version=? "
-                        "AND state_hash=? AND COALESCE(claim_hash,'')=COALESCE(?, '') AND dedup_of IS NULL ORDER BY rowid DESC LIMIT 1",
+                        "AND state_hash=? AND COALESCE(claim_hash,'')=COALESCE(?, '') AND dedup_of IS NULL "
+                        "AND state='DONE' AND exit_code IN (0,3,4) ORDER BY rowid DESC LIMIT 1",
                         (session, question_id, version, state_hash, claim_hash)):
                     if (now() - parse_ts(row["ts"])).total_seconds() <= DEDUP_TTL_S:
                         dedup_of = row["call_id"]
@@ -186,6 +192,11 @@ class Ledger:
             keys = ",".join(data)
             con.execute(f"INSERT INTO jev_calls({keys}) VALUES({','.join('?' * len(data))})", tuple(data.values()))  # noqa: S608 - keys are code-defined
         return call_id
+
+    def _sweep_stale(self, con) -> None:
+        """A row left EVALUATING by a crashed process is closed as an error, so it is neither in flight for ever nor an anchor."""
+        cutoff = ts(now() - timedelta(seconds=STALE_EVALUATING_S))
+        con.execute("UPDATE jev_calls SET state='DONE', error_kind='STALE_EVALUATING', exit_code=5, done_ts=? WHERE state='EVALUATING' AND ts<?", (ts(), cutoff))
 
     def finish_call(self, call_id: str, **cols) -> None:
         cols.setdefault("state", "DONE")

@@ -411,7 +411,7 @@ def undisposed(db, session: str, only_unreminded: bool = True):
     return db.all(
         "SELECT c.call_id, c.verdict, c.p, c.exit_code, c.question_id, c.error_kind, substr(COALESCE(c.question_text,''),1,90) AS q FROM jev_calls c "
         f"WHERE c.session_id=? AND c.state='DONE' AND c.exit_code IN (3,4,5,6) AND c.disposition IS NULL {extra} "  # noqa: S608 - constant fragments
-        "AND c.ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?) AND c.task_family IS NOT 'evidence_quality' "
+        "AND c.ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?) AND c.task_family IS NOT 'evidence_quality' AND COALESCE(c.primitive,'')<>'fast' "
         "AND NOT EXISTS (SELECT 1 FROM jev_calls d WHERE d.session_id=c.session_id AND d.claim_hash=c.claim_hash AND d.exit_code=0 AND d.rowid>c.rowid) "
         "ORDER BY c.rowid", (session, f"-{REMIND_WINDOW_S} seconds"))
 

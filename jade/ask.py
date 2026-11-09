@@ -7,6 +7,7 @@ Only 0 is a yes. Nothing here creates or touches a permit: a probability is neve
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import dataclass, field
 
@@ -26,6 +27,7 @@ class Spec:
     payload: dict
     version: int = 1
     gates: bool = True          # False: recorded and reported, never changes the exit code on its own
+    no_match: str | None = None  # a choice question's no-match option: selecting it means no option fits (ABSTAIN)
 
 
 @dataclass
@@ -72,6 +74,21 @@ def cap_state(state: dict) -> tuple[dict, bool]:
     return state, cut
 
 
+def resolve_model(model: str | None = None) -> str:
+    """--model, then the JEV_MODEL environment variable (the legacy script's default), then config.json, then the built-in default."""
+    return model or os.environ.get("JEV_MODEL", "").strip() or paths.config().get("model") or adapter.DEFAULT_MODEL
+
+
+def check_text(specs: list[Spec], state: dict) -> None:
+    """Text that cannot be encoded as UTF-8 (a lone surrogate from undecodable argv or stdin) cannot be sent or journaled: exit 6."""
+    try:
+        canonical(state).encode()
+        for s in specs:
+            canonical(s.payload).encode()
+    except UnicodeError:
+        raise questions.InvalidQuestion("the text is not valid UTF-8 (undecodable bytes in an argument, file or stdin)") from None
+
+
 def prepare(specs: list[Spec], state: dict) -> tuple[dict, int, bool, bool]:
     """Everything that happens to a call's text before it can leave the machine: redaction of the state and of every question payload (in
     place on the specs), the 32 KiB cap, and the residual-secret check. Returns (state, redactions, cut, residual). `run` and `--dry-run` both
@@ -88,14 +105,19 @@ def prepare(specs: list[Spec], state: dict) -> tuple[dict, int, bool, bool]:
 
 def run(specs: list[Spec], state: dict, *, risk: str = "low", session: str | None = None, decision_id: str | None = None,
         provider=None, model: str | None = None, db: ledger.Ledger | None = None, use_cache: bool = True) -> AskResult:
-    cfg = paths.config()
     session = session or session_id()
-    model = model or cfg.get("model") or adapter.DEFAULT_MODEL
+    model = resolve_model(model)
     warnings: list[str] = []
+    items = [Item(s) for s in specs]
+    try:
+        check_text(specs, state)
+    except questions.InvalidQuestion as e:
+        for it in items:
+            it.exit_code, it.error_kind = 6, "INVALID_QUESTION"
+        return AskResult(items, 6, str(e), warnings=warnings)
     state, hits, cut, leaked = prepare(specs, state)
     if cut:
         warnings.append("state truncated to 32 KiB")
-    items = [Item(s) for s in specs]
     if leaked:
         for it in items:
             it.exit_code, it.error_kind = 6, "RESIDUAL_SECRET"
@@ -107,75 +129,119 @@ def run(specs: list[Spec], state: dict, *, risk: str = "low", session: str | Non
     except Exception as e:  # noqa: BLE001 - journaling failure must not turn into a silent yes or a crash
         db = None
         warnings.append(f"ledger unavailable ({type(e).__name__}); this call is not journaled")
-    state_text, state_hash = canonical(state), sha256(canonical(state))
     try:
-        if db:
-            for it in items:
-                s = it.spec
-                it.call_id = db.begin_call(s.question_id, state_hash, session, version=s.version, claim_hash=sha256(canonical({"q": s.payload, "claim": state.get("claim")})),
-                                           primitive=s.primitive, task_family=s.family, request_model=model, decision_id=decision_id,
-                                           state_bytes=len(state_text.encode()), state_text=state_text, risk=risk, redactions=hits, language=state_language(state),
-                                           question_text=str(s.payload.get("instructions", ""))[:2000] + (" | " + str(state.get("claim", ""))[:500] if state.get("claim") else ""))
-                row = db.get_call(it.call_id)
-                if use_cache and row.dedup_of:
-                    orig = db.get_call(row.dedup_of)
-                    if orig and orig.state == "DONE" and orig.answers_json and orig.exit_code in (0, 3, 4):
-                        it.answer, it.cached = json.loads(orig.answers_json), True
-            today = db.one("SELECT COUNT(*) AS n FROM jev_calls WHERE ts >= strftime('%Y-%m-%dT00:00:00Z','now')").n
-            if today > DAILY_BUDGET:
-                warnings.append(f"daily call budget exceeded ({today} > {DAILY_BUDGET})")
-        result = AskResult(items, 5, redactions=hits, warnings=warnings)
-        todo = [it for it in items if not it.cached]
-        res = None
-        if todo:
-            res = (provider or adapter.OpenRouterProvider()).ask(state, {it.spec.key: it.spec.payload for it in todo}, model)
-            result.cost_usd, result.resolved_model, result.raw = res.cost_usd, res.resolved_model, res.raw
+        return _run(specs, items, state, hits, warnings, risk=risk, session=session, decision_id=decision_id, provider=provider, model=model,
+                    db=db, use_cache=use_cache)
+    except Exception as e:  # noqa: BLE001 - fail closed: whatever broke, no row stays EVALUATING and the answer is exit 5, never a yes or a traceback
         for it in items:
-            s = it.spec
-            if not it.cached:
-                if not res.ok or s.key not in res.answers:
-                    it.error_kind = res.error_kind or "MALFORMED"
-                    it.exit_code = 6 if (res.error_kind == "REJECTED" and res.http_status in (400, 404, 422)) else 5
-                    if db and it.call_id:
-                        db.finish_call(it.call_id, error_kind=it.error_kind, exit_code=it.exit_code, latency_ms=res.latency_ms, state="DONE")
-                    continue
-                it.answer = res.answers[s.key]
-            resolved = res.resolved_model if (res and res.ok) else None
-            it.verdict = thresholds.judge(it.answer, s.family, risk, s.version, resolved)
-            it.exit_code = it.verdict.exit_code
+            it.answer, it.verdict, it.cached, it.exit_code, it.error_kind = None, None, False, 5, "INTERNAL"
             if db and it.call_id:
-                db.finish_call(it.call_id, answers_json=it.answer, p=it.verdict.value, verdict=it.verdict.verdict, exit_code=it.exit_code,
-                               resolved_model=resolved, provider=res.provider if res else "cache", provider_request_id=res.request_id if res else None,
-                               latency_ms=res.latency_ms if (res and not it.cached) else 0.0, input_tokens=res.input_tokens if res else None,
-                               output_tokens=res.output_tokens if res else None,
-                               cost_usd=(res.cost_usd or 0.0) / max(1, len(todo)) if (res and not it.cached) else 0.0)
-        primary = items[0]
-        result.exit_code = primary.exit_code
-        if primary.cached:
-            result.note = "repeat_without_new_evidence: same question and state already answered in this session; cached answer returned"
-        # A companion can only make the outcome more cautious, and only when the stakes are above low.
-        if primary.exit_code == 0 and LEVELS.get(risk, 0) >= LEVELS["medium"]:
-            for it in items[1:]:
-                if it.spec.gates and it.verdict and it.verdict.verdict == "REJECT":
-                    result.exit_code = 3
-                    result.note = f"{it.spec.question_id} rejected (P={it.verdict.value:.2f}): the evidence looks like a summary; attach raw output"
-        if res and res.ok and res.resolved_model:
-            try:
-                ops.check_drift(None, res.resolved_model, ops.expected_models())
-            except Exception as e:  # noqa: BLE001 - drift bookkeeping is informational
-                warnings.append(f"drift check skipped ({type(e).__name__})")
-        if db and decision_id:
-            from . import decide, state_machine
-
-            try:
-                decide.link_evaluation(db, decision_id, primary.call_id, {0: "ACCEPT", 3: "ABSTAIN", 4: "REJECT"}.get(result.exit_code, "ABSTAIN"),
-                                       error=result.exit_code in (5, 6))
-            except state_machine.IllegalTransition as e:
-                warnings.append(f"decision {decision_id} not advanced: {e}")
-        return result
+                try:
+                    db.finish_call(it.call_id, error_kind="INTERNAL", exit_code=5, state="DONE")
+                except Exception:  # noqa: BLE001, S110 - the ledger may be what failed
+                    pass
+        return AskResult(items, 5, f"internal error ({type(e).__name__}); no answer was obtained", redactions=hits, warnings=warnings)
     finally:
         if db and own_db:
             db.close()
+
+
+def _run(specs: list[Spec], items: list[Item], state: dict, hits: int, warnings: list[str], *, risk: str, session: str, decision_id: str | None,
+         provider, model: str, db: ledger.Ledger | None, use_cache: bool) -> AskResult:
+    state_text, state_hash = canonical(state), sha256(canonical(state))
+    origs: dict[int, object] = {}
+    if db:
+        for i, it in enumerate(items):
+            s = it.spec
+            it.call_id = db.begin_call(s.question_id, state_hash, session, version=s.version, claim_hash=sha256(canonical({"q": s.payload, "claim": state.get("claim")})),
+                                       primitive=s.primitive, task_family=s.family, request_model=model, decision_id=decision_id,
+                                       state_bytes=len(state_text.encode()), state_text=state_text, risk=risk, redactions=hits, language=state_language(state),
+                                       question_text=str(s.payload.get("instructions", ""))[:2000] + (" | " + str(state.get("claim", ""))[:500] if state.get("claim") else ""))
+            row = db.get_call(it.call_id)
+            if use_cache and row.dedup_of:
+                orig = db.get_call(row.dedup_of)
+                if orig and orig.state == "DONE" and orig.answers_json and orig.exit_code in (0, 3, 4):
+                    answer = json.loads(orig.answers_json)
+                    if adapter.check_answer(answer, s.payload) is None:   # a stored answer is held to the same shape as a live one
+                        it.answer, it.cached, origs[i] = answer, True, orig
+        today = db.one("SELECT COUNT(*) AS n FROM jev_calls WHERE ts >= strftime('%Y-%m-%dT00:00:00Z','now')").n
+        if today > DAILY_BUDGET:
+            warnings.append(f"daily call budget exceeded ({today} > {DAILY_BUDGET})")
+    result = AskResult(items, 5, redactions=hits, warnings=warnings)
+    todo = [it for it in items if not it.cached]
+    res = None
+    if todo:
+        res = (provider or adapter.OpenRouterProvider()).ask(state, {it.spec.key: it.spec.payload for it in todo}, model)
+        result.cost_usd, result.resolved_model, result.raw = res.cost_usd, res.resolved_model, res.raw
+        if res.ok and not res.resolved_model:
+            warnings.append("the provider response carries no model string; judged at the strictest calibrated accept of its family")
+    for i, it in enumerate(items):
+        s = it.spec
+        orig = origs.get(i)
+        if orig is not None:
+            resolved = orig.resolved_model   # a repeat is judged in the group of the call that produced the answer
+        else:
+            problem = None
+            if not res.ok or s.key not in res.answers:
+                problem = res.error_kind or "MALFORMED"
+            elif adapter.check_answer(res.answers[s.key], s.payload):
+                problem = "MALFORMED"
+            if problem:
+                it.answer, it.error_kind = None, problem
+                it.exit_code = 6 if (res.error_kind == "REJECTED" and res.http_status in (400, 404, 422)) else 5
+                if db and it.call_id:
+                    db.finish_call(it.call_id, error_kind=it.error_kind, exit_code=it.exit_code, latency_ms=res.latency_ms, state="DONE")
+                continue
+            it.answer = res.answers[s.key]
+            resolved = res.resolved_model
+        try:
+            it.verdict = thresholds.judge(it.answer, s.family, risk, s.version, resolved, primitive=s.primitive, no_match=s.no_match)
+        except ValueError:
+            it.answer, it.error_kind, it.exit_code, it.cached = None, "MALFORMED", 5, False
+            if db and it.call_id:
+                db.finish_call(it.call_id, error_kind="MALFORMED", exit_code=5, state="DONE")
+            continue
+        if orig is not None and it.verdict.exit_code == 0 and orig.exit_code in (3, 4):
+            # A repeat is never looser than the first answer: a changed calibration or a lower risk cannot turn an abstain into a yes.
+            v = it.verdict
+            it.verdict = thresholds.Verdict(orig.verdict or "ABSTAIN", orig.exit_code, v.value, v.accept, v.reject, v.group, f"repeat of an answered call: the first verdict ({orig.verdict}) stands")
+        it.exit_code = it.verdict.exit_code
+        if db and it.call_id:
+            db.finish_call(it.call_id, answers_json=it.answer, p=it.verdict.value, verdict=it.verdict.verdict, exit_code=it.exit_code,
+                           resolved_model=resolved, provider=(res.provider if res else None) if not it.cached else "cache",
+                           provider_request_id=res.request_id if (res and not it.cached) else None,
+                           latency_ms=res.latency_ms if (res and not it.cached) else 0.0, input_tokens=res.input_tokens if (res and not it.cached) else None,
+                           output_tokens=res.output_tokens if (res and not it.cached) else None,
+                           cost_usd=(res.cost_usd or 0.0) / max(1, len(todo)) if (res and not it.cached) else 0.0)
+    primary = items[0]
+    result.exit_code = primary.exit_code
+    if primary.cached:
+        result.note = "repeat_without_new_evidence: same question and state already answered in this session; cached answer returned"
+    # A companion can only make the outcome more cautious, and only when the stakes are above low. Its answer missing is not a pass.
+    if primary.exit_code == 0 and LEVELS.get(risk, 0) >= LEVELS["medium"]:
+        for it in items[1:]:
+            if not it.spec.gates:
+                continue
+            if it.verdict is None:
+                result.exit_code = 3
+                result.note = f"{it.spec.question_id}: no usable answer ({it.error_kind}); the evidence check could not be made"
+            elif it.verdict.verdict == "REJECT":
+                result.exit_code = 3
+                result.note = f"{it.spec.question_id} rejected (P={it.verdict.value:.2f}): the evidence looks like a summary; attach raw output"
+    if res and res.ok and res.resolved_model:
+        try:
+            ops.check_drift(None, res.resolved_model, ops.expected_models())
+        except Exception as e:  # noqa: BLE001 - drift bookkeeping is informational
+            warnings.append(f"drift check skipped ({type(e).__name__})")
+    if db and decision_id:
+        from . import decide, state_machine
+
+        try:
+            decide.link_evaluation(db, decision_id, primary.call_id, {0: "ACCEPT", 3: "ABSTAIN", 4: "REJECT"}.get(result.exit_code, "ABSTAIN"),
+                                   error=result.exit_code in (5, 6))
+        except state_machine.IllegalTransition as e:
+            warnings.append(f"decision {decision_id} not advanced: {e}")
+    return result
 
 
 # ---- rendering -------------------------------------------------------------------------------------
@@ -251,7 +317,7 @@ def registry_spec(question_id: str, *, options=None, instructions=None, levels=N
         payload = questions.build_noul(question_id, instructions, true, false)
     else:
         payload = questions.build_score(question_id, instructions, levels)
-    return Spec("q", question_id, prim, e["task_family"], payload, e["version"])
+    return Spec("q", question_id, prim, e["task_family"], payload, e["version"], no_match=e.get("no_match_option") if prim == "choice" else None)
 
 
 def adhoc_spec(primitive: str, text: str, *, options=None, levels=None, true=None, false=None) -> Spec:

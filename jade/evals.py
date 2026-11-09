@@ -103,14 +103,21 @@ def set_label(db: ledger.Ledger, call_id: str, label: int, source: str, note: st
 
 
 def auto_label(db: ledger.Ledger) -> dict:
-    """Join outcomes to the calls that judged the same decision (source `observed`), and mark answers that were
-    later contradicted in the same session (source `heuristic`)."""
+    """Join outcomes to the call that gated the decision (source `observed`), and mark answers that were later contradicted in the
+    same session (source `heuristic`). The label says whether *that call's own claim* held, so only the call a decision acted on is
+    labelled: the primary verify call named last in the decision's `evaluation_refs`, and only when it was accepted (exit 0). A
+    companion question, an earlier rejected call on another claim and a call a human overrode stay unlabelled (the adjudication queue)."""
     n = {"observed": 0, "heuristic": 0}
-    for r in db.all("SELECT c.call_id, d.status FROM jev_calls c JOIN decisions d ON d.decision_id=c.decision_id "
-                    "WHERE c.p IS NOT NULL AND c.primitive='noul' AND (d.status='FAILED' OR (d.status='SUCCEEDED' AND EXISTS (SELECT 1 FROM outcomes o "
-                    "WHERE o.decision_id=d.decision_id AND json_extract(o.doc_json,'$.observation_type')='observed' AND json_extract(o.doc_json,'$.success')=1))) "
-                    "AND c.call_id NOT IN (SELECT call_id FROM labels WHERE source<>'heuristic')"):
-        set_label(db, r.call_id, 1 if r.status == "SUCCEEDED" else 0, "observed", "outcome join")
+    for d in db.all("SELECT d.decision_id, d.status, d.doc_json FROM decisions d WHERE d.status='FAILED' OR (d.status='SUCCEEDED' AND EXISTS (SELECT 1 FROM outcomes o "
+                    "WHERE o.decision_id=d.decision_id AND json_extract(o.doc_json,'$.observation_type')='observed' AND json_extract(o.doc_json,'$.success')=1))"):
+        refs = json.loads(d.doc_json).get("evaluation_refs") or []
+        gate = db.get_call(refs[-1]) if refs else None
+        if gate is None or gate.p is None or gate.primitive != "noul" or gate.task_family != "verify_claim" or gate.exit_code != 0:
+            continue
+        target = gate.dedup_of or gate.call_id   # a cached repeat labels the call that produced the answer
+        if db.one("SELECT 1 AS x FROM labels WHERE call_id=? AND source<>'heuristic'", (target,)):
+            continue
+        set_label(db, target, 1 if d.status == "SUCCEEDED" else 0, "observed", "outcome join")
         n["observed"] += 1
     for r in db.all("SELECT a.call_id FROM jev_calls a JOIN jev_calls b ON b.session_id=a.session_id AND b.claim_hash=a.claim_hash AND b.rowid>a.rowid "
                     "WHERE a.exit_code=0 AND b.exit_code=4 AND a.primitive='noul' AND a.call_id NOT IN (SELECT call_id FROM labels)"):
@@ -128,11 +135,26 @@ def adjudication_queue(db: ledger.Ledger, limit: int = ADJUDICATION_PER_WEEK) ->
                   "AND call_id NOT IN (SELECT call_id FROM labels) ORDER BY ABS(p-0.70) LIMIT ?", (room,))
 
 
+def distinct_claims(rows: list[dict]) -> int:
+    """How many independent pieces of evidence the rows hold: one per (claim, state) pair. A repeat of the same question over the same
+    state is the same evidence (docs/04 section 3); rows with no such key each count once."""
+    return len({(r["claim_hash"], r["state_hash"]) if r.get("claim_hash") and r.get("state_hash") else r.get("call_id", id(r)) for r in rows})
+
+
 def labeled(db: ledger.Ledger, fit_only: bool = True, include_protected: bool = False) -> list[dict]:
+    """Labeled answers, one per independent (claim, state, calibration group). Cached repeats (`dedup_of`) and answers with no model
+    string (no calibration group) are not evidence; neither is a second row for a (claim, state) the group already holds."""
     src = "AND l.source<>'heuristic'" if fit_only else ""
-    rows = db.all("SELECT c.call_id, c.p, c.task_family, c.question_version, c.resolved_model, c.session_id, c.risk, c.language, l.label, l.source "
-                  f"FROM jev_calls c JOIN labels l ON l.call_id=c.call_id WHERE c.p IS NOT NULL AND c.primitive='noul' {src}")  # noqa: S608 - constant fragment
-    out = [vars(r) | {"session": r.session_id or "", "split": bucket(r.session_id or ""), "language": r.language or "unknown"} for r in rows]
+    rows = db.all("SELECT c.call_id, c.p, c.task_family, c.question_id, c.question_version, c.resolved_model, c.session_id, c.risk, c.language, c.claim_hash, c.state_hash, "
+                  "l.label, l.source FROM jev_calls c JOIN labels l ON l.call_id=c.call_id WHERE c.p IS NOT NULL AND c.primitive='noul' "
+                  f"AND c.dedup_of IS NULL AND c.resolved_model IS NOT NULL {src} ORDER BY c.rowid")  # noqa: S608 - constant fragment
+    seen, out = set(), []
+    for r in rows:
+        key = (r.claim_hash, r.state_hash, r.task_family, r.question_version, r.resolved_model) if r.claim_hash else r.call_id
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(vars(r) | {"session": r.session_id or "", "split": bucket(r.session_id or ""), "language": r.language or "unknown"})
     return out if include_protected else [r for r in out if r["split"] != "protected"]
 
 
@@ -149,7 +171,8 @@ def report(db: ledger.Ledger, include_protected: bool = False) -> dict:
         accept, reject = thresholds.bands("noul", fam, "low", g)
         m = metrics([r["p"] for r in rows], [r["label"] for r in rows], accept, reject)
         m["thresholds"] = {"accept": accept, "reject": reject}
-        m["eligible_for_adjustment"] = m["n"] >= MIN_LABELED
+        m["distinct_claims"] = distinct_claims(rows)
+        m["eligible_for_adjustment"] = m["distinct_claims"] >= MIN_LABELED
         out["groups"][g] = m
     out["note"] = "no labeled rows yet" if not groups else ""
     by_lang: dict[str, list[dict]] = {}
@@ -163,8 +186,8 @@ def report(db: ledger.Ledger, include_protected: bool = False) -> dict:
 
 def propose_threshold(rows: list[dict], budget: float = FA_BUDGET) -> dict | None:
     """Lowest accept threshold whose Wilson 95% upper bound on false accepts meets the budget (ADR-07).
-    Returns None below 200 fit-quality labels: defaults stay."""
-    if len(rows) < MIN_LABELED:
+    Returns None below 200 fit-quality labels on distinct (claim, state) pairs: defaults stay."""
+    if distinct_claims(rows) < MIN_LABELED:
         return None
     for t in [x / 100 for x in range(50, 96)]:
         acc = [r for r in rows if r["p"] >= t]

@@ -14,11 +14,22 @@ LEGACY = ("verify", "noul", "choice", "score")
 
 
 # ---- ask -------------------------------------------------------------------------------------------
+def _read_file(path: str, what: str) -> str:
+    """A file the caller named. One that cannot be read (missing, a directory, no permission) is an invalid question (exit 6), not a traceback."""
+    try:
+        return Path(path).expanduser().read_text(errors="replace")
+    except (OSError, UnicodeError) as e:
+        raise questions.InvalidQuestion(f"{what} cannot be read ({type(e).__name__})") from None
+
+
 def _read_state(a) -> tuple[str, str]:
     if getattr(a, "state_file", None):
-        return Path(a.state_file).read_text(errors="replace"), f"file:{a.state_file}"
+        return _read_file(a.state_file, "the state file"), f"file:{a.state_file}"
     if a.state == "-":
-        return sys.stdin.read(), "stdin"
+        try:
+            return sys.stdin.read(), "stdin"
+        except (OSError, UnicodeError) as e:
+            raise questions.InvalidQuestion(f"stdin cannot be read as text ({type(e).__name__})") from None
     return a.state or "", "inline"
 
 
@@ -60,13 +71,14 @@ def ask_main(argv: list[str], prog: str = "jade ask", provider=None) -> int:
             evidence, source = _read_state(a)
             specs = ask.verify_specs(companion=not a.no_companion)
             state = {"claim": a.text, "evidence": evidence, "evidence_source": source}
+            ask.check_required("q.verify_claim.supported_by_evidence", state)   # a claim with no evidence is not sent (the legacy script sent it)
         elif a.cmd == "question":
             state = {}
             for f in a.field:
                 k, sep, v = f.partition("=")
                 if not sep:
                     raise questions.InvalidQuestion(f"--field must be name=value ({len(f)} characters given, none of them an '=')")
-                state[k.strip()] = Path(v[1:]).read_text(errors="replace") if v.startswith("@") else v
+                state[k.strip()] = _read_file(v[1:], f"field {k.strip()!r} file") if v.startswith("@") else v
             ask.check_required(a.question_id, state)
             specs = [ask.registry_spec(a.question_id, options=a.option or None)]
         else:
@@ -74,16 +86,15 @@ def ask_main(argv: list[str], prog: str = "jade ask", provider=None) -> int:
             specs = [ask.adhoc_spec(a.cmd, a.text, options=getattr(a, "option", None), levels=getattr(a, "level", None),
                                     true=getattr(a, "true", None), false=getattr(a, "false", None))]
             state = {"context": evidence}
+        ask.check_text(specs, state)
     except questions.InvalidQuestion as e:
         why = redact.redact(str(e))[0]   # an error may quote what the agent typed, and an agent's transcript is not a safe place for a secret
         print(f"jade: INVALID_QUESTION, exit 6 ({why}). Nothing was sent; this is not a yes.", file=sys.stderr)
         _journal_invalid(why)
         return 6
     if a.dry_run:
-        from . import adapter
-
         state, hits, cut, leaked = ask.prepare(specs, state)   # the same redaction a real call applies: a dry run shows what would leave the machine
-        print(json.dumps({"model": a.model or adapter.DEFAULT_MODEL, "state": state, "questions": {s.key: s.payload for s in specs}}, ensure_ascii=False, indent=2))
+        print(json.dumps({"model": ask.resolve_model(a.model), "state": state, "questions": {s.key: s.payload for s in specs}}, ensure_ascii=False, indent=2))
         print(f"jade: dry run: {hits} redaction(s){', state truncated to 32 KiB' if cut else ''}; "
               f"{'a secret-shaped string survived redaction, a real call would be refused (exit 6)' if leaked else 'no secret-shaped string left'}", file=sys.stderr)
         return 0
@@ -103,7 +114,7 @@ def _journal_invalid(reason: str) -> None:
 # ---- other commands ----------------------------------------------------------------------------------
 def _stats(a) -> int:
     db = ledger.open()
-    w = "ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?)"
+    w = "ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?) AND COALESCE(primitive,'')<>'fast'"   # `fast` rows from an older version are not Jev calls
     arg = (f"-{a.days} days",)
     one = lambda sql: db.one(sql, arg)  # noqa: E731
     total = one(f"SELECT COUNT(*) AS n FROM jev_calls WHERE {w}").n  # noqa: S608 - constant fragment
@@ -278,9 +289,12 @@ def _fast(a) -> int:
     from . import route
 
     ok, detail = route.fast_check(a.kind, a.args)
-    db = ledger.open()
-    cid = db.begin_call(f"fast.{a.kind}", "0" * 64, session_id(), primitive="fast", task_family="fast", question_text=" ".join(a.args)[:500])
-    db.finish_call(cid, verdict="ACCEPT" if ok else "REJECT", exit_code=0 if ok else 4, p=1.0 if ok else 0.0, latency_ms=0.0, cost_usd=0.0)
+    try:   # a deterministic check is no Jev answer: it is an event, never a jev_calls row (no dedup, no stats, no miner pattern, no Stop-hook reminder)
+        db = ledger.open()
+        db.event(session_id(), "FAST_CHECK", guard=f"{a.kind}: {'true' if ok else 'false'}", detail={"kind": a.kind, "ok": ok, "args": " ".join(a.args)[:500]}, actor="agent")
+        db.close()
+    except Exception:  # noqa: BLE001, S110 - the check's own answer must not depend on the journal
+        pass
     print(f"{'true' if ok else 'false'}  {detail}")
     return 0 if ok else 4
 
@@ -361,6 +375,12 @@ def _eval(a) -> int:
     return 0
 
 
+def evals_denied():
+    from . import evals
+
+    return evals.ProtectedSetAccessDenied
+
+
 def _improve(a) -> int:
     from . import improve
 
@@ -377,6 +397,13 @@ def _improve(a) -> int:
         try:
             print(json.dumps(improve.shadow(db, a.candidate_id, a.question_id, a.version, limit=a.limit), indent=1))
         except improve.PromotionBlocked as e:
+            print(f"jade: blocked: {e}", file=sys.stderr)
+            return 1
+    elif a.action in ("protected", "canary"):
+        try:
+            doc = improve.protected_check(db, a.candidate_id) if a.action == "protected" else improve.start_canary(db, a.candidate_id)
+            print(json.dumps((doc.get("results") or {}).get("protected" if a.action == "protected" else "canary"), indent=1))
+        except (improve.PromotionBlocked, evals_denied()) as e:
             print(f"jade: blocked: {e}", file=sys.stderr)
             return 1
     elif a.action in ("freeze", "unfreeze"):
@@ -542,6 +569,8 @@ def main(argv: list[str] | None = None) -> int:
     im.add_parser("list")
     for name in ("show", "promote", "rollback"):
         im.add_parser(name).add_argument("candidate_id")
+    im.add_parser("protected", help="evaluate a candidate on the protected split (human terminal only)").add_argument("candidate_id")
+    im.add_parser("canary", help="serve a shadowed template version to the canary share (human terminal or the standing opt-in)").add_argument("candidate_id")
     sh = im.add_parser("shadow", help="replay recent stored state through a challenger question version (async, off the hot path)")
     sh.add_argument("candidate_id")
     sh.add_argument("--question-id", required=True)

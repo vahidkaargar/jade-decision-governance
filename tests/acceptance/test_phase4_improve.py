@@ -4,6 +4,7 @@ import json
 import pytest
 
 from jade import adapter, ask, improve, ledger, ops, schemas
+from tests.promo_helpers import group_of, seed, threshold_candidate
 
 
 def test_candidate_cannot_target_protected():
@@ -19,39 +20,35 @@ def test_candidate_cannot_target_protected():
 
 def test_promotion_requires_protected_pass(tmp_path, human_env):
     db = ledger.open(tmp_path)
-    c = improve.propose(target_component="question_template", change_diff="x", hypothesis="y" * 10, path=db)
-    with pytest.raises(improve.PromotionBlocked):
-        improve.promote(db, c.candidate_id, stdin_isatty=True)  # no protected-set result attached
-    improve.attach_results(db, c.candidate_id, {"protected_test_non_inferior": True, "no_safety_invariant_violation": True, "latency_within_budget": False})
-    with pytest.raises(improve.PromotionBlocked, match="latency_within_budget"):
-        improve.promote(db, c.candidate_id, stdin_isatty=True)
-    improve.attach_results(db, c.candidate_id, {"latency_within_budget": True, "question_id": "q.verify_claim.supported_by_evidence"})
-    assert improve.promote(db, c.candidate_id, stdin_isatty=True)["promotion_decision"] == "promoted"
+    c = improve.propose(target_component="calibration_threshold", change_diff="x", hypothesis="y" * 10, path=db)
+    with pytest.raises(improve.PromotionBlocked, match="protected_test_non_inferior"):
+        improve.promote(db, c.candidate_id, stdin_isatty=True)  # nothing was evaluated
+    with pytest.raises(improve.PromotionBlocked, match="computed by the evaluator"):
+        improve.attach_results(db, c.candidate_id, {"protected_test_non_inferior": True, "no_safety_invariant_violation": True, "latency_within_budget": True})
+    seed(db)
+    cid = threshold_candidate(db)
+    assert improve.promote(db, cid, stdin_isatty=True)["promotion_decision"] == "promoted"
 
 
 def test_only_two_targets_auto_promote_and_only_with_opt_in(tmp_path, agent_env, monkeypatch):
     db = ledger.open(tmp_path)
-    ok = {"protected_test_non_inferior": True, "no_safety_invariant_violation": True, "latency_within_budget": True}
     thr = improve.propose("calibration_threshold", "accept 0.7 -> 0.65", "y" * 10, path=db)
-    improve.attach_results(db, thr.candidate_id, ok)
     with pytest.raises(improve.PromotionBlocked, match="human"):
         improve.promote(db, thr.candidate_id)
-    tpl = improve.propose("cache_ttl", "1800 -> 900", "y" * 10, path=db)
-    improve.attach_results(db, tpl.candidate_id, ok)
+    ttl = improve.propose("cache_ttl", "1800 -> 900", "y" * 10, path=db)
     with pytest.raises(improve.PromotionBlocked, match="opt-in"):
-        improve.promote(db, tpl.candidate_id)
+        improve.promote(db, ttl.candidate_id)
     cfg = tmp_path / "config"
     cfg.mkdir(exist_ok=True)
     monkeypatch.setenv("JADE_CONFIG", str(cfg))
     (cfg / "config.json").write_text(json.dumps({"auto_promotion_opt_in": True}))
-    assert improve.promote(db, tpl.candidate_id)["promotion_decision"] == "promoted"
+    with pytest.raises(improve.PromotionBlocked, match="no evaluator"):
+        improve.promote(db, ttl.candidate_id)   # allowed to auto-promote in principle, but nothing computes its results: it cannot pass
 
 
 def test_kill_switch_freezes(tmp_path, human_env):
     db = ledger.open(tmp_path)
-    ok = {"protected_test_non_inferior": True, "no_safety_invariant_violation": True, "latency_within_budget": True, "question_id": "q.x"}
     c = improve.propose("question_template", "x", "y" * 10, path=db)
-    improve.attach_results(db, c.candidate_id, ok)
     ops.set_challenger(tmp_path, "q.x", 2)
     assert ops.active_version(tmp_path, "q.x") == 2
     (tmp_path / "FREEZE").write_text("")
@@ -69,19 +66,15 @@ def test_shadow_adds_zero_hot_path_latency():
 
 def test_threshold_candidate_replay_and_promotion_writes_group_file(tmp_path, human_env):
     db = ledger.open(tmp_path)
-    from jade import evals
-    for i in range(240):
-        prov = adapter.FixtureProvider(lambda s, q, m, p=0.62 + (i % 3) * 0.12: {k: {"type": "noul", "noul": p} for k in q})
-        r = ask.run(ask.verify_specs(companion=False), {"claim": f"claim {i}", "evidence": "raw"}, provider=prov, session=f"s{i}", db=db)
-        evals.set_label(db, r.primary.call_id, 1, "adjudicated")
-    g = next(iter(evals.report(db)["groups"]))
-    c = improve.propose("calibration_threshold", f"{g}: accept 0.70 -> 0.60", "y" * 10, path=db)
-    res = improve.replay_threshold(db, c.candidate_id, g, 0.60)["results"]
-    assert res["n"] > 0 and "champion" in res and "challenger" in res
-    improve.attach_results(db, c.candidate_id, {"protected_test_non_inferior": True, "no_safety_invariant_violation": True, "latency_within_budget": True})
+    seed(db)
+    g = group_of(db)
+    c = improve.propose("calibration_threshold", f"{g}: accept 0.70 -> 0.85", "y" * 10, path=db)
+    res = improve.replay_threshold(db, c.candidate_id, g, 0.85)["results"]
+    assert res["n"] > 0 and "champion" in res and "challenger" in res and res["offline_replay_pass"] is True
+    improve.protected_check(db, c.candidate_id, stdin_isatty=True)
     improve.promote(db, c.candidate_id, stdin_isatty=True)
-    assert json.loads((tmp_path / "calibration" / "current.json").read_text())[g]["accept"] == 0.60
-    improve.rollback(db, c.candidate_id)
+    assert json.loads((tmp_path / "calibration" / "current.json").read_text())[g]["accept"] == 0.85
+    improve.rollback(db, c.candidate_id, stdin_isatty=True)
     assert g not in json.loads((tmp_path / "calibration" / "current.json").read_text())
 
 

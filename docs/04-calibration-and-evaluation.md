@@ -16,11 +16,11 @@ Calibration group = `(task_family, question_version, resolved_model)`. Today the
 | risk_triage | rule-based level (`risk.yaml`) | deterministic | none (Jev is advisory) |
 | evidence_quality | raw vs paraphrase | deterministic check of evidence_ref kind | none |
 
-Labels carry `label_source` (observed / user_correction / adjudicated / heuristic) and `disagreement` (count of adjudicators disagreeing). Heuristic labels are excluded from calibration fitting, used only for monitoring.
+The outcome join labels only the call that gated the decision: the primary verify call named last in the decision's `evaluation_refs`, and only when it was accepted (exit 0). A companion question, an earlier rejected call on another claim and a call a human overrode stay unlabelled and reach the adjudication queue. A cached repeat labels the call that produced the answer. Labels carry `label_source` (observed / user_correction / adjudicated / heuristic) and `disagreement` (count of adjudicators disagreeing). Heuristic labels are excluded from calibration fitting, used only for monitoring.
 
 ## 3. Thresholds
 
-Start: docs defaults 0.70 / 0.30 (Noul), top-p 0.70 (Choice), stricter for high/critical risk (`policies/escalation.yaml`). Adjustment only when a group has ≥ 200 labeled rows and the Wilson 95% upper bound on false-accept rate at the proposed threshold is ≤ the family budget. Method order as data grows: empirical bins (≥ 200) → logistic/Platt (≥ 500) → isotonic (≥ 1,000). Budgets are set from the baseline in §6, not invented.
+Start: docs defaults 0.70 / 0.30 (Noul), top-p 0.70 (Choice), stricter for high/critical risk (`policies/escalation.yaml`). Adjustment only when a group has ≥ 200 labeled rows (distinct `(claim, state)` pairs: a cached repeat, a second row for the same claim and state, and an answer with no resolved model string are not evidence and are not counted or fitted) and the Wilson 95% upper bound on false-accept rate at the proposed threshold is ≤ the family budget. Method order as data grows: empirical bins (≥ 200) → logistic/Platt (≥ 500) → isotonic (≥ 1,000). Budgets are set from the baseline in §6, not invented.
 
 ## 4. Baseline (measured 2026-11-08; `evals/baseline/summary-2026-11-08.json`)
 

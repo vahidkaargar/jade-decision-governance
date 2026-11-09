@@ -61,21 +61,55 @@ def pin_champion(path, question_id: str, version: int) -> None:
     _save_pins(path, pins)
 
 
-CANARY_FRACTION = 0.2   # policies/promotion.yaml canary.traffic_fraction
+CANARY_FRACTION = 0.2   # the shipped value of policies/promotion.yaml canary.traffic_fraction; a test pins the two together
 
 
-def set_challenger(path, question_id: str, version: int, fraction: float = CANARY_FRACTION) -> None:
-    if not 0 < fraction <= 1:
-        raise ValueError("fraction must be in (0, 1]")
+def promotion_policy() -> dict:
+    """policies/promotion.yaml (protected). Read at use, so an edit of the file changes what the gate demands."""
+    import yaml
+
+    return yaml.safe_load((paths.policy_dir() / "promotion.yaml").read_text()) or {}
+
+
+def canary_fraction() -> float:
+    try:
+        return float(promotion_policy()["canary"]["traffic_fraction"])
+    except (OSError, KeyError, TypeError, ValueError):
+        return CANARY_FRACTION
+
+
+def set_challenger(path, question_id: str, version: int, fraction: float | None = None) -> None:
+    """Serve a challenger to a share of sessions. The share is capped at the policy's canary fraction: a challenger never gets more traffic than
+    the canary stage allows (policies/promotion.yaml canary.traffic_fraction)."""
+    fraction = canary_fraction() if fraction is None else fraction
+    if not 0 < fraction <= canary_fraction():
+        raise ValueError(f"fraction must be in (0, {canary_fraction()}] (policies/promotion.yaml canary.traffic_fraction)")
     pins = _pins(path)
     pins.setdefault(question_id, {}).update(challenger=int(version), challenger_fraction=fraction)
     _save_pins(path, pins)
 
 
-def rollback(path, question_id: str) -> None:
+def rollback(path, question_id: str) -> str:
+    """Undo the most recent rollout step of one question. A challenger in canary is cleared (the champion keeps serving). With no
+    challenger, a promoted version goes back to the champion it replaced (`previous_champion`; None means the registry default).
+    Returns what was done: 'challenger_cleared', 'champion_restored' or 'nothing'."""
     pins = _pins(path)
-    pins.setdefault(question_id, {})["challenger"] = None
+    p = pins.setdefault(question_id, {})
+    if p.get("challenger"):
+        p["challenger"] = None
+        done = "challenger_cleared"
+    elif "previous_champion" in p:
+        p["champion"] = p.pop("previous_champion")
+        done = "champion_restored"
+    else:
+        p["challenger"] = None
+        done = "nothing"
     _save_pins(path, pins)
+    return done
+
+
+def pins_of(path, question_id: str) -> dict:
+    return dict(_pins(path).get(question_id, {}))
 
 
 def promote_challenger(path, question_id: str) -> int | None:
@@ -99,7 +133,7 @@ def active_version(path, question_id: str, key: str | None = None) -> int | None
     champion (None = registry default). Without a key (administrative view) the challenger is reported."""
     p = _pins(path).get(question_id, {})
     if p.get("challenger") and not frozen(path):
-        if key is None or in_canary(f"{question_id}:{key}", p.get("challenger_fraction", CANARY_FRACTION)):
+        if key is None or in_canary(f"{question_id}:{key}", p.get("challenger_fraction", canary_fraction())):
             return p["challenger"]
     return p.get("champion")
 

@@ -73,6 +73,8 @@ def run_case(c: dict) -> list[str]:
         for inv in c.get("expect_blocked", []):
             if inv not in res.stderr:
                 problems.append(f"expected invariant {inv} in the block message")
+    elif kind in ("answer_shape", "calibrated_repeat"):
+        problems += _run_judging(c)
     elif kind == "secret_stored":
         problems += _run_secret_stored(c)
     elif kind == "redact_keep":
@@ -84,6 +86,36 @@ def run_case(c: dict) -> list[str]:
         problems += _run_lifecycle(c)
     else:
         problems.append(f"unknown case kind {kind}")
+    return problems
+
+
+def _run_judging(c: dict) -> list[str]:
+    """Review cluster D. `answer_shape`: the provider returns `answer` for the key `q` (an ad hoc `primitive` question with `options`, or the
+    registry `question_id` with `fields`): a malformed or mismatched answer must be exit 5, never 0; `none_of_these` must be exit 3.
+    `calibrated_repeat`: a promoted accept for the fixture group, then the same question twice: both exits must be the same non-yes."""
+    from pathlib import Path
+
+    from jade import adapter, ask, paths
+
+    problems: list[str] = []
+    if c["kind"] == "calibrated_repeat":
+        cal = Path(paths.home()) / "calibration"
+        cal.mkdir(parents=True, exist_ok=True)
+        (cal / "current.json").write_text(json.dumps({"verify_claim/v1/jev-1.14-fixture": {"accept": c["accept"], "reject": 0.3}}))
+        prov = adapter.FixtureProvider(lambda s, q, m: {k: {"type": "noul", "noul": c["p"]} for k in q})
+        exits = [ask.run(ask.verify_specs(companion=False), {"claim": "tests pass", "evidence": "42 passed"}, provider=prov, session="case-session").exit_code for _ in range(2)]
+        if exits != c["expect_exits"]:
+            problems.append(f"exits {exits}, expected {c['expect_exits']}")
+        return problems
+    if c.get("question_id"):
+        spec = ask.registry_spec(c["question_id"], options=c.get("options"))
+        state = c["fields"]
+    else:
+        spec = ask.adhoc_spec(c["primitive"], "Which?", options=c.get("options"), levels=c.get("levels"), true=c.get("true"), false=c.get("false"))
+        state = {"context": "ctx"}
+    r = ask.run([spec], state, provider=adapter.FixtureProvider(lambda s, q, m: {k: c["answer"] for k in q}), session="case-session")
+    if r.exit_code != c["expect_exit"]:
+        problems.append(f"exit {r.exit_code}, expected {c['expect_exit']}")
     return problems
 
 

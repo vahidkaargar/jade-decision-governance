@@ -32,7 +32,7 @@ Each entry validates against `schemas/question.schema.json`. Initial families an
 |-------------|-----------|--------|-------|
 | `q.verify_claim.supported_by_evidence` | noul | verify_claim | Replaces today's `jev verify`. Negative criterion names paraphrase/insufficient evidence explicitly. |
 | `q.verify_claim.evidence_is_raw` | noul | evidence_quality | Companion: is the evidence raw tool output rather than the agent's summary? Low P → NEEDS_EVIDENCE. |
-| `q.root_cause.best_explanation` | choice | root_cause | Requires `none_of_these` companion Noul `q.root_cause.any_fits`. |
+| `q.root_cause.best_explanation` | choice | root_cause | Open set: carries a `no_match_option` (`none_of_these`). A confident `none_of_these` is ABSTAIN (exit 3), never a yes. The `q.root_cause.any_fits` companion is a registry entry that is asked on its own; it is not batched with the choice (a question with a dependency cannot be batch eligible) and the gate does not require it. |
 | `q.strategy.best_option` | choice | strategy_choice | Options must each carry a one-line tradeoff; margin recorded; low confidence acceptable for harmless preferences. |
 | `q.risk.irreversible` / `q.risk.touches_production` / `q.risk.exposes_secret` | noul ×3 | risk_triage | Batched; code combines with max. Advisory only: `policies/risk.yaml` rules (plus the machine-local overlay) decide; Jev may only *raise* the level, never lower it. |
 | `q.evidence.quality` | score | evidence_quality | Levels: none / summary only / partial raw / complete raw with source. Ranks, never gates. |

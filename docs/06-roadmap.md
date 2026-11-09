@@ -31,7 +31,7 @@ Rollback: thresholds revert to docs defaults by deleting `calibration/current.js
 Scope: `jade improve mine` → task-observer observations + improvement records; offline replay; shadow; canary only for `question_template` and `cache_ttl` after human opt-in; kill switch file; champion/challenger pins.
 Acceptance: `test_candidate_cannot_target_protected`, `test_promotion_requires_protected_pass`, `test_kill_switch_freezes`, `test_shadow_adds_zero_hot_path_latency`.
 Exit: one full cycle (mine → candidate → replay → shadow → human decision) completed and audited.
-Rollback: `FREEZE` file; `jade improve rollback <candidate>` restores champion.
+Rollback: `FREEZE` file; `jade improve rollback <candidate>` restores the exact prior champion (or the prior threshold band); under `FREEZE` it needs a human terminal.
 
 ## Phase 5 — Optimise and roll out
 Scope: profile real p95; batch all family questions into one request; remove redundant calls found in ledger; canary thresholds (if authorized); rollback drill; drift monitoring via launchd; audit review.

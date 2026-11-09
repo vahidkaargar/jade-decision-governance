@@ -57,6 +57,11 @@ def fast_check(kind: str, args: list[str]) -> tuple[bool, str]:
         return not missing, "all exist" if not missing else f"missing: {', '.join(missing)}"
     if len(args) != 2:
         raise SystemExit("usage: jade fast regex PATTERN FILE")
-    text = Path(args[1]).expanduser().read_text(errors="replace")
-    m = re.search(args[0], text, re.M)
+    try:
+        text = Path(args[1]).expanduser().read_text(errors="replace")
+        m = re.search(args[0], text, re.M)
+    except (OSError, UnicodeError) as e:
+        raise SystemExit(f"jade fast: cannot read {args[1]} ({type(e).__name__})") from None
+    except re.error as e:
+        raise SystemExit(f"jade fast: invalid pattern ({e})") from None
     return bool(m), f"matched at offset {m.start()}" if m else "no match"

@@ -22,7 +22,7 @@ Resumable side states: `WAITING_HUMAN`, `WAITING_DEPENDENCY`, `RETRY_SCHEDULED`.
 | VALIDATED | `classify` | risk rule matched (`policies/risk.yaml`); rationale non-empty | CLASSIFIED | runtime |
 | CLASSIFIED | `route` | preflight run; route ∈ {FAST, JEV, DEEP, ESCALATE} | EVALUATING | runtime |
 | EVALUATING | `fast_result` | deterministic check returned a boolean with evidence ref | ACCEPTED / REJECTED | runtime |
-| EVALUATING | `jev_result` | provider returned a parseable answer; question valid; not a dedup hit without new evidence | ACCEPTED (≥ accept_t) / ABSTAINED (band) / REJECTED (≤ reject_t) | runtime |
+| EVALUATING | `jev_result` | provider returned a parseable answer; question valid; not a dedup hit without new evidence (a dedup anchor is an answered call: DONE, exit 0, 3 or 4) | ACCEPTED (≥ accept_t) / ABSTAINED (band) / REJECTED (≤ reject_t) | runtime |
 | EVALUATING | `jev_error` | provider UNAVAILABLE / RATE_LIMITED after retries, or INVALID_QUESTION | NEEDS_EVIDENCE (never ACCEPTED) | runtime |
 | EVALUATING | `deep_result` | reasoning model's structured verdict attached with evidence refs | ACCEPTED / REJECTED / NEEDS_REVISION | agent |
 | ABSTAINED / NEEDS_EVIDENCE | `add_evidence` | new `evidence_refs` ⇒ new `context_fingerprint`; revision_count < max (3) | EVALUATING | agent |
