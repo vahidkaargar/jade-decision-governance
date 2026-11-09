@@ -15,6 +15,7 @@ import random
 import subprocess
 import threading
 import time
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -143,15 +144,46 @@ def get_key() -> str:
 MAX_BODY = 4 * 1024 * 1024
 
 
+def _proxy_for(parts):
+    """The proxy the environment names for this URL (`https_proxy`/`http_proxy`, `no_proxy`), or None. Only an `http://` proxy is spoken."""
+    host = parts.hostname or ""
+    proxies = urllib.request.getproxies()
+    raw = proxies.get(parts.scheme)
+    if not raw or urllib.request.proxy_bypass(host):
+        return None
+    p = urlsplit(raw if "://" in raw else "http://" + raw)
+    if p.scheme != "http" or not p.hostname:
+        raise OSError(f"unsupported proxy URL scheme {p.scheme!r}: only http:// proxies are supported")
+    return p
+
+
 def http_transport(payload: dict, key: str, timeout: float):
     """Returns (status, body_text, headers). Raises OSError/TimeoutError/HTTPException on transport failure.
 
     `timeout` is a wall-clock limit for the whole exchange, not for one socket operation: a timer shuts the socket at the deadline,
     so a server that trickles a byte at a time (or stalls just under a per-read timeout) cannot hold the caller past it."""
     parts = urlsplit(URL)
-    cls = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+    https = parts.scheme == "https"
+    target, headers = parts.path or "/", {}
+    proxy = _proxy_for(parts)
+    if proxy is None:
+        conn = (http.client.HTTPSConnection if https else http.client.HTTPConnection)(parts.hostname, parts.port, timeout=max(0.05, timeout))
+    else:
+        # urllib honoured HTTP(S)_PROXY and NO_PROXY; so does this. https goes through a CONNECT tunnel (TLS still ends at the provider),
+        # plain http as an absolute-URI request. A proxy URL that cannot be used is a transport failure, never a silent direct connection.
+        conn = (http.client.HTTPSConnection if https else http.client.HTTPConnection)(proxy.hostname, proxy.port or 80, timeout=max(0.05, timeout))
+        auth = {}
+        if proxy.username is not None:
+            import base64
+            from urllib.parse import unquote
+
+            cred = f"{unquote(proxy.username)}:{unquote(proxy.password or '')}".encode()
+            auth = {"Proxy-Authorization": "Basic " + base64.b64encode(cred).decode()}
+        if https:
+            conn.set_tunnel(parts.hostname, parts.port or 443, headers=auth)   # TCP to the proxy, CONNECT, then TLS to the provider
+        else:
+            target, headers = URL, auth
     deadline = time.monotonic() + timeout
-    conn = cls(parts.hostname, parts.port, timeout=max(0.05, timeout))
     expired = threading.Event()
 
     def cut() -> None:
@@ -167,8 +199,8 @@ def http_transport(payload: dict, key: str, timeout: float):
     timer.daemon = True
     timer.start()
     try:
-        conn.request("POST", parts.path or "/", body=json.dumps(payload).encode(),
-                     headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json", "X-Title": "jade-decision-governance"})
+        conn.request("POST", target, body=json.dumps(payload).encode(),
+                     headers={**headers, "Authorization": f"Bearer {key}", "Content-Type": "application/json", "X-Title": "jade-decision-governance"})
         resp = conn.getresponse()
         chunks, size = [], 0
         while True:

@@ -677,6 +677,157 @@ def test_rollback_restores_the_prior_promoted_value_not_the_default(tmp_path, hu
     assert cur() == {"accept": 0.60, "reject": 0.2, "candidate": "imp_earlier"}     # the earlier promotion, not the 0.70 default
 
 
+# ---- F26, second pass: a rollback touches only what its own candidate put live ---------------------------------------------------------
+def _promoted_template(tmp_path, human_env, monkeypatch):
+    registry_v2(tmp_path, monkeypatch)
+    home = tmp_path / "home"
+    db = ledger.open(home)
+    seed(db)
+    ops.pin_champion(home, Q, 1)
+    cid = template_candidate(db, tmp_path)
+    improve.promote(db, cid, stdin_isatty=True)
+    return home, db, cid
+
+
+def test_rolling_back_a_never_canaried_candidate_leaves_an_earlier_promotion_alone(tmp_path, human_env, monkeypatch):
+    home, db, a = _promoted_template(tmp_path, human_env, monkeypatch)
+    before = ops.pins_of(home, Q)
+    assert before["champion"] == 2 and before["previous_champion"] == 1
+    b = improve.propose("question_template", "another clause", "y" * 10, path=db)
+    improve.shadow(db, b.candidate_id, Q, 2, provider=provider(), limit=100)            # shadow only: no canary, no pin
+    monkeypatch.setenv("CLAUDECODE", "1")
+    doc = improve.rollback(db, b.candidate_id)
+    assert doc["promotion_decision"] == "rolled_back" and doc["audit_trail"][-1]["actor"] == "runtime:agent"
+    assert ops.pins_of(home, Q) == before and improve.get(db, a)["promotion_decision"] == "promoted"
+    c = improve.propose("question_template", "pending only", "y" * 10, path=db)           # not even shadowed
+    improve.rollback(db, c.candidate_id)
+    assert ops.pins_of(home, Q) == before
+
+
+def test_rolling_back_a_canary_clears_only_its_own_challenger(tmp_path, human_env, monkeypatch):
+    registry_v2(tmp_path, monkeypatch)
+    home = tmp_path / "home"
+    db = ledger.open(home)
+    seed(db)
+    ops.pin_champion(home, Q, 1)
+    cid = template_candidate(db, tmp_path)                 # canary running: challenger 2
+    assert ops.pins_of(home, Q)["challenger"] == 2
+    improve.rollback(db, cid, stdin_isatty=True)
+    assert ops.pins_of(home, Q)["challenger"] is None and ops.pins_of(home, Q)["champion"] == 1
+
+
+def test_rolling_back_a_promotion_refuses_while_a_later_challenger_serves(tmp_path, human_env, monkeypatch):
+    home, db, a = _promoted_template(tmp_path, human_env, monkeypatch)
+    ops.set_challenger(home, Q, 3, 0.1)
+    before = ops.pins_of(home, Q)
+    with pytest.raises(improve.PromotionBlocked, match="challenger"):
+        improve.rollback(db, a, stdin_isatty=True)
+    assert ops.pins_of(home, Q) == before and improve.get(db, a)["promotion_decision"] == "promoted"   # not "rolled back" with a champion left in place
+    ops.rollback(home, Q)                                  # the challenger is retired first
+    assert improve.rollback(db, a, stdin_isatty=True)["promotion_decision"] == "rolled_back" and ops.active_version(home, Q) == 1
+
+
+def test_an_agent_cannot_revert_a_promotion_a_human_made(tmp_path, human_env, monkeypatch):
+    home, db, a = _promoted_template(tmp_path, human_env, monkeypatch)
+    monkeypatch.setenv("CLAUDECODE", "1")
+    with pytest.raises(improve.PromotionBlocked, match="human"):
+        improve.rollback(db, a)
+    assert ops.active_version(home, Q) == 2 and improve.get(db, a)["promotion_decision"] == "promoted"
+    monkeypatch.delenv("CLAUDECODE")
+    assert improve.rollback(db, a, stdin_isatty=True)["promotion_decision"] == "rolled_back" and ops.active_version(home, Q) == 1
+
+
+def test_an_agent_may_revert_a_promotion_the_runtime_made_itself(tmp_path, human_env, monkeypatch):
+    home, db, a = _promoted_template(tmp_path, human_env, monkeypatch)
+    doc = improve.get(db, a)
+    for e in doc["audit_trail"]:
+        if e["event"] == "promoted":
+            e["actor"] = "runtime:auto"                    # the human's standing opt-in promoted it
+    db.con.execute("UPDATE improvements SET doc_json=? WHERE candidate_id=?", (json.dumps(doc), a))
+    monkeypatch.setenv("CLAUDECODE", "1")
+    assert improve.rollback(db, a)["promotion_decision"] == "rolled_back" and ops.active_version(home, Q) == 1
+
+
+# ---- the provider transport honours the proxy environment (urllib did) ------------------------------------------------------------
+def _clear_proxy_env(monkeypatch):
+    for k in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+        monkeypatch.delenv(k, raising=False)
+        monkeypatch.delenv(k.upper(), raising=False)
+
+
+def test_http_transport_goes_through_http_proxy(monkeypatch):
+    seen = []
+
+    class Proxy(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            seen.append((self.path, self.headers.get("Proxy-Authorization")))
+            body = _body()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    _clear_proxy_env(monkeypatch)
+    with _Server(Proxy) as base:
+        port = base.split(":")[2].split("/")[0]
+        monkeypatch.setenv("http_proxy", f"http://u:p%40w@127.0.0.1:{port}")
+        monkeypatch.setattr(adapter, "URL", "http://provider.invalid/api/alpha/decisions")
+        status, text, _ = adapter.http_transport({"x": 1}, "k", 5)
+    assert status == 200 and "answers" in text
+    assert seen == [("http://provider.invalid/api/alpha/decisions", "Basic " + __import__("base64").b64encode(b"u:p@w").decode())]
+
+
+def test_http_transport_tunnels_https_through_connect(monkeypatch):
+    seen = []
+
+    class Proxy(http.server.BaseHTTPRequestHandler):
+        def do_CONNECT(self):
+            seen.append(self.path)
+            self.send_error(502)
+
+        def log_message(self, *a):
+            pass
+
+    _clear_proxy_env(monkeypatch)
+    with _Server(Proxy) as base:
+        port = base.split(":")[2].split("/")[0]
+        monkeypatch.setenv("https_proxy", f"127.0.0.1:{port}")
+        with pytest.raises(OSError):
+            adapter.http_transport({"x": 1}, "k", 5)
+    assert seen == ["openrouter.ai:443"]
+
+
+def test_no_proxy_bypasses_the_proxy_and_an_unusable_proxy_is_never_ignored(monkeypatch):
+    class Direct(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            body = _body()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    _clear_proxy_env(monkeypatch)
+    with _Server(Direct) as url:
+        monkeypatch.setattr(adapter, "URL", url)
+        monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")          # nothing listens there
+        monkeypatch.setenv("no_proxy", "127.0.0.1")
+        assert adapter.http_transport({"x": 1}, "k", 5)[0] == 200
+        monkeypatch.delenv("no_proxy")
+        with pytest.raises(OSError):
+            adapter.http_transport({"x": 1}, "k", 5)
+        monkeypatch.setenv("http_proxy", "https://127.0.0.1:9")         # a TLS proxy is not spoken: fail, do not go direct
+        with pytest.raises(OSError, match="unsupported proxy"):
+            adapter.http_transport({"x": 1}, "k", 5)
+
+
 # ---- the CLI surface of the pipeline ----------------------------------------------------------------------------------------------
 def test_cli_improve_protected_and_rollback_refuse_an_agent(tmp_path, agent_env, capsys):
     db = ledger.open()

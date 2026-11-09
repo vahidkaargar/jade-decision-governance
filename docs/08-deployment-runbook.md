@@ -94,7 +94,7 @@ Add one line to the existing health script so silence is never mistaken for heal
 | Restore the old `jev` | section 1 undo |
 | Stop the job | `launchctl bootout ...` |
 | Freeze all improvement activity | `jade improve freeze` (human removes it with `jade improve unfreeze`) |
-| Revert a promoted candidate | `jade improve rollback <candidate>`: a template goes back to the exact champion it replaced (the registry default when it had none), a threshold goes back to the band the group had before. It refuses when the pins no longer match the promotion, under `FREEZE` unless a human is at the terminal, and for loosening a promoted stricter threshold unless a human is at the terminal; the audit trail records the real actor (`human:terminal` or `runtime:agent`). Deleting `~/.local/share/jade/calibration/current.json` still resets every threshold to the defaults |
+| Revert a promoted candidate | `jade improve rollback <candidate>`: a template goes back to the exact champion it replaced (the registry default when it had none), a threshold goes back to the band the group had before. It refuses when the pins no longer match the promotion, while a later challenger serves the question, when a human made the promotion and none is at the terminal, under `FREEZE` unless a human is at the terminal, and for loosening a promoted stricter threshold unless a human is at the terminal; the audit trail records the real actor (`human:terminal` or `runtime:agent`). Deleting `~/.local/share/jade/calibration/current.json` still resets every threshold to the defaults |
 
 ## 4. Known coverage limits
 

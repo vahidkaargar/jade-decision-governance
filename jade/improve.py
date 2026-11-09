@@ -379,7 +379,7 @@ def _write_calibration(cal: Path, cur: dict) -> None:
 def rollback(path, candidate_id: str, actor: str | None = None, stdin_isatty: bool | None = None) -> dict:
     """Undo a candidate. A promoted question template goes back to the exact champion it replaced; a promoted threshold goes back to the
     band the group had before (or to the defaults). The actor recorded is the real one: `human:terminal` only at a human terminal, else
-    `runtime:agent`; a caller cannot name itself human. Under FREEZE only a human at a terminal may roll back, and loosening a promoted
+    `runtime:agent`; a caller cannot name itself human. Under FREEZE only a human at a terminal may roll back, a promotion a human made is reverted only by a human, and loosening a promoted
     stricter threshold also needs one (an agent may only make acceptance stricter)."""
     from . import thresholds
 
@@ -404,12 +404,22 @@ def rollback(path, candidate_id: str, actor: str | None = None, stdin_isatty: bo
                 if pin.get("champion") != promo["champion_after"] or "previous_champion" not in pin or pin["previous_champion"] != promo["champion_before"]:
                     raise PromotionBlocked(f"the pins of {qid} no longer match this promotion (champion {pin.get('champion')}, expected {promo['champion_after']}); "
                                            "something else changed them, restore by hand")
-                ops.rollback(home, qid)
+                if pin.get("challenger"):
+                    raise PromotionBlocked(f"a challenger (version {pin['challenger']}) is serving {qid} after this promotion; roll that candidate back first, "
+                                           "so its canary is not cleared as a side effect of restoring the champion")
+                promoter = next((e.get("actor", "") for e in reversed(doc.get("audit_trail") or []) if e.get("event") == "promoted"), "")
+                if promoter.startswith("human") and not human:
+                    raise PromotionBlocked("this promotion was made by a human at a terminal; only a human at a terminal reverts it")
+                if ops.rollback(home, qid) != "champion_restored":
+                    raise PromotionBlocked(f"the champion of {qid} was not restored")
                 note = f"rolled back: champion restored to {promo['champion_before'] if promo['champion_before'] is not None else 'the registry default'}"
             elif promoted:
                 raise PromotionBlocked("a promoted template with no recorded promotion cannot be rolled back automatically")
-            elif (res.get("canary") or {}).get("version") == pin.get("challenger"):
-                ops.rollback(home, qid)   # an unpromoted canary: clear the challenger
+            else:
+                canary, challenger = res.get("canary") or {}, pin.get("challenger")
+                if challenger and canary.get("version") == challenger:
+                    ops.rollback(home, qid)   # this candidate's own canary is serving: clear the challenger
+                # a shadow or pending candidate owns no pin: nothing of the live rollout is touched
         if doc["target_component"] == "calibration_threshold" and promoted:
             cal = home / "calibration"
             cur = _read_calibration(cal)
