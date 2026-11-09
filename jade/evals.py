@@ -107,7 +107,8 @@ def auto_label(db: ledger.Ledger) -> dict:
     later contradicted in the same session (source `heuristic`)."""
     n = {"observed": 0, "heuristic": 0}
     for r in db.all("SELECT c.call_id, d.status FROM jev_calls c JOIN decisions d ON d.decision_id=c.decision_id "
-                    "WHERE c.p IS NOT NULL AND c.primitive='noul' AND d.status IN ('SUCCEEDED','FAILED') "
+                    "WHERE c.p IS NOT NULL AND c.primitive='noul' AND (d.status='FAILED' OR (d.status='SUCCEEDED' AND EXISTS (SELECT 1 FROM outcomes o "
+                    "WHERE o.decision_id=d.decision_id AND json_extract(o.doc_json,'$.observation_type')='observed' AND json_extract(o.doc_json,'$.success')=1))) "
                     "AND c.call_id NOT IN (SELECT call_id FROM labels WHERE source<>'heuristic')"):
         set_label(db, r.call_id, 1 if r.status == "SUCCEEDED" else 0, "observed", "outcome join")
         n["observed"] += 1

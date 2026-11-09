@@ -110,6 +110,8 @@ class Assessment:
     blocked: list[str] = field(default_factory=list)
     plan_hash: str = ""
     subject: str = ""
+    plan_subject: str = ""  # exactly what plan_hash covers besides the tool: `subject` is what a human reads, this is what was hashed
+    plan_cwd: str = ""
     hold_key: str = ""  # identity of the command for SI-07: the canonical gated segments, independent of quoting, separators, prefixes and cwd
 
 
@@ -203,9 +205,21 @@ def is_read_only(seg: str) -> bool:
     return any(p.search(bare) for p in risk()["_read_only"])
 
 
+def resolved_cwd(cwd: str = "") -> str:
+    """The directory a command will run in, symlinks resolved: a permit for `/tmp/link` stops matching when the link is retargeted."""
+    return os.path.realpath(os.path.expanduser(cwd)) if cwd else ""
+
+
 def plan_hash(tool: str, subject: str, cwd: str = "") -> str:
-    """Hash of the exact thing a permit authorizes: tool, normalised command or path, and working directory."""
-    return sha256(canonical({"tool": tool, "subject": re.sub(r"\s+", " ", subject).strip(), "cwd": cwd or ""}))
+    """Hash of the exact thing a permit authorizes: tool, the command or path as written, and the resolved working directory.
+
+    Whitespace is never folded: inside quotes (`rm -rf "my  dir"`), in a heredoc body (YAML, Python) and a newline versus a space it changes what
+    runs, and the human approved the text they saw. Only the ends are trimmed, which no shell reads."""
+    return sha256(canonical({"tool": tool, "subject": subject.strip(), "cwd": resolved_cwd(cwd)}))
+
+
+def _seal(a: Assessment, tool: str, subject: str, cwd: str, shown: str) -> None:
+    a.plan_hash, a.subject, a.plan_subject, a.plan_cwd = plan_hash(tool, subject, cwd), shown, subject, cwd
 
 
 def _absolute_operands(seg: str, dirs: tuple[str, ...]) -> str:
@@ -312,7 +326,7 @@ def _assess_write(tool: str, tool_input: dict, cwd: str) -> Assessment:
     if env == "production" and LEVELS[a.level] < LEVELS["high"]:
         a.level, a.rule_id, a.rationale = "high", "R-ENV", "Write under a production path"
     subject = "\n".join(subjects)
-    a.plan_hash, a.subject = plan_hash(tool, subject, ""), subject
+    _seal(a, tool, subject, "", subject)
     return a
 
 
@@ -372,7 +386,7 @@ def _assess_tool(tool: str, tool_input: dict, cwd: str) -> Assessment:
     else:
         a = _rule_assessment(rule)
         subject = canonical(tool_input)
-        a.plan_hash, a.subject = plan_hash(tool, subject, ""), f"{tool} {subject}"
+        _seal(a, tool, subject, "", f"{tool} {subject}")
     if rule.get("paths"):
         for p in _path_args(tool_input):
             norm = normalise_path(p, cwd)
@@ -421,7 +435,7 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         haystacks = [fold(subject)] if inv.get("match_on") == "raw" else active + [_bare(s) for s in active]
         if any(inv["_re"].search(h) for h in haystacks):
             a.blocked.append(inv["id"])
-    a.plan_hash, a.subject = plan_hash(tool, subject, cwd), subject
+    _seal(a, tool, subject, cwd, subject)
     a.hold_key = sha256(canonical({"shell": sorted(set(gated_keys or keys))}))
     return a
 

@@ -302,12 +302,27 @@ def _si07_hold(db, a: policy.Assessment):
     return None
 
 
+def fingerprints(subject: str, cwd: str) -> dict[str, str]:
+    """Current values of the preconditions a permit records, for a command run in `cwd`. For every `git push` in it: the HEAD commit of the
+    repository it runs in, so a permit approved for pushing one state is not used after the branch moved. A git call that hangs raises
+    (the gate fails closed)."""
+    heads = []
+    for seg, dirs in policy.segments_cwd(subject, cwd):
+        if policy.is_read_only(seg):
+            continue
+        for call in policy.git_calls(seg):
+            if call.sub == "push":
+                heads += [f"{os.path.realpath(os.path.expanduser(d))}@{_git(call, d, 'rev-parse', 'HEAD') or 'none'}" for d in dirs]
+    return {"git_head": ";".join(sorted(set(heads)))} if heads else {}
+
+
 def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> HookResult:
-    from . import decide, ledger, permits
+    from . import decide, ledger, permits, state_machine
 
     db = ledger.open(timeout=LEDGER_TIMEOUT_S)
     try:
         db.event("gate", "gated", guard=f"{a.rule_id} {a.level}", actor="hook", detail=_detail(event, a))
+        decide.sweep(db)  # a decision past its deadline is EXPIRED before a permit is looked at (and its permits are revoked with it)
         permits.sweep(db)
         hold = _si07_hold(db, a)
         if hold:
@@ -318,34 +333,43 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
                                   f"{' and still executing' if 'executing' in reason else ''}. It is not retried automatically and no permit is raised or used for it. "
                                   f"Read the real state, then record it: jade decide outcome {did} --type observed --success true|false --method \"how you checked\". "
                                   "Do not rephrase the command to get around the invariant; ask the human.")
-        p = permit or permits.find_usable(db, a.plan_hash)
-        if p is not None and permits.consume(db, p.permit_id, a.plan_hash):
-            row = db.one("SELECT decision_id, status FROM decisions WHERE decision_id=?", (p.decision_id,))
-            if row and row.status == "WAITING_HUMAN":
-                decide.step(db, row.decision_id, "human_accept", guard=f"permit {p.permit_id} approved from a terminal", actor="human")
-                decide.step(db, row.decision_id, "authorize", permit_ok=True, guard=f"permit {p.permit_id} issued, unexpired, unused, plan hash equal")
-                decide.step(db, row.decision_id, "execute", guard="PreToolUse saw the matching command; permit consumed", actor="hook", ttl_s=3600)
-            return HookResult(0, f"JADE: permit {p.permit_id} consumed for this {tool} call.")
+        cwd = event.get("cwd") or ""
+        fp = fingerprints(a.plan_subject, cwd) if policy.runs_shell(tool, event.get("tool_input") or {}) else {}
+        who = {"session": event.get("session_id"), "agent": event.get("agent_id")}
+        found = permit or permits.find_usable(db, a.plan_hash, level=a.level)
+        refusal = None
+        if found is not None:
+            try:
+                with db.tx():  # the permit and its decision move together: a decision that cannot advance leaves the permit unused
+                    refusal = permits.try_consume(db, found.permit_id, a.plan_hash, level=a.level, fingerprints=fp, **who)
+                    if refusal is None:
+                        row = db.one("SELECT decision_id, status FROM decisions WHERE decision_id=?", (found.decision_id,))
+                        if row and row.status == "WAITING_HUMAN":
+                            decide.step(db, row.decision_id, "human_accept", guard=f"permit {found.permit_id} approved from a terminal", actor="human")
+                            decide.step(db, row.decision_id, "authorize", permit_ok=True, guard=f"permit {found.permit_id} issued, unexpired, unused, plan hash equal")
+                        if row and row.status in ("WAITING_HUMAN", "AUTHORIZED"):
+                            decide.step(db, row.decision_id, "execute", guard="PreToolUse saw the matching command; permit consumed", actor="hook", ttl_s=3600)
+            except state_machine.IllegalTransition as e:
+                refusal = f"its decision could not advance ({e})"
+            if refusal is None:
+                return HookResult(0, f"JADE: permit {found.permit_id} consumed for this {tool} call.")
         if mode == "advisory":
             db.event("gate", "would_block", guard=f"{a.rule_id} {a.level}", actor="hook", detail=_detail(event, a))
             return HookResult(0, f"[advisory, not blocked] JADE: {a.level} risk ({a.rule_id}: {a.rationale}) would need a permit.")
-        pending = db.one("SELECT permit_id FROM permits WHERE plan_hash=? AND state='PENDING' AND expires_at>?", (a.plan_hash, ts()))
+        ctx = permits.make_context(tool, a, event, cwd=cwd)
+        pending = permits.pending_for(db, a.plan_hash, context=ctx, fingerprints=fp)
         if pending is None:
-            doc = decide.open_decision(db, f"Execute {tool}: {a.subject[:300]}", command=a.subject, tool=tool, cwd=event.get("cwd") or "",
-                                       session=event.get("session_id"), route="ESCALATE", assessment=a)
-            decide.step(db, doc["decision_id"], "route", guard="route=ESCALATE: permit required")
-            decide.step(db, doc["decision_id"], "escalate", guard="no issued permit for this plan", ttl_s=permits.DEFAULT_TTL_S)
-            p = permits.request(db, decide.canonical_action(a.rule_id, a.subject), a.plan_hash, risk=a.level, decision_id=doc["decision_id"],
-                                scope=(event.get("cwd") or "*")[:200], environment=a.environment)
-            with db.tx() as con:
-                con.execute("UPDATE permits SET scope=? WHERE permit_id=?", (json.dumps({"tool": tool, "subject": a.subject[:4000], "cwd": event.get("cwd") or "",
-                                                                                 "rule": a.rule_id, "rationale": a.rationale,
-                                                                                 "permission_mode": event.get("permission_mode"), "agent_id": event.get("agent_id")}),
-                                                                                p.permit_id))
-            pid = p.permit_id
+            with db.tx():
+                doc = decide.open_decision(db, f"Execute {tool}: {a.subject[:300]}", command=a.subject, tool=tool, cwd=cwd,
+                                           session=event.get("session_id"), route="ESCALATE", assessment=a)
+                decide.step(db, doc["decision_id"], "route", guard="route=ESCALATE: permit required")
+                decide.step(db, doc["decision_id"], "escalate", guard="no issued permit for this plan", ttl_s=permits.DEFAULT_TTL_S)
+                pid = permits.request(db, decide.canonical_action(a.rule_id, a.subject), a.plan_hash, risk=a.level, decision_id=doc["decision_id"],
+                                      context=ctx, fingerprints=fp, environment=a.environment).permit_id
         else:
             pid = pending.permit_id
-        return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}). This {tool} call needs a human-approved permit.\n"
+        why = f" (Permit {found.permit_id} exists but cannot be used: {refusal}.)" if found is not None and refusal else ""
+        return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}). This {tool} call needs a human-approved permit.{why}\n"
                              f"Permit {pid} is PENDING. Ask the human to run in their own terminal:  jade permit approve {pid}\n"
                              "Then retry the identical command (single use, 30 minutes). You cannot approve it yourself; "
                              "do not rephrase the command to avoid the gate. Continue with other work meanwhile.")

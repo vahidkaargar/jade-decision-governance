@@ -11,7 +11,7 @@ import secrets
 import sys
 from datetime import UTC, datetime, timedelta
 
-AGENT_ENV = ("CLAUDECODE", "CLAUDE_CODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT", "CURSOR_AGENT", "CODEX_SANDBOX")
+AGENT_ENV = ("CLAUDECODE", "CLAUDE_CODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT", "CURSOR_AGENT", "CODEX_SANDBOX", "AI_AGENT")
 LEVELS = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 
@@ -52,16 +52,58 @@ def agent_env_present() -> bool:
     return any(os.environ.get(k) for k in AGENT_ENV)
 
 
-def is_human_tty(stdin_isatty: bool | None = None) -> bool:
-    """True only for an interactive terminal that is not an agent harness (ADR-05, threat T2)."""
+# Programs that run an agent: the executable's name, or a Node/Python entry point that names one. Case-sensitive on purpose: the Claude
+# desktop app is `Claude`, the agent CLI is `claude`, and a human's own terminal panel inside the app must not look like an agent.
+_AGENT_PROGRAMS = frozenset({"claude", "claude-code", "codex", "cursor-agent", "aider"})
+_AGENT_ENTRY = re.compile(r"@anthropic-ai/claude-code|/claude-code/|/@openai/codex|cursor-agent")
+
+
+def agent_ancestor() -> str | None:
+    """Why the process tree above this one looks like an agent harness, or None when it does not.
+
+    An environment check is defeated by an agent that clears its variables, a tty check by an agent that allocates its own pty; neither
+    changes who the parent processes are. This is a heuristic with a known hole (a process that double-forks and is reparented to launchd
+    leaves no ancestry, docs/05 T2). When the process table cannot be read the answer is "refuse", never "allow"."""
+    import subprocess
+
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True, timeout=3, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return "the process table could not be read"
+    table: dict[int, tuple[int, str]] = {}
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            table[int(parts[0])] = (int(parts[1]), parts[2] if len(parts) > 2 else "")
+    pid, seen = os.getpid(), set()
+    while pid in table and pid not in seen and pid > 1:
+        seen.add(pid)
+        ppid, cmd = table[pid]
+        words = cmd.split()
+        prog = os.path.basename(words[0]) if words else ""
+        if pid != os.getpid() and (prog in _AGENT_PROGRAMS or _AGENT_ENTRY.search(cmd)):
+            return f"it runs under an agent process ({prog or 'unnamed'}, pid {pid})"
+        pid = ppid
+    return None
+
+
+def human_tty_refusal(stdin_isatty: bool | None = None) -> str | None:
+    """None for an interactive terminal that is not an agent harness, else the reason (ADR-05, threat T2). A heuristic for "not obviously an
+    agent": an agent that allocates a pty, removes its environment and detaches from its parent passes it (docs/05 T2, W-38)."""
     if agent_env_present():
-        return False
+        return "an agent harness is present in the environment"
     if stdin_isatty is None:
         try:
             stdin_isatty = sys.stdin.isatty() and sys.stdout.isatty()
         except (AttributeError, ValueError):
             stdin_isatty = False
-    return bool(stdin_isatty)
+    if not stdin_isatty:
+        return "stdin and stdout are not an interactive terminal"
+    return agent_ancestor()
+
+
+def is_human_tty(stdin_isatty: bool | None = None) -> bool:
+    return human_tty_refusal(stdin_isatty) is None
 
 
 def session_id() -> str:

@@ -28,6 +28,7 @@ Resumable side states: `WAITING_HUMAN`, `WAITING_DEPENDENCY`, `RETRY_SCHEDULED`.
 | ABSTAINED / NEEDS_EVIDENCE | `add_evidence` | new `evidence_refs` ⇒ new `context_fingerprint`; revision_count < max (3) | EVALUATING | agent |
 | ABSTAINED | `escalate` | risk ≥ medium, or revision_count = max | WAITING_HUMAN | runtime |
 | NEEDS_REVISION | `revise` | plan changed ⇒ new `plan_hash`; revision_count < max | VALIDATED | agent |
+| NEEDS_REVISION | `escalate` | revision_count reached the max (the exit the `revise` refusal points to) | WAITING_HUMAN | agent |
 | ACCEPTED | `authorize` | risk < high **or** permit `ISSUED`, unexpired, unused, `plan_hash` equal, no safety-invariant match | AUTHORIZED | runtime |
 | ACCEPTED | `authorize` fails | permit missing/PENDING | WAITING_HUMAN | runtime |
 | AUTHORIZED | `execute` | PreToolUse hook sees matching command; permit nonce consumed in same transaction | EXECUTING | hook |
@@ -39,15 +40,19 @@ Resumable side states: `WAITING_HUMAN`, `WAITING_DEPENDENCY`, `RETRY_SCHEDULED`.
 | FAILED | `compensate` / `rollback` | compensation plan ref present | COMPENSATED / ROLLED_BACK | agent |
 | OUTCOME_UNKNOWN | `reconcile` | external state read and attached | VERIFYING | agent |
 | WAITING_HUMAN | `human_answer` | from TTY (`jade permit approve` / `jade decide answer`) | previous state re-entered | human |
-| WAITING_* / RETRY_SCHEDULED | `deadline` | `expires_at` passed | EXPIRED | runtime (SessionStart sweep) |
-| any non-terminal | `cancel` | reason | CANCELLED | agent/human |
+| any state that waits (everything non-terminal except EXECUTING, VERIFYING, OUTCOME_UNKNOWN) | `deadline` | `expires_at` passed (refused before) | EXPIRED, and the decision's open permits are revoked | runtime (sweep on SessionStart, daily, and at every gated PreToolUse) |
+| EXECUTING / VERIFYING | `deadline` | `expires_at` passed with no outcome | `observe` then `unknown`, or `unknown`: OUTCOME_UNKNOWN, never SUCCEEDED and never EXPIRED (SI-07) | runtime (sweep) |
+| any non-terminal | `cancel` | reason; revokes the decision's open permits. From EXECUTING, VERIFYING or OUTCOME_UNKNOWN it lifts the SI-07 hold, so it needs a human terminal | CANCELLED | agent/human |
 
 Rules enforced in code:
 - No edge from EVALUATING or ACCEPTED to EXECUTING. `jade hook pretool` checks `AUTHORIZED`.
 - `ACCEPTED` is a quality judgment; `AUTHORIZED` is a permission fact; `SUCCEEDED` needs `observed`. An *estimated* outcome can at most produce `VERIFYING`, never `SUCCEEDED`.
 - `OUTCOME_UNKNOWN` blocks automatic retry of irreversible actions: `retry` is only legal after `reconcile`.
 - Bounded loops: `revision_count ≤ 3`, provider retries ≤ 2, `expires_at` mandatory on every non-terminal state (default 24 h; permits 30 min).
-- Concurrency: one writer (SQLite `BEGIN IMMEDIATE`); a decision is owned by the `session_id` that opened it; another session may only `cancel` or `human_answer`.
+- Concurrency: one writer (SQLite `BEGIN IMMEDIATE`; a nested step is a savepoint, so a permit consume and its decision steps commit or roll back together); a decision is owned by the `session_id` that opened it; another session may only `cancel` or answer for the human (enforced by `state_machine.apply` for every CLI call, which passes `caller_session`).
+- Who may send what through `jade decide event`: an agent session sends evaluation results, evidence, `escalate`, `authorize`, `cancel`, and `execute` below risk `high`. `execute` at risk >= high belongs to the hook (a matching command and a consumed permit); `observe`, `verified`, `failed`, `unknown` and `reconcile` follow only from `jade decide outcome`, which stores the observation first; `deadline` and `context_changed` are the runtime's; the `human_*` events need a human terminal. `SUCCEEDED` is refused unless the latest outcome row is `observed` with `success=true`, whoever calls.
+- A permit lives only while its decision does: a decision that is cancelled, expired or finished revokes its PENDING and ISSUED permits in the same transaction, approval and use are refused for a decision that is not WAITING_HUMAN or AUTHORIZED, and a changed `policy_version` revokes every open permit (docs/05 T6, T20).
+- `plan_hash` is sha256 of the canonical JSON of the tool, the command or path as written (leading and trailing whitespace trimmed, nothing inside folded) and the symlink-resolved cwd.
 - Re-evaluation triggers: changed `plan_hash`, `policy_version`, `resolved_model`, or precondition fingerprint.
 
 ## 3. Contracts

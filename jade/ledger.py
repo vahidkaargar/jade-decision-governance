@@ -61,6 +61,7 @@ class Ledger:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.timeout = float(timeout)
+        self._depth = 0
         self.con = sqlite3.connect(self.path, timeout=self.timeout, isolation_level=None)
         self.con.row_factory = sqlite3.Row
         self._init()
@@ -98,8 +99,25 @@ class Ledger:
 
     @contextmanager
     def tx(self):
-        """One immediate write transaction; rolls back on any exception."""
+        """One immediate write transaction; rolls back on any exception. Re-entrant: a `tx()` opened inside another one is a savepoint, so a
+        multi-step flow (consume a permit and advance its decision) commits or rolls back as a whole while each step stays usable alone."""
+        if self._depth:
+            name = f"sp{self._depth}"
+            self.con.execute(f"SAVEPOINT {name}")  # noqa: S608 - constant name
+            self._depth += 1
+            try:
+                yield self.con
+            except BaseException:
+                self.con.execute(f"ROLLBACK TO {name}")
+                self.con.execute(f"RELEASE {name}")
+                raise
+            else:
+                self.con.execute(f"RELEASE {name}")
+            finally:
+                self._depth -= 1
+            return
         self.con.execute("BEGIN IMMEDIATE")
+        self._depth = 1
         try:
             yield self.con
         except BaseException:
@@ -107,6 +125,8 @@ class Ledger:
             raise
         else:
             self.con.execute("COMMIT")
+        finally:
+            self._depth = 0
 
     def one(self, sql: str, args=()):
         return _ns(self.con.execute(sql, args).fetchone())

@@ -14,12 +14,14 @@ ROWS = [
     ("EVALUATING", "deep_accept", "ACCEPTED", "low"), ("EVALUATING", "deep_revise", "NEEDS_REVISION", "low"),
     ("ABSTAINED", "add_evidence", "EVALUATING", "low"), ("NEEDS_EVIDENCE", "add_evidence", "EVALUATING", "low"),
     ("ABSTAINED", "escalate", "WAITING_HUMAN", "medium"), ("NEEDS_REVISION", "revise", "VALIDATED", "low"),
+    ("NEEDS_REVISION", "escalate", "WAITING_HUMAN", "low"),
     ("ACCEPTED", "authorize", "AUTHORIZED", "low"), ("ACCEPTED", "authorize_without_permit_high_risk", "WAITING_HUMAN", "high"),
     ("AUTHORIZED", "execute", "EXECUTING", "low"), ("AUTHORIZED", "context_changed", "NEEDS_REVISION", "low"),
     ("EXECUTING", "observe", "VERIFYING", "low"), ("VERIFYING", "verified", "SUCCEEDED", "low"), ("VERIFYING", "failed", "FAILED", "low"),
     ("VERIFYING", "unknown", "OUTCOME_UNKNOWN", "low"), ("FAILED", "compensate", "COMPENSATED", "low"), ("FAILED", "rollback", "ROLLED_BACK", "low"),
     ("OUTCOME_UNKNOWN", "reconcile", "VERIFYING", "low"), ("WAITING_HUMAN", "human_accept", "ACCEPTED", "low"),
     ("WAITING_HUMAN", "human_reject", "REJECTED", "low"), ("RETRY_SCHEDULED", "resume", "EVALUATING", "low"),
+    ("EVALUATING", "deadline", "EXPIRED", "low"), ("AUTHORIZED", "deadline", "EXPIRED", "low"), ("NEEDS_REVISION", "deadline", "EXPIRED", "low"),
 ]
 
 
@@ -32,7 +34,7 @@ def test_state_machine_transitions(src, event, dst, risk):
 @pytest.mark.parametrize("src,event", [
     ("EVALUATING", "execute"), ("ACCEPTED", "execute"), ("OUTCOME_UNKNOWN", "retry"), ("ABSTAINED", "authorize"), ("ACCEPTED", "verified"),
     ("EXECUTING", "verified"), ("OUTCOME_UNKNOWN", "verified"), ("VERIFYING", "execute"), ("REJECTED", "authorize"), ("CLASSIFIED", "authorize"),
-    ("SUCCEEDED", "cancel"), ("EVALUATING", "deadline"), ("ACCEPTED", "human_answer")])
+    ("SUCCEEDED", "cancel"), ("EXECUTING", "deadline"), ("ACCEPTED", "human_answer"), ("VERIFYING", "deadline"), ("OUTCOME_UNKNOWN", "deadline")])
 def test_forbidden_edges(src, event):
     with pytest.raises(state_machine.IllegalTransition):
         state_machine.next_state(src, event, risk="low")
@@ -90,16 +92,16 @@ def test_duplicate_delivery_idempotent():
 
 def test_permit_single_use_and_ttl(tmp_path):
     p = permits.issue(tmp_path, action="git.commit", plan_hash="f" * 64, ttl_s=1800, risk="low")
-    assert permits.consume(tmp_path, p.permit_id, plan_hash="f" * 64)
-    assert not permits.consume(tmp_path, p.permit_id, plan_hash="f" * 64)
+    assert permits.consume(tmp_path, p.permit_id, plan_hash="f" * 64, level="low")
+    assert not permits.consume(tmp_path, p.permit_id, plan_hash="f" * 64, level="low")
     q = permits.issue(tmp_path, action="git.commit", plan_hash="e" * 64, ttl_s=1, risk="low")
     ledger.open(tmp_path).con.execute("UPDATE permits SET expires_at='2000-01-01T00:00:00Z' WHERE permit_id=?", (q.permit_id,))
-    assert not permits.consume(tmp_path, q.permit_id, plan_hash="e" * 64)
+    assert not permits.consume(tmp_path, q.permit_id, plan_hash="e" * 64, level="low")
 
 
 def test_permit_plan_hash_mismatch_blocks(tmp_path):
     p = permits.issue(tmp_path, action="git.commit", plan_hash="f" * 64, ttl_s=1800, risk="low")
-    assert not permits.consume(tmp_path, p.permit_id, plan_hash="e" * 64)
+    assert not permits.consume(tmp_path, p.permit_id, plan_hash="e" * 64, level="low")
     assert permits.get(tmp_path, p.permit_id).state == "ISSUED"
 
 
@@ -111,7 +113,7 @@ def test_high_risk_cannot_be_issued_directly(tmp_path):
 
 def test_pending_permit_cannot_be_consumed(tmp_path):
     p = permits.request(tmp_path, action="git.push", plan_hash="f" * 64, risk="high")
-    assert p.state == "PENDING" and not permits.consume(tmp_path, p.permit_id, plan_hash="f" * 64)
+    assert p.state == "PENDING" and not permits.consume(tmp_path, p.permit_id, plan_hash="f" * 64, level="high")
 
 
 def test_approve_refuses_non_tty(tmp_path, agent_env):
@@ -127,7 +129,7 @@ def test_approve_from_human_terminal_sets_tty_reference(tmp_path, human_env):
     p = permits.request(tmp_path, action="git.push", plan_hash="f" * 64, risk="high")
     ok = permits.approve(tmp_path, p.permit_id, stdin_isatty=True)
     assert ok.state == "ISSUED" and ok.approval_reference.startswith("tty:") and ok.principal.startswith("human:")
-    assert permits.consume(tmp_path, p.permit_id, plan_hash="f" * 64)
+    assert permits.consume(tmp_path, p.permit_id, plan_hash="f" * 64, level="high")
 
 
 def push(cmd="git push origin feat/x"):

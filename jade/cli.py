@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from . import __version__, ask, ledger, paths, questions
-from .util import is_human_tty, session_id, ts
+from .util import human_tty_refusal, is_human_tty, session_id, ts
 
 LEGACY = ("verify", "noul", "choice", "score")
 
@@ -126,20 +126,18 @@ def _stats(a) -> int:
 
 
 def _permit(a) -> int:
-    from . import permits, policy
+    from . import decide, hooks, permits, policy
 
     db = ledger.open()
     if a.action == "list":
         for p in permits.listing(db, ("PENDING", "ISSUED") if not a.all else ("PENDING", "ISSUED", "CONSUMED", "REVOKED", "EXPIRED")):
-            print(f"{p.permit_id}  {p.state:8} {p.risk_level:8} expires {p.expires_at}  {_subject(p)[:100]}")
+            print(f"{p.permit_id}  {p.state:8} {p.risk_level:8} expires {p.expires_at}  {permits.printable(_subject(p))[:100].replace(chr(10), ' ')}")
         return 0
     if a.action == "request":
-        assess = policy.assess("Bash", {"command": a.command}, a.cwd or str(Path.cwd()))
-        from . import decide
-
+        cwd = a.cwd or str(Path.cwd())
+        assess = policy.assess("Bash", {"command": a.command}, cwd)
         p = permits.request(db, decide.canonical_action(assess.rule_id, a.command), assess.plan_hash, risk=assess.level if assess.level in ("high", "critical") else "high",
-                            scope=json.dumps({"tool": "Bash", "subject": a.command, "cwd": a.cwd or str(Path.cwd()), "rule": assess.rule_id, "rationale": assess.rationale}),
-                            environment=assess.environment)
+                            context=permits.make_context("Bash", assess, cwd=cwd), fingerprints=hooks.fingerprints(a.command, cwd), environment=assess.environment)
         print(f"{p.permit_id} PENDING. A human approves it in a terminal: jade permit approve {p.permit_id}")
         return 0
     p = permits.get(db, a.permit_id)
@@ -153,13 +151,14 @@ def _permit(a) -> int:
         print("revoked" if permits.revoke(db, a.permit_id, "revoked from CLI") else "nothing to revoke")
         return 0
     try:  # approve
-        if not is_human_tty():
-            raise permits.ApprovalRefused("permit approval needs a human at an interactive terminal; an agent session cannot approve")
-        ctx = _context(p)
-        print(f"Permit   {p.permit_id}   risk {p.risk_level}   environment {p.environment}\nRule     {ctx.get('rule', '?')}: {ctx.get('rationale', '')}\n"
-              f"Tool     {ctx.get('tool', '?')}   cwd {ctx.get('cwd', '')}\nCommand  {ctx.get('subject', p.authorized_action)}\n"
-              f"Approving allows exactly this call once within {p.ttl_s // 60} minutes.")
-        if not a.yes and input("Approve? [y/N] ").strip().lower() not in ("y", "yes"):
+        why = human_tty_refusal()
+        if why:
+            raise permits.ApprovalRefused(f"permit approval needs a human at an interactive terminal; an agent session cannot approve ({why})")
+        if a.yes and permits.at_least(p.risk_level, "high"):
+            raise permits.PermitError("-y is not accepted for a high or critical permit: read the command, then type the code shown")
+        print(permits.review_text(p))  # raises instead of showing a command that was cut or does not match the plan hash
+        code = p.plan_hash[:6]
+        if input(f"Type {code} to approve, anything else to refuse: ").strip().lower() != code:
             print("not approved")
             return 1
         p = permits.approve(db, a.permit_id)
@@ -170,15 +169,10 @@ def _permit(a) -> int:
         return 1
 
 
-def _context(p) -> dict:
-    try:
-        return json.loads(p.scope)
-    except (TypeError, ValueError):
-        return {}
-
-
 def _subject(p) -> str:
-    return _context(p).get("subject", p.authorized_action)
+    from . import permits
+
+    return permits.ctx_of(p).get("subject", p.authorized_action)
 
 
 def _decide(a) -> int:
@@ -206,14 +200,26 @@ def _decide(a) -> int:
     try:
         if a.action == "outcome":
             success = None if a.type == "unknown" else a.success == "true"
-            out = decide.record_outcome(db, a.decision_id, a.type, success, a.method, evidence_refs=a.evidence)
+            out = decide.record_outcome(db, a.decision_id, a.type, success, a.method, evidence_refs=a.evidence, caller_session=session_id())
             print(json.dumps({"outcome_id": out["outcome_id"], "status": decide.get(db, a.decision_id)["status"]}))
             return 0
         event = a.event
-        if event in state_machine.HUMAN_EVENTS and not is_human_tty():
-            print("jade: human events need an interactive terminal", file=sys.stderr)
+        row = db.one("SELECT status, risk_level FROM decisions WHERE decision_id=?", (a.decision_id,))
+        if row is None:
+            print(f"jade: refused: unknown decision {a.decision_id}", file=sys.stderr)
             return 1
-        res = decide.step(db, a.decision_id, event, guard=a.note or "", actor="human" if event in state_machine.HUMAN_EVENTS else "agent")
+        human = event in state_machine.HUMAN_EVENTS or (event == "cancel" and row.status in state_machine.HOLDING)
+        if human:
+            why = human_tty_refusal()
+            if why:
+                print(f"jade: {'human events' if event in state_machine.HUMAN_EVENTS else 'cancelling a decision whose outcome is unknown or still running (it lifts the SI-07 hold)'} "
+                      f"need an interactive human terminal ({why})", file=sys.stderr)
+                return 1
+        elif not state_machine.agent_may(event, row.status, row.risk_level):
+            print(f"jade: refused: '{event}' is not an event an agent session may send. Evaluation results, evidence, escalation and cancel are; "
+                  "execution is the hook's job (with a permit at risk >= high), and verified/failed/unknown follow only from `jade decide outcome`.", file=sys.stderr)
+            return 1
+        res = decide.step(db, a.decision_id, event, guard=a.note or "", actor="human" if human else "agent", caller_session=session_id())
         print(json.dumps({"decision_id": a.decision_id, "status": res.status}))
         return 0
     except (state_machine.IllegalTransition, ValueError) as e:

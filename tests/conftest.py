@@ -9,8 +9,9 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("JADE_CLAUDE_SETTINGS", str(tmp_path / "settings.json"))
     monkeypatch.delenv("JADE_GATE_MODE", raising=False)
     monkeypatch.delenv("JADE_SESSION_ID", raising=False)
-    from jade import policy, questions, thresholds
+    from jade import policy, questions, thresholds, util
 
+    monkeypatch.setattr(util, "agent_ancestor", lambda: None)  # the test run itself may sit under an agent; tests of the real walk patch `ps`
     for fn in (policy.reset_cache, questions.reset_cache, thresholds.escalation.cache_clear):
         fn()
     yield

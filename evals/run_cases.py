@@ -66,14 +66,64 @@ def run_case(c: dict) -> list[str]:
             ev["tool_input"] = {**ev["tool_input"], "content": "".join(c["content_parts"])}
         ev.update(c.get("event", {}))  # extra host fields: permission_mode, agent_id
         res = hooks.pretool(ev)
-        want = 2 if c["expect"] == "block" else 0
+        want = 2 if c.get("expect") == "block" else 0
         if res.exit_code != want:
             problems.append(f"gate exit {res.exit_code}, expected {want} ({res.stderr[:80]!r})")
         for inv in c.get("expect_blocked", []):
             if inv not in res.stderr:
                 problems.append(f"expected invariant {inv} in the block message")
+    elif kind in ("permit_variant", "permit_forged", "decide_walk"):
+        problems += _run_lifecycle(c)
     else:
         problems.append(f"unknown case kind {kind}")
+    return problems
+
+
+def _run_lifecycle(c: dict) -> list[str]:
+    """Permit and decision-lifecycle cases (review cluster B). `permit_variant`: a human approves a permit for `command`, the hook then sees
+    `variant`; `permit_forged`: a row nobody approved (`claim_risk`) exists for `command`; `decide_walk`: an agent sends `events` through
+    `jade decide event`. The human terminal is simulated by replacing the ancestry probe; nothing here touches a real terminal or ledger."""
+    import contextlib
+    import io
+
+    from jade import cli, decide, hooks, ledger, permits, policy, util
+
+    problems: list[str] = []
+    real, real_cli = util.agent_ancestor, cli.human_tty_refusal
+    util.agent_ancestor = lambda: None
+    try:
+        db = ledger.open()
+        ev = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}, "session_id": "case-session", "cwd": "/tmp/case"}  # noqa: E731
+        want = 2 if c.get("expect") == "block" else 0
+        if c["kind"] == "permit_variant":
+            if hooks.pretool(ev(c["command"])).exit_code != 2:
+                problems.append("the command was not blocked before approval")
+            permits.approve(db, permits.listing(db, ("PENDING",))[-1].permit_id, stdin_isatty=True)
+            res = hooks.pretool(ev(c["variant"]))
+            if res.exit_code != want:
+                problems.append(f"variant exit {res.exit_code}, expected {want}")
+        elif c["kind"] == "permit_forged":
+            a = policy.assess("Bash", {"command": c["command"]}, "/tmp/case")
+            permits.issue(db, "forged.action", a.plan_hash, risk=c.get("claim_risk", "low"))
+            res = hooks.pretool(ev(c["command"]))
+            if res.exit_code != want:
+                problems.append(f"gate exit {res.exit_code}, expected {want} with a forged {c.get('claim_risk', 'low')} permit")
+        else:
+            os.environ["JADE_SESSION_ID"] = "case-session"
+            cli.human_tty_refusal = lambda *a, **k: "agent session"
+            with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+                cli.main(["decide", "open", "--objective", "an objective long enough", *(["--command", c["command"]] if c.get("command") else [])])
+                did = json.loads(out.getvalue().strip().splitlines()[-1])["decision_id"]
+                for e in c["events"]:
+                    cli.main(["decide", "event", did, e])
+            status = decide.get(db, did)["status"]
+            if status == c["expect_status_not"]:
+                problems.append(f"an agent reached {status} through `jade decide event`")
+            if db.one("SELECT COUNT(*) AS n FROM outcomes").n:
+                problems.append("an outcome row exists that no one recorded")
+    finally:
+        util.agent_ancestor, cli.human_tty_refusal = real, real_cli
+        os.environ.pop("JADE_SESSION_ID", None)
     return problems
 
 
@@ -86,7 +136,7 @@ def main(files: list[str]) -> int:
             c = json.loads(line)
             with tempfile.TemporaryDirectory() as d:
                 os.environ.update(JADE_HOME=d, JADE_CONFIG=d, JADE_GATE_MODE="enforce")
-                for k in ("CLAUDECODE", "CLAUDE_CODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT"):
+                for k in __import__("jade.util", fromlist=["AGENT_ENV"]).AGENT_ENV:
                     os.environ.pop(k, None)
                 from jade import policy, questions, thresholds
 

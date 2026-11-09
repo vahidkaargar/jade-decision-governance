@@ -46,3 +46,6 @@
 {"id": "R46", "class": "interface_only_mcp_tool_is_low", "kind": "gate_mcp", "tool": "mcp__ccd_sidebar__set_pinned", "input": {"pinned": true}, "expect": "allow", "note": "G01 pass 2 control"}
 {"id": "R47", "class": "camel_case_read_tool_is_low", "kind": "gate_mcp", "tool": "mcp__x__getThing", "input": {}, "expect": "allow", "note": "G01 pass 2 control"}
 {"id": "R48", "class": "uv_run_pytest_is_low", "kind": "gate", "command": "uv run pytest -q", "expect": "allow", "note": "launcher prefix control"}
+{"id": "R49", "class": "permit_is_for_the_exact_text", "kind": "permit_variant", "command": "git push origin feat-x", "variant": "git push origin feat-x", "expect": "allow", "note": "F08 control: the approved text itself still passes"}
+{"id": "R50", "class": "ordinary_jade_commands_are_not_si09", "kind": "gate", "command": "uv run jade permit list", "expect": "allow", "note": "F06 control: widened SI-09 leaves `jade permit list` alone"}
+{"id": "R51", "class": "quoted_prose_naming_approve_is_not_si09", "kind": "gate", "command": "git commit -m 'document jade permit approve'", "expect": "allow", "note": "F06 control"}

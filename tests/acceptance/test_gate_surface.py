@@ -279,7 +279,7 @@ def test_si06_a_production_release_is_never_auto_issued(cmd):
     assert a.level == "critical"
     states = {p.state for p in permits.listing(db, ("PENDING", "ISSUED", "CONSUMED"))}
     assert states == {"PENDING"}
-    assert permits.find_usable(db, a.plan_hash) is None
+    assert permits.find_usable(db, a.plan_hash, level="critical") is None
     pend = permits.listing(db, ("PENDING",))[0]
     assert decide.get(db, pend.decision_id)["status"] == "WAITING_HUMAN"
 

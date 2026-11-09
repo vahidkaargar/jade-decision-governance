@@ -48,7 +48,7 @@ From then on a high or critical call stops with a pending permit id. You approve
 
 ```bash
 jade permit list
-jade permit approve prm_xxxxxxxxxxxx     # shows the exact command; type y
+jade permit approve prm_xxxxxxxxxxxx     # shows the whole command, its length and the plan hash; type the 6-character code shown (no -y)
 ```
 
 Single use, 30 minutes, bound to the exact command text and working directory. A safety invariant (for example pushing the default branch) cannot be approved. Claude Code's own permission prompt is a second, independent gate only when the host asks: with `bypassPermissions`, `auto`, headless runs and unattended subagents JADE's gate is the only gate (section 4).

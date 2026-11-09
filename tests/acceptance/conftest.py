@@ -8,5 +8,7 @@ def agent_env(monkeypatch):
 
 @pytest.fixture
 def human_env(monkeypatch):
-    for k in ("CLAUDECODE", "CLAUDE_CODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT", "CURSOR_AGENT", "CODEX_SANDBOX"):
+    from jade.util import AGENT_ENV
+
+    for k in AGENT_ENV:
         monkeypatch.delenv(k, raising=False)

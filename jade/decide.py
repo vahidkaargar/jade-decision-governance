@@ -75,9 +75,12 @@ def link_evaluation(db: ledger.Ledger, decision_id: str, call_id: str, verdict: 
 
 
 def record_outcome(db: ledger.Ledger, decision_id: str, observation_type: str, success: bool | None, method: str, *,
-                   evidence_refs: list[str] | None = None, measurements: dict | None = None, attribution: str = "direct") -> dict:
+                   evidence_refs: list[str] | None = None, measurements: dict | None = None, attribution: str = "direct",
+                   caller_session: str | None = None) -> dict:
     """Store an outcome and advance the decision. Only an *observed* success reaches SUCCEEDED;
-    an estimate stays in VERIFYING and an unknown result becomes OUTCOME_UNKNOWN (never success)."""
+    an estimate stays in VERIFYING and an unknown result becomes OUTCOME_UNKNOWN (never success). The observe step, the outcome row and the
+    closing step are one transaction: a crash leaves the decision where it was, not in VERIFYING with nothing recorded.
+    `caller_session` (the CLI passes it) must be the session that opened the decision."""
     if observation_type == "unknown":
         success = None
     elif success is None:
@@ -87,39 +90,46 @@ def record_outcome(db: ledger.Ledger, decision_id: str, observation_type: str, s
            "attribution_quality": attribution, "observed_at": ts(), "evidence_refs": [str(e)[:512] for e in (evidence_refs or [])],
            "success": success}
     schemas.validate("outcome", out)
-    row = db.one("SELECT status FROM decisions WHERE decision_id=?", (decision_id,))
-    if row is None:
-        raise state_machine.IllegalTransition(f"unknown decision {decision_id}")
-    if row.status == "OUTCOME_UNKNOWN":
-        step(db, decision_id, "reconcile", guard="external state read", actor="agent")
-    elif row.status == "EXECUTING":
-        step(db, decision_id, "observe", guard=f"outcome {out['outcome_id']}", actor="agent")
-    elif row.status != "VERIFYING":
-        raise state_machine.IllegalTransition(f"cannot record an outcome in status {row.status}")
-    with db.tx() as con:
-        con.execute("INSERT INTO outcomes(outcome_id, decision_id, doc_json, ts) VALUES(?,?,?,?)",
-                    (out["outcome_id"], decision_id, json.dumps(out, ensure_ascii=False), ts()))
-    if observation_type == "unknown":
-        step(db, decision_id, "unknown", guard="observation_type=unknown")
-    elif success is False:
-        step(db, decision_id, "failed", guard="success=false")
-    elif observation_type == "observed":
-        step(db, decision_id, "verified", guard="observed and success=true")
+    who = {"caller_session": caller_session} if caller_session is not None else {}
+    with db.tx():
+        row = db.one("SELECT status FROM decisions WHERE decision_id=?", (decision_id,))
+        if row is None:
+            raise state_machine.IllegalTransition(f"unknown decision {decision_id}")
+        if row.status == "OUTCOME_UNKNOWN":
+            step(db, decision_id, "reconcile", guard="external state read", actor="agent", **who)
+        elif row.status == "EXECUTING":
+            step(db, decision_id, "observe", guard=f"outcome {out['outcome_id']}", actor="agent", **who)
+        elif row.status != "VERIFYING":
+            raise state_machine.IllegalTransition(f"cannot record an outcome in status {row.status}")
+        with db.tx() as con:
+            con.execute("INSERT INTO outcomes(outcome_id, decision_id, doc_json, ts) VALUES(?,?,?,?)",
+                        (out["outcome_id"], decision_id, json.dumps(out, ensure_ascii=False), ts()))
+        if observation_type == "unknown":
+            step(db, decision_id, "unknown", guard="observation_type=unknown", **who)
+        elif success is False:
+            step(db, decision_id, "failed", guard="success=false", **who)
+        elif observation_type == "observed":
+            step(db, decision_id, "verified", guard="observed and success=true", **who)
     return out
 
 
 def sweep(db: ledger.Ledger) -> dict:
-    """Expire waiting decisions and stale executions past their deadline (SessionStart and daily maintenance)."""
+    """End decisions past their deadline (SessionStart and daily maintenance): a state that waits for something that never came expires; an
+    execution or verification with no outcome becomes OUTCOME_UNKNOWN, never success and never merely expired (SI-07)."""
     now_s, n = ts(), {"expired": 0, "unknown": 0}
     for row in db.all("SELECT decision_id, status FROM decisions WHERE expires_at < ?", (now_s,)):
         try:
-            if row.status in state_machine.WAITING:
-                step(db, row.decision_id, "deadline", guard="expires_at passed")
-                n["expired"] += 1
-            elif row.status == "EXECUTING":
-                step(db, row.decision_id, "observe", guard="deadline without outcome")
-                step(db, row.decision_id, "unknown", guard="no outcome recorded before deadline")
-                n["unknown"] += 1
+            with db.tx():
+                if row.status in state_machine.EXPIRES:
+                    step(db, row.decision_id, "deadline", guard="expires_at passed")
+                    n["expired"] += 1
+                elif row.status == "EXECUTING":
+                    step(db, row.decision_id, "observe", guard="deadline without outcome")
+                    step(db, row.decision_id, "unknown", guard="no outcome recorded before deadline")
+                    n["unknown"] += 1
+                elif row.status == "VERIFYING":
+                    step(db, row.decision_id, "unknown", guard="deadline while verifying: no verdict recorded")
+                    n["unknown"] += 1
         except state_machine.IllegalTransition:
             continue
     return n
