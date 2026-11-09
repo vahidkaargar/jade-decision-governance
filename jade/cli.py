@@ -432,7 +432,8 @@ def _ops(a) -> int:
                 print("\n".join(f"{'installed' if v else 'MISSING  '}  {k}" for k, v in st.items()))
                 return 0 if all(st.values()) else 1
             if a.action == "install":
-                print(f"hooks installed in {ops.settings_path()} (backup {ops.hooks_install()}). New sessions pick them up.")
+                backup = ops.hooks_install()
+                print(f"hooks installed in {ops.settings_path()} ({f'backup {backup}' if backup else 'no earlier file, no backup'}). New sessions pick them up.")
             else:
                 print(f"removed {ops.hooks_uninstall()} hook entr(ies)")
         elif a.cmd == "gate":
@@ -447,7 +448,7 @@ def _ops(a) -> int:
             else:
                 print(f"CLAUDE.md Jev section replaced (backup {ops.claude_md_apply()})")
         return 0
-    except ops.HumanOnly as e:
+    except (ops.HumanOnly, ops.WiringError, ValueError, OSError) as e:
         print(f"jade: {e}", file=sys.stderr)
         return 1
 

@@ -354,11 +354,7 @@ def test_attaching_an_evaluation_advances_the_decision():
     assert r2.exit_code == 5 and decide.get(db, d2["decision_id"])["status"] == "NEEDS_EVIDENCE"
 
 
-def test_check_exits_nonzero_on_dead_wiring_and_zero_when_wired(human_env, monkeypatch, tmp_path, capsys):
-    fake = tmp_path / "jev"
-    fake.write_text("#!/bin/sh\n# jade shim\nexec jade ask \"$@\"\n")
-    fake.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+def test_check_exits_nonzero_on_dead_wiring_and_zero_when_wired(human_env, jade_stub, capsys):
     rows = ops.check(live=False)
     assert ops.print_check(rows) == 1 and "hooks installed" in capsys.readouterr().err  # hooks missing
     ops.hooks_install(stdin_isatty=True)

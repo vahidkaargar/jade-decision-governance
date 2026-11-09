@@ -43,6 +43,11 @@ invariants:
     enforcement: "every permit that can be used carries an HMAC over its fields (permits.py), made with a key in the JADE home next to the ledger (permit-seal.key, mode 600). A row edited with SQL then fails at use. The key is a same-user file, so this raises the bar and does not remove it (docs/05 T19): the command text that names it is blocked, a script that reads it is not seen"
     match_on: raw
     block: "permit-seal\\.key"
+  - id: SI-11
+    description: "The agent never sets the variables that move the gate: JADE_GATE_MODE, JADE_POLICY_DIR, JADE_CONFIG, JADE_HOME"
+    enforcement: "JADE_GATE_MODE (also SI-09, which sees only a command that is not read-only) lowers the mode. The other three point the hook at another policy directory, another configuration (gate_mode and the local overlays) or another ledger (pins, the permit seal key, SI-07 history). A variable in an agent's own command reaches only that command's children, so the lasting routes are a shell profile, `launchctl setenv`, a LaunchAgent plist or the `env` block of a Claude settings file; this invariant matches the assignment wherever it is written in a command, read-only commands and `export` included (raw text, like SI-10), and R-13 gates the settings files. `jade check` reports each of them (row `gate overrides`, including the settings `env` block), and the SessionStart hook shows and journals one that is in force (event `gate_override`). Residual: an assignment built at run time, a file an agent wrote first, or an edit to a profile that names no variable the agent had to spell out (docs/05 T19)"
+    match_on: raw
+    block: "\\bJADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME)\\s*=|\\bsetenv\\s+[\\x22\\x27]?JADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME)\\b"
 protected_targets:
   - policies/safety.yaml
   - policies/promotion.yaml

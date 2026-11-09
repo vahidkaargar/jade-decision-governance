@@ -7,7 +7,10 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("JADE_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("JADE_CONFIG", str(tmp_path / "config"))
     monkeypatch.setenv("JADE_CLAUDE_SETTINGS", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("JADE_LAUNCH_AGENTS", str(tmp_path / "LaunchAgents"))   # never the real ~/Library/LaunchAgents
     monkeypatch.delenv("JADE_GATE_MODE", raising=False)
+    monkeypatch.delenv("JADE_POLICY_DIR", raising=False)
+    monkeypatch.delenv("JADE_ACK_OVERRIDES", raising=False)
     monkeypatch.delenv("JADE_SESSION_ID", raising=False)
     from jade import policy, questions, thresholds, util
 

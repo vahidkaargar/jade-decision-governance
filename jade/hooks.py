@@ -441,6 +441,21 @@ def stop(event: dict) -> HookResult:
         db.close()
 
 
+def _override_notice(db, event: dict) -> list[str]:
+    """Environment overrides in force for this hook process that weaken the gate (docs/05 T19, G05): a different policy directory, configuration or
+    ledger, or a gate mode below enforce. They are shown to the session and journaled once per session, so a weakened gate is never silent."""
+    weak = [o for o in paths.gate_overrides() if o.weakens]
+    if not weak:
+        return []
+    names = ", ".join(f"{o.var}={o.value}" for o in weak)
+    try:
+        db.event("gate", "gate_override", guard=names, actor="hook", key=f"gate_override:{event.get('session_id') or '-'}:{names}",
+                 detail={"session": event.get("session_id"), "overrides": [{"var": o.var, "value": o.value, "why": o.why} for o in weak]})
+    except Exception:  # noqa: BLE001, S110 - journaling must never change the hook's answer
+        pass
+    return [f"JADE: gate override in force in the hook environment ({names}); it weakens the gate. `jade check` lists it, unset it unless a human set it on purpose."]
+
+
 def session_start(event: dict) -> HookResult:
     from . import decide, ledger, permits
 
@@ -448,7 +463,7 @@ def session_start(event: dict) -> HookResult:
     try:
         decide.sweep(db)
         permits.sweep(db)
-        out = []
+        out = _override_notice(db, event)
         pend = permits.listing(db, ("PENDING",))
         if pend:
             out.append(f"JADE: {len(pend)} permit(s) awaiting human approval: " + ", ".join(p.permit_id for p in pend[:5]))

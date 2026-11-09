@@ -24,7 +24,7 @@ jade gate advisory
 jade hooks install
 ```
 
-`hooks install` backs up `~/.claude/settings.json` next to itself, adds four hook entries (PreToolUse for Bash, PowerShell, Monitor, file edits, RemoteTrigger and MCP tools; PostToolUse for Bash; Stop; SessionStart). An install made before the matcher grew shows `pretool matcher` as FAIL in `jade check`; run `jade hooks install` again, and leaves other hooks alone. Hooks are read at session start: open a new Claude Code session afterwards.
+`hooks install` backs up `~/.claude/settings.json` next to itself (`settings.json.bak-jade-<time>`; a second run in the same second gets a `-1` suffix, a backup is never overwritten), writes the file atomically (temp file in the same directory, then rename; a symlink stays a symlink and the target keeps its permission bits, a new file is 0600), adds four hook entries (PreToolUse for Bash, PowerShell, Monitor, file edits, RemoteTrigger and MCP tools; PostToolUse for Bash; Stop; SessionStart). An install made before the matcher grew shows `pretool matcher` as FAIL in `jade check`; run `jade hooks install` again, and leaves other hooks alone. Hooks are read at session start: open a new Claude Code session afterwards.
 
 In advisory mode the gate never blocks. It records a `would_block` event and prints what it would have done, so you can see the real false-positive rate before it can interrupt work.
 
@@ -35,6 +35,8 @@ jade hooks status        # four lines, all "installed"
 jade check               # every line "ok"; non-zero exit means dead wiring
 jade ledger stats        # events.would_block counts the calls the gate would have stopped
 ```
+
+`jade check` fails (exit 1) on: a missing hook (`hooks installed`); a hook command whose binary is missing or not executable, `disableAllHooks` in `settings.json` or `settings.local.json`, a matcher or event that is not the one `hooks install` writes, and a registered command that does not decide when run once with a synthetic event (`hook wiring`: the PreToolUse command must block a `jade permit approve` call with SI-09, the other three must exit 0 without an internal error; the probe runs in a throwaway `JADE_HOME` with the gate forced to `enforce` and never touches your ledger); gate mode `off`, or a `JADE_GATE_MODE` in the environment that differs from the configured mode (`gate mode`; `advisory` passes, it is the soak state); a weakening override (`gate overrides`: `JADE_POLICY_DIR`, `JADE_CONFIG`, `JADE_HOME` pointing away from their defaults, `JADE_GATE_MODE` below enforce, in this shell or in the `env` block of the Claude settings; a deliberate one in your own shell is silenced with `JADE_ACK_OVERRIDES=VAR,VAR`, an `env` block entry never is); `permissions.defaultMode` bypassPermissions or auto together with a gate that is advisory or off (`host permission prompt`: nothing stops a call); a `jade maintain` LaunchAgent in `~/Library/LaunchAgents` that launchd has not loaded (`maintain job`); `jev` neither on PATH nor beside `jade` (`jev shim`). Not checked: project-level or managed settings files that shadow the user file (W-47).
 
 ### 2.2 Soak, then enforce
 
@@ -62,6 +64,8 @@ jade claude-md show      # the replacement text, `docs/claude-md-jev-section.md`
 jade claude-md apply     # replaces only the "## Jev: ..." section; writes CLAUDE.md.bak-jade-<time>
 ```
 
+The section runs from its `## Jev: ...` heading to the next heading of the same or a higher level (`#` or `##`; a `###` inside belongs to it). Headings inside code fences are ignored, a Jev heading that appears twice is refused (nothing is written), the write is atomic and keeps the file's mode and symlink, and the backup is never overwritten.
+
 ### 2.4 Daily maintenance job
 
 Expires stale permits and decisions, purges state text older than 90 days, runs the provider canary and the improvement miner, and exits non-zero when wiring is dead.
@@ -73,6 +77,8 @@ launchctl print "gui/$(id -u)/com.example.jade-maintain" | head -5     # registe
 launchctl kickstart "gui/$(id -u)/com.example.jade-maintain"           # run once now
 tail -1 ~/.local/share/jade/maintain.log                               # one JSON line, "check_failed": []
 ```
+
+The plist sets `PATH` (the directory of `jade` and `jev`, then `/opt/homebrew/bin`, `/usr/local/bin` and the system directories) and `HOME`, because launchd starts agents with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`; `jade check` also looks for `jev` beside `jade` when PATH has none. `jade check` fails when this plist exists but launchd has not loaded it.
 
 Undo: `launchctl bootout "gui/$(id -u)/com.example.jade-maintain"` and delete the plist.
 
@@ -89,7 +95,7 @@ Add one line to the existing health script so silence is never mistaken for heal
 | Layer | Command |
 |-------|---------|
 | Stop blocking, keep recording | `jade gate advisory` |
-| Remove the hooks | `jade hooks uninstall` (backup of settings.json kept) |
+| Remove the hooks | `jade hooks uninstall` (removes only JADE's own entries, matched by program name `jade` and the `hook <name>` ending, never by a substring; atomic; backup of settings.json kept) |
 | Restore the old CLAUDE.md section | copy back `CLAUDE.md.bak-jade-<time>` |
 | Restore the old `jev` | section 1 undo |
 | Stop the job | `launchctl bootout ...` |
