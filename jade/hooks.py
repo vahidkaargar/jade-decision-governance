@@ -388,6 +388,8 @@ def pretool(event: dict, permit=None) -> HookResult:
         _journal("gate", "safety_block", a, event)
         return _verdict(mode, f"JADE safety invariant {', '.join(a.blocked)} blocks this {tool} call. No permit can authorize it. "
                               f"Rule text: policies/safety.yaml. Do not rephrase the command to get around the invariant; ask the human.", a.blocked)
+    if a.ho_ids and paths.level() in ("low", "medium", "high") and not at_least(a.level, "high"):
+        a.level, a.elevated = "high", True   # docs/12: a human-only class (a mod file, the terminal panel ...) is high work once the human has set a level; `level` and `rule_id` stay the rule's
     if not at_least(a.level, policy.permit_floor()):
         if a.rule_id in policy.RECORDED_RULES and a.recorded:
             if a.rule_id in ("R-31", "R-32"):

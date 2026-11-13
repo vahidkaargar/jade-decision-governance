@@ -125,11 +125,12 @@ def run_decision(db, a, tool: str, cwd: str, session: str, ask_id: str, where: s
     """Open the decision of a call the human allowed (in the chat or in a dialog), walked to EXECUTING so that SI-07 still holds an unknown outcome."""
     from . import decide, permits
 
-    doc = decide.open_decision(db, f"Execute {tool}: {decide.scrub(a.subject)[:300]}", command=a.subject, tool=tool, cwd=cwd, session=session, route="ESCALATE", assessment=a)
+    doc = decide.open_decision(db, f"Execute {tool}: {decide.scrub(a.subject)[:300]}", command=a.subject, tool=tool, cwd=cwd, session=session, route="ASK", assessment=a)
     did = doc["decision_id"]
-    decide.step(db, did, "route", guard=f"route=ESCALATE: the human answers in the {where}")
+    decide.step(db, did, "route", guard=f"route=ASK: the human answers in the {where}")
     decide.step(db, did, "escalate", guard=f"{where} ask {ask_id}", ttl_s=permits.DEFAULT_TTL_S)
-    decide.step(db, did, "human_accept", guard=f"Allow answered in the {where} (ask {ask_id})", actor="human")
+    decide.step(db, did, "human_accept", guard=f"Allow answered in the {where} (ask {ask_id})", actor="human",
+                patch={"ask": {"channel": where, "ask_id": ask_id, "answer": "allow", "answered_at": ts()}})
     decide.step(db, did, "authorize", permit_ok=True, guard=f"{where} grant {ask_id}: single use, unexpired, same session, same call")
     decide.step(db, did, "execute", guard=f"PreToolUse saw the matching call; {where} grant consumed", actor="hook", ttl_s=3600)
     return did

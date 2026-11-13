@@ -21,7 +21,7 @@ Resumable side states: `WAITING_HUMAN`, `WAITING_DEPENDENCY`, `RETRY_SCHEDULED`.
 |------|-------|-------|----|-------|
 | — | `open` | payload validates against `decision.schema.json` | RECEIVED→VALIDATED (atomic) | agent |
 | VALIDATED | `classify` | risk rule matched (`policies/risk.yaml`); rationale non-empty | CLASSIFIED | runtime |
-| CLASSIFIED | `route` | preflight run; route ∈ {FAST, JEV, DEEP, ESCALATE} | EVALUATING | runtime |
+| CLASSIFIED | `route` | preflight run; route ∈ {FAST, JEV, DEEP, ESCALATE, ASK} | EVALUATING | runtime |
 | EVALUATING | `fast_result` | deterministic check returned a boolean with evidence ref | ACCEPTED / REJECTED | runtime |
 | EVALUATING | `jev_result` | provider returned a parseable answer; question valid; not a dedup hit without new evidence (a dedup anchor is an answered call: DONE, exit 0, 3 or 4) | ACCEPTED (≥ accept_t) / ABSTAINED (band) / REJECTED (≤ reject_t) | runtime |
 | EVALUATING | `jev_error` | provider UNAVAILABLE / RATE_LIMITED after retries, or INVALID_QUESTION | NEEDS_EVIDENCE (never ACCEPTED) | runtime |
@@ -60,7 +60,7 @@ Rules enforced in code:
 All records: `schema_version` (semver string), `additionalProperties: false`, timestamps RFC 3339 UTC, ids `^[a-z]+_[0-9a-f]{12}$` (prefix `dec_`, `q_`, `prm_`, `out_`, `wi_`, `imp_`). Files: `schemas/<name>.schema.json`; examples: `schemas/examples/<name>.json`; test: `tests/test_schemas.py`.
 
 ### 3.1 Decision (`decision.schema.json`)
-`decision_id, task_id, tenant_scope ("local:<user>"), objective, candidate_actions[], constraints[], assumptions[], evidence_refs[], context_fingerprint (sha256 of canonical evidence+plan), context_freshness {observed_at, ttl_s}, risk {level, reversibility, environment, blast_radius, data_sensitivity, permission_scope, rationale, rule_id}, route, evaluation_refs[], policy_version, status, timestamps {created_at, updated_at, expires_at}, trace_id, session_id, revision_count`.
+`decision_id, task_id, tenant_scope ("local:<user>"), objective, candidate_actions[], constraints[], assumptions[], evidence_refs[], context_fingerprint (sha256 of canonical evidence+plan), context_freshness {observed_at, ttl_s}, risk {level, reversibility, environment, blast_radius, data_sensitivity, permission_scope, rationale, rule_id}, route, evaluation_refs[], policy_version, status, timestamps {created_at, updated_at, expires_at}, trace_id, session_id, revision_count`, and optionally `human_only`, `ho_ids[]` (the human-only classes the gate named) and `ask {channel (chat|dialog), ask_id, answer, answered_at}` (the human's answer to a call in the chat or in a dialog). Route `ASK` means the human decides in the chat or a dialog; a decision with that route is accepted only with `ask.answer = allow` recorded (docs/12).
 
 ### 3.2 Jev Question (`question.schema.json`) — the registry entry
 `question_id, version, primitive (noul|choice|score), task_family, objective, input_schema (JSON Schema for state), output_schema, required_evidence[], template {instructions, criteria}, prompt_or_template_version, model_version (request id + accepted resolved ids), calibration_group, threshold_policy {accept, reject, metric}, abstention_behavior, fallback (deep|human|fast), dependencies[], batch_eligibility, no_match_option (for choice), min_options`.

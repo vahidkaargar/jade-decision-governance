@@ -46,6 +46,8 @@ def open_decision(db: ledger.Ledger, objective: str, *, command: str | None = No
         "timestamps": {"created_at": ts(), "updated_at": ts(), "expires_at": ts_in(ttl_s)},
         "trace_id": "trace-" + new_id("t")[2:], "session_id": (session or session_id()).ljust(8, "-"), "revision_count": 0,
     }
+    if a.ho_ids:   # the gate named human-only classes (live wiring, mods, R-17, the terminal panel): the decision says so
+        doc["human_only"], doc["ho_ids"] = True, list(a.ho_ids)
     schemas.validate("decision", doc)
     with db.tx() as con:
         con.execute("INSERT INTO decisions(decision_id, status, risk_level, rule_id, route, session_id, plan_hash, hold_key, doc_json, created_at, updated_at, expires_at, source) "
