@@ -13,6 +13,7 @@ import os
 import re
 import shlex
 import stat as stat_mod
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -205,6 +206,12 @@ class Assessment:
     hold_key: str = ""  # identity of the command for SI-07: the canonical gated segments, independent of quoting, separators, prefixes and cwd
     blind: list[str] = field(default_factory=list)  # R-31 only: the labels of what the gate could not read (`script-file`, `eval-var` ...); never the command text
     recorded: bool = False  # R-30 and R-31: a read-only command or a Read/Grep/Glob call named a credential file (a write that names one is R-30 too and is not counted)
+    ho_ids: list[str] = field(default_factory=list)   # docs/12: the human-only classes the call falls in (HO_* below). Never changes `level` or `rule_id`
+    elevated: bool = False   # set by the hook, not here: a level was set and a human-only class raised the call to high
+
+    @property
+    def human_only(self) -> bool:
+        return bool(self.ho_ids)
 
 
 _BASE_ONLY = False  # see base_only()
@@ -858,6 +865,106 @@ def _si12_hit(path: str, base: str, roots: tuple[str, ...], parent_too: bool = F
     return any(real == r or real.startswith(r + os.sep) or (parent_too and r.startswith(real.rstrip(os.sep) + os.sep)) for r in roots)
 
 
+HO_WIRING, HO_INSTALL, HO_SETTINGS, HO_STATE, HO_MOD, HO_R17, HO_TERMINAL = (
+    "HO-wiring", "HO-checkout-install", "HO-settings-shadow", "HO-state-path", "HO-mod", "HO-R17", "HO-terminal")
+_STATE_LITERAL = re.compile(r"\.config/jade(?![\w.-])|\.local/share/jade(?![\w.-])|jade\.sqlite")
+_INSTALL_CMD = re.compile(r"\b(?:uv\s+tool\s+(?:install|upgrade|reinstall)|uv\s+pip\s+install|pip3?\s+install|pipx\s+(?:install|upgrade|reinstall)|python3?\s+-m\s+pip\s+install)\b")
+_SETTINGS_FILE = re.compile(r"(?:^|/)\.claude/settings(?:\.local)?\.json$")
+_SETTINGS_DISABLE = re.compile(r"disableAllHooks|allowManagedHooksOnly|JADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME|REGISTRY_DIR)|\"hooks\"\s*:\s*(?:\{\s*\}|null)", re.I)
+TERMINAL_TOOLS = frozenset({"mcp__terminal__run_in_terminal"})
+
+
+def _real(p: str) -> str:
+    return os.path.realpath(os.path.expanduser(p))
+
+
+def _wiring_roots() -> tuple[str, ...]:
+    """The real paths of what the running JADE is made of and reads: its environment, the uv tool directory, the launchers, the hook files, the state and
+    config directories, and the shipped policy and registry directories unless they sit in a checkout (a checkout is plain high work, docs/12 decision 8)."""
+    out = [os.path.expanduser(p) for p in ("~/.local/share/uv/tools/jade-decision-governance", "~/.local/share/uv/tools/jade", "~/.local/bin/jade", "~/.local/bin/jev",
+                                           "~/.claude/settings.json", "~/.claude/settings.local.json", "~/.claude/hooks", "~/.local/share/jade")]
+    prefix = _real(sys.prefix)
+    if len([x for x in prefix.split(os.sep) if x]) >= 3:   # not /usr or /usr/local of a system Python
+        out.append(prefix)
+    out.append(os.environ.get("JADE_HOME") or os.path.expanduser("~/.local/share/jade"))
+    for d in (paths.shipped_policy_dir(), paths.registry_dir()):
+        if not _is_checkout(os.path.dirname(_real(str(d)))):
+            out.append(str(d))
+    out.extend(_config_roots())
+    return tuple(dict.fromkeys(_real(p) for p in out))
+
+
+def _mod_roots() -> tuple[str, ...]:
+    return tuple(_real(p) for p in ("~/.claude/dev-mods", "~/.claude/plugins", "~/.claude/mods"))
+
+
+def _written_text(tool_input: dict) -> str:
+    """The new text a Write, Edit, MultiEdit or NotebookEdit call carries ('' when it carries none the gate can read)."""
+    parts = [str(tool_input[k]) for k in ("content", "new_string", "new_source") if isinstance(tool_input.get(k), str)]
+    for e in tool_input.get("edits") or []:
+        if isinstance(e, dict) and isinstance(e.get("new_string"), str):
+            parts.append(e["new_string"])
+    return "\n".join(parts).strip()
+
+
+_SCRIPT_READ_MAX = 1 << 20
+
+
+def _script_names_state(f: str, dirs: tuple[str, ...], cwd: str) -> bool:
+    """Does the script file a command runs (at most 1 MiB, a regular file, resolved in a directory the call may run in) name the JADE state paths?"""
+    for d in (dirs or ("",)):
+        p = os.path.realpath(os.path.join(d or cwd or os.getcwd(), os.path.expanduser(f)))
+        try:
+            if os.path.isfile(p) and os.path.getsize(p) <= _SCRIPT_READ_MAX:
+                with open(p, encoding="utf-8", errors="replace") as fh:
+                    if _STATE_LITERAL.search(fh.read(_SCRIPT_READ_MAX)):
+                        return True
+        except OSError:
+            continue
+    return False
+
+
+def _ho_add(a: Assessment, ident: str) -> None:
+    if ident not in a.ho_ids:
+        a.ho_ids.append(ident)
+
+
+def _ho_tool_paths(a: Assessment, tool_input: dict, subjects: list[str], cwd: str) -> None:
+    """Human-only classes of a Write/Edit-style or MCP call, from the paths it names."""
+    wroots, mroots = _wiring_roots(), _mod_roots()
+    text = None
+    for s in subjects:
+        if not s.strip():
+            continue
+        if _si12_hit(s, cwd, wroots):
+            _ho_add(a, HO_WIRING)
+        if _si12_hit(s, cwd, mroots):
+            _ho_add(a, HO_MOD)
+        if _SETTINGS_FILE.search(os.path.realpath(os.path.join(cwd or os.getcwd(), os.path.expanduser(s)))):
+            text = _written_text(tool_input) if text is None else text
+            if not text or _SETTINGS_DISABLE.search(text):   # unreadable text counts: it could be anything
+                _ho_add(a, HO_SETTINGS)
+
+
+def _ho_segment(a: Assessment, seg: str, dirs: tuple[str, ...], cwd: str, wroots: tuple[str, ...], mroots: tuple[str, ...]) -> None:
+    """Human-only classes of one shell segment that is not read-only."""
+    toks, parent_too = _segment_tokens(seg)
+    bare = _bare(seg)
+    install = bool(_INSTALL_CMD.search(bare))
+    for tok in toks:
+        for d in (dirs or ("",)):
+            base = d or cwd
+            if _si12_hit(tok, base, wroots, parent_too):
+                _ho_add(a, HO_WIRING)
+            if _si12_hit(tok, base, mroots, parent_too):
+                _ho_add(a, HO_MOD)
+            real = os.path.realpath(os.path.join(base or os.getcwd(), os.path.expanduser(tok))) if tok else ""
+            if real and _SETTINGS_FILE.search(real):
+                _ho_add(a, HO_SETTINGS)   # a shell write of a settings file: the text is not the gate's to read
+            if install and real and os.path.isdir(real) and _is_checkout(real):
+                _ho_add(a, HO_INSTALL)
+
+
 def _si12_tool_paths(a: Assessment, subjects: list[str], cwd: str) -> None:
     if paths.level() is None or "SI-12" in a.blocked:
         return
@@ -866,23 +973,28 @@ def _si12_tool_paths(a: Assessment, subjects: list[str], cwd: str) -> None:
         a.blocked.append("SI-12")
 
 
-def _si12_segment(seg: str, dirs: tuple[str, ...], cwd: str, roots: tuple[str, ...]) -> bool:
-    """SI-12 for one shell segment that is not read-only: does it write the config directory (or replace it, or a parent of it)?"""
+def _segment_tokens(seg: str) -> tuple[list[str], bool]:
+    """The words of a shell segment that may be paths it writes (the write view of the segment, or the whole segment when it may write any operand), cleaned
+    of quotes and of an `--opt=` prefix, and whether its verb replaces a directory (rm, mv, find -delete ...): a parent of the operand then counts too."""
     bare = _bare(seg)
     words = bare.split(" ")
     verb = words[0].rsplit("/", 1)[-1]
     view = files_view(bare)
     text = bare if view is None else view
     parent_too = verb in _DIR_REPLACING_VERBS or (verb == "find" and "-delete" in words)
+    toks = []
     for tok in text.split(" "):
         tok = tok.rpartition("=")[2] if "=" in tok and not tok.startswith("=") else tok
         tok = tok.strip("'\"`,;()")
-        if not tok or tok.startswith("-") or tok in (">", ">>"):
-            continue
-        for d in (dirs or ("",)):
-            if _si12_hit(tok, d or cwd, roots, parent_too):
-                return True
-    return False
+        if tok and not tok.startswith("-") and tok not in (">", ">>"):
+            toks.append(tok)
+    return toks, parent_too
+
+
+def _si12_segment(seg: str, dirs: tuple[str, ...], cwd: str, roots: tuple[str, ...]) -> bool:
+    """SI-12 for one shell segment that is not read-only: does it write the config directory (or replace it, or a parent of it)?"""
+    toks, parent_too = _segment_tokens(seg)
+    return any(_si12_hit(tok, d or cwd, roots, parent_too) for tok in toks for d in (dirs or ("",)))
 
 
 def _assess_write(tool: str, tool_input: dict, cwd: str) -> Assessment:
@@ -905,6 +1017,7 @@ def _assess_write(tool: str, tool_input: dict, cwd: str) -> Assessment:
     relative = any(x.strip() and not os.path.isabs(os.path.expanduser(x)) for x in subjects)
     _seal(a, tool, subject, cwd if relative else "", subject)
     _si12_tool_paths(a, [x for x in subjects if x.strip()], cwd)
+    _ho_tool_paths(a, tool_input, subjects, cwd)
     return a
 
 
@@ -977,6 +1090,7 @@ def _assess_tool(tool: str, tool_input: dict, cwd: str) -> Assessment:
         _seal(a, tool, subject, "", f"{tool} {subject}")
     if rule.get("paths"):
         _si12_tool_paths(a, list(_path_args(tool_input)), cwd)
+        _ho_tool_paths(a, tool_input, list(_path_args(tool_input)), cwd)
         for p in _path_args(tool_input):
             norm = normalise_path(p, cwd)
             hit = next((r for r in (_path_rule(p, dirs=(cwd,), whole=True), _path_rule(norm, dirs=(cwd,), whole=True)) if r), None)
@@ -1101,6 +1215,8 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     labels: list[str] = []
     si12_roots = _config_roots() if paths.level() is not None else None   # docs/12: SI-12 is active once a level is set
     si12 = False
+    ho = Assessment(level="low", rule_id="", rationale="")   # collects the human-only classes of the segments
+    wroots, mroots = _wiring_roots(), _mod_roots()
     for seg, dirs in shellnorm.segments_cwd(scan, cwd):
         if seg.startswith(BLIND_MARK):
             labels.append(seg[len(BLIND_MARK):].split(" ", 1)[0])
@@ -1130,6 +1246,9 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
             best = seg_best
         if si12_roots and not si12 and _si12_segment(seg, dirs, cwd, si12_roots):
             si12 = True
+        _ho_segment(ho, seg, dirs, cwd, wroots, mroots)
+        if HO_STATE not in ho.ho_ids and (sf := blind.script_file(words)) and _script_names_state(sf, dirs, cwd):
+            _ho_add(ho, HO_STATE)
         key = _segment_key(bare)
         keys.append(key)
         if LEVELS[seg_best["level"]] >= LEVELS[permit_floor()]:
@@ -1166,6 +1285,11 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
             a.blocked.append(inv["id"])
     if si12 and "SI-12" not in a.blocked:
         a.blocked.append("SI-12")
+    a.ho_ids = list(ho.ho_ids)
+    if HO_STATE not in a.ho_ids and any(_STATE_LITERAL.search(e) for e in extra):   # a script the command runs names the JADE state paths: what it does there is not the gate's to read
+        _ho_add(a, HO_STATE)
+    if a.rule_id == "R-17":
+        _ho_add(a, HO_R17)
     _seal(a, tool, subject, cwd, subject)
     a.hold_key = sha256(canonical({"shell": sorted(set(gated_keys or keys))}))
     return a
@@ -1246,6 +1370,8 @@ def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
     else:
         return _assess_shell(tool, str(tool_input.get("command") or ""), cwd)
     a.hold_key = a.hold_key or a.plan_hash
+    if tool in TERMINAL_TOOLS:
+        _ho_add(a, HO_TERMINAL)   # a script typed into the human's terminal panel runs outside any sandbox; the gate cannot read what it does
     _scan_content(a, tool_input, read_only=is_mcp(tool) and mcp_command(tool_input) is None and _tool_rule(tool, False).get("id") in ("M-06", "M-06a", "M-06b"), cwd=cwd)
     return a
 
