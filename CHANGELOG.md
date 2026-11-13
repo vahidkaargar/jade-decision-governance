@@ -4,6 +4,8 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+Plan for 0.4.0: docs/11-release-0.4.0-plan.md (W-88).
+
 ### Fixed
 - **Signed approval: independent review findings (W-38, W-89, docs/10 section 4.4).** The verifier and the helper run only absolute root-owned programs (`/usr/bin/ssh-keygen`, `/usr/bin/sudo`): a bare name could resolve to a program in the agent user's own bin directory, and a `ssh-keygen` that exits 0 would have made every forged approval verify. An installed default trust anchor always wins over `JADE_APPROVER_ANCHOR` (a missing override target used to read as "no anchor", a downgrade to terminal approval). The anchor and the helper must sit under directories that belong to root and are not writable by group or others (sticky directories allowed). The helper moved to `/Library/PrivilegedHelperTools/jade-approve-sign` (`/usr/lib/jade/` elsewhere) and ignores its test overrides when run through sudo. `scripts/install-approver.sh` now shows the helper, its sha256 and the sudoers rule and needs `INSTALL` typed, makes the private key as the approver account (never in your temp), creates a hidden `dscl` service account `_jadeapprove` instead of a login account, adds a `!ALL` line so an admin rule cannot read the key, writes the trust anchor last and from the key on every run, and removes a configured `approval_backend` on `--uninstall`. Still untested on a real system. Residuals recorded: a trojaned `jade`/`sudo` that keeps the password (W-91, hardware key), and a consumed permit that SQL can re-arm inside its window (W-92).
 
