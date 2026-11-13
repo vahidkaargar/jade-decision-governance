@@ -20,7 +20,7 @@ from functools import lru_cache
 
 from policies import loader
 
-from . import blind, egress, gitalias, inert, paths, samecmd, shellnorm
+from . import blind, egress, gitalias, humanonly, inert, paths, samecmd, shellnorm
 from .util import LEVELS, canonical, fold, sha256
 
 NULL_REDIRECT = shellnorm.NULL_REDIRECT
@@ -867,6 +867,7 @@ def _si12_hit(path: str, base: str, roots: tuple[str, ...], parent_too: bool = F
 
 HO_WIRING, HO_INSTALL, HO_SETTINGS, HO_STATE, HO_MOD, HO_R17, HO_TERMINAL = (
     "HO-wiring", "HO-checkout-install", "HO-settings-shadow", "HO-state-path", "HO-mod", "HO-R17", "HO-terminal")
+HO_DELETE, HO_MONEY, HO_RELEASE = humanonly.HO_DELETE, humanonly.HO_MONEY, humanonly.HO_RELEASE   # W-98b: jade/humanonly.py holds the patterns and their corpus
 _STATE_LITERAL = re.compile(r"\.config/jade(?![\w.-])|\.local/share/jade(?![\w.-])|jade\.sqlite")
 _INSTALL_CMD = re.compile(r"\b(?:uv\s+tool\s+(?:install|upgrade|reinstall)|uv\s+pip\s+install|pip3?\s+install|pipx\s+(?:install|upgrade|reinstall)|python3?\s+-m\s+pip\s+install)\b")
 _UV_TOOL_JADE = re.compile(r"\buv\s+tool\s+(?:uninstall|upgrade|reinstall|install)\b[^;&|]*\bjade|\buv\s+tool\s+(?:uninstall|upgrade|reinstall)\b[^;&|]*--all\b")   # R-13: changes or removes the installed JADE tool itself, whatever it installs from
@@ -925,6 +926,25 @@ def _script_names_state(f: str, dirs: tuple[str, ...], cwd: str) -> bool:
     return False
 
 
+def _script_ho(f: str, dirs: tuple[str, ...], cwd: str) -> set[str]:
+    """The delete, money and release classes of the commands in the script file a command runs (at most 1 MiB, a regular file, resolved in a directory the call may run in).
+    A script in a language the shell segmenter does not read is not understood here (docs/05)."""
+    out: set[str] = set()
+    for d in (dirs or ("",)):
+        p = os.path.realpath(os.path.join(d or cwd or os.getcwd(), os.path.expanduser(f)))
+        try:
+            if not (os.path.isfile(p) and os.path.getsize(p) <= _SCRIPT_READ_MAX):
+                continue
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                text = fh.read(_SCRIPT_READ_MAX)
+        except OSError:
+            continue
+        for seg, sdirs in shellnorm.segments_cwd(text, os.path.dirname(p)):
+            if not is_read_only(seg):
+                out |= humanonly.shell_classes(_bare(seg), sdirs or (os.path.dirname(p),), os.path.dirname(p))
+    return out
+
+
 def _ho_add(a: Assessment, ident: str) -> None:
     if ident not in a.ho_ids:
         a.ho_ids.append(ident)
@@ -954,6 +974,8 @@ def _ho_segment(a: Assessment, seg: str, dirs: tuple[str, ...], cwd: str, wroots
     install = bool(_INSTALL_CMD.search(bare))
     if _UV_TOOL_JADE.search(bare):
         _ho_add(a, HO_WIRING)
+    for ident in sorted(humanonly.shell_classes(bare, dirs, cwd, raw=seg)):
+        _ho_add(a, ident)
     for tok in toks:
         for d in (dirs or ("",)):
             base = d or cwd
@@ -1091,6 +1113,10 @@ def _assess_tool(tool: str, tool_input: dict, cwd: str) -> Assessment:
         a = _rule_assessment(rule)
         subject = canonical(tool_input)
         _seal(a, tool, subject, "", f"{tool} {subject}")
+    if cmd is None:   # a tool that carries no command is classed by what its name does; one that carries a command was read as that command above
+        for ident in sorted(humanonly.tool_classes(tool) | (humanonly.tool_classes(f"{tool}__{tool_input['action']}") if isinstance(tool_input.get("action"), str)
+                                                              and re.fullmatch(r"[\w-]{1,40}", tool_input["action"]) else set())):
+            _ho_add(a, ident)
     if rule.get("paths"):
         _si12_tool_paths(a, list(_path_args(tool_input)), cwd)
         _ho_tool_paths(a, tool_input, list(_path_args(tool_input)), cwd)
@@ -1219,6 +1245,7 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     si12_roots = _config_roots() if paths.level() is not None else None   # docs/12: SI-12 is active once a level is set
     si12 = False
     ho = Assessment(level="low", rule_id="", rationale="")   # collects the human-only classes of the segments
+    sql_client = False   # a segment runs a database client: its statement is quoted text, so the raw command is read for it below
     wroots, mroots = _wiring_roots(), _mod_roots()
     for seg, dirs in shellnorm.segments_cwd(scan, cwd):
         if seg.startswith(BLIND_MARK):
@@ -1250,8 +1277,12 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         if si12_roots and not si12 and _si12_segment(seg, dirs, cwd, si12_roots):
             si12 = True
         _ho_segment(ho, seg, dirs, cwd, wroots, mroots)
-        if HO_STATE not in ho.ho_ids and (sf := blind.script_file(words)) and _script_names_state(sf, dirs, cwd):
-            _ho_add(ho, HO_STATE)
+        sql_client = sql_client or humanonly.is_sql_client(_bare(seg))
+        if sf := blind.script_file(words):
+            if HO_STATE not in ho.ho_ids and _script_names_state(sf, dirs, cwd):
+                _ho_add(ho, HO_STATE)
+            for ident in sorted(_script_ho(sf, dirs, cwd)):
+                _ho_add(ho, ident)
         key = _segment_key(bare)
         keys.append(key)
         if LEVELS[seg_best["level"]] >= LEVELS[permit_floor()]:
@@ -1288,6 +1319,8 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
             a.blocked.append(inv["id"])
     if si12 and "SI-12" not in a.blocked:
         a.blocked.append("SI-12")
+    if sql_client and humanonly.sql_destroys(text_in):
+        _ho_add(ho, HO_DELETE)
     a.ho_ids = list(ho.ho_ids)
     if HO_STATE not in a.ho_ids and any(_STATE_LITERAL.search(e) for e in extra):   # a script the command runs names the JADE state paths: what it does there is not the gate's to read
         _ho_add(a, HO_STATE)
