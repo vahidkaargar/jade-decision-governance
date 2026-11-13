@@ -73,7 +73,7 @@ id "$USER_NAME" >/dev/null || { echo "install-approver: the account '$USER_NAME'
 sudo install -d -m 755 -o root "$CONF" "$HELPER_DIR"
 if [ ! -f "$CONF/approver_ed25519" ]; then
   # The private key is made by the approver account itself, inside a directory only that account can enter: it never exists where your own user can read it.
-  KEYDIR="$(sudo mktemp -d)"
+  KEYDIR="$(sudo mktemp -d /var/tmp/jade-approver.XXXXXXXX)"   # /var/tmp is enterable by every account; root's own $TMPDIR (a private /var/folders path on macOS) is not, so the approver could not write its key there
   sudo chown "$USER_NAME" "$KEYDIR"; sudo chmod 700 "$KEYDIR"
   sudo -u "$USER_NAME" /usr/bin/ssh-keygen -q -t ed25519 -N '' -C jade-approver -f "$KEYDIR/key"
   sudo install -m 600 -o "$USER_NAME" "$KEYDIR/key" "$CONF/approver_ed25519"

@@ -383,3 +383,11 @@ def test_the_installer_orders_its_steps_so_a_failure_never_leaves_a_half_install
     assert text.index("visudo -cf") < anchor_install and text.index('sudo install -m 755 -o root "$HERE/jade-approve-sign"') < anchor_install   # the anchor is the last step
     assert 'RULE_DENY="$ME ALL=($USER_NAME) !ALL"' in text and "Type INSTALL to continue" in text and "dscl . -create" in text
     assert text.count("approval_backend") >= 1   # uninstall also removes a configured signed backend
+
+
+def test_the_installer_makes_the_approvers_key_in_a_directory_the_approver_can_enter():
+    """The first real run failed with 'Saving key ... Permission denied': a bare `sudo mktemp -d` is under root's private $TMPDIR (macOS /var/folders/zz/...), which the approver
+    account cannot traverse. The key directory must be made under a world-traversable absolute path."""
+    install = (HELPER.parent / "install-approver.sh").read_text()
+    line = next(ln for ln in install.splitlines() if "KEYDIR=" in ln and "mktemp" in ln)
+    assert "mktemp -d /var/tmp/" in line, line
