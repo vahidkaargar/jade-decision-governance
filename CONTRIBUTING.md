@@ -12,9 +12,12 @@ JADE is an alpha runtime (design approved and implemented, not yet validated on 
 ```bash
 uv sync
 uv run ruff check .
-uv run pytest -q
+uv run pytest -q -n auto -m "not timing"   # parallel (pytest-xdist); plain `uv run pytest -q` runs the same tests one by one
+uv run pytest -q -m timing                 # the wall-clock budget tests, serially: load from other workers would fail them
 uv run python evals/run_cases.py
 ```
+
+Every test gets its own JADE home, config and settings directory (`tests/conftest.py`), so tests can run in any order and in parallel. A test that asserts a time budget carries `@pytest.mark.timing`; CI runs those in their own serial step.
 
 Pull requests target `main`, pass CI (pytest, ruff and the case replay), and keep `additionalProperties: false` on every contract. Bump `schema_version` in the affected schema and its example when fields change (additive: minor; removal: major, with a migration note in `CHANGELOG.md`).
 
