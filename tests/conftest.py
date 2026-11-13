@@ -75,6 +75,9 @@ def isolated(tmp_path, monkeypatch):
     from jade import signing as _signing
 
     monkeypatch.setattr(_signing, "DEFAULT_ANCHOR", tmp_path / "no-default-anchor")   # W-93: in-process tests never see a real installed anchor
+    from jade import askdialog as _askdialog
+
+    monkeypatch.setattr(_askdialog, "available", lambda: False)   # W-100c: no test ever shows a real macOS dialog; the dialog tests switch it on and stub `run_dialog`
     monkeypatch.delenv("JADE_GATE_MODE", raising=False)
     monkeypatch.delenv("JADE_SOURCE", raising=False)
     monkeypatch.delenv("JADE_POLICY_DIR", raising=False)

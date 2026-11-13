@@ -33,7 +33,8 @@ def posttool_matcher() -> str:
     return "|".join((*policy.POST_TOOLS, "AskUserQuestion", "mcp__.*"))
 
 
-HOOKS = {"PreToolUse": (pretool_matcher(), "pretool", 10), "PostToolUse": (posttool_matcher(), "posttool", 10),
+# PreToolUse: a timeout above askdialog.DIALOG_WAIT_S + ALARM_MARGIN_S, because the hook waits for a macOS dialog (W-100c); the others answer at once
+HOOKS = {"PreToolUse": (pretool_matcher(), "pretool", 130), "PostToolUse": (posttool_matcher(), "posttool", 10),
          "Stop": ("", "stop", 10), "SessionStart": ("", "session-start", 10)}
 JEV_HEADING = "## Jev: verify outputs and decide (global, all sessions)"
 

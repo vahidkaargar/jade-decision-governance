@@ -10,8 +10,8 @@ At a level (`jade level`), gate mode enforce, host mode auto or bypassPermission
    (10 minutes, this session, this call); Deny closes the ask. The answer is recorded as a hint in `human_answers`; it teaches nothing yet.
 4. The identical retry reaches `step` again, which consumes the grant, opens a decision (so SI-07 still holds an unknown outcome) and lets the call run.
 
-A grant is never valid for live JADE wiring, a subagent call, a host mode outside the two above, or a call with secrets in it: those keep the signed
-terminal permit. Residual: a mod loaded in Claude Code can answer for the human (docs/12 risks).
+A grant is never valid for live JADE wiring, a host mode outside the two above, or a call with secrets in it: those keep the signed terminal permit.
+A subagent call has no AskUserQuestion: `askdialog` (W-100c) asks it in a macOS dialog instead. Residual: a mod loaded in Claude Code can answer for the human (docs/12 risks).
 """
 
 from __future__ import annotations
@@ -63,9 +63,23 @@ def _expire(db) -> None:
     db.con.execute("UPDATE asks SET status='EXPIRED' WHERE status IN ('PENDING','SHOWN','ALLOWED') AND expires_ts<=?", (ts(),))
 
 
+def run_decision(db, a, tool: str, cwd: str, session: str, ask_id: str, where: str) -> str:
+    """Open the decision of a call the human allowed (in the chat or in a dialog), walked to EXECUTING so that SI-07 still holds an unknown outcome."""
+    from . import decide, permits
+
+    doc = decide.open_decision(db, f"Execute {tool}: {decide.scrub(a.subject)[:300]}", command=a.subject, tool=tool, cwd=cwd, session=session, route="ESCALATE", assessment=a)
+    did = doc["decision_id"]
+    decide.step(db, did, "route", guard=f"route=ESCALATE: the human answers in the {where}")
+    decide.step(db, did, "escalate", guard=f"{where} ask {ask_id}", ttl_s=permits.DEFAULT_TTL_S)
+    decide.step(db, did, "human_accept", guard=f"Allow answered in the {where} (ask {ask_id})", actor="human")
+    decide.step(db, did, "authorize", permit_ok=True, guard=f"{where} grant {ask_id}: single use, unexpired, same session, same call")
+    decide.step(db, did, "execute", guard=f"PreToolUse saw the matching call; {where} grant consumed", actor="hook", ttl_s=3600)
+    return did
+
+
 def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
     """The chat branch of the gate: a HookResult (run the call, or refuse it with the instruction) or None when this call does not take the chat channel."""
-    from . import decide, permits, state_machine
+    from . import permits, state_machine
     from .hooks import HookResult
 
     if not applicable(mode, a, event):
@@ -80,14 +94,7 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
             row = db.one("SELECT ask_id FROM asks WHERE session_id=? AND status='ALLOWED' AND hold_key=? AND fingerprints_json=? AND expires_ts>? ORDER BY answered_ts LIMIT 1",
                          (session, hold, fpj, ts()))
             if row is not None and db.con.execute("UPDATE asks SET status='CONSUMED' WHERE ask_id=? AND status='ALLOWED'", (row.ask_id,)).rowcount == 1:
-                doc = decide.open_decision(db, f"Execute {tool}: {decide.scrub(a.subject)[:300]}", command=a.subject, tool=tool, cwd=cwd, session=session,
-                                           route="ESCALATE", assessment=a)
-                did = doc["decision_id"]
-                decide.step(db, did, "route", guard="route=ESCALATE: the human answers in the chat")
-                decide.step(db, did, "escalate", guard=f"chat ask {row.ask_id}", ttl_s=permits.DEFAULT_TTL_S)
-                decide.step(db, did, "human_accept", guard=f"Allow answered in the chat (ask {row.ask_id})", actor="human")
-                decide.step(db, did, "authorize", permit_ok=True, guard=f"chat grant {row.ask_id}: single use, unexpired, same session, same call")
-                decide.step(db, did, "execute", guard="PreToolUse saw the matching call; chat grant consumed", actor="hook", ttl_s=3600)
+                did = run_decision(db, a, tool, cwd, session, row.ask_id, "chat")
                 db.con.execute("UPDATE asks SET decision_id=? WHERE ask_id=?", (did, row.ask_id))
                 db.event(row.ask_id, "ask_consumed", guard=f"{a.rule_id} {a.level}", actor="hook", detail={"decision_id": did})
                 return HookResult(0, f"JADE: your Allow in the chat (ask {row.ask_id}) was used for this {tool} call. It is spent; the next identical call asks again.")
