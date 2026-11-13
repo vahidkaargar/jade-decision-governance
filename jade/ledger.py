@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS outcomes(outcome_id TEXT PRIMARY KEY, decision_id TEX
 CREATE TABLE IF NOT EXISTS labels(call_id TEXT PRIMARY KEY, label INTEGER NOT NULL, source TEXT NOT NULL, note TEXT, ts TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS work_items(id TEXT PRIMARY KEY, status TEXT, doc_json TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS improvements(candidate_id TEXT PRIMARY KEY, decision TEXT, doc_json TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS human_answers(
+  answer_id TEXT PRIMARY KEY, ts TEXT NOT NULL, session_id TEXT, decision_id TEXT, rule_id TEXT NOT NULL, class_key TEXT, exact_key TEXT NOT NULL,
+  answer TEXT NOT NULL, channel TEXT NOT NULL, strength TEXT NOT NULL DEFAULT 'hint', confirmed_ts TEXT, source TEXT);
 """
 # Indexes created after the migrations: some name a column added after the first release (hold_key, source), which an older file lacks until `_migrate`
 # has run. Each serves a query that every gated call or every Stop hook runs, measured at 100k rows in evals/performance/ledger_load.py (W-58); the
@@ -61,6 +64,8 @@ CREATE INDEX IF NOT EXISTS calls_claim ON jev_calls(session_id, claim_hash);
 CREATE INDEX IF NOT EXISTS decisions_test ON decisions(source) WHERE source='test';
 CREATE INDEX IF NOT EXISTS permits_test ON permits(source) WHERE source='test';
 CREATE INDEX IF NOT EXISTS calls_evaluating ON jev_calls(ts) WHERE state='EVALUATING';
+CREATE INDEX IF NOT EXISTS human_answers_exact ON human_answers(exact_key, strength);
+CREATE INDEX IF NOT EXISTS human_answers_ts ON human_answers(ts);
 """
 MIGRATIONS = {"jev_calls": [("language", "TEXT"), ("source", "TEXT")], "decisions": [("hold_key", "TEXT"), ("source", "TEXT")],
               "permits": [("source", "TEXT")], "events": [("source", "TEXT")]}   # columns added after the first release: (name, type)
@@ -293,6 +298,33 @@ class Ledger:
         except sqlite3.IntegrityError:
             return False
         return True
+
+    HUMAN_ANSWERS = ("allow", "deny")
+    ANSWER_CHANNELS = ("chat", "dialog", "terminal")
+
+    def record_human_answer(self, *, session: str | None, decision_id: str | None, rule_id: str, class_key: str | None, exact_key: str, answer: str,
+                            channel: str) -> str:
+        """Store what the human answered to an ask, as a `hint` (docs/12): it decides nothing and goes to no model until `jade review confirm` (0.6.0).
+        `exact_key` identifies the call, `class_key` the kind of call. Returns the answer id."""
+        if answer not in self.HUMAN_ANSWERS or channel not in self.ANSWER_CHANNELS or not exact_key or not rule_id:
+            raise ValueError(f"a human answer needs answer in {self.HUMAN_ANSWERS}, channel in {self.ANSWER_CHANNELS}, an exact key and a rule id")
+        aid = new_id("ans")
+        ck = redact.redact(class_key, secrets_only=True)[0] if class_key else None
+        self.con.execute("INSERT INTO human_answers(answer_id, ts, session_id, decision_id, rule_id, class_key, exact_key, answer, channel, strength, source) "
+                         "VALUES(?,?,?,?,?,?,?,?,?,'hint',?)", (aid, ts(), session, decision_id, rule_id, ck, exact_key, answer, channel, self.source))
+        self.event(aid, "human_answer", guard=f"{rule_id} {answer} via {channel}", actor="human", detail={"decision_id": decision_id, "rule_id": rule_id})
+        return aid
+
+    def human_answers(self, strength: str | None = None, since_s: float | None = None, limit: int = 500):
+        """The recorded answers, newest first; live rows only (a verification run's rows are left out, W-72)."""
+        sql, args = "SELECT * FROM human_answers WHERE " + LIVE.format(a=""), []
+        if strength:
+            sql += " AND strength=?"
+            args.append(strength)
+        if since_s is not None:
+            sql += " AND ts>=?"
+            args.append(ts(now() - timedelta(seconds=since_s)))
+        return self.con.execute(sql + " ORDER BY ts DESC, rowid DESC LIMIT ?", (*args, int(limit))).fetchall()
 
     def meta_get(self, k: str, default=None):
         row = self.con.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()

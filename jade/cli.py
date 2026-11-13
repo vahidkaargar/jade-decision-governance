@@ -537,6 +537,8 @@ def _ops(a) -> int:
             else:
                 ops.set_gate_mode(a.action, allow_unsigned=a.allow_unsigned)
                 print(f"gate mode {a.action}")
+        elif a.cmd == "review":
+            print(ops.review(ops.parse_since(a.since) if a.since else None))
         elif a.cmd == "level":
             if a.value is None:
                 print(paths.level() or "unset")
@@ -731,6 +733,8 @@ def build_parser() -> argparse.ArgumentParser:
     pgate = sub.add_parser("gate")
     pgate.add_argument("action", choices=("status", "enforce", "advisory", "off"))
     pgate.add_argument("--allow-unsigned", action="store_true", help="enforce without the signed approval backend (docs/10); journaled")
+    preview = sub.add_parser("review", help="read-only: what you answered to JADE's asks (counts by rule and channel)")
+    preview.add_argument("--since", help="a window such as 90m, 24h or 7d (default: all time)")
     plevel = sub.add_parser("level", help="human only: show or set the autonomy level (docs/12): unset, off or high; no argument prints it")
     plevel.add_argument("value", nargs="?", choices=("unset", "off", "high"))
     sub.add_parser("claude-md").add_argument("action", choices=("show", "apply"))
@@ -800,7 +804,7 @@ def main(argv: list[str] | None = None) -> int:
         print(ops.launchd_plist(a.label), end="")
         return 0
     table = {"permit": _permit, "decide": _decide, "ack": _ack, "question": _question, "route": _route, "fast": _fast, "work": _work,
-             "label": _label, "eval": _eval, "improve": _improve, "hooks": _ops, "gate": _ops, "claude-md": _ops, "maintain": _maintain, "git-hook": _git_hook}
+             "label": _label, "eval": _eval, "improve": _improve, "hooks": _ops, "gate": _ops, "review": _ops, "claude-md": _ops, "maintain": _maintain, "git-hook": _git_hook}
     return table[a.cmd](a)
 
 

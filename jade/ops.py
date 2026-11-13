@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 from datetime import timedelta
@@ -456,10 +457,46 @@ def _read_quiet(p: Path) -> dict:
         return {}
 
 
+ON_FAILURE_MIN_HOST = (2, 1, 295)   # the Claude Code version that honours `"onFailure": "block"` on a hook entry (docs/12; measured on 2.1.314 in evals/probes/hook_ask/RESULTS.md)
+
+
+def host_version() -> tuple[int, int, int] | None:
+    """The installed Claude Code version as (major, minor, patch), or None when `claude --version` cannot be read."""
+    try:
+        r = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.match(r"\s*(\d+)\.(\d+)\.(\d+)", r.stdout or "")
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+
+
+def _wants_on_failure(event: str) -> bool:
+    """Only the PreToolUse hook fails closed: a crashed or hung gate then blocks the call instead of letting it run (probe cell 9). Older hosts ignore the field."""
+    if event != "PreToolUse":
+        return False
+    v = host_version()
+    return v is not None and v >= ON_FAILURE_MIN_HOST
+
+
+def _entry_current(event: str, g: dict, h: dict) -> bool:
+    """Is one installed JADE entry what `hooks install` writes now? A timeout may be longer than ours (an operator's choice), never shorter, and `onFailure`
+    is required on PreToolUse when the host honours it. Matchers are not compared here: `pretool_matcher_gaps` (PreToolUse, where a wider matcher is fine)
+    and `wiring_problems` (the other events) report them with the exact fix."""
+    _matcher, _sub, want_timeout = HOOKS[event]
+    timeout = h.get("timeout")
+    if not isinstance(timeout, (int, float)) or timeout < want_timeout:
+        return False
+    return not (_wants_on_failure(event) and h.get("onFailure") != "block")
+
+
 def hooks_status() -> dict[str, bool]:
     data = _read_quiet(settings_path())
-    found = {(event, parsed.sub) for event, _g, _h, parsed in _jade_hooks(data)}
-    return {event: (event, sub) in found for event, (_m, sub, _t) in HOOKS.items()}
+    current = {(event, parsed.sub) for event, g, h, parsed in _jade_hooks(data) if event in HOOKS and _entry_current(event, g, h)}
+    gaps = pretool_matcher_gaps()
+    out = {event: (event, sub) in current for event, (_m, sub, _t) in HOOKS.items()}
+    if gaps:
+        out["PreToolUse"] = False
+    return out
 
 
 def pretool_matcher_gaps() -> list[str] | None:
@@ -511,6 +548,8 @@ def hooks_install(stdin_isatty: bool | None = None) -> Path | None:
     hooks = data.setdefault("hooks", {})
     for event, (matcher, sub, timeout) in HOOKS.items():
         entry = {"hooks": [{"type": "command", "command": hook_command(sub), "timeout": timeout}]}
+        if _wants_on_failure(event):
+            entry["hooks"][0]["onFailure"] = "block"
         if matcher:
             entry["matcher"] = matcher
         hooks.setdefault(event, []).append(entry)
@@ -602,6 +641,40 @@ def _level_row() -> tuple[str, bool, str]:
     if raw != _recorded_level():
         return ("level", False, f"{lv}, but no `jade level` command recorded it (written some other way?); run `jade level unset`, look at the config directory, set it again")
     return ("level", True, f"{lv}")
+
+
+def parse_since(value: str) -> float:
+    """`90m`, `24h` or `7d` as a number of seconds."""
+    m = re.fullmatch(r"(\d+)([mhd])", (value or "").strip())
+    if not m:
+        raise ValueError(f"invalid window {value!r}: use 90m, 24h or 7d")
+    return int(m.group(1)) * {"m": 60, "h": 3600, "d": 86400}[m.group(2)]
+
+
+def review(since_s: float | None = None) -> str:
+    """What the human answered to JADE's asks (read-only): counts by answer, strength, rule and channel. Confirming answers is a later, human-only step."""
+    db = ledger.open(timeout=5)
+    try:
+        rows = db.human_answers(since_s=since_s, limit=100000)
+    finally:
+        db.close()
+    window = "all time" if since_s is None else f"last {int(since_s // 3600)}h" if since_s >= 3600 else f"last {int(since_s // 60)}m"
+    if not rows:
+        return f"no answers recorded ({window})"
+
+    def tally(key):
+        out: dict[str, list[int]] = {}
+        for r in rows:
+            c = out.setdefault(r[key], [0, 0])
+            c[0 if r["answer"] == "allow" else 1] += 1
+        return out
+
+    allow = sum(1 for r in rows if r["answer"] == "allow")
+    hints = sum(1 for r in rows if r["strength"] == "hint")
+    lines = [f"{len(rows)} answer(s) ({window}): {allow} allow, {len(rows) - allow} deny; {hints} hint, {len(rows) - hints} confirmed"]
+    lines.append("by rule: " + ", ".join(f"{k} {a + d} ({a} allow, {d} deny)" for k, (a, d) in sorted(tally("rule_id").items())))
+    lines.append("by channel: " + ", ".join(f"{k} {a + d}" for k, (a, d) in sorted(tally("channel").items())))
+    return "\n".join(lines)
 
 
 def claude_md_section() -> str:
@@ -1163,7 +1236,7 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
         rows.append(("question registry", False, repr(e)))
     st = hooks_status()
     missing = [k for k, v in st.items() if not v]
-    rows.append(("hooks installed", not missing, "all four" if not missing else f"missing {', '.join(missing)}: run `jade hooks install` in a terminal"))
+    rows.append(("hooks installed", not missing, "all four" if not missing else f"missing or out of date: {', '.join(missing)}: run `jade hooks install` in a terminal"))
     if not missing:
         problems = wiring_problems()
         rows.append(("hook wiring", not problems, "binary runs, hooks enabled, a synthetic event is decided" if not problems else "; ".join(problems)))
