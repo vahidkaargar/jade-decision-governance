@@ -4,7 +4,10 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
-Plan for 0.4.0: docs/11-release-0.4.0-plan.md (W-88).
+## [0.4.0] - 2026-11-13
+
+The first enforce-ready release. Signed permit approval (a high or critical permit is approved by a signature only a separate OS account can make) is verified on a real macOS host: one approval consumed once, the replay refused, gate mode enforce. SI-11 no longer blocks a scratch `JADE_HOME`/`JADE_CONFIG` prefix. Plan and gates: `docs/11-release-0.4.0-plan.md`. Not VALIDATED: that needs 14 days under enforce (earliest 2026-11-27). Upgrade note: install the approver (`bash scripts/install-approver.sh`, in your own terminal) before `jade gate enforce`; `jade upgrade` changes `policy_version`, which revokes unapproved permits.
+
 
 ### Fixed
 - **`scripts/install-approver.sh` failed on the first real run (W-90).** The approver's key directory came from a bare `sudo mktemp -d`, which on macOS is under root's private `/var/folders` path that the approver account cannot enter (`Saving key ... failed: Permission denied`). It is now made under `/var/tmp`. The anchor step then failed too: it derived the public key with `sudo -u _jadeapprove`, which the sudoers rule installed just before it refuses (only the helper is allowed); it now runs as root. A failed run leaves the service account and an empty `/Library/Application Support/jade`; re-running is safe (each step checks first).
