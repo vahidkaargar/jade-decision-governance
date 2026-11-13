@@ -62,7 +62,7 @@ rules:
     level: high
     reversibility: partially_reversible
     blast_radius: host
-    match: "\\b(launchctl (bootstrap|bootout|load|unload|enable|disable|kickstart|remove|stop|kill|submit|unsetenv)|systemctl (start|stop|restart|enable)|crontab -|docker (compose )?(up|down|rm)|brew services)\\b|(?i:/library/launchagents/.*\\.plist)"
+    match: "\\b(launchctl (bootstrap|bootout|load|unload|enable|disable|kickstart|remove|stop|kill|submit|unsetenv)|systemctl (start|stop|restart|enable)|crontab -|docker (compose )?(up|down)|docker compose rm|docker rm(?! -f [\\w.:/-]+( [\\w.:/-]+)*$)|brew services)\\b|(?i:/library/launchagents/.*\\.plist)"
     rationale: "Service lifecycle on this host"
   - id: R-13
     level: high
