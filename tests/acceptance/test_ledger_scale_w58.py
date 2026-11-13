@@ -201,6 +201,7 @@ GATE_BUDGET_MS = 15.0
 HOOK_PROCESS_BUDGET_MS = 1000.0
 
 
+@pytest.mark.timing
 def test_the_gated_pretool_handler_stays_inside_its_budget_at_20k_rows(at_big):
     from jade import hooks
 
@@ -210,6 +211,7 @@ def test_the_gated_pretool_handler_stays_inside_its_budget_at_20k_rows(at_big):
     assert got < GATE_BUDGET_MS, f"gated pretool p95 {got:.1f} ms at {ROWS} rows (budget {GATE_BUDGET_MS} ms; 1.35 ms measured at 100k rows)"
 
 
+@pytest.mark.timing
 def test_a_whole_hook_process_stays_inside_its_budget_at_20k_rows(at_big, tmp_path):
     cfg = tmp_path / "config"
     cfg.mkdir()
