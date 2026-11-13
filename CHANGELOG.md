@@ -4,6 +4,8 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-14
+
 ### Added
 - **The human answers a gated call in the chat or in a dialog (W-96 to W-100d; docs/12, ADR-13).** `jade level high` (human only; `off` makes JADE only watch, `unset` returns to 0.4.0) turns it on. In the main session in `auto` or `bypassPermissions` the gate tells the agent to ask with AskUserQuestion; the hook replaces the question text with its own (rule, rationale, the command, what is not shown), reads the answer from the host's response, and Allow makes a single-use grant for that call (10 minutes, this session). A subagent has no AskUserQuestion, so the hook shows a macOS dialog and waits (PreToolUse timeout 130 s). Live JADE wiring, secrets, unknown host modes and every call with no level keep the signed permit. Safety invariants are never asked.
 - **A failed call closes its decision (`PostToolUseFailure` hook).** Five hooks are installed now; a call that ran under a grant or a permit and failed is recorded as an observed failure, so the next identical call is asked again instead of held by SI-07. An interrupted call keeps its hold.
