@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security problem privately
+    url: https://github.com/vahidkaargar/jade-decision-governance/security/advisories/new
+    about: Anything that lets an action run without the documented human approval. Do not open a public issue.
