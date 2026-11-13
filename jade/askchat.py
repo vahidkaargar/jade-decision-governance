@@ -29,6 +29,9 @@ GRANT_TTL_S = 600
 PERMIT_ONLY = frozenset({"HO-wiring", "HO-checkout-install", "HO-settings-shadow", "HO-state-path"})   # live JADE wiring: a human types `jade permit approve`
 TOKEN = re.compile(r"\[jade:ask_([0-9a-f]{12})\]")
 HEAD_CHARS, TAIL_CHARS = 450, 150
+DENY_CAP = 3            # the 3rd Deny of one call is a plain refusal: the human has answered, asking again is pressure
+EXPIRE_PAUSE = 30       # asks that expired unanswered, in the window below and since the last answer, pause asking for the session
+PAUSE_WINDOW_S = 3600
 
 
 def applicable(mode: str, a, event: dict) -> bool:
@@ -57,6 +60,61 @@ def question_for(ask_id: str, a, tool: str, ctx: dict) -> dict:
     return {"question": "\n".join(lines), "header": "JADE gate", "multiSelect": False,
             "options": [{"label": "Allow", "description": "Run this one call once. It is not remembered."},
                         {"label": "Deny", "description": "Do not run it. The agent is told you said no."}]}
+
+
+def refusal(db, session: str, hold: str, fpj: str, tool: str, where: str):
+    """A call the human already answered no to: refused with no new ask. The window (10 minutes after a Deny) or the cap (the 3rd Deny of the same call, ever) is what ends asking."""
+    from .hooks import HookResult
+
+    n = db.one("SELECT COUNT(*) AS n FROM asks WHERE session_id=? AND status='DENIED' AND hold_key=?", (session, hold)).n
+    if n >= DENY_CAP:
+        return HookResult(2, f"JADE gate: the human denied this {tool} call {n} times. It is not asked again. Do not retry it or rephrase it to get around the answers; "
+                             "tell the human what you need and why, or continue with other work.")
+    denied = db.one("SELECT ask_id FROM asks WHERE session_id=? AND status='DENIED' AND hold_key=? AND fingerprints_json=? AND expires_ts>?", (session, hold, fpj, ts()))
+    if denied is not None:
+        return HookResult(2, f"JADE gate: the human said no to this {tool} call in {where} (ask {denied.ask_id}). Do not retry it unchanged and do not rephrase it to get "
+                             "around the answer. Continue with other work, or tell the human what you need and why.")
+    return None
+
+
+def paused(db, session: str):
+    """EXPIRE_PAUSE asks of this session expired unanswered since the human last answered: the human is away, so no new ask is opened (it would only expire too)."""
+    from .hooks import HookResult
+
+    since = ts(now() - timedelta(seconds=PAUSE_WINDOW_S))
+    n = db.one("SELECT COUNT(*) AS n FROM asks WHERE session_id=? AND status IN ('EXPIRED','GAVE_UP') AND answered_ts IS NULL AND created_ts>=? "
+               "AND created_ts>COALESCE((SELECT MAX(answered_ts) FROM asks WHERE session_id=?),'')", (session, since, session)).n
+    if n >= EXPIRE_PAUSE:
+        return HookResult(2, f"JADE gate: the human is away: {n} asks in this session expired unanswered. No new ask is opened for now. Work on other things that need no "
+                             "approval and tell the human what is waiting. Asking resumes when the human answers one, or when these age out of the last hour.")
+    return None
+
+
+def gui_paused(db, session: str) -> bool:
+    """Is an ask of this session open (the chat question not answered, or a dialog on screen)? Then the computer-use tools of the session are refused."""
+    return db.one("SELECT 1 AS x FROM asks WHERE session_id=? AND status IN ('PENDING','SHOWN','DIALOG') AND expires_ts>? LIMIT 1", (session, ts())) is not None
+
+
+def stop_nudge(db, session: str):
+    """An ask opened for this session whose question the agent never put to the human: pointed out once per ask, when the agent tries to stop."""
+    from .hooks import HookResult
+
+    if paths.level() not in ("low", "medium", "high"):
+        return None
+    _expire(db)
+    for row in db.all("SELECT ask_id FROM asks WHERE session_id=? AND status='PENDING' AND expires_ts>? ORDER BY created_ts", (session, ts())):
+        if db.one("SELECT 1 AS x FROM events WHERE kind='ask_nudged' AND entity_id=? LIMIT 1", (row.ask_id,)) is not None:
+            continue
+        db.event(row.ask_id, "ask_nudged", guard="stop with an ask that never reached the question", actor="hook")
+        return HookResult(2, "JADE: a gated call of this session is waiting for the human's answer in the chat. Call the AskUserQuestion tool now with ONE question whose text starts "
+                             f"with [jade:ask_{row.ask_id}] and the options Allow and Deny, wait for the answer, then retry the identical call. This reminder is shown once per ask.")
+    return None
+
+
+def _project(cwd: str) -> str:
+    """The folder name of the call's working directory, as plain text for a notification: letters, digits and a few separators, at most 40 characters."""
+    name = re.sub(r"[^A-Za-z0-9._ -]", "", (cwd or "").rstrip("/").rsplit("/", 1)[-1])[:40].strip()
+    return name or "a project"
 
 
 def _expire(db) -> None:
@@ -98,21 +156,24 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
                 db.con.execute("UPDATE asks SET decision_id=? WHERE ask_id=?", (did, row.ask_id))
                 db.event(row.ask_id, "ask_consumed", guard=f"{a.rule_id} {a.level}", actor="hook", detail={"decision_id": did})
                 return HookResult(0, f"JADE: your Allow in the chat (ask {row.ask_id}) was used for this {tool} call. It is spent; the next identical call asks again.")
-            denied = db.one("SELECT ask_id FROM asks WHERE session_id=? AND status='DENIED' AND hold_key=? AND fingerprints_json=? AND expires_ts>?", (session, hold, fpj, ts()))
-            if denied is not None:
-                return HookResult(2, f"JADE gate: the human said no to this {tool} call in the chat (ask {denied.ask_id}). Do not retry it unchanged and do not rephrase it to get "
-                                     "around the answer. Continue with other work, or tell the human what you need and why.")
+            if (res := refusal(db, session, hold, fpj, tool, "the chat")) is not None:
+                return res
             open_ask = db.one("SELECT ask_id FROM asks WHERE session_id=? AND status IN ('PENDING','SHOWN') AND hold_key=? AND fingerprints_json=? AND expires_ts>? ORDER BY created_ts DESC LIMIT 1",
                               (session, hold, fpj, ts()))
             if open_ask is not None:
                 ask_id = open_ask.ask_id
             else:
+                if (res := paused(db, session)) is not None:
+                    return res
                 ask_id = new_id("a")[2:]   # twelve hex characters
                 q = question_for(ask_id, a, tool, ctx)
                 db.con.execute("INSERT INTO asks(ask_id, session_id, agent_id, plan_hash, hold_key, fingerprints_json, rule_id, level, tool, question_json, status, created_ts, expires_ts, source) "
                                "VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',?,?,?)",
                                (ask_id, session, event.get("agent_id"), a.plan_hash, hold, fpj, a.rule_id, a.level, tool, json.dumps(q), ts(), ts(now() + timedelta(seconds=ASK_TTL_S)), db.source))
                 db.event(ask_id, "ask_opened", guard=f"{a.rule_id} {a.level}", actor="hook", detail={"tool": tool, "ho_ids": list(a.ho_ids)})
+                from . import askdialog
+
+                askdialog.notify(f"A {a.level}-risk call (rule {a.rule_id}) waits for your answer in {_project(cwd)}. Open the chat.")   # one per new ask: a session in another project is otherwise a silent wait
     except state_machine.IllegalTransition as e:
         return HookResult(2, f"JADE gate: the chat approval for this {tool} call could not be used ({e}). Ask the human to run `jade decide list` and look at it.")
     return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}). The human decides this {tool} call in the chat.\n"

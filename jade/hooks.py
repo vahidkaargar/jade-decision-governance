@@ -67,6 +67,28 @@ _MUTATING_TOOL = re.compile(
     r"|kubectl_|exec_in_pod|helm_chart|^RemoteTrigger$|__(?:app_type|Type|type|Shortcut|computer_batch|app_batch|teach_batch|app_key|key)$")
 
 
+_GUI_PREFIXES = ("mcp__computer-use__", "mcp__MacOS-MCP__")   # tools that can press Allow on the screen
+
+
+def _gui_pause(event: dict, tool: str):
+    """While an ask of this session is open, the session's computer-use tools are refused: an agent that drives the mouse could press Allow itself (docs/12 risks)."""
+    if paths.level() not in ("low", "medium", "high") or paths.gate_mode() != "enforce" or not event.get("session_id"):
+        return None
+    try:
+        from . import askchat, ledger
+
+        db = ledger.open(timeout=LEDGER_TIMEOUT_S)
+        try:
+            if askchat.gui_paused(db, event["session_id"]):
+                return HookResult(2, f"JADE gate: {tool} is paused while the human decides a gated call of this session. Do not click or type anything on the screen. "
+                                     "Continue with other work; this clears when the human answers or the ask expires.")
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001, S110 - a ledger failure must not stop an ordinary GUI call; the gated call itself fails closed
+        pass
+    return None
+
+
 def failsafe_reason(event: dict) -> str | None:
     """Why a gated call must be blocked when the policy cannot be consulted, or None when it is clearly harmless: a read-only command,
     a file write outside the protected locations, a tool whose name says it only reads."""
@@ -344,6 +366,8 @@ def pretool(event: dict, permit=None) -> HookResult:
         from . import askchat
 
         return askchat.rewrite(event)   # a question that carries an ask token of this session is replaced by the hook's own (docs/12); any other passes
+    if isinstance(tool, str) and tool.startswith(_GUI_PREFIXES) and (res := _gui_pause(event, tool)) is not None:
+        return res
     if not policy.is_gated(tool):
         return HookResult()
     _note_unnamed_tool(tool)
@@ -730,6 +754,10 @@ def stop(event: dict) -> HookResult:
 
     db = ledger.open(timeout=LEDGER_TIMEOUT_S)
     try:
+        from . import askchat
+
+        if paths.gate_mode() == "enforce" and (nudge := askchat.stop_nudge(db, session)) is not None:
+            return nudge
         rows = undisposed(db, session)
         if not rows:
             return HookResult()
