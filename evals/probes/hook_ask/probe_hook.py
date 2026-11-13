@@ -8,6 +8,8 @@ every event, so the action can change without restarting a session):
     ask        PreToolUse: permissionDecision "ask" with a reason text
     allow      PreToolUse: permissionDecision "allow"
     answer     PreToolUse on AskUserQuestion: updatedInput with an `answers` object (first option of each question) + "allow"
+    cycle      exit1, exit2, sleep, log on four successive PreToolUse events (counter in probe.cycle)
+    rewrite    PreToolUse on AskUserQuestion: updatedInput with a hook-written question, no permissionDecision
     exit1      exit 1 (a hook error, not a block)
     exit2      exit 2 with a reason on stderr (a block)
     sleep      sleep 15 s (past the 10 s hook timeout the owner sets in the scratch settings), then answer nothing
@@ -18,6 +20,7 @@ string value), so a log holds no file content.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -62,6 +65,8 @@ def record(event: dict, act: str, note: str = "") -> None:
         "agent_id": event.get("agent_id"),
         "agent_type": event.get("agent_type"),
         "tool_input": shape(event.get("tool_input")),
+        "input_sha256": hashlib.sha256(json.dumps(event.get("tool_input"), sort_keys=True).encode()).hexdigest()[:16],
+        "command_len": len(str((event.get("tool_input") or {}).get("command", ""))),
         "tool_response": shape(event.get("tool_response")),
         "error": shape(event.get("error")),
         "is_interrupt": event.get("is_interrupt"),
@@ -84,6 +89,14 @@ def main() -> int:
         return 0
     act = action()
     name = event.get("hook_event_name")
+    if act == "cycle" and name == "PreToolUse":   # exit1, exit2, sleep, log on four successive PreToolUse events
+        counter = HERE / "probe.cycle"
+        try:
+            n = int(counter.read_text())
+        except (OSError, ValueError):
+            n = 0
+        counter.write_text(str(n + 1))
+        act = ("exit1", "exit2", "sleep", "log")[n % 4]
     record(event, act)
     if name != "PreToolUse" or act == "log":
         return 0
@@ -99,6 +112,11 @@ def main() -> int:
             opts = q.get("options") or []
             answers[q.get("question", "")] = (opts[0].get("label") if opts and isinstance(opts[0], dict) else "") or ""
         print(pre_output("allow", "PROBE: answered by hook", {"questions": qs, "answers": answers}))
+    elif act == "rewrite" and tool == "AskUserQuestion":
+        # updatedInput with a different fixed question and NO permissionDecision: does the human see the hook-written text?
+        q = {"question": "PROBE-REWRITE: allow the call? (written by the hook)", "header": "Probe",
+             "multiSelect": False, "options": [{"label": "Allow", "description": "hook-written"}, {"label": "Deny", "description": "hook-written"}]}
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": {"questions": [q]}}}))
     elif act == "exit1":
         print("PROBE: hook error", file=sys.stderr)
         return 1
