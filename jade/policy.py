@@ -1098,12 +1098,17 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         if "_re" not in inv:
             continue
         raw = inv.get("match_on") == "raw"
-        if views is None and (raw or "_qre" in inv):
-            views = text_views(text_in)
-        haystacks, qviews = (views if raw else active + [_bare(s) for s in active]), views
+        src = _scratch_prefix_stripped(text_in) if inv["id"] == "SI-11" else text_in   # W-48
+        if src is not text_in and src != text_in:
+            inv_views = text_views(src)
+        else:
+            if views is None and (raw or "_qre" in inv):
+                views = text_views(text_in)
+            inv_views = views
+        haystacks, qviews = (inv_views if raw else active + [_bare(s) for s in active]), inv_views
         if inv.get("inert_data"):   # W-71: a name in a position that only holds data (a grep pattern, a commit message, an echo argument) is not a mention
-            masked = _masked(text_in, cwd)
-            if masked != text_in:
+            masked = _masked(src, cwd)
+            if masked != src:
                 qviews = text_views(masked)
                 haystacks = qviews if raw else _active_of(masked)
         # `block_quoted`: the same invariant, also read in the quoted text the segmenter blanks (an alias whose value is the whole command, `env -S "..."`)
@@ -1160,6 +1165,23 @@ def _segment_key(bare: str) -> str:
     words = bare.split(" ")
     words[0] = words[0].rsplit("/", 1)[-1]
     return " ".join(w for w in words if w)
+
+
+# W-48: the one harmless shape SI-11 used to block. A prefix assignment of JADE_HOME or JADE_CONFIG that points at a scratch directory (`$(mktemp -d)`, a path under
+# /tmp, /private/tmp or /var/folders, or empty) in front of a test or lint run or a `jade`/`jev` call reaches only that command's children, never the hook process, and
+# is what the skill tells an agent to type for a synthetic payload. JADE_GATE_MODE and JADE_POLICY_DIR are never exempt, nor is `export`, `env`, a real path, a `..`
+# segment, a variable, or a program outside the list; SI-09 still sees `jade permit approve` and the other human-only commands in the same command.
+_SCRATCH_VALUE = r"""(?:""|''|"?\$\(mktemp -d(?: [^)\n;&|]*)?\)"?|(?:/private)?/(?:tmp|var/folders)/[\w./+-]*|)"""
+_SCRATCH_PREFIX = re.compile(
+    r"(?P<lead>(?:\A|[;&|\n])[ \t]*)(?P<asg>(?:(?:JADE_(?:HOME|CONFIG)=" + _SCRATCH_VALUE + r"|JADE_SOURCE=\w+)[ \t]+)+)"
+    r"(?P<prog>(?:uv[ \t]+run[ \t]+(?:-\S+[ \t]+)*)?(?:python3?[ \t]+-m[ \t]+)?(?:pytest|ruff|jade|jev)(?![\w./-]))")
+
+
+def _scratch_prefix_stripped(text: str) -> str:
+    """`text` with the exempt scratch prefix assignments removed; the rest, SI-11's own pattern included, still reads the result."""
+    def drop(m: re.Match) -> str:
+        return m.group(0) if ".." in m.group("asg") else m.group("lead") + m.group("prog")
+    return _SCRATCH_PREFIX.sub(drop, text)
 
 
 def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:

@@ -7,8 +7,8 @@ Three kinds of answer:
   jade/shellnorm.py (pipes, substitutions) and jade/policy.py (a download and its later run) place the marker.
 * A script written and run by the same command (`cat > x.sh <<EOF ... EOF; bash x.sh`). The text is on the command line after all, so `written_scripts` returns it as a
   command for the classifier to read, as if it were fed to the interpreter by a heredoc.
-* What is still unreadable and is only recorded, never gated (R-31, medium, event `blind_spot`): a script file run by name, `sed -f`/`awk -f`, `eval "$(cat f)"`,
-  `eval "$VAR"`, a relative write after `cd $VAR`. Whether these should be high is a human decision (W-31, W-33); the event is the evidence for it.
+* What is still unreadable and is only recorded, never gated (event `blind_spot`): a script file run by name, `eval "$(cat f)"` and `eval "$VAR"` (R-31, low);
+  `sed -f`/`awk -f` and a relative write after `cd $VAR` (R-32, medium). Whether these should be high is a human decision (W-31, W-33); the event is the evidence for it.
 
 Everything is a text match on already canonicalised words. Nothing is run and no file is read.
 """
