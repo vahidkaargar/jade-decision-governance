@@ -347,6 +347,11 @@ def test_a_directory_above_the_anchor_that_others_can_write_is_not_trusted(appro
         assert signing.anchor_state()[0] == "untrusted"
     finally:
         approver.dir.parent.chmod(0o700)
+    approver.dir.parent.chmod(0o1777)   # sticky, like /tmp on Linux (mode 1777): others cannot rename entries they do not own
+    try:
+        assert signing.anchor_state()[0] == "ok"
+    finally:
+        approver.dir.parent.chmod(0o700)
 
 
 def test_the_real_helper_must_be_installed_root_owned(approver, monkeypatch, tmp_path):

@@ -57,7 +57,7 @@ def chain_refusal(path: Path) -> str | None:
             st = os.stat(d)
             if st.st_uid not in (0, TRUSTED_UID):
                 return f"{d} is owned by uid {st.st_uid}"
-            if st.st_mode & 0o020 or (st.st_mode & 0o002 and not st.st_mode & 0o1000):
+            if st.st_mode & 0o022 and not st.st_mode & 0o1000:
                 return f"{d} is writable by group or others (mode {st.st_mode & 0o7777:o})"
             if d == d.parent:
                 return None
