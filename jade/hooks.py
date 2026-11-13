@@ -619,6 +619,20 @@ def posttool(event: dict) -> HookResult:
         from . import askchat
 
         return askchat.settle(event)   # the human's answer to an ask of this session, read from the host's tool_response
+    return _close_decision(event, not _failed(event.get("tool_response")), "tool call returned (exit status only; the goal is not verified)")
+
+
+def posttool_failure(event: dict) -> HookResult:
+    """PostToolUseFailure (probe cell 10): the host fires it, and not PostToolUse, for a call that failed. The decision it ran under is closed as an observed failure,
+    so SI-07 stops holding it as unknown and the next identical call is asked again. An interrupted call may have run in part: its decision is left as it is
+    (EXECUTING, then held as unknown at its deadline), which is the cautious answer."""
+    if event.get("is_interrupt"):
+        return HookResult()
+    return _close_decision(event, False, "tool call failed (host event PostToolUseFailure; exit status only, the goal is not verified)")
+
+
+def _close_decision(event: dict, success: bool, method: str) -> HookResult:
+    tool = event.get("tool_name")
     if not isinstance(tool, str) or not (tool in policy.POST_TOOLS or policy.is_mcp(tool)):
         return HookResult()
     tin = event.get("tool_input")
@@ -633,8 +647,7 @@ def posttool(event: dict) -> HookResult:
             db.event(event.get("session_id") or "session", "BYPASS", guard="raw Decisions API call outside the adapter", actor="hook")
         did = _executing_decision(db, tool, tin, event, cwd)
         if did:
-            decide.record_outcome(db, did, "observed", not _failed(event.get("tool_response")), "tool call returned (exit status only; the goal is not verified)",
-                                  attribution="indirect")
+            decide.record_outcome(db, did, "observed", success, method, attribution="indirect")
     finally:
         db.close()
     return HookResult()
@@ -828,7 +841,7 @@ def session_start(event: dict) -> HookResult:
         db.close()
 
 
-HANDLERS = {"pretool": pretool, "posttool": posttool, "stop": stop, "session-start": session_start}
+HANDLERS = {"pretool": pretool, "posttool": posttool, "posttool-failure": posttool_failure, "stop": stop, "session-start": session_start}
 
 
 def _on_alarm(_signum, _frame):

@@ -609,7 +609,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action=_VersionAction, help="print the code version, commit, ledger schema version and policy_version")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("ask", help="ask Jev (see `jade ask -h`)")
-    sub.add_parser("hook", help="Claude Code hook entry: pretool | posttool | stop | session-start")
+    sub.add_parser("hook", help="Claude Code hook entry: pretool | posttool | posttool-failure | stop | session-start")
 
     s = sub.add_parser("ledger").add_subparsers(dest="action", required=True)
     st = s.add_parser("stats")

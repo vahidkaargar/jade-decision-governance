@@ -82,7 +82,7 @@ jade setup --yes         # same steps without the questions; still needs an inte
 |------|------|------|
 | 1 | Checks Python, `uv` and that the OpenRouter key exists (Keychain item `OPENROUTER_API_KEY`, or the environment variable). It never reads or prints the value; when it is missing it prints how you add it yourself | never (informational, a missing key does not fail the run) |
 | 2 | `jade gate advisory` (2.1) | `gate_mode` is already `advisory` or `enforce` in `~/.config/jade/config.json`; a configured enforce is never lowered |
-| 3 | `jade hooks install` (2.1) | all four hooks are installed and the PreToolUse matcher is current |
+| 3 | `jade hooks install` (2.1) | all five hooks are installed and the PreToolUse matcher is current |
 | 4 | `jade claude-md apply` (2.3) | the Jev section already equals the shipped text; not applicable (and not an error) when CLAUDE.md or the section does not exist: add the output of `jade claude-md show` yourself |
 | 5 | Copies the skill (`skills/jade/SKILL.md`, shipped in the wheel as `jade/_skills`) to `~/.agents/jade/SKILL.md` and links `~/.claude/skills/jade` to `~/.agents/jade` | file and link already match. A different existing skill file is shown as a change, copied to `SKILL.md.bak-jade-<time>` next to it and replaced when you say y (this is how a release that improves the skill reaches you; `--yes` does the same). A link or a different path is never overwritten: the step is refused, the run exits 1 and says what to compare |
 | 6 | macOS only: writes `~/Library/LaunchAgents/com.jade.maintain.plist` from `jade launchd-plist`, then offers `launchctl bootstrap gui/<uid> <plist>` (2.4) as a second question | not macOS; a `jade maintain` job already exists and is loaded |

@@ -35,7 +35,7 @@ def posttool_matcher() -> str:
 
 # PreToolUse: a timeout above askdialog.DIALOG_WAIT_S + ALARM_MARGIN_S, because the hook waits for a macOS dialog (W-100c); the others answer at once
 HOOKS = {"PreToolUse": (pretool_matcher(), "pretool", 130), "PostToolUse": (posttool_matcher(), "posttool", 10),
-         "Stop": ("", "stop", 10), "SessionStart": ("", "session-start", 10)}
+         "PostToolUseFailure": (posttool_matcher(), "posttool-failure", 10), "Stop": ("", "stop", 10), "SessionStart": ("", "session-start", 10)}
 JEV_HEADING = "## Jev: verify outputs and decide (global, all sessions)"
 
 
@@ -357,7 +357,7 @@ def atomic_write(path: Path, text: str, default_mode: int = 0o600) -> None:
             os.close(dfd)
 
 
-_HOOK_CMD = re.compile(r"^(?P<bin>.*?)\s+hook\s+(?P<sub>pretool|posttool|stop|session-start)\s*$", re.S)
+_HOOK_CMD = re.compile(r"^(?P<bin>.*?)\s+hook\s+(?P<sub>pretool|posttool-failure|posttool|stop|session-start)\s*$", re.S)
 
 
 class HookCommand(NamedTuple):
@@ -786,6 +786,8 @@ def _probe_event(sub: str) -> dict:
         return {"tool_name": "Bash", "tool_input": {"command": "jade permit approve prm_000000000000"}, "session_id": PROBE_SESSION, "cwd": "/tmp"}
     if sub == "posttool":
         return {"tool_name": "Bash", "tool_input": {"command": "true"}, "tool_response": {}, "session_id": PROBE_SESSION, "cwd": "/tmp"}
+    if sub == "posttool-failure":
+        return {"tool_name": "Bash", "tool_input": {"command": "true"}, "error": "probe", "is_interrupt": False, "session_id": PROBE_SESSION, "cwd": "/tmp"}
     return {"session_id": PROBE_SESSION, "cwd": "/tmp"}
 
 
