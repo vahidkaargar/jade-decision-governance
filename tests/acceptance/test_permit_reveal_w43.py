@@ -106,10 +106,10 @@ def test_the_same_call_again_reuses_the_permit_and_keeps_one_stash(reveal_on, hu
 
 
 def test_a_command_without_a_secret_keeps_nothing(reveal_on, human_env):
-    hooks.pretool(call("git push origin feat-x"))
+    hooks.pretool(call("git push origin v1-feat-x"))
     db = ledger.open()
     assert not (db.path.parent / "reveal").exists() or not any((db.path.parent / "reveal").iterdir())
-    assert "git push origin feat-x" in permits.review_raw(db, pending(db))
+    assert "git push origin v1-feat-x" in permits.review_raw(db, pending(db))
 
 
 def test_show_raw_prints_the_command_in_full_on_a_human_terminal(reveal_on, human_tty, capsys):

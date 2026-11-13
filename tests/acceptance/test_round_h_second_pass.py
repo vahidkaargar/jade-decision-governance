@@ -72,8 +72,8 @@ def test_si10_state_directory_from_the_environment_counts(monkeypatch):
 
 # ---- R-17: the environment route around core.hooksPath -------------------------------------------------------------
 @pytest.mark.parametrize("cmd", [
-    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/x git push origin feat",
-    "GIT_CONFIG_PARAMETERS=\"'core.hookspath=/x'\" git push origin feat",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/x git push origin v1-feat",
+    "GIT_CONFIG_PARAMETERS=\"'core.hookspath=/x'\" git push origin v1-feat",
     "export GIT_CONFIG_KEY_0=core.hooksPath",
 ])
 def test_the_environment_route_around_the_guard_is_rated_r17(cmd):

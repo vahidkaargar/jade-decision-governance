@@ -341,7 +341,7 @@ def test_a_quoted_syntax_character_is_data():
 
 def test_gate_replay_reports_levels_and_rules_without_printing_a_command(tmp_path):
     secretish = "uniquemarker-7f3a"
-    items = [f"ls {secretish}", f"echo {secretish}", "git push origin feature/x", "ssh host uptime", heredoc("print('systemctl start x')"),
+    items = [f"ls {secretish}", f"echo {secretish}", "git push origin v1-feature-x", "ssh host uptime", heredoc("print('systemctl start x')"),
              {"command": "git status", "cwd": "/tmp"}, {"command": "rm -rf ~/gone", "tool": "Bash"}]
     jsonl = tmp_path / "c.jsonl"
     jsonl.write_text("\n".join(json.dumps(i) for i in items) + "\n")

@@ -248,7 +248,7 @@ def test_an_oversized_settings_file_is_reported_not_read(proj):
 # ---- integrity-bad-revoked-row-fails-forever / integrity-row-never-clears --------------------------------------------
 def test_a_dead_corrupt_permit_row_no_longer_fails_the_check(human_env, jade_stub):
     db = ledger.open()
-    assert hooks.pretool({"tool_name": "Bash", "tool_input": {"command": "git push origin feat-x"}, "session_id": "sess-1", "cwd": "/tmp/x"}).exit_code == 2
+    assert hooks.pretool({"tool_name": "Bash", "tool_input": {"command": "git push origin v1-feat-x"}, "session_id": "sess-1", "cwd": "/tmp/x"}).exit_code == 2
     pid = permits.listing(db, ("PENDING",))[-1].permit_id
     db.con.execute("UPDATE permits SET doc_json='{' WHERE permit_id=?", (pid,))
     assert "permit" in " ".join(ops.integrity_problems(db)[2])   # open and corrupt: reported

@@ -210,7 +210,7 @@ def test_risk_rules_ordered_by_severity_and_regexes_compile():
 
 
 @pytest.mark.parametrize("cmd,expected", [
-    ("git push origin feature/x", "R-10"),
+    ("git push origin v1-feature-x", "R-10"),
     ("git push --force origin feature/x", "R-10"),            # first match wins: push rule precedes force rule
     ("composio execute GMAIL_FETCH_EMAILS", "R-10"),           # any connected-app action is high (Q3b)
     ("sudo pfctl -f /etc/pf.conf", "R-01"),

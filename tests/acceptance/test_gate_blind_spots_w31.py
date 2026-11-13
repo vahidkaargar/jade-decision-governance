@@ -239,7 +239,7 @@ ALIASES = (
     "\tnuke = !git reset --hard && git clean -fd\n"
     "\tbrief = !git log --oneline | head -n 3\n"
     "\tpush = status\n"
-    "\tpub = push origin feat/x\n"
+    "\tpub = push origin v1-feat-x\n"
     "\tpush-it = !git push origin main\n"
 )
 
@@ -277,7 +277,7 @@ def test_twins_of_the_alias_rule_stay_low(home, cmd):
 def test_an_alias_that_hides_a_builtin_is_ignored_as_git_ignores_it(home):
     alias_config(home, ALIASES)
     assert not at_least_high(sh("git status"))   # `status = push origin main` would be R-10; git never reads it
-    assert sh("git push origin feat/x").rule_id == "R-10"   # `push = status` must not hide a real push either
+    assert sh("git push origin v1-feat-x").rule_id == "R-10"   # `push = status` must not hide a real push either
 
 
 def test_an_alias_set_in_the_repository_config_is_read(home, tmp_path):
@@ -456,7 +456,7 @@ def test_twins_of_the_blind_spot_rule_are_not_recorded(cmd):
 
 
 def test_a_blind_spot_never_lowers_a_higher_rating():
-    assert sh("bash x.sh && git push origin feat/x").rule_id == "R-10"
+    assert sh("bash x.sh && git push origin v1-feat-x").rule_id == "R-10"
     assert sh("sed -f x.sed in > ~/.claude/settings.json").rule_id == "R-13"
     assert sh("python3 x.py && terraform apply").rule_id == "R-03"
 

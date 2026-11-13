@@ -85,7 +85,7 @@ def test_an_inherited_git_dir_does_not_redirect_the_branch_lookup(tmp_path, monk
 
 # ---------------------------------------------------------------- a hostile repository
 
-@pytest.mark.parametrize("cmd", ["git push origin HEAD", "git push", "git push origin feat/x", "git push origin HEAD:trunk"])
+@pytest.mark.parametrize("cmd", ["git push origin HEAD", "git push", "git push origin v1-feat-x", "git push origin HEAD:trunk"])
 def test_hostile_repository_config_and_hooks_never_run(tmp_path, cmd):
     repo = init(tmp_path / "r", "feat/x")
     marker = tmp_path / "ran"
@@ -165,7 +165,7 @@ def test_git_failing_is_unresolved_but_no_such_ref_is_an_answer(tmp_path):
 def test_an_unresolved_destination_blocks_a_high_risk_push_even_with_an_issued_permit(tmp_path, human_env):
     bad = broken(init(tmp_path / "bad"))
     db = ledger.open()
-    cmd = "git push origin feat/x"
+    cmd = "git push origin v1-feat-x"
     ev = {"tool_name": "Bash", "tool_input": {"command": cmd}, "session_id": SESSION, "cwd": bad}
     hooks.pretool({**ev, "cwd": init(tmp_path / "r")})   # the permit is requested where the branch resolves (feat/x)
     pid = permits.listing(db, ("PENDING",))[0].permit_id

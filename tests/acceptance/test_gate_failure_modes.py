@@ -109,7 +109,7 @@ def test_pretool_total_time_is_bounded_when_the_handler_hangs(monkeypatch, capsy
     """The alarm in main() turns a hang (ledger, git, a pathological regex) into the cheap fail-closed verdict before the host kills the hook."""
     monkeypatch.setattr(hooks, "BUDGET_S", 0.3)
     monkeypatch.setitem(hooks.HANDLERS, "pretool", lambda e: time.sleep(5))
-    for cmd, want in (("git push origin feat/x", 2), ("make deploy", 2), ("ls -la", 0)):
+    for cmd, want in (("git push origin v1-feat-x", 2), ("make deploy", 2), ("ls -la", 0)):
         monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(ev(cmd))))
         t0 = time.monotonic()
         assert hooks.main("pretool") == want, cmd
@@ -136,7 +136,7 @@ def test_unresolvable_push_destination_fails_closed_even_with_an_issued_permit(h
     import subprocess
 
     db = ledger.open()
-    cmd = "git push origin feat/x"
+    cmd = "git push origin v1-feat-x"
     pre(cmd, cwd=str(tmp_path))   # W-60: an existing directory, so that the hung git is what fails (a missing one has nothing to push from)
     pid = permits.listing(db, ("PENDING",))[0].permit_id
     permits.approve(db, pid, stdin_isatty=True)
@@ -190,8 +190,8 @@ def test_jade_check_flags_a_malformed_overlay(tmp_path, monkeypatch):
 # ---------------------------------------------------------------- F41: mutation guards for sh -c unwrapping and worst segment
 
 WRAPPED_HIGH = [
-    ('bash -c "git push origin feat/x"', "R-10"), ("sh -c 'ssh host ls /srv'", "R-14"), ('sudo bash -c "git push origin feat/x"', "R-10"),
-    ('zsh -c "git reset --hard HEAD~1"', "R-11"), ("sh -c 'sh -c \"git push origin feat/x\"'", "R-10"), ('eval "git push origin feat/x"', "R-10"),
+    ('bash -c "git push origin v1-feat-x"', "R-10"), ("sh -c 'ssh host ls /srv'", "R-14"), ('sudo bash -c "git push origin v1-feat-x"', "R-10"),
+    ('zsh -c "git reset --hard HEAD~1"', "R-11"), ("sh -c 'sh -c \"git push origin v1-feat-x\"'", "R-10"), ('eval "git push origin v1-feat-x"', "R-10"),
     ("env FOO=1 bash -c 'kubectl apply -f x.yaml'", "R-03"), ('bash -lc "ufw disable"', "R-01"),
 ]
 
@@ -209,10 +209,10 @@ def test_shell_wrapped_harmless_commands_stay_low(cmd):
 
 
 CHAINS = [
-    ("touch /tmp/a && git push origin feat/x", "high"), ("touch /tmp/a; ssh host ls", "high"), ("ls; git push origin feat/x", "high"),
-    ("git merge dev && git push origin feat/x", "high"), ("git rebase x; ufw disable", "critical"), ("git merge x | git push origin feat/x", "high"),
+    ("touch /tmp/a && git push origin v1-feat-x", "high"), ("touch /tmp/a; ssh host ls", "high"), ("ls; git push origin v1-feat-x", "high"),
+    ("git merge dev && git push origin v1-feat-x", "high"), ("git rebase x; ufw disable", "critical"), ("git merge x | git push origin v1-feat-x", "high"),
     ("make build && make test && kubectl apply -f x.yaml", "critical"), ("git commit -m x; rm -rf /Users/x/y", "high"),
-    ("git commit -m x && git push origin feat/x && git rebase main", "high"), ("git rebase main && ssh host ls && ufw disable", "critical"),
+    ("git commit -m x && git push origin v1-feat-x && git rebase main", "high"), ("git rebase main && ssh host ls && ufw disable", "critical"),
 ]
 
 
@@ -225,6 +225,6 @@ def test_the_worst_segment_decides_whatever_the_order(cmd, level):
 
 
 def test_medium_then_high_picks_high_and_high_then_medium_keeps_high():
-    assert policy.assess("Bash", {"command": "git merge dev; git push origin feat/x"}, "").level == "high"
-    assert policy.assess("Bash", {"command": "git push origin feat/x; git merge dev"}, "").level == "high"
+    assert policy.assess("Bash", {"command": "git merge dev; git push origin v1-feat-x"}, "").level == "high"
+    assert policy.assess("Bash", {"command": "git push origin v1-feat-x; git merge dev"}, "").level == "high"
     assert policy.assess("Bash", {"command": "git merge dev; ls"}, "").level == "medium"

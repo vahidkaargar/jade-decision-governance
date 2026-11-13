@@ -122,15 +122,15 @@ MCP_HIGH = [
     ("mcp__Desktop_Commander__write_file", {"path": "/tmp/x", "content": "x"}),
     ("mcp__Desktop_Commander__edit_block", {"file_path": "/tmp/x", "old_string": "a", "new_string": "b"}),
     ("mcp__Desktop_Commander__move_file", {"source": "/tmp/a", "destination": "/tmp/b"}),
-    ("mcp__Desktop_Commander__interact_with_process", {"pid": 1, "input": "git push origin feat/x"}),
+    ("mcp__Desktop_Commander__interact_with_process", {"pid": 1, "input": "git push origin v1-feat-x"}),
     ("mcp__MCP_DOCKER__mcp-exec", {"name": "x", "arguments": {"command": "ls"}}),
     ("mcp__MCP_DOCKER__code-mode", {"code": "x", "servers": []}),
     ("mcp__MCP_DOCKER__mcp-add", {"name": "x"}), ("mcp__MCP_DOCKER__mcp-config-set", {"server": "x", "config": {}}),
-    ("mcp__MacOS-MCP__Shell", {"command": "git push origin feat/x"}),
+    ("mcp__MacOS-MCP__Shell", {"command": "git push origin v1-feat-x"}),
     ("mcp__Kubernetes_MCP_Server__kubectl_apply", {"manifest": "x"}), ("mcp__Kubernetes_MCP_Server__exec_in_pod", {"name": "p", "command": ["sh"]}),
     ("mcp__GitLab__accept_merge_request", {"id": 1}), ("mcp__GitLab__save_merge_request", {"id": 1}),
-    ("mcp__computer-use__app_type", {"app": "Terminal", "text": "git push origin feat/x\n"}),
-    ("mcp__MacOS-MCP__Type", {"text": "git push origin feat/x\n"}),
+    ("mcp__computer-use__app_type", {"app": "Terminal", "text": "git push origin v1-feat-x\n"}),
+    ("mcp__MacOS-MCP__Type", {"text": "git push origin v1-feat-x\n"}),
     ("mcp__ccd_session_mgmt__send_message", {"session_id": "x", "message": "do it"}),
     ("mcp__some_new_server__delete_everything", {"x": 1}), ("mcp__some_new_server__write_config", {"x": 1}),
     ("mcp__some_new_server__execute", {"x": 1}),
@@ -178,13 +178,13 @@ def test_unknown_mcp_tool_without_a_rule_is_labelled_not_silently_low():
 
 def test_agent_and_task_calls_need_no_gate():
     for tool in ("Agent", "Task", "Read", "Grep", "WebFetch"):
-        assert hooks.pretool(call(tool, {"prompt": "git push origin feat/x"})).exit_code == 0
+        assert hooks.pretool(call(tool, {"prompt": "git push origin v1-feat-x"})).exit_code == 0
 
 
 def test_subagent_tool_calls_are_gated_exactly_like_the_parents(human_env):
     """Claude Code runs the same PreToolUse hook for a subagent's tool calls and adds agent_id/agent_type; the verdict must not depend on them."""
-    main = hooks.pretool(bash("git push origin feat/x"))
-    sub = hooks.pretool(bash("git push origin feat/x", agent_id="agent-1", agent_type="general-purpose"))
+    main = hooks.pretool(bash("git push origin v1-feat-x"))
+    sub = hooks.pretool(bash("git push origin v1-feat-x", agent_id="agent-1", agent_type="general-purpose"))
     assert main.exit_code == sub.exit_code == 2
     assert hooks.pretool(bash("git push origin main", agent_id="agent-1")).exit_code == 2
     row = ledger.open().one("SELECT detail_json FROM events WHERE kind='safety_block'")
@@ -236,7 +236,7 @@ def test_mcp_arguments_without_a_command_are_scanned_too():
 @pytest.mark.parametrize("mode", ["bypassPermissions", "acceptEdits", "plan", "default", None])
 def test_the_verdict_does_not_depend_on_the_host_permission_mode_and_the_mode_is_recorded(mode):
     extra = {"permission_mode": mode} if mode else {}
-    assert hooks.pretool(bash("git push origin feat/x", **extra)).exit_code == 2
+    assert hooks.pretool(bash("git push origin v1-feat-x", **extra)).exit_code == 2
     assert hooks.pretool(bash("git push origin main", **extra)).exit_code == 2
     rows = ledger.open().all("SELECT detail_json FROM events WHERE kind='safety_block'")
     assert json.loads(rows[-1].detail_json).get("permission_mode") == mode
@@ -252,8 +252,8 @@ def test_check_says_plainly_that_jade_is_the_only_gate_without_a_host_prompt():
 
 
 def test_check_reports_gated_calls_seen_without_a_host_prompt():
-    hooks.pretool(bash("git push origin feat/x", permission_mode="bypassPermissions"))
-    hooks.pretool(bash("git push origin feat/y", permission_mode="default"))
+    hooks.pretool(bash("git push origin v1-feat-x", permission_mode="bypassPermissions"))
+    hooks.pretool(bash("git push origin v1-feat-y", permission_mode="default"))
     detail = {n: d for n, _ok, d in ops.check(live=False)}["host permission prompt"]
     assert "1 of 2 gated call" in detail
 

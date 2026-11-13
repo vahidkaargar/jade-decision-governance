@@ -9,7 +9,7 @@
       "permission_mode": "default",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
-      "tool_input": {"command": "git push origin feat-x", "description": "Push the branch"},
+      "tool_input": {"command": "git push origin v1-feat-x", "description": "Push the branch"},
       "tool_use_id": "toolu_synthetic_bash_0001"
     },
     "post": {
@@ -19,7 +19,7 @@
       "permission_mode": "default",
       "hook_event_name": "PostToolUse",
       "tool_name": "Bash",
-      "tool_input": {"command": "git push origin feat-x", "description": "Push the branch"},
+      "tool_input": {"command": "git push origin v1-feat-x", "description": "Push the branch"},
       "tool_response": {"stdout": "Everything up-to-date", "stderr": "", "interrupted": false, "isImage": false},
       "tool_use_id": "toolu_synthetic_bash_0001"
     }
@@ -81,7 +81,7 @@
       "permission_mode": "default",
       "hook_event_name": "PreToolUse",
       "tool_name": "mcp__demo__shell",
-      "tool_input": {"command": "git push origin feat-x", "cwd": "/work/project"},
+      "tool_input": {"command": "git push origin v1-feat-x", "cwd": "/work/project"},
       "tool_use_id": "toolu_synthetic_mcp_0001"
     },
     "post": {
@@ -91,7 +91,7 @@
       "permission_mode": "default",
       "hook_event_name": "PostToolUse",
       "tool_name": "mcp__demo__shell",
-      "tool_input": {"command": "git push origin feat-x", "cwd": "/work/project"},
+      "tool_input": {"command": "git push origin v1-feat-x", "cwd": "/work/project"},
       "tool_response": [{"type": "text", "text": "ok"}],
       "tool_use_id": "toolu_synthetic_mcp_0001"
     }
@@ -131,7 +131,7 @@
       "agent_id": "agent-0000000000000001",
       "agent_type": "general-purpose",
       "tool_name": "Bash",
-      "tool_input": {"command": "git push origin feat-x"},
+      "tool_input": {"command": "git push origin v1-feat-x"},
       "tool_use_id": "toolu_synthetic_subagent_0001"
     },
     "post": {
@@ -143,7 +143,7 @@
       "agent_id": "agent-0000000000000001",
       "agent_type": "general-purpose",
       "tool_name": "Bash",
-      "tool_input": {"command": "git push origin feat-x"},
+      "tool_input": {"command": "git push origin v1-feat-x"},
       "tool_response": {"stdout": "", "stderr": "", "interrupted": false, "isImage": false},
       "tool_use_id": "toolu_synthetic_subagent_0001"
     }

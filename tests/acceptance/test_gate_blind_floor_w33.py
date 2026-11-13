@@ -90,7 +90,7 @@ def test_twins_of_the_floor_are_not_rated_medium(cmd):
 def test_the_floor_never_lowers_a_higher_rating():
     assert sh("sed -f x.sed in > ~/.claude/settings.json").rule_id == "R-13"
     assert sh("awk -f x.awk in && terraform apply").rule_id == "R-03"
-    assert sh("cd $NOPE/x && sort -o out in && git push origin feat/x").rule_id == "R-10"
+    assert sh("cd $NOPE/x && sort -o out in && git push origin v1-feat-x").rule_id == "R-10"
 
 
 def test_a_medium_label_wins_over_a_low_one_and_both_are_recorded():

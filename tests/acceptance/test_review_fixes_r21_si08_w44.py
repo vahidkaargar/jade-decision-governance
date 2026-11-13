@@ -283,8 +283,8 @@ def test_ordinary_config_on_a_feature_branch_is_not_si08(feat_repo, config, cmd)
 
 def test_an_explicit_refspec_still_wins_over_config(feat_repo):
     cfg(feat_repo, "remote.origin.push", "HEAD:refs/heads/main")
-    assert hooks._on_default_branch(feat_repo, "git push origin feat:feat") is False
-    assert hooks._on_default_branch(feat_repo, "git push origin feat:main") is True
+    assert hooks._on_default_branch(feat_repo, "git push origin v1-feat:feat") is False
+    assert hooks._on_default_branch(feat_repo, "git push origin v1-feat:main") is True
 
 
 # ---- W-44: a canary cannot be restarted to forget its triggers -----------------------------------------------------------------------

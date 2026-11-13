@@ -11,7 +11,7 @@
 {"id": "R11", "class": "provider_rejected_request", "kind": "provider_error", "error_kind": "REJECTED", "http_status": 400, "expect_exit": 6}
 {"id": "R12", "class": "gate_commit_is_low", "kind": "gate", "command": "git commit -m 'git push later'", "expect": "allow"}
 {"id": "R13", "class": "gate_install_is_low", "kind": "gate", "command": "uv tool install .", "expect": "allow"}
-{"id": "R14", "class": "gate_push_is_high", "kind": "gate", "command": "git push origin feat/x", "expect": "block"}
+{"id": "R14", "class": "gate_push_is_high", "kind": "gate", "command": "git push origin v1-feat-x", "expect": "block"}
 {"id": "R15", "class": "gate_ssh_is_high", "kind": "gate", "command": "ssh web1 uptime", "expect": "block"}
 {"id": "R16", "class": "gate_composio_is_high", "kind": "gate", "command": "composio execute GMAIL_SEND_EMAIL", "expect": "block"}
 {"id": "R17", "class": "gate_firewall_is_critical", "kind": "gate", "command": "sudo pfctl -f /etc/pf.conf", "expect": "block"}
@@ -46,7 +46,7 @@
 {"id": "R46", "class": "interface_only_mcp_tool_is_low", "kind": "gate_mcp", "tool": "mcp__ccd_sidebar__set_pinned", "input": {"pinned": true}, "expect": "allow", "note": "G01 pass 2 control"}
 {"id": "R47", "class": "camel_case_read_tool_is_low", "kind": "gate_mcp", "tool": "mcp__x__getThing", "input": {}, "expect": "allow", "note": "G01 pass 2 control"}
 {"id": "R48", "class": "uv_run_pytest_is_low", "kind": "gate", "command": "uv run pytest -q", "expect": "allow", "note": "launcher prefix control"}
-{"id": "R49", "class": "permit_is_for_the_exact_text", "kind": "permit_variant", "command": "git push origin feat-x", "variant": "git push origin feat-x", "expect": "allow", "note": "F08 control: the approved text itself still passes"}
+{"id": "R49", "class": "permit_is_for_the_exact_text", "kind": "permit_variant", "command": "git push origin v1-feat-x", "variant": "git push origin v1-feat-x", "expect": "allow", "note": "F08 control: the approved text itself still passes"}
 {"id": "R50", "class": "ordinary_jade_commands_are_not_si09", "kind": "gate", "command": "uv run jade permit list", "expect": "allow", "note": "F06 control: widened SI-09 leaves `jade permit list` alone"}
 {"id": "R51", "class": "quoted_prose_naming_approve_is_not_si09", "kind": "gate", "command": "git commit -m 'document jade permit approve'", "expect": "allow", "note": "F06 control"}
 {"id": "R52", "class": "pytest_in_a_directory_named_jade_with_approve_is_not_si09", "kind": "gate", "command": "pytest /Users/x/Documents/projects/jade/tests -k approve", "expect": "allow", "note": "pass 2 control: a path component jade is not the program"}

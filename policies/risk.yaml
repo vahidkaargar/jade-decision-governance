@@ -50,8 +50,8 @@ rules:
     level: high
     reversibility: partially_reversible
     blast_radius: public
-    match: "\\b(git push|gh (pr|release) (create|merge)|glab mr (create|merge)|npm publish|cargo publish|twine upload|docker push|composio execute)\\b"
-    rationale: "External side effect: publish, push, send, act in a connected app"
+    match: "\\b(gh pr merge|gh release (create|merge)|glab mr merge|npm publish|cargo publish|twine upload|docker push|composio execute)\\b|\\bgit push\\b(?!(?:\\s+(?:-u|-q|--set-upstream|--quiet))*\\s+\\w[\\w.-]*\\s+(?!main\\b|master\\b|v?[0-9]|HEAD\\b)\\w[\\w./-]*(?:\\s*(?:$|[;&|)]|2>&1)))"
+    rationale: "External side effect: merge, release, publish, connected-app action, or a git push that is not a plain push of one named branch (bare push, force, delete, tag, default branch, refspec)"
   - id: R-11
     level: high
     reversibility: irreversible
@@ -172,6 +172,12 @@ rules:
     files_only: true
     match: "(?i:(?<![\\w.-])\\.git/(?:modules/\\S+?/)?config(?![\\w./-])|/\\.config/git/config(?![\\w.-])|(?<![\\w.-])\\.gitconfig(?![\\w.-]))"
     rationale: "Edits a git config file: an alias, pager, sshCommand or filter set there runs a program the next time git runs"
+  - id: R-19
+    level: medium
+    reversibility: reversible
+    blast_radius: public
+    match: "\\bgit push\\b|\\b(gh pr create|glab mr create)\\b"
+    rationale: "Routine publish of a named branch or a pull request: recorded, not gated. R-10 comes first and keeps every merge, release, tag, force, delete and default-branch push high"
   - id: R-20
     level: medium
     reversibility: reversible
