@@ -57,6 +57,9 @@ _PROTECTED_PATH = re.compile(
 # Read, Grep and Glob when the policy cannot be consulted: only a call that may touch the permit seal key (SI-10, W-70) is blocked.
 # Not a bare `permit` (a repository has app/Models/Permit.php): the key's own name, a glob that could expand to it (`perm*`, `permit-s*`), the state directory.
 _SEAL_KEY_TEXT = re.compile(r"(?i)permit[-_.]?seal|seal[-_.]?key|\.local/share/jade|jade_home|(?:^|/)perm[^/]*[*?\[]")
+# Harness bookkeeping tools (M-06b in policies/risk.yaml; a test keeps the two patterns equal): their names say `update`, but they only
+# change what the app shows, so the degraded failsafe lets them through like the policy does.
+_HARNESS_TOOL = re.compile(r"^mcp__ccd_turn__(?:update_plan|wrap_up)$|^mcp__ccd_session__(?:mark_chapter|dismiss_task)$")
 _MUTATING_TOOL = re.compile(
     r"^mcp__.+?__(?:set|write|edit|create|update|delete|remove|move|rename|exec|execute|run|shell|apply|merge|deploy|install|uninstall|kill|terminate|patch|publish"
     r"|push|commit|save|add|drop|truncate|restart|stop|start|send|post|put|accept|fork|link|discard|clean|interact|force|mcp-(?:exec|add|remove|config|create|activate)|code-mode)"
@@ -90,6 +93,8 @@ def failsafe_reason(event: dict) -> str | None:
         if len(text) <= 4096 and _SAFE_CMD.fullmatch(text) and not _EXEC_FLAG.search(text):
             return None
         return "the command is not clearly read-only"
+    if _HARNESS_TOOL.search(tool):
+        return None
     if _MUTATING_TOOL.search(tool) or _MUTATING_TOOL.search("__".join((tool.rpartition("__")[0], policy.snake(tool.rpartition("__")[2])))):
         return f"{tool} can mutate state"
     return None
