@@ -9,7 +9,7 @@
     "ref": { "type": "string", "minLength": 1, "maxLength": 512 },
     "risk_level": { "enum": ["low", "medium", "high", "critical"] },
     "environment": { "enum": ["local", "staging", "production"] },
-    "route": { "enum": ["FAST", "JEV", "DEEP", "ESCALATE"] },
+    "route": { "enum": ["FAST", "JEV", "DEEP", "ESCALATE", "ASK"] },
     "primitive": { "enum": ["noul", "choice", "score"] }
   }
 }

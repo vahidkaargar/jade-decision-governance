@@ -37,6 +37,9 @@ MAX_BYTES = 1_000_000
 INSTALL_TIMEOUT_S = 600
 CHECK_TIMEOUT_S = 120
 MAX_CHANGES = 50
+MAX_FILES = 100          # file lines `jade upgrade` prints before it says how many more there are
+COMPARE_LIMIT = 300      # GitHub's compare answer lists at most this many files
+WATCHED_DIRS = ("jade/", "policies/", "registry/", "scripts/")   # what decides the gate: a change here is what the human reads before typing yes
 LEDGER_SCHEMA_VERSION = "1.0.0"   # `schema_version` of every record the ledger stores (schemas/*.schema.json); a test pins it to the shipped examples
 HOOK_ROWS = ("hooks installed", "hook wiring", "pretool matcher")   # rows of `jade check` that say the installed hooks differ from what this version expects
 
@@ -44,6 +47,8 @@ REF_RE = re.compile(r"v?[0-9]+(?:\.[0-9]+){2}|[0-9a-f]{40}")
 TAG_RE = re.compile(r"v?[0-9]+(?:\.[0-9]+){2}")
 _HEADING = re.compile(r"^##[ \t]+\[([0-9][0-9A-Za-z.+-]{0,31})\](?:[ \t]+-[ \t]+([0-9]{4}-[0-9]{2}-[0-9]{2}))?", re.M)
 _FAIL_ROW = re.compile(r"^FAIL[ \t]+([^:\n]+): ", re.M)
+_SAFE_PATH = re.compile(r"[A-Za-z0-9._/@+-]{1,200}")
+_STATUS = {"added", "modified", "removed", "renamed", "copied", "changed"}
 _ALLOWED_HOSTS = frozenset({"api.github.com", "github.com", "codeload.github.com", "raw.githubusercontent.com"})
 
 
@@ -266,8 +271,74 @@ class UpgradeResult:
     error: str | None = None
 
 
-def apply(ref: str | None = None, stdin_isatty: bool | None = None, say: Callable[[str], None] | None = None) -> UpgradeResult:
-    """Install `ref` (a release tag or a commit; the latest release when None), then run `jade check` from the new install. Human only."""
+COMPARE_MAX_BYTES = 25_000_000   # GitHub's compare answer carries every file's patch and the commits: a release step of a few versions is many megabytes
+
+
+def _compare(base: str, head: str) -> dict:
+    """Both ends are already checked: the ref by validate_ref, the installed commit by the hex pattern."""
+    return json.loads(_http_get(f"https://api.github.com/repos/{REPO}/compare/{base}...{head}", limit=COMPARE_MAX_BYTES).decode("utf-8"))
+
+
+def changed_files(ref: str) -> tuple[list[str], str]:
+    """The files under jade/, policies/, registry/ and scripts/ that differ between the installed commit and `ref` (GitHub's compare answer), as printable lines, plus a
+    note (what is not listed, or why nothing could be). Each path is checked against a plain-character pattern, so nothing a terminal could obey is printed; a file whose name
+    fails the check is counted, never dropped. A ref that is behind the installed commit is a rollback: the files that return to their older state are listed. Never raises."""
+    base = _direct_url_commit() or paths.code_commit() or ""
+    if not re.fullmatch(r"[0-9a-f]{7,40}", base):
+        return [], "the installed commit is not known, so the changed files cannot be listed"
+    notes: list[str] = []
+    flip = False
+    try:
+        ref = validate_ref(ref)
+        doc = _compare(base, ref)
+        status = doc.get("status") if isinstance(doc, dict) else None
+        if status == "behind":   # `ref` is an ancestor of what is installed: a rollback. The forward compare is empty; the reverse one names what changes back.
+            doc, flip = _compare(ref, base), True
+            notes.append("this is a rollback: the files below return to their older state")
+        elif status == "diverged":
+            notes.append("the release and the installed commit have diverged: the list shows what the release has that the installed commit lacks, and may miss what is dropped")
+    except FetchError as e:
+        return [], f"cannot list the changed files ({e.kind}: {_clean(e.detail, 80)})"
+    except (UpgradeError, ValueError, RecursionError):
+        return [], "cannot list the changed files (the answer could not be read)"
+    files = doc.get("files") if isinstance(doc, dict) else None
+    if not isinstance(files, list):
+        return [], "cannot list the changed files (the answer has no file list)"
+    lines, other, unsafe = [], 0, 0
+    flipped = {"added": "removed", "removed": "added"}
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        name, old = item.get("filename"), item.get("previous_filename")
+        names = [n for n in (name, old) if n is not None]
+        if not names or any(not isinstance(n, str) or not _SAFE_PATH.fullmatch(n) for n in names):
+            unsafe += 1
+            continue
+        if not any(n.startswith(WATCHED_DIRS) for n in names):
+            other += 1
+            continue
+        status = item.get("status") if item.get("status") in _STATUS else "changed"
+        status = flipped.get(status, status) if flip else status
+        add, dele = (n if isinstance(n, int) and not isinstance(n, bool) else 0 for n in (item.get("additions"), item.get("deletions")))
+        shown = f"{name} (from {old})" if old else name
+        lines.append(f"{status:<8}  {shown} (+{add} -{dele})")
+    if other:
+        notes.append(f"{other} other file(s) outside {', '.join(WATCHED_DIRS)} changed and are not listed")
+    if unsafe:
+        notes.append(f"{unsafe} file(s) with names that cannot be shown safely changed: read the diff on GitHub before you type yes")
+    if len(lines) > MAX_FILES:
+        notes.append(f"{len(lines) - MAX_FILES} more file(s) not shown")
+        lines = lines[:MAX_FILES]
+    if len(files) >= COMPARE_LIMIT:
+        notes.append(f"GitHub lists at most {COMPARE_LIMIT} files, so there may be more")
+    if not lines and not notes:
+        notes.append(f"no file under {', '.join(WATCHED_DIRS)} changed")
+    return lines, "; ".join(notes)
+
+
+def apply(ref: str | None = None, stdin_isatty: bool | None = None, say: Callable[[str], None] | None = None, confirm: Callable[[], bool] | None = None) -> UpgradeResult:
+    """Install `ref` (a release tag or a commit; the latest release when None), then run `jade check` from the new install. Human only. With `confirm` (the command passes
+    one) the changed files are listed first and nothing is installed unless it returns True: the human reads what changes, then types `yes`."""
     say = say or (lambda _s: None)
     why = util.human_tty_refusal(stdin_isatty)
     if why:
@@ -286,8 +357,20 @@ def apply(ref: str | None = None, stdin_isatty: bool | None = None, say: Callabl
         a, b = ops._version_tuple(jade.__version__), ops._version_tuple(ref.removeprefix("v")) if TAG_RE.fullmatch(ref) else None
         if a is not None and b is not None and b < a:
             steps.append(f"{ref} is older than the installed {jade.__version__}: this is a rollback")
+            say(f"{ref} is older than the installed {jade.__version__}: this is a rollback")
     if not shutil.which("uv"):
         return UpgradeResult(False, ref=ref, error="uv is not on PATH: install uv first (https://docs.astral.sh/uv/)")
+    if confirm is not None:
+        lines, note = changed_files(ref)
+        say(f"Files that change under the installed commit ({', '.join(WATCHED_DIRS)}):" if lines else "Files that change: none could be listed.")
+        for line in lines:
+            say(f"  {line}")
+        if note:
+            say(f"  ({note})")
+        if not lines:
+            say("  Without this list you would install code that decides every gate call without reading what changed.")
+        if not confirm():
+            return UpgradeResult(False, ref=ref, error="not confirmed: you did not type yes, so nothing was installed")
     argv = install_argv(ref)
     say(f"running: {' '.join(argv)}")
     try:
@@ -323,6 +406,13 @@ def apply(ref: str | None = None, stdin_isatty: bool | None = None, say: Callabl
     return UpgradeResult(error is None, ref, 0, crc, failed, reinstall, steps, out, error)
 
 
+def _confirm_yes() -> bool:
+    try:
+        return input("Type yes to install this release; anything else stops: ").strip() == "yes"
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
 def cli_upgrade(a) -> int:
     if a.check:
         r = check()
@@ -332,7 +422,7 @@ def cli_upgrade(a) -> int:
         _print_check(r)
         return 0
     try:
-        res = apply(a.ref, say=print)
+        res = apply(a.ref, say=print, confirm=_confirm_yes)
     except (ops.HumanOnly, UpgradeError) as e:
         print(f"jade: {e}", file=sys.stderr)
         return 1

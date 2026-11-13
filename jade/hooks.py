@@ -67,6 +67,41 @@ _MUTATING_TOOL = re.compile(
     r"|kubectl_|exec_in_pod|helm_chart|^RemoteTrigger$|__(?:app_type|Type|type|Shortcut|computer_batch|app_batch|teach_batch|app_key|key)$")
 
 
+_GUI_PREFIXES = ("mcp__computer-use__", "mcp__MacOS-MCP__")   # tools that can press Allow on the screen
+_GUI_SHELL = re.compile(r"\b(?:osascript|cliclick|shortcuts\s+run)\b")   # a shell or terminal call that scripts the screen the same way
+
+
+def _is_gui_call(tool, event: dict) -> bool:
+    if not isinstance(tool, str):
+        return False
+    if tool.startswith(_GUI_PREFIXES):
+        return True
+    tin = event.get("tool_input")
+    try:
+        return isinstance(tin, dict) and policy.runs_shell(tool, tin) and bool(_GUI_SHELL.search(policy.tool_subject(tool, tin)))
+    except Exception:  # noqa: BLE001 - not classifiable: it is not paused here, and the gate rates it as it always did
+        return False
+
+
+def _gui_pause(event: dict, tool: str):
+    """While an ask of this session is open, the session's computer-use tools are refused: an agent that drives the mouse could press Allow itself (docs/12 risks)."""
+    if paths.level() not in ("low", "medium", "high") or paths.gate_mode() != "enforce" or not event.get("session_id"):
+        return None
+    try:
+        from . import askchat, ledger
+
+        db = ledger.open(timeout=LEDGER_TIMEOUT_S)
+        try:
+            if askchat.gui_paused(db, event["session_id"]):
+                return HookResult(2, f"JADE gate: {tool} is paused while the human decides a gated call of this session. Do not click or type anything on the screen. "
+                                     "Continue with other work; this clears when the human answers or the ask expires.")
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001, S110 - a ledger failure must not stop an ordinary GUI call; the gated call itself fails closed
+        pass
+    return None
+
+
 def failsafe_reason(event: dict) -> str | None:
     """Why a gated call must be blocked when the policy cannot be consulted, or None when it is clearly harmless: a read-only command,
     a file write outside the protected locations, a tool whose name says it only reads."""
@@ -344,6 +379,8 @@ def pretool(event: dict, permit=None) -> HookResult:
         from . import askchat
 
         return askchat.rewrite(event)   # a question that carries an ask token of this session is replaced by the hook's own (docs/12); any other passes
+    if _is_gui_call(tool, event) and (res := _gui_pause(event, tool)) is not None:
+        return res
     if not policy.is_gated(tool):
         return HookResult()
     _note_unnamed_tool(tool)
@@ -364,6 +401,8 @@ def pretool(event: dict, permit=None) -> HookResult:
         _journal("gate", "safety_block", a, event)
         return _verdict(mode, f"JADE safety invariant {', '.join(a.blocked)} blocks this {tool} call. No permit can authorize it. "
                               f"Rule text: policies/safety.yaml. Do not rephrase the command to get around the invariant; ask the human.", a.blocked)
+    if a.ho_ids and paths.level() in ("low", "medium", "high") and not at_least(a.level, "high"):
+        a.level, a.elevated = "high", True   # docs/12: a human-only class (a mod file, the terminal panel ...) is high work once the human has set a level; `level` and `rule_id` stay the rule's
     if not at_least(a.level, policy.permit_floor()):
         if a.rule_id in policy.RECORDED_RULES and a.recorded:
             if a.rule_id in ("R-31", "R-32"):
@@ -619,6 +658,20 @@ def posttool(event: dict) -> HookResult:
         from . import askchat
 
         return askchat.settle(event)   # the human's answer to an ask of this session, read from the host's tool_response
+    return _close_decision(event, not _failed(event.get("tool_response")), "tool call returned (exit status only; the goal is not verified)")
+
+
+def posttool_failure(event: dict) -> HookResult:
+    """PostToolUseFailure (probe cell 10): the host fires it, and not PostToolUse, for a call that failed. The decision it ran under is closed as an observed failure,
+    so SI-07 stops holding it as unknown and the next identical call is asked again. An interrupted call may have run in part: its decision is left as it is
+    (EXECUTING, then held as unknown at its deadline), which is the cautious answer."""
+    if event.get("is_interrupt"):
+        return HookResult()
+    return _close_decision(event, False, "tool call failed (host event PostToolUseFailure; exit status only, the goal is not verified)")
+
+
+def _close_decision(event: dict, success: bool, method: str) -> HookResult:
+    tool = event.get("tool_name")
     if not isinstance(tool, str) or not (tool in policy.POST_TOOLS or policy.is_mcp(tool)):
         return HookResult()
     tin = event.get("tool_input")
@@ -633,8 +686,7 @@ def posttool(event: dict) -> HookResult:
             db.event(event.get("session_id") or "session", "BYPASS", guard="raw Decisions API call outside the adapter", actor="hook")
         did = _executing_decision(db, tool, tin, event, cwd)
         if did:
-            decide.record_outcome(db, did, "observed", not _failed(event.get("tool_response")), "tool call returned (exit status only; the goal is not verified)",
-                                  attribution="indirect")
+            decide.record_outcome(db, did, "observed", success, method, attribution="indirect")
     finally:
         db.close()
     return HookResult()
@@ -717,6 +769,10 @@ def stop(event: dict) -> HookResult:
 
     db = ledger.open(timeout=LEDGER_TIMEOUT_S)
     try:
+        from . import askchat
+
+        if paths.gate_mode() == "enforce" and (nudge := askchat.stop_nudge(db, session)) is not None:
+            return nudge
         rows = undisposed(db, session)
         if not rows:
             return HookResult()
@@ -828,7 +884,7 @@ def session_start(event: dict) -> HookResult:
         db.close()
 
 
-HANDLERS = {"pretool": pretool, "posttool": posttool, "stop": stop, "session-start": session_start}
+HANDLERS = {"pretool": pretool, "posttool": posttool, "posttool-failure": posttool_failure, "stop": stop, "session-start": session_start}
 
 
 def _on_alarm(_signum, _frame):

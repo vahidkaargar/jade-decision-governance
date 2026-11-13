@@ -201,7 +201,7 @@ def test_uninstall_writes_through_a_temp_file_then_rename(human_env, jade_stub, 
     calls = []
     real = os.replace
     monkeypatch.setattr(os, "replace", lambda a, b: (calls.append((os.path.dirname(a), os.path.basename(b))), real(a, b))[1])
-    assert ops.hooks_uninstall(stdin_isatty=True) == 4
+    assert ops.hooks_uninstall(stdin_isatty=True) == 5
     assert calls == [(str(tmp_path.resolve()), "settings.json")]
     assert len(list(tmp_path.glob("settings.json.bak-jade-*"))) == 1   # the uninstall's: the install had no file to back up
 
@@ -214,7 +214,7 @@ def test_a_foreign_hook_that_mentions_jade_survives_install_and_uninstall(human_
     install_hooks()
     cmds = lambda: [h["command"] for g in json.loads((tmp_path / "settings.json").read_text())["hooks"]["PreToolUse"] for h in g["hooks"]]  # noqa: E731
     assert foreign in cmds() and other in cmds()
-    assert ops.hooks_uninstall(stdin_isatty=True) == 4
+    assert ops.hooks_uninstall(stdin_isatty=True) == 5
     assert cmds() == [foreign, other]
 
 

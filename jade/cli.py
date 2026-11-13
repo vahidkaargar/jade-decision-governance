@@ -113,6 +113,31 @@ def _journal_invalid(reason: str) -> None:
 
 
 # ---- other commands ----------------------------------------------------------------------------------
+def _ask_stats(db, days: int) -> dict | None:
+    """How often the human was asked and where they answered (docs/12): answers by channel, terminal approvals, both per 100 gated calls, and the asks by rule. None when
+    the window holds nothing of the kind."""
+    arg = (f"-{days} days",)
+    since = "strftime('%Y-%m-%dT%H:%M:%SZ','now',?)"
+    live = ledger.live()
+    gated = db.one(f"SELECT COUNT(*) AS n FROM events WHERE kind='gated' AND ts>={since} AND {live}", arg).n  # noqa: S608 - constant fragments
+    terminal = db.one(f"SELECT COUNT(*) AS n FROM events WHERE kind='permit_approved' AND ts>={since} AND {live}", arg).n  # noqa: S608
+    answers: dict[str, dict[str, int]] = {}
+    for r in db.all(f"SELECT channel, answer, COUNT(*) AS n FROM human_answers WHERE ts>={since} AND {live} GROUP BY channel, answer", arg):  # noqa: S608
+        answers.setdefault(r.channel, {"allow": 0, "deny": 0})[r.answer] = r.n
+    by_rule: dict[str, dict[str, int]] = {}
+    for r in db.all(f"SELECT rule_id, status, answered_ts IS NOT NULL AS answered, COUNT(*) AS n FROM asks WHERE created_ts>={since} AND {live} GROUP BY rule_id, status, answered", arg):  # noqa: S608
+        row = by_rule.setdefault(r.rule_id, {"asks": 0, "allowed": 0, "denied": 0, "unanswered": 0})
+        row["asks"] += r.n
+        row["allowed" if r.status in ("ALLOWED", "CONSUMED") or (r.status == "EXPIRED" and r.answered) else "denied" if r.status == "DENIED" else "unanswered"] += r.n   # an Allow that expired unused was still answered
+    if not (gated or terminal or answers or by_rule):
+        return None
+    per = None
+    if gated:
+        count = lambda ch: sum(answers.get(ch, {}).values())  # noqa: E731
+        per = {"chat": round(100 * count("chat") / gated, 1), "dialog": round(100 * count("dialog") / gated, 1), "terminal": round(100 * terminal / gated, 1)}
+    return {"gated_calls": gated, "answers": answers, "terminal_approvals": terminal, "per_100_gated": per, "by_rule": by_rule}
+
+
 def _stats(a) -> int:
     db = ledger.open()
     w = "ts >= strftime('%Y-%m-%dT%H:%M:%SZ','now',?) AND COALESCE(primitive,'')<>'fast' AND " + ledger.live()   # `fast` rows from an older version are not Jev calls; rows of a `JADE_SOURCE=test` run are not live data (W-72)
@@ -138,6 +163,8 @@ def _stats(a) -> int:
                     "dispositions": {x.disposition: x.n for x in db.all(f"SELECT disposition, COUNT(*) AS n FROM jev_calls WHERE disposition IS NOT NULL AND {w} GROUP BY disposition", arg)},  # noqa: S608
                     "latency_ms": {"p50": pct(0.5), "p95": pct(0.95), "p99": pct(0.99)}, "cost_usd": r.cost, "calls_with_redactions": r.redacted,
                     "events": {x.kind: x.n for x in db.all("SELECT kind, COUNT(*) AS n FROM events WHERE kind IN ('BYPASS','MODEL_DRIFT','INVALID_QUESTION','would_block','safety_block','secret_read','blind_spot') AND " + ledger.live() + " GROUP BY kind")}})
+    if (asks := _ask_stats(db, a.days)) is not None:
+        out["asks"] = asks
     print(json.dumps(out, indent=1))
     return 0
 
@@ -609,7 +636,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action=_VersionAction, help="print the code version, commit, ledger schema version and policy_version")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("ask", help="ask Jev (see `jade ask -h`)")
-    sub.add_parser("hook", help="Claude Code hook entry: pretool | posttool | stop | session-start")
+    sub.add_parser("hook", help="Claude Code hook entry: pretool | posttool | posttool-failure | stop | session-start")
 
     s = sub.add_parser("ledger").add_subparsers(dest="action", required=True)
     st = s.add_parser("stats")

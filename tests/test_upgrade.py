@@ -420,6 +420,8 @@ def runner(monkeypatch, human):
     monkeypatch.setenv("JADE_BIN", "/opt/jade-new/bin/jade")
     monkeypatch.setattr(upgrade, "_run", r)
     monkeypatch.setattr(upgrade.shutil, "which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+    monkeypatch.setattr(upgrade, "changed_files", lambda ref: ([], "stubbed: no network in a test"))   # W-100d: the command lists the changed files, then needs a typed yes
+    monkeypatch.setattr("builtins.input", lambda prompt="": "yes")
     return r
 
 

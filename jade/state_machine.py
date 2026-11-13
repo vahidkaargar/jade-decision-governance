@@ -118,6 +118,10 @@ def apply(path, ev: dict):
             if key and con.execute("SELECT 1 FROM events WHERE idempotency_key=?", (key,)).fetchone():
                 return SimpleNamespace(applied=False, status=row["status"])
             src = row["status"]
+            if ev["event"] == "human_accept" and row["route"] == "ASK":   # the authority to accept an ASK decision is the recorded answer, never a bare event (docs/12)
+                ask = (ev.get("patch") or {}).get("ask")
+                if not (isinstance(ask, dict) and ask.get("answer") == "allow" and ask.get("channel") in ("chat", "dialog") and ask.get("ask_id")):
+                    raise IllegalTransition("a decision routed ASK is accepted only with the recorded Allow answer of an ask (chat or dialog)")
             caller = ev.get("caller_session")
             if caller is not None and ev["event"] not in ({"cancel"} | HUMAN_EVENTS) and not _same(row["session_id"], caller):
                 raise IllegalTransition("this decision belongs to another session; a session may only cancel it or answer for the human")
