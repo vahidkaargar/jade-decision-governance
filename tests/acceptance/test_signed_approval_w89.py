@@ -323,7 +323,7 @@ def test_the_scripts_pin_their_own_path():
         assert "export PATH=/usr/bin:/bin" in text, name
     install = (HELPER.parent / "install-approver.sh").read_text()
     assert "visudo -cf" in install and "exit 1" in install.split("visudo -cf", 1)[1].split("sudo install -m 440", 1)[0]   # a failed validation stops the script
-    assert "mktemp -d)" in install and "sudo -u \"$USER_NAME\" /usr/bin/ssh-keygen" in install   # the private key is made by the approver, never in the user's own temp
+    assert "mktemp -d /var/tmp/" in install and "sudo -u \"$USER_NAME\" /usr/bin/ssh-keygen" in install   # the private key is made by the approver, never in the user's own temp
 
 
 # ---- review findings, second batch ------------------------------------------------------------------------
