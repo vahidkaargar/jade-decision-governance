@@ -295,7 +295,7 @@ def test_check_reports_every_weakening_override(human_env, jade_stub, monkeypatc
     assert not ok and "JADE_HOME" in detail and "JADE_CONFIG" in detail
     monkeypatch.setenv("JADE_POLICY_DIR", str(tmp_path / "empty-policies"))
     assert "JADE_POLICY_DIR" in rows_of()["gate overrides"][1]
-    monkeypatch.setenv("JADE_ACK_OVERRIDES", "JADE_HOME,JADE_CONFIG,JADE_POLICY_DIR")
+    monkeypatch.setenv("JADE_ACK_OVERRIDES", "JADE_HOME,JADE_CONFIG,JADE_POLICY_DIR,JADE_APPROVER_ANCHOR")
     ok, detail = rows_of()["gate overrides"]
     assert ok and "acknowledged" in detail
 
@@ -311,7 +311,7 @@ def test_an_override_in_the_claude_settings_env_block_fails_check_and_cannot_be_
     s = tmp_path / "settings.json"
     data = json.loads(s.read_text())
     s.write_text(json.dumps({**data, "env": {"JADE_POLICY_DIR": "/nonexistent/policies", "JADE_GATE_MODE": "off", "OTHER": "x"}}))
-    monkeypatch.setenv("JADE_ACK_OVERRIDES", "JADE_HOME,JADE_CONFIG,JADE_POLICY_DIR,JADE_GATE_MODE")
+    monkeypatch.setenv("JADE_ACK_OVERRIDES", "JADE_HOME,JADE_CONFIG,JADE_POLICY_DIR,JADE_GATE_MODE,JADE_APPROVER_ANCHOR")
     ok, detail = rows_of()["gate overrides"]
     assert not ok and "JADE_POLICY_DIR" in detail and "JADE_GATE_MODE" in detail and "OTHER" not in detail
 

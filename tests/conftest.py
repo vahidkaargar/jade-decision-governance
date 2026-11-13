@@ -48,6 +48,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("JADE_CLAUDE_SETTINGS", str(tmp_path / "settings.json"))
     monkeypatch.setenv("JADE_LAUNCH_AGENTS", str(tmp_path / "LaunchAgents"))   # never the real ~/Library/LaunchAgents
     monkeypatch.setenv("JADE_MANAGED_SETTINGS", str(tmp_path / "managed-settings.json"))   # never the real /Library/Application Support/ClaudeCode
+    monkeypatch.setenv("JADE_APPROVER_ANCHOR", str(tmp_path / "no-approver-anchor"))   # W-89: never the real root-owned trust anchor, so a machine that has one still runs the tty-approval tests
     monkeypatch.delenv("JADE_GATE_MODE", raising=False)
     monkeypatch.delenv("JADE_SOURCE", raising=False)
     monkeypatch.delenv("JADE_POLICY_DIR", raising=False)

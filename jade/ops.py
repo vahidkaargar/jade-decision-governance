@@ -17,8 +17,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import NamedTuple
 
-from . import ledger, paths, policy
-from .util import is_human_tty, now, ts
+from . import ledger, paths, policy, signing
+from .util import is_human_tty, now, ts, user
 
 
 def pretool_matcher() -> str:
@@ -532,8 +532,21 @@ def hooks_uninstall(stdin_isatty: bool | None = None) -> int:
     return removed
 
 
-def set_gate_mode(mode: str, stdin_isatty: bool | None = None) -> None:
+def set_gate_mode(mode: str, stdin_isatty: bool | None = None, allow_unsigned: bool = False) -> None:
     _require_human("jade gate", stdin_isatty)
+    if mode == "enforce" and not signing.signed_backend():   # W-38 / W-89 (maintainer decision 2026-11-13): enforce is not a boundary against a same-user agent without it
+        seen, no_prompt = no_prompt_gated_calls()
+        if no_prompt and not allow_unsigned:
+            raise HumanOnly(f"enforce mode needs the signed approval backend (docs/10): {no_prompt} of {seen} gated call(s) in the last 7 days ran with no host prompt, "
+                            "so JADE's gate is the only gate and a terminal approval can be forged by a same-user process. Install the approver (docs/10 section 6, W-90), "
+                            "or pass --allow-unsigned to accept that risk; the override is journaled")
+        if allow_unsigned:
+            db = ledger.open(timeout=5)
+            try:
+                db.event("gate", "enforce_unsigned_override", guard="enforce without the signed approval backend", actor=f"human:{user()}",
+                         detail={"gated_7d": seen, "no_host_prompt_7d": no_prompt})
+            finally:
+                db.close()
     cfg = paths.config()
     cfg["gate_mode"] = mode
     atomic_write(paths.config_dir() / "config.json", json.dumps(cfg, indent=1) + "\n")
@@ -898,7 +911,7 @@ def _overrides_row() -> tuple[str, bool, str]:
     if weak:
         return ("gate overrides", False, "weakening: " + ", ".join(f"{o.var} [{o.why}]" for o in weak) + ". Unset them; `JADE_ACK_OVERRIDES=VAR,...` only silences "
                 "this row for a deliberate override in this shell, never one in the Claude settings `env` block")
-    return ("gate overrides", True, shown or "none (JADE_GATE_MODE, JADE_POLICY_DIR, JADE_CONFIG, JADE_HOME all default)")
+    return ("gate overrides", True, shown or "none (JADE_GATE_MODE, JADE_POLICY_DIR, JADE_CONFIG, JADE_HOME, JADE_APPROVER_ANCHOR all default)")
 
 
 def overlay_problems() -> list[str]:
@@ -1116,6 +1129,7 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
     rows.append(_overrides_row())
     rows.append(_ack_audit_row())
     rows.append(_permission_row())
+    rows.append(_approval_row())
     rows.append(tool_coverage_row())
     rows.append(_maintain_row())
     shim = _find_jev()
@@ -1235,27 +1249,47 @@ def _permission_row() -> tuple[str, bool, str]:
     return ("host permission prompt", True, detail)
 
 
-def _permission_prompt_detail() -> str:
-    """JADE's gate is the only gate whenever the host shows no permission prompt; say so, and say how often that was the case here."""
+def no_prompt_gated_calls(days: int = 7) -> tuple[int, int]:
+    """(gated calls seen, of those with no host prompt) in the last `days` days; (0, 0) when the ledger cannot be read."""
     from . import hooks
 
-    text = ("JADE's gate is the only gate when the host runs with permission_mode bypassPermissions or auto, with acceptEdits (file edits), "
-            "headless (`claude -p`) or in unattended subagents: the host prompt is not an independent backstop there (docs/05 T18)")
     try:
         db = ledger.open(timeout=2)
         try:
-            rows = db.all("SELECT detail_json FROM events WHERE kind IN ('gated','safety_block') AND " + ledger.live() + " AND ts>=?", (ts(now() - timedelta(days=7)),))
+            rows = db.all("SELECT detail_json FROM events WHERE kind IN ('gated','safety_block') AND " + ledger.live() + " AND ts>=?", (ts(now() - timedelta(days=days)),))
         finally:
             db.close()
-        seen = no_prompt = 0
-        for r in rows:
-            d = json.loads(r.detail_json or "{}")
-            seen += 1
-            no_prompt += bool(hooks.no_host_prompt(d.get("permission_mode"), str(d.get("tool") or "")))
-        text += f". Last 7 days: {no_prompt} of {seen} gated call(s) ran with no host prompt" if seen else ". Last 7 days: no gated calls recorded"
-    except Exception:  # noqa: BLE001, S110 - the note is informational; the ledger row above reports ledger failures
-        pass
+    except Exception:  # noqa: BLE001 - informational and a pre-flight: an unreadable ledger is reported by its own check row
+        return 0, 0
+    seen = no_prompt = 0
+    for r in rows:
+        d = json.loads(r.detail_json or "{}")
+        seen += 1
+        no_prompt += bool(hooks.no_host_prompt(d.get("permission_mode"), str(d.get("tool") or "")))
+    return seen, no_prompt
+
+
+def _permission_prompt_detail() -> str:
+    """JADE's gate is the only gate whenever the host shows no permission prompt; say so, and say how often that was the case here."""
+    text = ("JADE's gate is the only gate when the host runs with permission_mode bypassPermissions or auto, with acceptEdits (file edits), "
+            "headless (`claude -p`) or in unattended subagents: the host prompt is not an independent backstop there (docs/05 T18)")
+    seen, no_prompt = no_prompt_gated_calls()
+    text += f". Last 7 days: {no_prompt} of {seen} gated call(s) ran with no host prompt" if seen else ". Last 7 days: no gated calls recorded"
     return text
+
+
+def _approval_row() -> tuple[str, bool, str]:
+    """W-38 / W-89: which backend approves high and critical permits, and whether its trust anchor can be used."""
+    state, why = signing.anchor_state()
+    if state == "untrusted":
+        return ("approval backend", False, f"signed, but the trust anchor is not usable, so no high or critical permit can be used: {why}")
+    if state == "ok":
+        return ("approval backend", True, f"signed: high and critical permits need a signature from the approver account (anchor {signing.anchor_path()})")
+    if paths.config().get("approval_backend") == "signed":
+        return ("approval backend", False, f"config asks for the signed backend but {why}: no high or critical permit can be used until the approver is installed (docs/10)")
+    seen, no_prompt = no_prompt_gated_calls()
+    note = f"; {no_prompt} of {seen} gated call(s) in the last 7 days had no host prompt" if seen else ""
+    return ("approval backend", True, f"tty: a terminal approves high and critical permits, which a same-user process can imitate (docs/05 T19, docs/10){note}")
 
 
 def print_check(rows) -> int:

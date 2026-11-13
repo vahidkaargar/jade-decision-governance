@@ -535,7 +535,7 @@ def _ops(a) -> int:
             if a.action == "status":
                 print(paths.gate_mode())
             else:
-                ops.set_gate_mode(a.action)
+                ops.set_gate_mode(a.action, allow_unsigned=a.allow_unsigned)
                 print(f"gate mode {a.action}")
         elif a.cmd == "claude-md":
             if a.action == "show":
@@ -722,7 +722,9 @@ def build_parser() -> argparse.ArgumentParser:
     im.add_parser("unfreeze")
 
     sub.add_parser("hooks").add_argument("action", choices=("status", "install", "uninstall"))
-    sub.add_parser("gate").add_argument("action", choices=("status", "enforce", "advisory", "off"))
+    pgate = sub.add_parser("gate")
+    pgate.add_argument("action", choices=("status", "enforce", "advisory", "off"))
+    pgate.add_argument("--allow-unsigned", action="store_true", help="enforce without the signed approval backend (docs/10); journaled")
     sub.add_parser("claude-md").add_argument("action", choices=("show", "apply"))
     gh = sub.add_parser("git-hook", help="the standalone pre-push guard for the default branch (SI-08): `script` prints it, `check <repo>` says whether a repository runs it").add_subparsers(dest="action", required=True)
     gh.add_parser("script", help="print the self-contained POSIX sh pre-push hook (installs nothing; install it yourself, docs/08 section 2.7)")

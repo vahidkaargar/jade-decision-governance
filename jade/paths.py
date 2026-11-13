@@ -174,6 +174,9 @@ def gate_overrides(env: Mapping[str, str] | None = None, source: str = "environm
         add("JADE_CONFIG", not _same(env["JADE_CONFIG"], Path.home() / ".config" / "jade"), "reads gate_mode and local overlays from another directory")
     if env.get("JADE_HOME"):
         add("JADE_HOME", not _same(env["JADE_HOME"], Path.home() / ".local" / "share" / "jade"), "uses another ledger, pins and permit seal key")
+    if env.get("JADE_APPROVER_ANCHOR"):   # W-89: where the approver public key is read from; the default path is the only one a root-owned file protects
+        from . import signing
+        add("JADE_APPROVER_ANCHOR", not _same(env["JADE_APPROVER_ANCHOR"], signing.DEFAULT_ANCHOR), "reads the approver public key from another file than the root-owned default")
     if env.get("JADE_SOURCE") == "test":   # W-72: tags every row, so a persisted tag hides gated calls from the statistics and the pending-permit notice
         add("JADE_SOURCE", True, "tags every ledger row `test`, which leaves its gated calls out of `jade ledger stats` and out of the pending-permit notice")
     for var in ("JADE_REGISTRY_DIR", "JADE_CLAUDE_SETTINGS", "JADE_BIN"):

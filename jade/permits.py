@@ -23,7 +23,7 @@ import unicodedata
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import ledger, paths, policy, redact, schemas
+from . import ledger, paths, policy, redact, schemas, signing
 from .state_machine import TERMINAL as TERMINAL_DECISION
 from .util import at_least, canonical, human_tty_refusal, new_id, parse_ts, sha256, ts, ts_in, user
 
@@ -525,7 +525,17 @@ def approve(path, permit_id: str, stdin_isatty: bool | None = None):
         raise ApprovalRefused(f"permit approval needs a human at an interactive terminal; an agent session cannot approve ({why})")
     db, own = _db(path)
     refused = None
+    sig = valid_until = None
     try:
+        if signing.signed_backend():   # W-38: the signature is made before the write transaction opens (the helper waits on a human) and checked inside it
+            row0 = db.one("SELECT * FROM permits WHERE permit_id=?", (permit_id,))
+            doc0 = _doc(row0) if row0 is not None and _col(row0, "state") == "PENDING" else None
+            if doc0 is not None and at_least(str(_col(row0, "risk_level")), "high"):
+                valid_until = ts_in(_col(row0, "ttl_s"))
+                try:
+                    sig = signing.sign_with_helper(_approval_message(row0, {**doc0, "principal": f"human:{user()}"}, valid_until))
+                except RuntimeError as e:
+                    raise PermitError(str(e)) from e
         with db.tx() as con:
             row = con.execute("SELECT * FROM permits WHERE permit_id=?", (permit_id,)).fetchone()
             if row is None:
@@ -547,8 +557,17 @@ def approve(path, permit_id: str, stdin_isatty: bool | None = None):
                     raise PermitError(f"permit {permit_id} has an unreadable or invalid stored record and cannot be approved; revoke it and ask the agent to request it again")
                 if "subject" in ctx:  # a permit that carries a command is approved only when that command (and its content, W-39) is what the permit covers
                     _verify(ctx, row["plan_hash"], _fingerprints_of(doc), read_raw(db, permit_id) if ctx.get("redacted") else None)
-                doc.update(state="ISSUED", principal=f"human:{user()}", approval_reference=f"tty:{user()}@{ts()}", issued_at=ts(),
-                           expires_at=ts_in(row["ttl_s"]))
+                if signing.signed_backend() and at_least(str(row["risk_level"]), "high"):
+                    if sig is None or valid_until is None:
+                        raise PermitError("the signed backend is on: this permit needs a signature from the approver account (docs/10)")
+                    doc.update(principal=f"human:{user()}")
+                    if (why := signing.verify(_approval_message(row, doc, valid_until), sig)):
+                        raise PermitError(f"{why}; no approval was made")
+                    doc.update(state="ISSUED", approval_reference=f"sig:{user()}@{ts()}", approval_signature=sig, approval_valid_until=valid_until,
+                               issued_at=ts(), expires_at=valid_until)
+                else:
+                    doc.update(state="ISSUED", principal=f"human:{user()}", approval_reference=f"tty:{user()}@{ts()}", issued_at=ts(),
+                               expires_at=ts_in(row["ttl_s"]))
                 doc.pop("seal", None)
                 schemas.validate("permit", doc)
                 doc["seal"] = _seal_of(_seal_key(db, create=True), SimpleNamespace(**{**dict(row), "issued_at": doc["issued_at"], "expires_at": doc["expires_at"]}), doc)
@@ -571,9 +590,35 @@ def _static_refusal(db, row, doc: dict, level: str) -> str | None:
     if not at_least(doc.get("risk_level", "low"), level):
         return f"the permit is for {doc.get('risk_level')} risk and this command is {level}"
     if at_least(level, "high") or at_least(level, policy.permit_floor()) or at_least(level, policy.human_floor()):
-        if not str(doc.get("principal", "")).startswith("human:") or not str(doc.get("approval_reference", "")).startswith("tty:"):
+        if not str(doc.get("principal", "")).startswith("human:"):
+            return f"a {level} command needs a permit a human approved from a terminal"
+        ref = str(doc.get("approval_reference", ""))
+        if at_least(level, "high") and signing.signed_backend():   # W-38: with the signed backend a terminal alone is not an approval
+            if not ref.startswith("sig:"):
+                return (f"a {level} command needs a permit approved with a signature from the approver account (docs/10); an approval from a terminal alone does not count "
+                        "while the signed backend is on")
+            if (why := _signature_refusal(row, doc)):
+                return why
+        elif not ref.startswith("tty:"):
             return f"a {level} command needs a permit a human approved from a terminal"
     return _seal_refusal(db, row, doc)
+
+
+def _approval_message(row, doc: dict, valid_until: str | None = None) -> str:
+    return signing.message(permit_id=_col(row, "permit_id"), plan_hash=_col(row, "plan_hash"), preconditions=doc.get("preconditions"),
+                           policy_version=str(doc.get("policy_version")), risk=str(doc.get("risk_level")), principal=str(doc.get("principal")),
+                           valid_until=valid_until or str(doc.get("approval_valid_until")), nonce=str(doc.get("nonce")))
+
+
+def _signature_refusal(row, doc: dict) -> str | None:
+    """The approval signature of a high or critical permit, checked at use: it covers the fields that decide what the permit authorizes, so a row edited
+    after approval (or a permit forged with SQL) fails here whatever its seal says."""
+    sig, until = doc.get("approval_signature"), doc.get("approval_valid_until")
+    if not isinstance(sig, str) or not isinstance(until, str):
+        return "the permit carries no approver signature"
+    if until <= ts():
+        return "the approver signature is past its validity window"
+    return signing.verify(_approval_message(row, doc), sig)
 
 
 def _caller_refusal(ctx: dict, session: str | None, agent: str | None) -> str | None:

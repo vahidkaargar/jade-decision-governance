@@ -1,0 +1,25 @@
+#!/bin/bash
+# W-89 / docs/10: the approver's signing helper. Installed root-owned (0755) by scripts/install-approver.sh and run only as the approver account:
+#   sudo -u jadeapprove /usr/local/libexec/jade-approve-sign        (the message is on stdin; the armored signature goes to stdout)
+# It shows the exact message on the terminal, asks for the 6-character code derived from that message, and signs only a permit-approval message.
+# Not a security boundary by itself: the boundary is that only this account can read the private key, and reaching this account needs the sudo password.
+set -euo pipefail
+KEY="${JADE_APPROVER_KEY:-}"
+if [ -z "$KEY" ]; then
+  case "$(uname -s)" in Darwin) KEY="/Library/Application Support/jade/approver_ed25519" ;; *) KEY="/etc/jade/approver_ed25519" ;; esac
+fi
+TTY="${JADE_APPROVER_TTY:-/dev/tty}"
+TTY_OUT="${JADE_APPROVER_TTY_OUT:-$TTY}"
+msg="$(cat)"
+re='^jade-permit-approval v1 \| permit prm_[0-9a-f]{12} \| plan [0-9a-f]{64} \| pre [0-9a-f]{64} \| policy [0-9a-f]{7,40} \| risk (high|critical) \| principal human:[a-z0-9._-]+ \| valid_until [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z \| nonce [0-9a-f]{32}$'
+if ! [[ "$msg" =~ $re ]]; then echo "jade-approve-sign: not a permit approval message; nothing signed" >&2; exit 2; fi
+code="$(printf '%s' "$msg" | shasum -a 256 | cut -c1-6 | tr 'a-f' 'A-F')"
+{
+  echo "Signing this permit approval:"
+  echo "  $msg"
+  echo "The code must equal the one \`jade permit approve\` showed you in your own terminal."
+  printf 'Type the code %s to sign, anything else to cancel: ' "$code"
+} > "$TTY_OUT"
+IFS= read -r typed < "$TTY" || exit 3
+if [ "$typed" != "$code" ]; then echo "jade-approve-sign: code mismatch; nothing signed" >&2; exit 3; fi
+printf '%s' "$msg" | ssh-keygen -Y sign -f "$KEY" -n jade-permit-approval
