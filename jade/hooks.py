@@ -359,7 +359,7 @@ def pretool(event: dict, permit=None) -> HookResult:
     if a.blocked:
         _journal("gate", "safety_block", a, event)
         return _verdict(mode, f"JADE safety invariant {', '.join(a.blocked)} blocks this {tool} call. No permit can authorize it. "
-                              f"Rule text: policies/safety.yaml. Do not rephrase the command to get around the invariant; ask the human.")
+                              f"Rule text: policies/safety.yaml. Do not rephrase the command to get around the invariant; ask the human.", a.blocked)
     if not at_least(a.level, policy.permit_floor()):
         if a.rule_id in policy.RECORDED_RULES and a.recorded:
             if a.rule_id in ("R-31", "R-32"):
@@ -374,8 +374,16 @@ def pretool(event: dict, permit=None) -> HookResult:
                                   "so no permit can be checked.")
 
 
-def _verdict(mode: str, message: str) -> HookResult:
-    if mode == "advisory":
+GOVERNANCE_INVARIANTS = frozenset({"SI-09", "SI-10", "SI-11", "SI-12"})
+
+
+def _verdict(mode: str, message: str, blocked: list[str] | tuple[str, ...] = ()) -> HookResult:
+    """Exit 2, or an advisory exit 0. Once the human has set a level (docs/12) the governance invariants block whatever the gate mode, and any level at all
+    keeps them firm; the other invariants are advisory at level `off` ("JADE only watches") and in advisory gate mode."""
+    level = paths.level()
+    if level is not None and GOVERNANCE_INVARIANTS & set(blocked):
+        return HookResult(2, message)
+    if mode == "advisory" or (level == "off" and blocked):
         return HookResult(0, "[advisory, not blocked] " + message)
     return HookResult(2, message)
 

@@ -140,6 +140,16 @@ def gate_mode() -> str:
     return mode if mode in GATE_MODES else "enforce"
 
 
+LEVEL_VALUES = ("off", "low", "medium", "high")
+
+
+def level() -> str | None:
+    """The autonomy level the human set (docs/12): off | low | medium | high, or None when none is set. It is read from the config file only, so no
+    environment variable of an agent's command can move it, and any other value (a typo, a number, a list, a planted string) counts as unset."""
+    v = config().get("level")
+    return v if isinstance(v, str) and v in LEVEL_VALUES else None
+
+
 class Override(NamedTuple):
     var: str
     value: str
