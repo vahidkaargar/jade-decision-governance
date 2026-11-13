@@ -63,9 +63,9 @@ def test_f00_global_options_do_not_hide_a_push_to_the_default_branch(cmd):
 
 
 @pytest.mark.parametrize("cmd,rule", [
-    ("git -C . push origin feat", "R-10"),
-    ("git -c a=b push origin feat", "R-10"),
-    ("git --no-pager push origin feat", "R-10"),
+    ("git -C . push origin v1-feat", "R-10"),
+    ("git -c a=b push origin v1-feat", "R-10"),
+    ("git --no-pager push origin v1-feat", "R-10"),
     ("git -C . push --force origin feat", "R-10"),
     ("git -c user.name=x push --force origin feat", "R-10"),
     ("git -C . reset --hard", "R-11"),
@@ -418,7 +418,7 @@ def test_f04_static_default_branch_refspecs_are_blocked_on_any_branch(tmp_path, 
     "git push -o ci.skip origin HEAD",
     "git push --force-with-lease=feat/x origin HEAD",
     "git push --tags origin",
-    "git push origin feature/main",
+    "git push origin v1-feature/main",
     "git push origin v1.0",
     "git push",
     "git push origin $BRANCH",
