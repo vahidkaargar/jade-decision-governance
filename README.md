@@ -24,6 +24,8 @@ It governs how agents (Claude Code first) use [TypeSafe Jev](https://docs.typesa
 | VALIDATED | No — needs 14 days of real ledger data, labelled outcomes and one full improvement cycle (`docs/08` section 5); earliest 2026-11-23 |
 | PRODUCTION_APPROVED | No — a human decision (`docs/08`) |
 
+Signed permit approval (W-38, W-89) is merged: with the approver installed, a high or critical permit is approved by a signature only a separate OS account can make, and `jade gate enforce` refuses without it. The installer has not yet been run on a second machine; treat it as new (`docs/10`, `docs/11`).
+
 Hardening batch 1 (merged 2026-11-09, `CHANGELOG.md` Unreleased) added the wiring checks: `jade check` now reports shadowed or disabled hooks in project, managed and plugin settings, lints the private overlay, compares the installed code with the checkout, validates permit and improvement rows, and the permit seal key is protected against Read, Grep and Glob as well as shell. After pulling a change like this, re-install the tool and, when the changelog says the hook matcher changed, re-run `jade hooks install` yourself (an agent cannot: SI-09).
 
 What exists today: the design documents, the runtime, six JSON Schema contracts, five policy files with a tested loader, a 10-entry question registry, replayable regression and adversarial cases (`evals/run_cases.py`), the baseline and performance tooling, and the phase acceptance tests. What does not exist yet is listed in `BACKLOG.md` (for example the routing and judgment eval sets, W-49, and several metrics of `docs/04` section 7, W-52); the documents mark each of those as planned. The gate is a syntactic classifier with known residual risks (`docs/05` T2, T3, T18, T19, T22): it is a strong guard rail for an agent that makes mistakes, not a boundary against one that is adversarial and runs as the same user. Wiring it into an agent harness is deliberately a human step: see `docs/08-deployment-runbook.md`.
@@ -56,7 +58,8 @@ A prose rule with no threshold and no enforcement point does not hold. Details a
 | 7 | `docs/07-self-improvement-and-work-management.md` | Bounded improvement loop, durable work items, human-only boundaries |
 | 8 | `docs/08-deployment-runbook.md` | What is installed, the human-only wiring steps, rollback, coverage limits, the path to VALIDATED |
 | 9 | `docs/09-install-and-upgrade.md` | Versioning policy, the upgrade contract, the release process, supported platforms, troubleshooting by `jade check` row, full uninstall |
-| 10 | `docs/10-out-of-band-permit-approval.md` | W-38 design: an approval a same-user agent cannot synthesise (not implemented) |
+| 10 | `docs/10-out-of-band-permit-approval.md` | Signed permit approval: an approval a same-user agent cannot synthesise (implemented; the human installs the approver, `scripts/install-approver.sh`) |
+| 11 | `docs/11-release-0.4.0-plan.md` | The plan for the first enforce-ready release: gates in order, what is human-only, rollback |
 | — | `BACKLOG.md` | Every open item: owner, priority, dependency, trigger, next action |
 | — | `docs/JADE_Claude_Code_Master_Plan.md` | The original handoff draft this repository completes |
 

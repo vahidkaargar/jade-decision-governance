@@ -1,6 +1,6 @@
 # Contributing
 
-JADE is an alpha runtime (`jade` 0.2.x: design approved and implemented, not yet validated on real ledger data; see `README.md` for the status ladder). Contributions that help most right now:
+JADE is an alpha runtime (design approved and implemented, not yet validated on real ledger data; see `README.md` for the status ladder). Contributions that help most right now:
 
 - Review of the ADRs (`docs/01-adrs.md`) and contracts (`schemas/`): open an issue naming the ADR or schema and the failure you foresee.
 - Policy patterns in `policies/risk.yaml` and `policies/safety.yaml`: generic patterns only. Anything specific to your hosts belongs in your gitignored `policies/local/*.yaml` overlay.
@@ -21,6 +21,10 @@ Pull requests target `main`, pass CI (pytest, ruff and the case replay), and kee
 ## Design rules that are not up for a quick PR
 
 The invariants in `policies/safety.yaml` and the promotion rules in `policies/promotion.yaml` are protected targets. Changes to them need an issue first, with the threat-model row (`docs/05-threat-model.md`) they affect.
+
+## Conduct
+
+Be respectful: see `CODE_OF_CONDUCT.md`.
 
 ## Reporting a security problem
 
