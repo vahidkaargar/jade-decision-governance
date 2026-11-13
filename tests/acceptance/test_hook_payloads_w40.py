@@ -283,6 +283,7 @@ def run_parallel(events):
 @pytest.mark.parametrize("family", ("write", "mcp"))
 def test_parallel_processes_delivering_one_call_all_pass_and_spend_one_permit(home, family):
     db, p = approved(pre(family))
+    db.close()   # a connection kept open while the child processes write and the last one deletes the -wal/-shm files holds a stale shared-memory map; the next connection in this process then reads 'database disk image is malformed' (CI flake, Linux)
     codes = run_parallel([pre(family)] * 6)
     db = ledger.open()
     assert codes == [0] * 6
@@ -294,6 +295,7 @@ def test_parallel_processes_delivering_one_call_all_pass_and_spend_one_permit(ho
 def test_parallel_processes_delivering_different_calls_spend_one_permit_for_one_call(home):
     db, p = approved(pre("write"))
     evs = [pre("write", tool_use_id=f"toolu_synthetic_parallel_{i:04d}") for i in range(6)]
+    db.close()   # a connection kept open while the child processes write and the last one deletes the -wal/-shm files holds a stale shared-memory map; the next connection in this process then reads 'database disk image is malformed' (CI flake, Linux)
     codes = run_parallel(evs)
     db = ledger.open()
     assert sorted(codes) == [0, 2, 2, 2, 2, 2]
@@ -306,6 +308,7 @@ def test_parallel_processes_delivering_different_calls_spend_one_permit_for_one_
 
 def test_the_decision_and_the_permit_move_together_under_parallel_calls(home):
     db, p = approved(pre("mcp"))
+    db.close()   # a connection kept open while the child processes write and the last one deletes the -wal/-shm files holds a stale shared-memory map; the next connection in this process then reads 'database disk image is malformed' (CI flake, Linux)
     run_parallel([pre("mcp")] * 4 + [pre("mcp", tool_use_id="toolu_synthetic_mcp_0002")] * 2)
     db = ledger.open()
     states = {r.permit_id: r.state for r in db.all("SELECT permit_id, state FROM permits")}

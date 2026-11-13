@@ -21,7 +21,7 @@ def test_regression_and_adversarial_cases_all_pass(capsys):
 
 def test_runner_detects_a_wrong_expectation(tmp_path, capsys):
     bad = tmp_path / "bad.jsonl"
-    bad.write_text('{"id":"N1","class":"wrong","kind":"gate","command":"git push origin feat/x","expect":"allow"}\n')
+    bad.write_text('{"id":"N1","class":"wrong","kind":"gate","command":"git push origin v1-feat-x","expect":"allow"}\n')
     assert _runner().main([str(bad)]) == 1
 
 

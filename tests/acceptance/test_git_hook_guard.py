@@ -335,7 +335,7 @@ def level(cmd):
 
 
 @pytest.mark.parametrize("cmd", [
-    "git push --no-verify origin feat", "git push origin feat --no-verify", "git push --no-ver origin feat", "git -C /x push --no-verify",
+    "git push --no-verify origin feat", "git push origin v1-feat --no-verify", "git push --no-ver origin feat", "git -C /x push --no-verify",
     "git -c core.hooksPath=/dev/null push origin feat", "git -c core.hooksPath=/dev/null commit -m x", "git -c core.hookspath=/x status",
     "git config core.hooksPath /dev/null", "git config --global core.hooksPath /x", "git config --unset core.hooksPath",
     "chmod -x .git/hooks/pre-push", "rm .git/hooks/pre-push", "jade git-hook script > .git/hooks/pre-push", "mv /tmp/h .git/hooks/pre-push",

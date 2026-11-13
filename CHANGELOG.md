@@ -4,6 +4,9 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+### Changed
+- **Routine `git push` of a named branch and `gh pr create` are medium (new R-19, recorded not gated); R-10 stays high for everything irreversible.** Under enforce on a host with no permission prompt, every push and PR asked for a permit. R-10 now keeps high: merge (`gh pr merge`, `glab mr merge`), `gh release create`, publish, `docker push`, `composio execute`, and any `git push` that is not a plain push of one named branch (bare push, force, force-with-lease, delete, tag or tag-like name, `--tags`, `--mirror`, `--all`, `main`/`master`/`HEAD`, a refspec). A chain is rated by its highest part. Covered by `tests/acceptance/test_r10_split_routine_push.py`; the tests that used `git push origin feat-x` as their "high command" now use a tag-like branch name (`v1-feat-x`). Not measured against the real ledger. A user overlay may not lower a shipped high rule, so this had to be a shipped change.
+
 ## [0.4.0] - 2026-11-13
 
 The first enforce-ready release. Signed permit approval (a high or critical permit is approved by a signature only a separate OS account can make) is verified on a real macOS host: one approval consumed once, the replay refused, gate mode enforce. SI-11 no longer blocks a scratch `JADE_HOME`/`JADE_CONFIG` prefix. Plan and gates: `docs/11-release-0.4.0-plan.md`. Not VALIDATED: that needs 14 days under enforce (earliest 2026-11-27). Upgrade note: install the approver (`bash scripts/install-approver.sh`, in your own terminal) before `jade gate enforce`; `jade upgrade` changes `policy_version`, which revokes unapproved permits.

@@ -16,7 +16,7 @@ from jade.util import ts, ts_in
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "scripts" / "jade-approve-sign"
-PUSH = "git push origin feat-x"
+PUSH = "git push origin v1-feat-x"
 
 
 def keygen(d: Path, name: str) -> Path:
@@ -161,7 +161,7 @@ def test_a_signature_replayed_on_another_permit_is_refused(approver):
     db, a = blocked(PUSH)
     permits.approve(db, a.permit_id, stdin_isatty=True)
     _, doc_a = row_doc(db, a.permit_id)
-    assert hooks.pretool(call("git push origin feat-y")).exit_code == 2
+    assert hooks.pretool(call("git push origin v1-feat-y")).exit_code == 2
     b = permits.listing(db, ("PENDING",))[-1]
     r, doc = row_doc(db, b.permit_id)
     doc.update(state="ISSUED", principal=doc_a["principal"], approval_reference=doc_a["approval_reference"], approval_signature=doc_a["approval_signature"],
@@ -169,7 +169,7 @@ def test_a_signature_replayed_on_another_permit_is_refused(approver):
     with db.tx() as con:
         con.execute("UPDATE permits SET state='ISSUED', issued_at=?, expires_at=? WHERE permit_id=?", (doc["issued_at"], doc["expires_at"], b.permit_id))
     put_doc(db, b.permit_id, doc)
-    assert hooks.pretool(call("git push origin feat-y")).exit_code == 2
+    assert hooks.pretool(call("git push origin v1-feat-y")).exit_code == 2
 
 
 def test_an_edited_field_of_a_signed_permit_is_refused_even_when_resealed(approver):

@@ -132,7 +132,7 @@ def test_approve_from_human_terminal_sets_tty_reference(tmp_path, human_env):
     assert permits.consume(tmp_path, p.permit_id, plan_hash="f" * 64, level="high")
 
 
-def push(cmd="git push origin feat/x"):
+def push(cmd="git push origin v1-feat-x"):
     return {"tool_name": "Bash", "tool_input": {"command": cmd}, "session_id": "sess-12345678", "cwd": "/tmp/x"}
 
 
@@ -151,7 +151,7 @@ def test_full_permit_flow_and_single_use(human_env):
     assert hooks.pretool(push()).exit_code == 0
     again = hooks.pretool(push())
     assert again.exit_code == 2 and permits.get(db, pid).state == "CONSUMED"
-    assert hooks.pretool(push("git push origin feat/y")).exit_code == 2  # a different command needs its own permit
+    assert hooks.pretool(push("git push origin v1-feat-y")).exit_code == 2  # a different command needs its own permit
 
 
 def test_decision_lifecycle_through_gate_and_posttool(human_env):
@@ -400,7 +400,7 @@ def test_mcp_read_only_tools_pass():
 
 
 def test_mcp_shell_tools_are_classified_by_their_command():
-    assert hooks.pretool(mcp("mcp__MacOS-MCP__Shell", command="git push origin feat/x")).exit_code == 2
+    assert hooks.pretool(mcp("mcp__MacOS-MCP__Shell", command="git push origin v1-feat-x")).exit_code == 2
     assert hooks.pretool(mcp("mcp__terminal__run_in_terminal", command="git status")).exit_code == 0
     assert "SI-08" in hooks.pretool(mcp("mcp__Desktop_Commander__start_process", command="git push origin main")).stderr
 

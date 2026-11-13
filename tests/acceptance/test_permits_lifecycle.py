@@ -11,7 +11,7 @@ import pytest
 from jade import cli, decide, hooks, ledger, paths, permits, policy, state_machine, util
 
 REAL_ANCESTOR = util.agent_ancestor  # tests/conftest.py replaces util.agent_ancestor for every test; this is the real one
-PUSH = "git push origin feat-x"
+PUSH = "git push origin v1-feat-x"
 CRITICAL = "kubectl delete namespace production"
 
 
@@ -58,7 +58,7 @@ SI09_BLOCKED = [
     "jade$IFS permit approve", "jade hooks uninstall", "jade   hooks   install", "jade gate off", "jade claude-md apply",
     "python3 -c 'from jade import state_machine; state_machine.apply(1, {})'", "python3 -c 'import jade.state_machine'",
 ]
-SI09_ALLOWED = ["jade check", "jade permit list", "jade permit request --command 'git push origin feat'", "uv run jade ask verify x -s y",
+SI09_ALLOWED = ["jade check", "jade permit list", "jade permit request --command 'git push origin v1-feat'", "uv run jade ask verify x -s y",
                 "git commit -m 'document jade permit approve'", "grep -rn 'permit approve' docs", "cat jade/permits.py", "uv run pytest tests -q",
                 "git add jade/permits.py policies/safety.yaml", "jade decide list", "uv run --quiet jade work render"]
 
@@ -176,8 +176,8 @@ def test_f07_the_approved_path_still_works(human_env):
     ('rm -rf "/tmp/jb/my dir"', 'rm -rf "/tmp/jb/my  dir"'),
     ("rm -rf '/tmp/jb/a b'", "rm -rf '/tmp/jb/a      b'"),
     ("kubectl apply -f - <<'EOF'\nspec:\n  a: 1\nEOF", "kubectl apply -f - <<'EOF'\nspec:\na: 1\nEOF"),
-    ("git push origin feat", "git push\torigin feat"),
-    ("git push origin feat", "git push origin\nfeat"),
+    ("git push origin v1-feat", "git push\torigin feat"),
+    ("git push origin v1-feat", "git push origin\nfeat"),
 ])
 def test_f08_whitespace_that_changes_the_command_changes_the_hash(a, b):
     assert policy.plan_hash("Bash", a, "/tmp/x") != policy.plan_hash("Bash", b, "/tmp/x")
@@ -185,7 +185,7 @@ def test_f08_whitespace_that_changes_the_command_changes_the_hash(a, b):
 
 
 def test_f08_only_the_ends_are_trimmed():
-    assert policy.plan_hash("Bash", "  git push origin feat \n", "/tmp/x") == policy.plan_hash("Bash", "git push origin feat", "/tmp/x")
+    assert policy.plan_hash("Bash", "  git push origin v1-feat \n", "/tmp/x") == policy.plan_hash("Bash", "git push origin v1-feat", "/tmp/x")
 
 
 def test_f08_a_permit_for_one_quoted_path_does_not_authorize_another(human_env):
@@ -210,7 +210,7 @@ def test_f08_the_plan_hash_covers_the_resolved_cwd(tmp_path):
 
 # ---- F09: what the human reads is everything the permit covers -------------------------------------------
 def test_f09_a_long_command_is_shown_in_full_and_padding_cannot_hide_a_second_command(human_env):
-    cmd = "git push origin feat-a" + " " * 4100 + "; git push --force origin feat-victim"
+    cmd = "git push origin v1-feat-a" + " " * 4100 + "; git push --force origin feat-victim"
     db = ledger.open()
     assert hooks.pretool(call(cmd)).exit_code == 2
     p = pending(db)
@@ -220,7 +220,7 @@ def test_f09_a_long_command_is_shown_in_full_and_padding_cannot_hide_a_second_co
 
 
 def test_f09_a_command_too_long_to_show_cannot_be_approved(human_env, monkeypatch, capsys):
-    cmd = "git push origin feat-a" + " " * (permits.MAX_SUBJECT + 10) + "; git push --force origin feat-victim"
+    cmd = "git push origin v1-feat-a" + " " * (permits.MAX_SUBJECT + 10) + "; git push --force origin feat-victim"
     db = ledger.open()
     assert hooks.pretool(call(cmd)).exit_code == 2
     p = pending(db)
@@ -234,7 +234,7 @@ def test_f09_a_command_too_long_to_show_cannot_be_approved(human_env, monkeypatc
 
 
 def test_f09_control_characters_are_escaped_on_the_approval_screen(human_env):
-    cmd = "git push origin feat-x\n# \x1b[2K\rgit status‮ ​\x07"
+    cmd = "git push origin v1-feat-x\n# \x1b[2K\rgit status‮ ​\x07"
     db = ledger.open()
     assert hooks.pretool(call(cmd)).exit_code == 2
     screen = permits.review_text(pending(db))
@@ -254,11 +254,11 @@ def test_f09_a_scope_that_does_not_hash_to_the_permit_is_refused(human_env):
 
 
 def test_f09_the_cli_request_path_carries_the_same_review_context(human_env, capsys):
-    assert cli.main(["permit", "request", "--command", "git push origin feat-y", "--cwd", "/tmp/x"]) == 0
+    assert cli.main(["permit", "request", "--command", "git push origin v1-feat-y", "--cwd", "/tmp/x"]) == 0
     db = ledger.open()
     p = pending(db)
-    assert permits.review_text(p).count("git push origin feat-y") == 1
-    assert permits.ctx_of(p)["length"] == len("git push origin feat-y")
+    assert permits.review_text(p).count("git push origin v1-feat-y") == 1
+    assert permits.ctx_of(p)["length"] == len("git push origin v1-feat-y")
 
 
 # ---- F10 / F13: expiry and the decision lifecycle ---------------------------------------------------------
@@ -301,9 +301,9 @@ def test_f13_an_expired_decision_cannot_have_its_permit_approved_or_consumed(hum
     with pytest.raises(permits.PermitError):
         permits.approve(db, p.permit_id, stdin_isatty=True)
     # the decision expired between approval and use
-    db2, q = blocked_then_approved("git push origin feat-z")
+    db2, q = blocked_then_approved("git push origin v1-feat-z")
     db2.con.execute("UPDATE decisions SET expires_at='2020-01-01T00:00:00Z' WHERE decision_id=?", (q.decision_id,))
-    r = hooks.pretool(call("git push origin feat-z"))
+    r = hooks.pretool(call("git push origin v1-feat-z"))
     assert r.exit_code == 2
     assert decide.get(db2, q.decision_id)["status"] == "EXPIRED"
 
@@ -329,10 +329,10 @@ def _repo(tmp_path):
 
 def test_f11_a_push_permit_is_not_used_after_head_moved(tmp_path, human_env):
     repo, env = _repo(tmp_path)
-    db, p = blocked_then_approved("git push origin feat-x", cwd=str(repo))
+    db, p = blocked_then_approved("git push origin v1-feat-x", cwd=str(repo))
     assert [x["kind"] for x in permits.get(db, p.permit_id).preconditions] == ["policy_version", "git_head"]
     subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "two"], cwd=repo, check=True, env=env)
-    r = hooks.pretool(call("git push origin feat-x", cwd=str(repo)))
+    r = hooks.pretool(call("git push origin v1-feat-x", cwd=str(repo)))
     assert r.exit_code == 2 and "git_head changed since approval" in r.stderr
     assert permits.get(db, p.permit_id).state == "ISSUED"  # not used up: the same state would still match it
 
@@ -340,10 +340,10 @@ def test_f11_a_push_permit_is_not_used_after_head_moved(tmp_path, human_env):
 def test_f11_the_pending_request_is_replaced_when_the_repository_moved(tmp_path, human_env):
     repo, env = _repo(tmp_path)
     db = ledger.open()
-    hooks.pretool(call("git push origin feat-x", cwd=str(repo)))
+    hooks.pretool(call("git push origin v1-feat-x", cwd=str(repo)))
     first = pending(db)
     subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "two"], cwd=repo, check=True, env=env)
-    hooks.pretool(call("git push origin feat-x", cwd=str(repo)))
+    hooks.pretool(call("git push origin v1-feat-x", cwd=str(repo)))
     assert permits.get(db, first.permit_id).state == "REVOKED" and pending(db).permit_id != first.permit_id
 
 

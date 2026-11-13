@@ -57,7 +57,7 @@ def test_overlay_low_rule_cannot_shadow_a_shipped_high_rule(tmp_path):
     ov = tmp_path / "o.yaml"
     ov.write_text("rules_prepend:\n  - {id: R-L05, level: low, match: 'git push', rationale: 'try to whitelist pushes'}\n")
     risk = load_risk(overlay=ov)
-    hit = classify(risk, "git push origin feature/x")
+    hit = classify(risk, "git push origin v1-feature-x")
     assert hit["id"] == "R-10" and hit["level"] == "high"
 
 

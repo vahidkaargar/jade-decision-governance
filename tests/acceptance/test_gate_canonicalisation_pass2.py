@@ -414,7 +414,7 @@ def test_n7_production_paths_are_case_insensitive():
 def test_n7_push_tags_on_main_stays_blocked_and_other_pushes_unchanged(tmp_path):
     cwd = repo(tmp_path / "r", "main")
     assert is_si08(pre("git push --tags origin", cwd=cwd))
-    assert json.dumps(assess("git push origin feat/x").blocked) == "[]"
+    assert json.dumps(assess("git push origin v1-feat-x").blocked) == "[]"
 
 
 def test_f01_rebase_exec_classifies_the_command_it_runs():

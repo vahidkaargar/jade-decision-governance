@@ -68,7 +68,7 @@ def test_f18_the_block_message_tells_the_agent_to_remove_the_inline_secret():
 
 
 def test_f18_a_command_without_a_secret_is_unchanged_and_approvable(human_env):
-    cmd = "git push origin feat-x"
+    cmd = "git push origin v1-feat-x"
     hooks.pretool(call(cmd))
     db = ledger.open()
     p = permits.listing(db, ("PENDING",))[0]
@@ -78,7 +78,7 @@ def test_f18_a_command_without_a_secret_is_unchanged_and_approvable(human_env):
 
 
 def test_f18_an_email_in_a_gated_command_stays_approvable():
-    cmd = "git push origin feat-x --push-option=notify=someone@example.org"
+    cmd = "git push origin v1-feat-x --push-option=notify=someone@example.org"
     hooks.pretool(call(cmd))
     db = ledger.open()
     p = permits.listing(db, ("PENDING",))[0]
@@ -103,7 +103,7 @@ def test_f14_a_decision_opened_with_a_secret_stores_it_redacted():
 
 
 def test_f14_purge_clears_decision_permit_and_event_text_after_the_window_and_keeps_metrics():
-    cmd = "git push origin feat-private-branch-name"
+    cmd = "git push origin v1-feat-private-branch-name"
     hooks.pretool(call(cmd))
     db = ledger.open()
     did = db.one("SELECT decision_id FROM decisions").decision_id
@@ -111,7 +111,7 @@ def test_f14_purge_clears_decision_permit_and_event_text_after_the_window_and_ke
     db.con.execute("UPDATE decisions SET created_at=?, updated_at=? WHERE decision_id=?", (old, old, did))
     db.con.execute("UPDATE permits SET issued_at=?, expires_at=?", (old, old))
     db.con.execute("UPDATE events SET ts=?", (old,))
-    hooks.pretool(call("git push origin feat-fresh-branch"))   # a fresh decision keeps its text
+    hooks.pretool(call("git push origin v1-feat-fresh-branch"))   # a fresh decision keeps its text
     n = ops.purge(db, 90)
     assert n >= 3
     dump_old = db.one("SELECT doc_json FROM decisions WHERE decision_id=?", (did,)).doc_json
@@ -128,13 +128,13 @@ def test_f14_purge_clears_decision_permit_and_event_text_after_the_window_and_ke
 
 
 def test_f14_purge_leaves_an_open_permit_and_its_decision_alone():
-    hooks.pretool(call("git push origin feat-x"))
+    hooks.pretool(call("git push origin v1-feat-x"))
     db = ledger.open()
     old = "2000-01-01T00:00:00Z"
     db.con.execute("UPDATE permits SET issued_at=?", (old,))
     db.con.execute("UPDATE decisions SET created_at=?, updated_at=?", (old, old))
     ops.purge(db, 90)
-    assert "git push origin feat-x" in permits.review_text(permits.listing(db, ("PENDING",))[0])
+    assert "git push origin v1-feat-x" in permits.review_text(permits.listing(db, ("PENDING",))[0])
 
 
 # ---- F17: sidecars and the database are created 0600 -------------------------------------------------------------

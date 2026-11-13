@@ -63,7 +63,7 @@ def test_end_to_end_blocked_push_approved_then_verified(human_env):
     from jade import decide, hooks, permits
 
     db = ledger.open()
-    ev = {"tool_name": "Bash", "tool_input": {"command": "git push origin feat/jade"}, "session_id": "sess-e2e-0001", "cwd": "/tmp/repo"}
+    ev = {"tool_name": "Bash", "tool_input": {"command": "git push origin v1-feat-jade"}, "session_id": "sess-e2e-0001", "cwd": "/tmp/repo"}
     assert hooks.pretool(ev).exit_code == 2
     p = permits.listing(db, ("PENDING",))[0]
     prov = adapter.FixtureProvider(lambda s, q, m: {k: {"type": "noul", "noul": 0.99} for k in q})

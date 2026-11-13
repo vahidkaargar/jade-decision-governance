@@ -12,7 +12,7 @@ from jade.permits import PermitError
 from jade.util import AGENT_ENV
 
 ROOT = Path(__file__).resolve().parents[2]
-PUSH = "git push origin feat-x"
+PUSH = "git push origin v1-feat-x"
 GHP = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
 
 

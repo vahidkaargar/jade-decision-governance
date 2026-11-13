@@ -8,7 +8,7 @@ import pytest
 
 from jade import hooks, improve, ledger, ops, permits
 
-PUSH = "git push origin feat-x"
+PUSH = "git push origin v1-feat-x"
 MARK = "ZZ-SECRET-MARKER-ZZ"   # stored content that no report may repeat
 ROW = "ledger integrity"
 

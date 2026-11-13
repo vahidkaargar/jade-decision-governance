@@ -151,7 +151,7 @@ def test_a_notebook_edit_permit_covers_the_new_source(home):
 
 # ---- MCP -----------------------------------------------------------------------------------------------
 def test_an_mcp_call_with_a_command_is_bound_to_its_other_arguments(home):
-    tool, tin = "mcp__x__shell", {"command": "git push origin feat-x", "cwd": "/tmp/a"}
+    tool, tin = "mcp__x__shell", {"command": "git push origin v1-feat-x", "cwd": "/tmp/a"}
     db, p = approved(ev(tool, tin))
     assert "file_sha" in kinds(p)
     assert hooks.pretool(ev(tool, {**tin, "cwd": "/tmp/b"})).exit_code == 2
@@ -270,7 +270,7 @@ def test_a_pending_write_request_made_before_content_was_bound_cannot_be_approve
 
 
 def test_a_bash_permit_is_unchanged(home):
-    cmd = "git push origin feat-x"
+    cmd = "git push origin v1-feat-x"
     db = ledger.open()
     assert hooks.pretool(ev("Bash", {"command": cmd})).exit_code == 2
     p = pending(db)

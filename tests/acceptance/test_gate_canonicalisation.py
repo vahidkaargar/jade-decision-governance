@@ -63,9 +63,9 @@ def test_f00_global_options_do_not_hide_a_push_to_the_default_branch(cmd):
 
 
 @pytest.mark.parametrize("cmd,rule", [
-    ("git -C . push origin feat", "R-10"),
-    ("git -c a=b push origin feat", "R-10"),
-    ("git --no-pager push origin feat", "R-10"),
+    ("git -C . push origin v1-feat", "R-10"),
+    ("git -c a=b push origin v1-feat", "R-10"),
+    ("git --no-pager push origin v1-feat", "R-10"),
     ("git -C . push --force origin feat", "R-10"),
     ("git -c user.name=x push --force origin feat", "R-10"),
     ("git -C . reset --hard", "R-11"),
@@ -75,7 +75,7 @@ def test_f00_global_options_do_not_hide_a_push_to_the_default_branch(cmd):
     ("git --no-pager -C . reset --hard", "R-11"),
     ("git reset HEAD~1 --hard", "R-11"),
     ("git reset -q --hard", "R-11"),
-    ("git push origin feat --force", "R-10"),
+    ("git push origin v1-feat --force", "R-10"),
     ("git branch -d x -D", "R-11"),
     ("git clean -df", "R-11"),
     ("timeout 5 git -C . reset --hard", "R-11"),
@@ -131,7 +131,7 @@ def test_f00_harmless_git_with_global_options_stays_low(cmd):
 
 def test_f00_plain_forms_keep_their_old_verdicts():
     assert "SI-08" in assess("git push origin main").blocked
-    assert assess("git push origin feat").rule_id == "R-10"
+    assert assess("git push origin v1-feat").rule_id == "R-10"
     assert assess("git reset --hard").rule_id == "R-11"
     assert assess("git commit -m 'git push later'").level == "low"
     assert assess("git branch -d old").level == "low"
@@ -258,7 +258,7 @@ def test_f02_literal_pushes_the_shell_will_run_are_classified_like_direct_ones(c
     ("echo 'rm -rf ~/Documents' | bash", "R-11"),
     ("sh <<EOF\nsudo pfctl -d\nEOF", "R-01"),
     ("python3 -c \"import os; os.system('rm -rf ~/Documents')\"", "R-11"),
-    ('echo "$(git push origin feat)"', "R-10"),
+    ('echo "$(git push origin v1-feat)"', "R-10"),
 ])
 def test_f02_other_hidden_commands_keep_their_level(cmd, rule):
     a = assess(cmd)
@@ -294,7 +294,7 @@ def test_f02_quoted_prose_and_data_stay_inert(cmd):
 
 
 def test_f02_heredoc_marker_inside_quotes_does_not_swallow_following_lines():
-    cmd = "echo \"<<EOF\"\ngit push origin feat\nEOF"
+    cmd = "echo \"<<EOF\"\ngit push origin v1-feat\nEOF"
     assert assess(cmd).rule_id == "R-10"
 
 
@@ -376,8 +376,8 @@ ANYWHERE_REFSPECS = [
     "git push origin heads/main",
     "git push origin HEAD:main",
     "git push origin HEAD:refs/heads/main",
-    "git push origin feat:refs/heads/main",
-    "git push origin feat:heads/master",
+    "git push origin v1-feat:refs/heads/main",
+    "git push origin v1-feat:heads/master",
     "git push origin :main",
     "git push --delete origin main",
     "git push -f origin feat:main",
@@ -410,15 +410,15 @@ def test_f04_static_default_branch_refspecs_are_blocked_on_any_branch(tmp_path, 
 @pytest.mark.parametrize("cmd", [
     "git push origin HEAD",
     "git push -u origin HEAD",
-    "git push origin feat/x",
+    "git push origin v1-feat-x",
     "git push origin HEAD:feat/y",
     "git push origin HEAD:refs/heads/feat/y",
     "git push origin main:feat/y",
-    "git push origin feat/x:feat/z",
+    "git push origin v1-feat-x:feat/z",
     "git push -o ci.skip origin HEAD",
     "git push --force-with-lease=feat/x origin HEAD",
     "git push --tags origin",
-    "git push origin feature/main",
+    "git push origin v1-feature/main",
     "git push origin v1.0",
     "git push",
     "git push origin $BRANCH",

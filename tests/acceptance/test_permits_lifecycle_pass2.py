@@ -11,7 +11,7 @@ import pytest
 from jade import cli, hooks, ledger, permits, policy, util
 
 REAL_ANCESTOR = util.agent_ancestor  # tests/conftest.py replaces util.agent_ancestor for every test; this is the real one
-PUSH = "git push origin feat-x"
+PUSH = "git push origin v1-feat-x"
 CRITICAL = "kubectl delete namespace production"
 
 
@@ -168,9 +168,9 @@ def test_f07_a_forged_row_with_no_seal_at_all_is_refused(human_env):
 ])
 def test_f07_editing_an_approved_permit_row_breaks_its_seal(human_env, sql):
     db, p = approved()
-    other = policy.assess("Bash", {"command": "git push origin feat-y"}, "/tmp/x")
+    other = policy.assess("Bash", {"command": "git push origin v1-feat-y"}, "/tmp/x")
     db.con.execute(sql.format(h=other.plan_hash), (p.permit_id,))
-    cmd = "git push origin feat-y" if "plan_hash" in sql else PUSH
+    cmd = "git push origin v1-feat-y" if "plan_hash" in sql else PUSH
     r = hooks.pretool(call(cmd))
     assert r.exit_code == 2 and permits.get(db, p.permit_id).state in ("ISSUED", "REVOKED")
 
@@ -275,7 +275,7 @@ def test_plan_hash_still_trims_a_space_tab_and_newline_at_the_ends(tail):
 
 
 # ---- new: a NUL byte in a command ------------------------------------------------------------------------------------
-@pytest.mark.parametrize("cmd", ["git push origin feat\x00x", "rm -rf /etc/x\x00y", "cd /tmp\x00x && ls", "echo a\x00b", "kubectl delete\x00 namespace production"])
+@pytest.mark.parametrize("cmd", ["git push origin v1-feat\x00x", "rm -rf /etc/x\x00y", "cd /tmp\x00x && ls", "echo a\x00b", "kubectl delete\x00 namespace production"])
 def test_a_nul_byte_in_a_command_never_raises_in_the_classifier(cmd):
     a = policy.assess("Bash", {"command": cmd}, "/tmp")
     assert a.level in ("low", "medium", "high", "critical")
@@ -283,12 +283,12 @@ def test_a_nul_byte_in_a_command_never_raises_in_the_classifier(cmd):
 
 
 def test_a_nul_byte_does_not_hide_the_risk_and_the_hook_does_not_fail_closed_on_it(human_env):
-    r = hooks.pretool(call("git push origin feat\x00x"))
+    r = hooks.pretool(call("git push origin v1-feat\x00x"))
     assert r.exit_code == 2 and "Failing closed" not in r.stderr and "needs a human-approved permit" in r.stderr
     assert hooks.pretool(call("echo a\x00b")).exit_code == 0
 
 
 def test_permit_request_with_a_nul_byte_in_the_command_does_not_crash(capsys):
-    assert cli.main(["permit", "request", "--command", "git push origin feat\x00x", "--cwd", "/tmp/x"]) == 0
+    assert cli.main(["permit", "request", "--command", "git push origin v1-feat\x00x", "--cwd", "/tmp/x"]) == 0
     p = pending(ledger.open())
     assert "\\x00" in permits.review_text(p)  # the approval screen writes the NUL out
