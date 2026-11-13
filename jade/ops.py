@@ -552,6 +552,58 @@ def set_gate_mode(mode: str, stdin_isatty: bool | None = None, allow_unsigned: b
     atomic_write(paths.config_dir() / "config.json", json.dumps(cfg, indent=1) + "\n")
 
 
+LEVEL_CHOICES = ("unset", "off", "high")   # 0.5.0: low and medium arrive with memory and Jev (docs/12, release 0.6.0)
+
+
+def _recorded_level() -> str | None:
+    """The level the newest `jade level` event recorded (None for `unset`, for no event, and when the ledger cannot be read)."""
+    try:
+        db = ledger.open(timeout=5)
+    except Exception:  # noqa: BLE001 - an unreadable ledger records nothing
+        return None
+    try:
+        row = db.con.execute("SELECT detail_json FROM events WHERE kind='level' ORDER BY id DESC LIMIT 1").fetchone()
+    finally:
+        db.close()
+    try:
+        return (json.loads(row[0]) or {}).get("level") if row and row[0] else None
+    except (ValueError, AttributeError):
+        return None
+
+
+def set_level(value: str, stdin_isatty: bool | None = None) -> None:
+    """`jade level unset|off|high`: human terminal only (like `jade gate`). The change is journaled as a `level` event first; a level found in the config
+    that no `level` event recorded was written some other way, so setting a new one is refused until the human clears it with `unset`."""
+    _require_human("jade level", stdin_isatty)
+    if value not in LEVEL_CHOICES:
+        raise ValueError(f"level must be one of {', '.join(LEVEL_CHOICES)} in this release (low and medium come with memory and Jev, docs/12), not {value!r}")
+    cfg = paths.config()
+    if value != "unset" and "level" in cfg and cfg["level"] != _recorded_level():
+        raise HumanOnly("the config holds a level that no `jade level` command recorded (it was written some other way): run `jade level unset`, check "
+                        "the config directory, then set the level again")
+    db = ledger.open(timeout=5)
+    try:
+        db.event("level", "level", guard=f"jade level {value}", actor=f"human:{user()}", detail={"level": None if value == "unset" else value})
+    finally:
+        db.close()
+    if value == "unset":
+        cfg.pop("level", None)
+    else:
+        cfg["level"] = value
+    atomic_write(paths.config_dir() / "config.json", json.dumps(cfg, indent=1) + "\n")
+
+
+def _level_row() -> tuple[str, bool, str]:
+    raw, lv = paths.config().get("level"), paths.level()
+    if raw is None:
+        return ("level", True, "unset: JADE behaves as release 0.4.0 (`jade level high` turns on in-chat approval, docs/12)")
+    if lv is None:
+        return ("level", False, f"the config level {raw!r} is not off, low, medium or high, so it counts as unset; `jade level unset` clears it")
+    if raw != _recorded_level():
+        return ("level", False, f"{lv}, but no `jade level` command recorded it (written some other way?); run `jade level unset`, look at the config directory, set it again")
+    return ("level", True, f"{lv}")
+
+
 def claude_md_section() -> str:
     return (paths.docs_dir() / "claude-md-jev-section.md").read_text()
 
@@ -1126,6 +1178,7 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
     if gaps is not None:
         rows.append(("pretool matcher", not gaps, "covers every gated tool" if not gaps else f"does not cover {', '.join(gaps)}: re-run `jade hooks install` in a terminal"))
     rows.append(_gate_mode_row())
+    rows.append(_level_row())
     rows.append(_overrides_row())
     rows.append(_ack_audit_row())
     rows.append(_permission_row())

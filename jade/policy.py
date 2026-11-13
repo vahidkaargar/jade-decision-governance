@@ -842,6 +842,49 @@ def _scan_content(a: Assessment, tool_input: dict, read_only: bool = False, cwd:
             a.blocked.append(inv["id"])
 
 
+_DIR_REPLACING_VERBS = frozenset({"rm", "rmdir", "mv", "unlink", "shred", "srm"})
+
+
+def _config_roots() -> tuple[str, ...]:
+    """The real paths of the config directory in force and of the default one (`~/.config/jade`): SI-12 guards both."""
+    return tuple(dict.fromkeys(os.path.realpath(str(p)) for p in (paths.config_dir(), os.path.expanduser("~/.config/jade"))))
+
+
+def _si12_hit(path: str, base: str, roots: tuple[str, ...], parent_too: bool = False) -> bool:
+    """True when `path` (relative to `base`) is a config directory, a path inside one, or, for a verb that replaces a directory, a parent of one."""
+    if not path or "\x00" in path:
+        return False
+    real = os.path.realpath(os.path.join(base or os.getcwd(), os.path.expanduser(path)))
+    return any(real == r or real.startswith(r + os.sep) or (parent_too and r.startswith(real.rstrip(os.sep) + os.sep)) for r in roots)
+
+
+def _si12_tool_paths(a: Assessment, subjects: list[str], cwd: str) -> None:
+    if paths.level() is None or "SI-12" in a.blocked:
+        return
+    roots = _config_roots()
+    if any(_si12_hit(s, cwd, roots) for s in subjects):
+        a.blocked.append("SI-12")
+
+
+def _si12_segment(seg: str, dirs: tuple[str, ...], cwd: str, roots: tuple[str, ...]) -> bool:
+    """SI-12 for one shell segment that is not read-only: does it write the config directory (or replace it, or a parent of it)?"""
+    bare = _bare(seg)
+    words = bare.split(" ")
+    verb = words[0].rsplit("/", 1)[-1]
+    view = files_view(bare)
+    text = bare if view is None else view
+    parent_too = verb in _DIR_REPLACING_VERBS or (verb == "find" and "-delete" in words)
+    for tok in text.split(" "):
+        tok = tok.rpartition("=")[2] if "=" in tok and not tok.startswith("=") else tok
+        tok = tok.strip("'\"`,;()")
+        if not tok or tok.startswith("-") or tok in (">", ">>"):
+            continue
+        for d in (dirs or ("",)):
+            if _si12_hit(tok, d or cwd, roots, parent_too):
+                return True
+    return False
+
+
 def _assess_write(tool: str, tool_input: dict, cwd: str) -> Assessment:
     subjects = write_paths(tool_input) or [""]
     best_rule, envs = None, []
@@ -861,6 +904,7 @@ def _assess_write(tool: str, tool_input: dict, cwd: str) -> Assessment:
     # A relative path names a different file in each directory, so the permit binds the working directory too; an absolute or `~` path does not depend on it.
     relative = any(x.strip() and not os.path.isabs(os.path.expanduser(x)) for x in subjects)
     _seal(a, tool, subject, cwd if relative else "", subject)
+    _si12_tool_paths(a, [x for x in subjects if x.strip()], cwd)
     return a
 
 
@@ -932,6 +976,7 @@ def _assess_tool(tool: str, tool_input: dict, cwd: str) -> Assessment:
         subject = canonical(tool_input)
         _seal(a, tool, subject, "", f"{tool} {subject}")
     if rule.get("paths"):
+        _si12_tool_paths(a, list(_path_args(tool_input)), cwd)
         for p in _path_args(tool_input):
             norm = normalise_path(p, cwd)
             hit = next((r for r in (_path_rule(p, dirs=(cwd,), whole=True), _path_rule(norm, dirs=(cwd,), whole=True)) if r), None)
@@ -1054,6 +1099,8 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     fetched: set[str] = set()   # files a curl or wget of this command writes
     computed = False   # a `cd` to a directory only the running shell knows came before this segment
     labels: list[str] = []
+    si12_roots = _config_roots() if paths.level() is not None else None   # docs/12: SI-12 is active once a level is set
+    si12 = False
     for seg, dirs in shellnorm.segments_cwd(scan, cwd):
         if seg.startswith(BLIND_MARK):
             labels.append(seg[len(BLIND_MARK):].split(" ", 1)[0])
@@ -1081,6 +1128,8 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         seg_best, bare = classify_segment(seg, dirs, proxied, tuple(marks))
         if best is None or LEVELS[seg_best["level"]] > LEVELS[best["level"]]:
             best = seg_best
+        if si12_roots and not si12 and _si12_segment(seg, dirs, cwd, si12_roots):
+            si12 = True
         key = _segment_key(bare)
         keys.append(key)
         if LEVELS[seg_best["level"]] >= LEVELS[permit_floor()]:
@@ -1115,6 +1164,8 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         if any(inv["_re"].search(h) for h in haystacks) or (raw and inv.get("block_globs") and _names_by_glob(inv["block_globs"], haystacks)) \
                 or ("_qre" in inv and any(inv["_qre"].search(v) for v in qviews)):
             a.blocked.append(inv["id"])
+    if si12 and "SI-12" not in a.blocked:
+        a.blocked.append("SI-12")
     _seal(a, tool, subject, cwd, subject)
     a.hold_key = sha256(canonical({"shell": sorted(set(gated_keys or keys))}))
     return a

@@ -537,6 +537,12 @@ def _ops(a) -> int:
             else:
                 ops.set_gate_mode(a.action, allow_unsigned=a.allow_unsigned)
                 print(f"gate mode {a.action}")
+        elif a.cmd == "level":
+            if a.value is None:
+                print(paths.level() or "unset")
+            else:
+                ops.set_level(a.value)
+                print(f"level {a.value}")
         elif a.cmd == "claude-md":
             if a.action == "show":
                 print(ops.claude_md_section())
@@ -725,6 +731,8 @@ def build_parser() -> argparse.ArgumentParser:
     pgate = sub.add_parser("gate")
     pgate.add_argument("action", choices=("status", "enforce", "advisory", "off"))
     pgate.add_argument("--allow-unsigned", action="store_true", help="enforce without the signed approval backend (docs/10); journaled")
+    plevel = sub.add_parser("level", help="human only: show or set the autonomy level (docs/12): unset, off or high; no argument prints it")
+    plevel.add_argument("value", nargs="?", choices=("unset", "off", "high"))
     sub.add_parser("claude-md").add_argument("action", choices=("show", "apply"))
     gh = sub.add_parser("git-hook", help="the standalone pre-push guard for the default branch (SI-08): `script` prints it, `check <repo>` says whether a repository runs it").add_subparsers(dest="action", required=True)
     gh.add_parser("script", help="print the self-contained POSIX sh pre-push hook (installs nothing; install it yourself, docs/08 section 2.7)")
