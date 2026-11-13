@@ -240,6 +240,7 @@ rules:
 read_only:
   - "^(cat|head|tail|wc|ls|ll|stat|which|type|whereis|pwd|whoami|id|uname|printenv|echo|printf|true|false|test|\\[|grep|egrep|fgrep|jq|cut|tr|column|nl|diff|cmp|comm|basename|dirname|realpath|readlink|du|df|ps|pgrep|lsof|netstat|sw_vers|md5|shasum|sha256sum|hexdump|strings|cd|pushd|popd|export|set|unset|sleep|wait)\\b"
   # Verbs that CAN write are read-only only without the flag or operand that makes them write (output file, in-place, exec, program text).
+  - "^command\\s+-[A-Za-z]*[vV]\\b"   # `command -v NAME` and `command -V NAME` look a name up and run nothing
   - "^sort\\b(?!.*(\\s-[a-zA-Z]*o|\\s--output|\\s--compress-program))"
   - "^uniq\\b(?!(?:\\s+-\\S+)*\\s+(?!\\d+(?:\\s|$))[^-\\s]\\S*\\s+(?!\\d+(?:\\s|$))[^-\\s]\\S*)"
   - "^xxd\\b(?!.*\\s-[a-zA-Z]*r)(?!(?:\\s+-\\S+)*\\s+(?!\\d+(?:\\s|$))[^-\\s]\\S*\\s+(?!\\d+(?:\\s|$))[^-\\s]\\S*)"
@@ -288,12 +289,14 @@ mcp_tools:
       match: "^mcp__.*(delete_(file|project|session)|kill_process|force_terminate|move_file|rename_file|copy_file|write_file|write_pdf|edit_block|edit_file|create_directory|clean_up_worktrees|discard_kept_worktree)$" }
   - { id: M-04, level: high, blast_radius: host, reversibility: partially_reversible,
       rationale: "Changes agent permissions, settings, scheduling, connectors, the tool surface, or starts or steers another session (governance wiring)",
-      match: "^mcp__.+?__(set_session_(permission_mode|model|effort|fast_mode|output_style)|set_(setting|config_value|remote_control|session_connector_enabled)|(create|update|delete|run)_scheduled_task|mcp-(add|remove|config-set|create-profile|activate-profile)|send_message|start_session|move_to_cloud|stop_session|archive_session|clear_session|set_auto_merge|bind_pr|reconnect_session_connector)$" }
+      match: "^mcp__.+?__(set_session_(permission_mode|model|effort|fast_mode|output_style)|set_(setting|config_value|remote_control|session_connector_enabled)|(create|update|delete|run)_scheduled_task|mcp-(add|remove|config-set|create-profile|activate-profile)|send_message|start_session|hand_off_to_session|move_to_cloud|stop_session|archive_session|clear_session|set_auto_merge|bind_pr|reconnect_session_connector)$" }
   - { id: M-05, level: high, blast_radius: host, reversibility: partially_reversible,
       rationale: "Runs another tool or arbitrary code by name through a gateway, or starts an agent outside this session's hooks: the gate cannot see what it calls",
       match: "^(RemoteTrigger|mcp__.+?__(?:\\w+_)?(?:mcp-exec|code-mode|run_code_unsafe|run_code|executeCode|execute_code))$" }
   - { id: M-06a, level: low, blast_radius: file, rationale: "Interface-only MCP tool (sidebar, panes, window layout, session title, PR monitor toggle, terminal tabs): changes how the app looks, not what runs",
       match: "^mcp__ccd_(?:sidebar|view|window)__|^mcp__ccd_session_mgmt__set_session_title$|^mcp__ccd_pr__set_monitor$|^mcp__terminal__(?:open|stop)_terminal_tab$" }
+  - { id: M-06b, level: low, blast_radius: file, rationale: "Harness bookkeeping (task list, turn recap, chapter marks, withdrawing a proposal): changes what the app shows, not what runs",
+      match: "^mcp__ccd_turn__(?:update_plan|wrap_up)$|^mcp__ccd_session__(?:mark_chapter|dismiss_task)$" }
   - { id: M-06, level: low, blast_radius: file, rationale: "MCP tool with a read-only name",
       match: "^mcp__.+?__(?:get|list|read|search|find|query|describe|show|status|info|ping|logs?|view|fetch|resolve|snapshot|screenshot|scrape|wait|explain|check|count|version|inspect|dump|stat|tree|take|hover|start_search|stop_search|smart_search|skills_get|skills_search|rules_always|rules_search|query-docs|resolve-library-id)(?:[_-]|$)" }
   - { id: M-07, level: high, blast_radius: host, reversibility: partially_reversible, paths: true, generic: true,

@@ -1195,7 +1195,7 @@ def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
     else:
         return _assess_shell(tool, str(tool_input.get("command") or ""), cwd)
     a.hold_key = a.hold_key or a.plan_hash
-    _scan_content(a, tool_input, read_only=is_mcp(tool) and mcp_command(tool_input) is None and _tool_rule(tool, False).get("id") in ("M-06", "M-06a"), cwd=cwd)
+    _scan_content(a, tool_input, read_only=is_mcp(tool) and mcp_command(tool_input) is None and _tool_rule(tool, False).get("id") in ("M-06", "M-06a", "M-06b"), cwd=cwd)
     return a
 
 
