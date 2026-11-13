@@ -340,6 +340,10 @@ def pretool(event: dict, permit=None) -> HookResult:
     if mode == "off":
         return HookResult()
     tool = event.get("tool_name", "")
+    if tool == "AskUserQuestion":
+        from . import askchat
+
+        return askchat.rewrite(event)   # a question that carries an ask token of this session is replaced by the hook's own (docs/12); any other passes
     if not policy.is_gated(tool):
         return HookResult()
     _note_unnamed_tool(tool)
@@ -368,7 +372,7 @@ def pretool(event: dict, permit=None) -> HookResult:
                 _journal("gate", "secret_read", a, event)   # W-55: counted (rule, tool, session), never the path or the command; the read itself is not gated
         return HookResult()
     try:
-        return _gate(mode, tool, a, event, permit)
+        return _gate("advisory" if paths.level() == "off" else mode, tool, a, event, permit)   # level off: JADE only watches (docs/12)
     except Exception as e:  # noqa: BLE001 - the ledger is unreadable, locked or full: no permit can be checked, so nothing high-risk runs
         return _fail_closed(mode, f"this {tool} call is {a.level} risk ({a.rule_id}) and the permit ledger failed ({type(e).__name__}: {str(e)[:160]}), "
                                   "so no permit can be checked.")
@@ -533,6 +537,10 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
                 return HookResult(0, f"JADE: permit {found.permit_id} consumed for this {tool} call.")
         if (res := replayed()) is not None:   # a parallel delivery of the same call spent the permit between the lookup above and the use
             return res
+        from . import askchat
+
+        if (res := askchat.step(db, mode, a, tool, event, fp, cwd)) is not None:   # docs/12: the human answers in the chat (consumes a grant, or asks)
+            return res
         if mode == "advisory":
             db.event("gate", "would_block", guard=f"{a.rule_id} {a.level}", actor="hook", detail=_detail(event, a))
             return HookResult(0, f"[advisory, not blocked] JADE: {a.level} risk ({a.rule_id}: {a.rationale}) would need a permit.")
@@ -603,6 +611,10 @@ def posttool(event: dict) -> HookResult:
     closed the same way (W-40); before, a permitted Write stayed EXECUTING until its deadline and was then held as unknown (SI-07). Only the exit status of
     the call is known here, so the outcome is `observed` with indirect attribution, as for Bash."""
     tool = event.get("tool_name")
+    if tool == "AskUserQuestion":
+        from . import askchat
+
+        return askchat.settle(event)   # the human's answer to an ask of this session, read from the host's tool_response
     if not isinstance(tool, str) or not (tool in policy.POST_TOOLS or policy.is_mcp(tool)):
         return HookResult()
     tin = event.get("tool_input")
