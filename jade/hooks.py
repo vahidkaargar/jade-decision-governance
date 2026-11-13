@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from . import paths, policy
 from .util import at_least, now, ts
 
-BUDGET_S = 6.0          # whole PreToolUse handler; the installed host timeout is 10 s (ops.HOOKS)
+BUDGET_S = 6.0          # whole PreToolUse handler; the dialog path (askdialog) raises its own alarm for the wait, the installed host timeout (ops.HOOKS) covers it
 LEDGER_TIMEOUT_S = 1.5  # one wait for the ledger lock (open waits at most twice: busy timeout, then the schema step)
 GIT_TIMEOUT_S = 2.0     # one git call made to resolve a push destination
 BYPASS = re.compile(r"\bcurl\b.*openrouter\.ai/api/alpha/decisions")
@@ -540,6 +540,10 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
         from . import askchat
 
         if (res := askchat.step(db, mode, a, tool, event, fp, cwd)) is not None:   # docs/12: the human answers in the chat (consumes a grant, or asks)
+            return res
+        from . import askdialog
+
+        if (res := askdialog.step(db, mode, a, tool, event, fp, cwd)) is not None:   # docs/12: a subagent call is answered in a macOS dialog the hook waits for
             return res
         if mode == "advisory":
             db.event("gate", "would_block", guard=f"{a.rule_id} {a.level}", actor="hook", detail=_detail(event, a))
