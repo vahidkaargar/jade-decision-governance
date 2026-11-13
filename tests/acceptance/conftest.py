@@ -30,5 +30,5 @@ def jade_stub(tmp_path, monkeypatch):
     monkeypatch.setenv("JADE_BIN", str(jade))
     monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
     # the test run itself redirects JADE_HOME and JADE_CONFIG: say so, as a human would for a deliberate override
-    monkeypatch.setenv("JADE_ACK_OVERRIDES", "JADE_HOME,JADE_CONFIG,JADE_CLAUDE_SETTINGS,JADE_BIN")
+    monkeypatch.setenv("JADE_ACK_OVERRIDES", "JADE_HOME,JADE_CONFIG,JADE_CLAUDE_SETTINGS,JADE_BIN,JADE_APPROVER_ANCHOR")
     return bin_dir

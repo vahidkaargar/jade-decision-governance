@@ -56,6 +56,7 @@ A prose rule with no threshold and no enforcement point does not hold. Details a
 | 7 | `docs/07-self-improvement-and-work-management.md` | Bounded improvement loop, durable work items, human-only boundaries |
 | 8 | `docs/08-deployment-runbook.md` | What is installed, the human-only wiring steps, rollback, coverage limits, the path to VALIDATED |
 | 9 | `docs/09-install-and-upgrade.md` | Versioning policy, the upgrade contract, the release process, supported platforms, troubleshooting by `jade check` row, full uninstall |
+| 10 | `docs/10-out-of-band-permit-approval.md` | W-38 design: an approval a same-user agent cannot synthesise (not implemented) |
 | — | `BACKLOG.md` | Every open item: owner, priority, dependency, trigger, next action |
 | — | `docs/JADE_Claude_Code_Master_Plan.md` | The original handoff draft this repository completes |
 
