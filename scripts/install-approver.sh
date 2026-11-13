@@ -87,7 +87,7 @@ if ! sudo visudo -cf "$SUDOERS.tmp" >/dev/null; then
 fi
 sudo install -m 440 -o root "$SUDOERS.tmp" "$SUDOERS"; sudo rm -f "$SUDOERS.tmp"
 # Last: the anchor turns the signed backend on. It is made from the key every time, so a re-run after a partial install still ends with a complete one.
-PUB="$(sudo -u "$USER_NAME" /usr/bin/ssh-keygen -y -f "$CONF/approver_ed25519" | cut -d' ' -f1,2)"
+PUB="$(sudo /usr/bin/ssh-keygen -y -f "$CONF/approver_ed25519" | cut -d' ' -f1,2)"   # as root: the sudoers rule above lets you run only the helper as the approver, so running this as the approver is refused
 printf 'jade-approver %s\n' "$PUB" | sudo tee "$CONF/allowed_signers.tmp" >/dev/null
 sudo install -m 644 -o root "$CONF/allowed_signers.tmp" "$CONF/allowed_signers"; sudo rm -f "$CONF/allowed_signers.tmp"
 sudo -k   # drop any cached sudo ticket

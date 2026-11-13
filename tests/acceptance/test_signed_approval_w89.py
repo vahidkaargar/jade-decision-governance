@@ -391,3 +391,12 @@ def test_the_installer_makes_the_approvers_key_in_a_directory_the_approver_can_e
     install = (HELPER.parent / "install-approver.sh").read_text()
     line = next(ln for ln in install.splitlines() if "KEYDIR=" in ln and "mktemp" in ln)
     assert "mktemp -d /var/tmp/" in line, line
+
+
+def test_the_installer_derives_the_public_key_as_root_after_the_sudoers_rule_is_in_place():
+    """The second real run failed: 'user is not allowed to execute ssh-keygen -y as _jadeapprove'. From the sudoers install on, the user may run only the helper as the
+    approver, so every later step that needs the key must run as root."""
+    install = (HELPER.parent / "install-approver.sh").read_text()
+    after = install.split('sudo install -m 440 -o root "$SUDOERS.tmp"', 1)[1]
+    line = next(ln for ln in after.splitlines() if "ssh-keygen -y" in ln)
+    assert "sudo -u" not in line and "sudo /usr/bin/ssh-keygen -y" in line, line
