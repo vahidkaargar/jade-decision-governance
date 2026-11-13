@@ -869,7 +869,7 @@ HO_WIRING, HO_INSTALL, HO_SETTINGS, HO_STATE, HO_MOD, HO_R17, HO_TERMINAL = (
     "HO-wiring", "HO-checkout-install", "HO-settings-shadow", "HO-state-path", "HO-mod", "HO-R17", "HO-terminal")
 _STATE_LITERAL = re.compile(r"\.config/jade(?![\w.-])|\.local/share/jade(?![\w.-])|jade\.sqlite")
 _INSTALL_CMD = re.compile(r"\b(?:uv\s+tool\s+(?:install|upgrade|reinstall)|uv\s+pip\s+install|pip3?\s+install|pipx\s+(?:install|upgrade|reinstall)|python3?\s+-m\s+pip\s+install)\b")
-_UV_TOOL_JADE = re.compile(r"\buv\s+tool\s+(?:uninstall|upgrade|reinstall|install)\b[^;&|]*\bjade")   # R-13: changes or removes the installed JADE tool itself, whatever it installs from
+_UV_TOOL_JADE = re.compile(r"\buv\s+tool\s+(?:uninstall|upgrade|reinstall|install)\b[^;&|]*\bjade|\buv\s+tool\s+(?:uninstall|upgrade|reinstall)\b[^;&|]*--all\b")   # R-13: changes or removes the installed JADE tool itself, whatever it installs from
 _SETTINGS_FILE = re.compile(r"(?:^|/)\.claude/settings(?:\.local)?\.json$")
 _SETTINGS_DISABLE = re.compile(r"disableAllHooks|allowManagedHooksOnly|JADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME|REGISTRY_DIR)|\"hooks\"\s*:\s*(?:\{\s*\}|null)", re.I)
 TERMINAL_TOOLS = frozenset({"mcp__terminal__run_in_terminal"})

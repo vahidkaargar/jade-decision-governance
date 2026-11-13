@@ -35,10 +35,10 @@ The first channel that fits the call is used.
 Around the channels:
 
 - Every answer is stored as a `hint` in the `human_answers` table. A hint decides nothing and goes to no model. `jade review` lists them (read-only).
-- While an ask of the session is open (the chat question unanswered, or a dialog on screen) the session's computer-use tools are refused, so an agent that drives the mouse cannot press Allow.
+- While an ask of the session is open (the chat question unanswered) or a dialog is on screen (any session), screen-control calls are refused so that an agent cannot press Allow: the `mcp__computer-use__*` and `mcp__MacOS-MCP__*` tools, and a shell or terminal-tool call that runs `osascript`, `cliclick` or `shortcuts run`.
 - A new ask posts one macOS notification (rule and folder name, never the command).
 - When the agent tries to stop with an ask that never reached the question, the Stop hook points at it once.
-- 30 asks of a session that expired unanswered pause asking for that session ("the human is away") until the human answers or they age out of the last hour.
+- 30 asks of a session that expired unanswered pause asking for that session until the human answers or they age out of the last hour. Gated calls then take the signed permit path (a permit id to approve in your terminal), so something waits for you when you come back.
 - A call that failed fires `PostToolUseFailure`: the decision it ran under closes as an observed failure, so the next identical call is asked again instead of held. An interrupted call may have run in part: its hold stays.
 
 ## 4. What only a human can decide
@@ -64,7 +64,7 @@ JADE's own source in a checkout is plain high work, asked like any other call. `
 | The agent says the gate wants a permit and gives an id | no level is set, or the call is live wiring, a secret, or a mode the chat does not reach | `jade permit approve <id>` in your terminal, or `jade level high` |
 | A question starting with `[jade:ask_...]` | the chat channel | Allow or Deny |
 | A dialog on your screen | a subagent call | Allow or Deny; no answer in 120 s falls back to the permit |
-| "the human is away" | 30 asks expired | answer one, or continue; it ends within the hour |
+| A permit id although a level is set | 30 asks of the session expired unanswered, so asking is paused | `jade permit approve <id>`, or answer one ask; it ends within the hour |
 | "denied this call 3 times" | you said no three times | nothing: the agent was told to stop |
 | `jade check` fails `hooks installed` | hooks from before 0.5.0 (shorter PreToolUse timeout, no failure hook, no AskUserQuestion matcher) | `jade hooks install`, then open a new session |
 | Nothing happens on a high call | the hook is dead or the host is older than 2.1.295 and fails open | `jade check`; `jade setup` says what is todo |
@@ -83,7 +83,10 @@ Measure it with `jade ledger stats`: the `asks` block gives answers by channel a
 ## 7. Risks accepted
 
 - Any program the agent starts, not only one in your terminal, can change the level or the config file, or fake one hook event. A fake approval covers one call.
-- An agent that drives the mouse can press Allow when no ask of its session is open to pause it, or through another session's tools.
+- An agent that drives the mouse can press Allow when no ask is open to pause it, through a screen-control tool the name list does not know, through a background `osascript` loop started before the ask, or by a `computer_batch` already in flight.
+- `uv tool install --force` of another package can overwrite the `jade` launcher; it is not classed as live wiring.
+- The ask button labels are fixed (Allow, Deny), with no per-ask nonce.
+- `jade upgrade` lists changed files from GitHub's compare answer, which caps at 300 files and a size; a name that cannot be shown safely is counted and the note says to read the diff on GitHub before typing yes. A ref behind the installed commit is shown as a rollback.
 - A mod loaded in Claude Code can answer a chat question or approve a call JADE blocked. Mods are not locked.
 - The chat channel rests on host behaviour the Claude Code documentation does not describe (`evals/probes/hook_ask/RESULTS.md`, Claude Code 2.1.314). A host update can break it. `jade check` reports the hooks; the probe can be re-run.
 - Hosts older than 2.1.295 ignore `onFailure` and fail open on a hook crash or timeout.

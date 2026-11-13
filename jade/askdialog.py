@@ -125,8 +125,8 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
         return res
     if db.one("SELECT ask_id FROM asks WHERE session_id=? AND status='GAVE_UP' AND hold_key=? AND fingerprints_json=? AND expires_ts>?", (session, hold, fpj, ts())) is not None:
         return None
-    if (res := askchat.paused(db, session)) is not None:
-        return res
+    if askchat.paused(db, session):
+        return None
     text = text_for(a, tool, ctx)
     ask_id = new_id("a")[2:]
     _insert(db, ask_id, session, event, a, tool, hold, fpj, text, "DIALOG", DIALOG_WAIT_S + ALARM_MARGIN_S, False)   # while it is on screen the session's GUI tools are paused

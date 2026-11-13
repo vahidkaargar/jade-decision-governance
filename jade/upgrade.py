@@ -271,14 +271,32 @@ class UpgradeResult:
     error: str | None = None
 
 
+COMPARE_MAX_BYTES = 25_000_000   # GitHub's compare answer carries every file's patch and the commits: a release step of a few versions is many megabytes
+
+
+def _compare(base: str, head: str) -> dict:
+    """Both ends are already checked: the ref by validate_ref, the installed commit by the hex pattern."""
+    return json.loads(_http_get(f"https://api.github.com/repos/{REPO}/compare/{base}...{head}", limit=COMPARE_MAX_BYTES).decode("utf-8"))
+
+
 def changed_files(ref: str) -> tuple[list[str], str]:
     """The files under jade/, policies/, registry/ and scripts/ that differ between the installed commit and `ref` (GitHub's compare answer), as printable lines, plus a
-    note (what is not listed, or why nothing could be). Each path is checked against a plain-character pattern, so nothing a terminal could obey is printed. Never raises."""
+    note (what is not listed, or why nothing could be). Each path is checked against a plain-character pattern, so nothing a terminal could obey is printed; a file whose name
+    fails the check is counted, never dropped. A ref that is behind the installed commit is a rollback: the files that return to their older state are listed. Never raises."""
     base = _direct_url_commit() or paths.code_commit() or ""
     if not re.fullmatch(r"[0-9a-f]{7,40}", base):
         return [], "the installed commit is not known, so the changed files cannot be listed"
+    notes: list[str] = []
+    flip = False
     try:
-        doc = json.loads(_http_get(f"https://api.github.com/repos/{REPO}/compare/{base}...{validate_ref(ref)}").decode("utf-8"))
+        ref = validate_ref(ref)
+        doc = _compare(base, ref)
+        status = doc.get("status") if isinstance(doc, dict) else None
+        if status == "behind":   # `ref` is an ancestor of what is installed: a rollback. The forward compare is empty; the reverse one names what changes back.
+            doc, flip = _compare(ref, base), True
+            notes.append("this is a rollback: the files below return to their older state")
+        elif status == "diverged":
+            notes.append("the release and the installed commit have diverged: the list shows what the release has that the installed commit lacks, and may miss what is dropped")
     except FetchError as e:
         return [], f"cannot list the changed files ({e.kind}: {_clean(e.detail, 80)})"
     except (UpgradeError, ValueError, RecursionError):
@@ -286,20 +304,28 @@ def changed_files(ref: str) -> tuple[list[str], str]:
     files = doc.get("files") if isinstance(doc, dict) else None
     if not isinstance(files, list):
         return [], "cannot list the changed files (the answer has no file list)"
-    lines, other = [], 0
+    lines, other, unsafe = [], 0, 0
+    flipped = {"added": "removed", "removed": "added"}
     for item in files:
-        name = item.get("filename") if isinstance(item, dict) else None
-        if not isinstance(name, str) or not _SAFE_PATH.fullmatch(name):
+        if not isinstance(item, dict):
             continue
-        if not name.startswith(WATCHED_DIRS):
+        name, old = item.get("filename"), item.get("previous_filename")
+        names = [n for n in (name, old) if n is not None]
+        if not names or any(not isinstance(n, str) or not _SAFE_PATH.fullmatch(n) for n in names):
+            unsafe += 1
+            continue
+        if not any(n.startswith(WATCHED_DIRS) for n in names):
             other += 1
             continue
         status = item.get("status") if item.get("status") in _STATUS else "changed"
+        status = flipped.get(status, status) if flip else status
         add, dele = (n if isinstance(n, int) and not isinstance(n, bool) else 0 for n in (item.get("additions"), item.get("deletions")))
-        lines.append(f"{status:<8}  {name} (+{add} -{dele})")
-    notes = []
+        shown = f"{name} (from {old})" if old else name
+        lines.append(f"{status:<8}  {shown} (+{add} -{dele})")
     if other:
         notes.append(f"{other} other file(s) outside {', '.join(WATCHED_DIRS)} changed and are not listed")
+    if unsafe:
+        notes.append(f"{unsafe} file(s) with names that cannot be shown safely changed: read the diff on GitHub before you type yes")
     if len(lines) > MAX_FILES:
         notes.append(f"{len(lines) - MAX_FILES} more file(s) not shown")
         lines = lines[:MAX_FILES]
@@ -331,6 +357,7 @@ def apply(ref: str | None = None, stdin_isatty: bool | None = None, say: Callabl
         a, b = ops._version_tuple(jade.__version__), ops._version_tuple(ref.removeprefix("v")) if TAG_RE.fullmatch(ref) else None
         if a is not None and b is not None and b < a:
             steps.append(f"{ref} is older than the installed {jade.__version__}: this is a rollback")
+            say(f"{ref} is older than the installed {jade.__version__}: this is a rollback")
     if not shutil.which("uv"):
         return UpgradeResult(False, ref=ref, error="uv is not on PATH: install uv first (https://docs.astral.sh/uv/)")
     if confirm is not None:

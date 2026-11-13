@@ -125,10 +125,10 @@ def _ask_stats(db, days: int) -> dict | None:
     for r in db.all(f"SELECT channel, answer, COUNT(*) AS n FROM human_answers WHERE ts>={since} AND {live} GROUP BY channel, answer", arg):  # noqa: S608
         answers.setdefault(r.channel, {"allow": 0, "deny": 0})[r.answer] = r.n
     by_rule: dict[str, dict[str, int]] = {}
-    for r in db.all(f"SELECT rule_id, status, COUNT(*) AS n FROM asks WHERE created_ts>={since} AND {live} GROUP BY rule_id, status", arg):  # noqa: S608
+    for r in db.all(f"SELECT rule_id, status, answered_ts IS NOT NULL AS answered, COUNT(*) AS n FROM asks WHERE created_ts>={since} AND {live} GROUP BY rule_id, status, answered", arg):  # noqa: S608
         row = by_rule.setdefault(r.rule_id, {"asks": 0, "allowed": 0, "denied": 0, "unanswered": 0})
         row["asks"] += r.n
-        row["allowed" if r.status in ("ALLOWED", "CONSUMED") else "denied" if r.status == "DENIED" else "unanswered"] += r.n
+        row["allowed" if r.status in ("ALLOWED", "CONSUMED") or (r.status == "EXPIRED" and r.answered) else "denied" if r.status == "DENIED" else "unanswered"] += r.n   # an Allow that expired unused was still answered
     if not (gated or terminal or answers or by_rule):
         return None
     per = None

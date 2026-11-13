@@ -116,12 +116,21 @@ def test_denies_of_another_command_do_not_count():
     assert "[jade:ask_" in hooks.pretool(call()).stderr
 
 
-def test_thirty_expired_asks_pause_asking_for_the_session():
+def test_thirty_expired_asks_pause_asking_and_the_call_takes_the_signed_permit():
     for _ in range(30):
         add_ask("EXPIRED")
     r = hooks.pretool(call())
-    assert r.exit_code == 2 and "away" in r.stderr and "[jade:ask_" not in r.stderr and "jade permit approve" not in r.stderr
+    assert r.exit_code == 2 and "[jade:ask_" not in r.stderr and "jade permit approve" in r.stderr
     assert len([x for x in rows() if x["status"] == "PENDING"]) == 0
+
+
+def test_the_dialog_is_not_shown_while_asking_is_paused(monkeypatch):
+    monkeypatch.setattr(askdialog, "available", lambda: True)
+    monkeypatch.setattr(askdialog, "run_dialog", lambda text, wait: pytest.fail("a dialog was shown while paused"))
+    for _ in range(30):
+        add_ask("EXPIRED")
+    r = hooks.pretool(call(agent_id="a1", agent_type="general-purpose"))
+    assert r.exit_code == 2 and "jade permit approve" in r.stderr
 
 
 def test_twenty_nine_expired_asks_do_not_pause():
@@ -214,6 +223,44 @@ def test_gui_tools_are_paused_while_a_dialog_is_on_screen(monkeypatch):
     hooks.pretool(call(agent_id="a1", agent_type="general-purpose"))
     assert seen["status"] == ["DIALOG"] and "paused" in seen["gui"]
     assert "paused" not in hooks.pretool(gui()).stderr
+
+
+def shell_gui(cmd, session=SESSION):
+    return {"tool_name": "Bash", "tool_input": {"command": cmd}, "session_id": session, "cwd": "/tmp", "permission_mode": "auto"}
+
+
+def test_a_shell_osascript_is_paused_while_an_ask_is_open():
+    hooks.pretool(call())
+    for cmd in ('osascript -e \'tell application "System Events" to click button "Allow"\'', "cliclick c:100,200", "shortcuts run Foo"):
+        r = hooks.pretool(shell_gui(cmd))
+        assert r.exit_code == 2 and "paused" in r.stderr, cmd
+
+
+def test_a_terminal_tool_osascript_is_paused_while_an_ask_is_open():
+    hooks.pretool(call())
+    ev = {"tool_name": "mcp__Desktop_Commander__start_process", "tool_input": {"command": "osascript -e 'tell application \"System Events\" to keystroke return'"},
+          "session_id": SESSION, "cwd": "/tmp", "permission_mode": "auto"}
+    assert "paused" in hooks.pretool(ev).stderr
+
+
+def test_a_plain_shell_call_is_not_paused_while_an_ask_is_open():
+    hooks.pretool(call())
+    assert "paused" not in hooks.pretool(shell_gui("ls -la")).stderr
+
+
+def test_a_dialog_on_screen_pauses_the_gui_tools_of_every_session(monkeypatch):
+    monkeypatch.setattr(askdialog, "available", lambda: True)
+    seen = {}
+
+    def fake(text, wait):
+        seen["other"] = hooks.pretool(gui(OTHER)).stderr
+        seen["other_shell"] = hooks.pretool(shell_gui("osascript -e 'beep'", OTHER)).stderr
+        return "Deny"
+
+    monkeypatch.setattr(askdialog, "run_dialog", fake)
+    hooks.pretool(call(agent_id="a1", agent_type="general-purpose"))
+    assert "paused" in seen["other"] and "paused" in seen["other_shell"]
+    assert "paused" not in hooks.pretool(gui(OTHER)).stderr
 
 
 # ------------------------------------------------------------------ Stop nudge

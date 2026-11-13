@@ -87,6 +87,7 @@ TABLE = {
     r"\buv tool (?:uninstall|upgrade|reinstall)\b[^;&|]*\bjade": [
         (B("uv tool uninstall jade-decision-governance"), LIVE), (B("uv tool upgrade jade"), LIVE), (B("uv tool reinstall jade"), LIVE)],
     r"\buv tool install\b[^;&|]*\bjade": [(B("uv tool install jade-decision-governance"), LIVE), (B("uv tool install --reinstall git+https://github.com/x/jade"), LIVE)],
+    r"\buv tool (?:uninstall|upgrade|reinstall)\b[^;&|]*--all\b": [(B("uv tool uninstall --all"), LIVE), (B("uv tool upgrade --all"), LIVE), (B("uv tool reinstall --all"), LIVE)],
     # The human-only CLI refuses these without a terminal (ops.HumanOnly), so a chat Allow cannot make them do anything an agent could not do anyway.
     r"\bjade (improve (promote|rollback)|ledger purge|label set)\b": [
         (B("jade improve promote c1"), PLAIN), (B("jade improve rollback"), PLAIN), (B("jade ledger purge --yes"), PLAIN), (B("jade label set a b"), PLAIN)],

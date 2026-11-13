@@ -50,7 +50,7 @@ High and critical actions (push, publish, remote shell or copy, deploy, service 
 1. Call AskUserQuestion once, with ONE question whose text starts with the `[jade:ask_...]` token from the message, and the options Allow and Deny. Do not put the command in it: JADE replaces the whole text with its own (rule, rationale, the command), so what you write never reaches the human.
 2. Wait for the answer, then retry the identical call, unchanged. Allow covers that one call once, for 10 minutes. A different or reworded call asks again.
 3. Deny, or a message that the human said no, means stop: do not retry, rephrase, split or wrap the call. Tell the user what you needed and why, and continue with other work. After the third no, the call is not asked again.
-4. While the ask is open, JADE refuses screen-control tools (computer-use): do not click or type on the screen. If the human is away for a long time the gate says so; work on things that need no approval.
+4. While the ask is open, JADE refuses screen-control tools (computer-use): do not click or type on the screen. If the human is away for a long time (30 unanswered asks) the gate gives a permit id instead of asking again; work on things that need no approval.
 5. A subagent has no AskUserQuestion: the human sees a dialog on their screen and the call waits for the click. Nothing for you to do.
 6. If you try to stop with an ask you never put to the human, the Stop hook points at it once. Put it, then retry.
 

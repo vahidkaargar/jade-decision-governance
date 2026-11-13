@@ -77,7 +77,7 @@ rules:
     # at a command named in `inert_for_files` or a `read_only` verb without a redirect: `git add AGENTS.md`, `cp ~/.claude/settings.json /tmp/b`,
     # `printf 'policies/local/' > .gitignore` are not changes to a protected file. A Write/Edit path is always a target.
     files_only: true
-    match: "(?i:\\.claude/(settings[\\w.-]*\\.json|hooks/|CLAUDE\\.md)|\\bAGENTS\\.md\\b|\\.cursor/rules|\\.ai/rules\\.md|policies/(?:[\\w-]+\\.(?:yaml|py)|local/)|\\.config/jade(?![\\w.-])|\\.local/share/jade(?![\\w.-])|jade\\.sqlite(?:-(?:wal|shm|journal))?(?![\\w.])|calibration/current\\.json|uv/tools/jade(?:-decision-governance)?(?![\\w-])|evals/[^/\\s]+/protected/|\\.local/bin/(?:jade|jev)(?![\\w.-])|\\buv tool (?:uninstall|upgrade|reinstall)\\b[^;&|]*\\bjade|\\buv tool install\\b[^;&|]*\\bjade)|\\bjade (improve (promote|rollback)|ledger purge|label set)\\b"
+    match: "(?i:\\.claude/(settings[\\w.-]*\\.json|hooks/|CLAUDE\\.md)|\\bAGENTS\\.md\\b|\\.cursor/rules|\\.ai/rules\\.md|policies/(?:[\\w-]+\\.(?:yaml|py)|local/)|\\.config/jade(?![\\w.-])|\\.local/share/jade(?![\\w.-])|jade\\.sqlite(?:-(?:wal|shm|journal))?(?![\\w.])|calibration/current\\.json|uv/tools/jade(?:-decision-governance)?(?![\\w-])|evals/[^/\\s]+/protected/|\\.local/bin/(?:jade|jev)(?![\\w.-])|\\buv tool (?:uninstall|upgrade|reinstall)\\b[^;&|]*\\bjade|\\buv tool install\\b[^;&|]*\\bjade|\\buv tool (?:uninstall|upgrade|reinstall)\\b[^;&|]*--all\\b)|\\bjade (improve (promote|rollback)|ledger purge|label set)\\b"
     rationale: "Changes agent policy, hooks, JADE's own ledger, config or installed code, or another protected target"
   - id: R-16
     level: high

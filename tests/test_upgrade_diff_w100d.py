@@ -185,3 +185,55 @@ def test_a_human_is_still_required(monkeypatch):
     monkeypatch.setattr(upgrade, "changed_files", lambda ref: pytest.fail("an agent gets no listing"))
     with pytest.raises(ops.HumanOnly):
         upgrade.apply(TAG, stdin_isatty=False, confirm=lambda: True)
+
+
+# ------------------------------------------------------------------ review fixes: rollback, size, unsafe names, renames
+
+REVERSE = f"https://api.github.com/repos/vahidkaargar/jade-decision-governance/compare/{TAG}...{BASE}"
+
+
+def test_a_ref_behind_the_installed_commit_is_a_rollback_and_lists_the_files_that_return(web):
+    web[COMPARE] = compare([], status="behind")
+    web[REVERSE] = compare([f("jade/hooks.py", "modified"), f("jade/askdialog.py", "added", add=200), f("policies/risk.yaml", "removed", add=0, dele=9)])
+    lines, note = upgrade.changed_files(TAG)
+    assert lines == ["modified  jade/hooks.py (+1 -0)", "removed   jade/askdialog.py (+200 -0)", "added     policies/risk.yaml (+0 -9)"]
+    assert "rollback" in note
+
+
+def test_a_diverged_release_says_the_list_may_be_partial(web):
+    web[COMPARE] = compare([f("jade/hooks.py")], status="diverged")
+    lines, note = upgrade.changed_files(TAG)
+    assert lines == ["modified  jade/hooks.py (+1 -0)"] and "diverged" in note and "may miss" in note
+
+
+def test_the_compare_answer_may_be_much_bigger_than_the_default_download_cap(monkeypatch):
+    seen = {}
+
+    def get(url, timeout=upgrade.HTTP_TIMEOUT_S, limit=upgrade.MAX_BYTES):
+        seen["limit"] = limit
+        return compare([f("jade/hooks.py")])
+
+    monkeypatch.setattr(upgrade, "_http_get", get)
+    monkeypatch.setattr(upgrade, "_direct_url_commit", lambda: BASE)
+    upgrade.changed_files(TAG)
+    assert seen["limit"] == upgrade.COMPARE_MAX_BYTES > upgrade.MAX_BYTES
+
+
+def test_a_file_with_an_unsafe_name_is_counted_never_silently_dropped(web):
+    web[COMPARE] = compare([f("jade/ok.py"), f("jade/\x1b[31mred.py"), f("jade/new\nline.py"), {"filename": 5}])
+    lines, note = upgrade.changed_files(TAG)
+    assert lines == ["modified  jade/ok.py (+1 -0)"]
+    assert "3 file(s) with names that cannot be shown safely" in note and "before you type yes" in note
+
+
+def test_a_rename_out_of_a_watched_directory_is_listed_with_its_old_name(web):
+    web[COMPARE] = compare([{"filename": "docs/old_policy.yaml", "previous_filename": "policies/risk.yaml", "status": "renamed", "additions": 0, "deletions": 0},
+                            {"filename": "jade/b.py", "previous_filename": "jade/a.py", "status": "renamed", "additions": 2, "deletions": 1}])
+    lines, _ = upgrade.changed_files(TAG)
+    assert lines == ["renamed   docs/old_policy.yaml (from policies/risk.yaml) (+0 -0)", "renamed   jade/b.py (from jade/a.py) (+2 -1)"]
+
+
+def test_an_unsafe_previous_filename_is_counted_too(web):
+    web[COMPARE] = compare([{"filename": "jade/ok.py", "previous_filename": "jade/\x1b[2Jx.py", "status": "renamed"}])
+    lines, note = upgrade.changed_files(TAG)
+    assert lines == [] and "1 file(s) with names that cannot be shown safely" in note

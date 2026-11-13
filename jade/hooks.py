@@ -68,6 +68,19 @@ _MUTATING_TOOL = re.compile(
 
 
 _GUI_PREFIXES = ("mcp__computer-use__", "mcp__MacOS-MCP__")   # tools that can press Allow on the screen
+_GUI_SHELL = re.compile(r"\b(?:osascript|cliclick|shortcuts\s+run)\b")   # a shell or terminal call that scripts the screen the same way
+
+
+def _is_gui_call(tool, event: dict) -> bool:
+    if not isinstance(tool, str):
+        return False
+    if tool.startswith(_GUI_PREFIXES):
+        return True
+    tin = event.get("tool_input")
+    try:
+        return isinstance(tin, dict) and policy.runs_shell(tool, tin) and bool(_GUI_SHELL.search(policy.tool_subject(tool, tin)))
+    except Exception:  # noqa: BLE001 - not classifiable: it is not paused here, and the gate rates it as it always did
+        return False
 
 
 def _gui_pause(event: dict, tool: str):
@@ -366,7 +379,7 @@ def pretool(event: dict, permit=None) -> HookResult:
         from . import askchat
 
         return askchat.rewrite(event)   # a question that carries an ask token of this session is replaced by the hook's own (docs/12); any other passes
-    if isinstance(tool, str) and tool.startswith(_GUI_PREFIXES) and (res := _gui_pause(event, tool)) is not None:
+    if _is_gui_call(tool, event) and (res := _gui_pause(event, tool)) is not None:
         return res
     if not policy.is_gated(tool):
         return HookResult()

@@ -64,3 +64,12 @@ def test_the_window_is_respected(capsys):
     db.close()
     assert stats(capsys, "--days", "7")["asks"]["by_rule"]["R-11"]["asks"] == 1
     assert stats(capsys, "--days", "60")["asks"]["by_rule"]["R-11"]["asks"] == 2
+
+
+def test_an_allow_that_expired_unused_counts_as_answered(capsys):
+    db = ledger.open()
+    add_ask(db, "R-11", "EXPIRED")
+    add_ask(db, "R-11", "EXPIRED")
+    db.con.execute("UPDATE asks SET answered_ts=created_ts WHERE rowid=(SELECT MIN(rowid) FROM asks)")
+    db.close()
+    assert stats(capsys)["asks"]["by_rule"]["R-11"] == {"asks": 2, "allowed": 1, "denied": 0, "unanswered": 1}

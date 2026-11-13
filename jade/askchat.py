@@ -77,22 +77,18 @@ def refusal(db, session: str, hold: str, fpj: str, tool: str, where: str):
     return None
 
 
-def paused(db, session: str):
-    """EXPIRE_PAUSE asks of this session expired unanswered since the human last answered: the human is away, so no new ask is opened (it would only expire too)."""
-    from .hooks import HookResult
-
+def paused(db, session: str) -> bool:
+    """EXPIRE_PAUSE asks of this session expired unanswered since the human last answered: the human is away, so no new ask is opened (it would only expire too). The call
+    then takes the signed permit path, so the human finds something to approve when they are back."""
     since = ts(now() - timedelta(seconds=PAUSE_WINDOW_S))
     n = db.one("SELECT COUNT(*) AS n FROM asks WHERE session_id=? AND status IN ('EXPIRED','GAVE_UP') AND answered_ts IS NULL AND created_ts>=? "
                "AND created_ts>COALESCE((SELECT MAX(answered_ts) FROM asks WHERE session_id=?),'')", (session, since, session)).n
-    if n >= EXPIRE_PAUSE:
-        return HookResult(2, f"JADE gate: the human is away: {n} asks in this session expired unanswered. No new ask is opened for now. Work on other things that need no "
-                             "approval and tell the human what is waiting. Asking resumes when the human answers one, or when these age out of the last hour.")
-    return None
+    return n >= EXPIRE_PAUSE
 
 
 def gui_paused(db, session: str) -> bool:
-    """Is an ask of this session open (the chat question not answered, or a dialog on screen)? Then the computer-use tools of the session are refused."""
-    return db.one("SELECT 1 AS x FROM asks WHERE session_id=? AND status IN ('PENDING','SHOWN','DIALOG') AND expires_ts>? LIMIT 1", (session, ts())) is not None
+    """Is an ask of this session open (the chat question not answered), or a dialog on screen for any session? Then the screen-control tools of the session are refused."""
+    return db.one("SELECT 1 AS x FROM asks WHERE ((session_id=? AND status IN ('PENDING','SHOWN')) OR status='DIALOG') AND expires_ts>? LIMIT 1", (session, ts())) is not None   # a dialog on screen pauses every session of this Mac
 
 
 def stop_nudge(db, session: str):
@@ -164,8 +160,8 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
             if open_ask is not None:
                 ask_id = open_ask.ask_id
             else:
-                if (res := paused(db, session)) is not None:
-                    return res
+                if paused(db, session):
+                    return None   # the human is away: the signed permit path, not another ask that would only expire
                 ask_id = new_id("a")[2:]   # twelve hex characters
                 q = question_for(ask_id, a, tool, ctx)
                 db.con.execute("INSERT INTO asks(ask_id, session_id, agent_id, plan_hash, hold_key, fingerprints_json, rule_id, level, tool, question_json, status, created_ts, expires_ts, source) "
