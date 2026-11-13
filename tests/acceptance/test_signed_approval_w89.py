@@ -323,7 +323,7 @@ def test_the_scripts_pin_their_own_path():
         assert "export PATH=/usr/bin:/bin" in text, name
     install = (HELPER.parent / "install-approver.sh").read_text()
     assert "visudo -cf" in install and "exit 1" in install.split("visudo -cf", 1)[1].split("sudo install -m 440", 1)[0]   # a failed validation stops the script
-    assert "mktemp -d)" in install and "sudo -u \"$USER_NAME\" /usr/bin/ssh-keygen" in install   # the private key is made by the approver, never in the user's own temp
+    assert "mktemp -d /var/tmp/" in install and "sudo -u \"$USER_NAME\" /usr/bin/ssh-keygen" in install   # the private key is made by the approver, never in the user's own temp
 
 
 # ---- review findings, second batch ------------------------------------------------------------------------
@@ -383,3 +383,20 @@ def test_the_installer_orders_its_steps_so_a_failure_never_leaves_a_half_install
     assert text.index("visudo -cf") < anchor_install and text.index('sudo install -m 755 -o root "$HERE/jade-approve-sign"') < anchor_install   # the anchor is the last step
     assert 'RULE_DENY="$ME ALL=($USER_NAME) !ALL"' in text and "Type INSTALL to continue" in text and "dscl . -create" in text
     assert text.count("approval_backend") >= 1   # uninstall also removes a configured signed backend
+
+
+def test_the_installer_makes_the_approvers_key_in_a_directory_the_approver_can_enter():
+    """The first real run failed with 'Saving key ... Permission denied': a bare `sudo mktemp -d` is under root's private $TMPDIR (macOS /var/folders/zz/...), which the approver
+    account cannot traverse. The key directory must be made under a world-traversable absolute path."""
+    install = (HELPER.parent / "install-approver.sh").read_text()
+    line = next(ln for ln in install.splitlines() if "KEYDIR=" in ln and "mktemp" in ln)
+    assert "mktemp -d /var/tmp/" in line, line
+
+
+def test_the_installer_derives_the_public_key_as_root_after_the_sudoers_rule_is_in_place():
+    """The second real run failed: 'user is not allowed to execute ssh-keygen -y as _jadeapprove'. From the sudoers install on, the user may run only the helper as the
+    approver, so every later step that needs the key must run as root."""
+    install = (HELPER.parent / "install-approver.sh").read_text()
+    after = install.split('sudo install -m 440 -o root "$SUDOERS.tmp"', 1)[1]
+    line = next(ln for ln in after.splitlines() if "ssh-keygen -y" in ln)
+    assert "sudo -u" not in line and "sudo /usr/bin/ssh-keygen -y" in line, line
