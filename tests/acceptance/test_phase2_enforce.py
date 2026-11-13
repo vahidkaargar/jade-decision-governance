@@ -230,7 +230,7 @@ def test_hooks_install_is_idempotent_and_reversible(human_env, tmp_path, monkeyp
     assert all(ops.hooks_status().values()) and data["model"] == "x"
     cmds = [h["command"] for g in data["hooks"]["PreToolUse"] for h in g["hooks"]]
     assert cmds.count("other-hook.sh") == 1 and sum("jade" in c for c in cmds) == 1
-    assert ops.hooks_uninstall(stdin_isatty=True) == 4
+    assert ops.hooks_uninstall(stdin_isatty=True) == len(ops.HOOKS)
     assert not any(ops.hooks_status().values())
     assert [h["command"] for g in json.loads(s.read_text())["hooks"]["PreToolUse"] for h in g["hooks"]] == ["other-hook.sh"]
 
