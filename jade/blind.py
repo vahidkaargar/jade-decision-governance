@@ -234,6 +234,21 @@ def script_label(words: list[str], known: frozenset[str] = frozenset()) -> str |
     return None
 
 
+def script_file(words: list[str]) -> str | None:
+    """The script file one simple command runs (launcher prefixes and git options already removed), as written, or None: the file `script_label` calls a
+    blind spot, so that a caller may read it."""
+    if not words or not words[0]:
+        return None
+    w, args = _base(words[0]), words[1:]
+    if (kind := _runner_kind(w)) is not None:
+        f = _first_positional(args, kind)
+        return f if f and (kind == "shell" or _script_path(f)) and not f.startswith("/dev/") else None
+    first = words[0]
+    if first.startswith(("./", "../")) or (first.startswith(("/", "~/")) and not _SYSTEM_DIR.match(first) and _SCRIPT_EXT.search(first)):
+        return first
+    return None
+
+
 def cd_kind(words: list[str]) -> str | None:
     """'computed' when `cd`/`pushd` names a directory only the running shell knows (`cd $NOPE/x`, a glob, a substitution), 'literal' for a written one."""
     if not words or words[0] not in ("cd", "pushd"):
