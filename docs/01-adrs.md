@@ -95,3 +95,13 @@ Format: Context → Decision → Alternatives rejected → Consequences. Status 
 ## ADR-12 Scope cuts
 
 Single tenant: one configured `tenant_scope` value `local:<user>`; no HYBRID runtime route (skill pattern); no VOI heuristic until data; no services; no SKILL.md until design approval; no auto-promotion before Phase 4 opt-in. Each cut is a BACKLOG item with a reopening trigger.
+
+## ADR-13 The human answers gated calls in the chat or a dialog, at a level the human sets (0.5.0)
+
+**Decision.** Approval keeps one meaning: a human decided. Where the host shows no prompt (`auto`, `bypassPermissions`, subagents) the signed terminal permit was the only way to say yes, and it cost a password and a retry message every time. At a level (`jade level high`, human only, one value for the Mac) the hook asks instead: in the chat with a question the hook rewrites (the agent's wording never reaches the human), or in a macOS dialog the hook waits for (subagents). The answer is read from the host's own response, becomes a single-use grant bound to the session and the call, and is recorded as a `hint` in `human_answers`; the decision carries route ASK and an `ask` block, and the state machine refuses to accept an ASK decision without the recorded Allow. Live JADE wiring, secrets and unknown host modes keep the signed permit. Safety invariants are never asked. Level `off` makes JADE only watch.
+
+**Why.** PR-0 (`evals/probes/hook_ask/RESULTS.md`, Claude Code 2.1.314) measured what the host does: the native Allow box is not a channel in `auto` or `bypassPermissions`, a hook-rewritten question reaches the human, PostToolUse carries the answer, a subagent has no AskUserQuestion, and the hook timeout must exceed a dialog wait.
+
+**Rejected.** Letting a model answer in the human's place before there is a confirmed record of the human's own answers (0.6.0 adds memory and Jev, only from confirmed answers); a signature on the level (the same protection as `jade gate`: a human tty check, SI-09 and SI-12); locking the Claude mod directories (accepted risk, docs/12).
+
+**Consequence.** SI-01 stands: no model output authorizes a side effect. The rule in the agent's instructions that a probability is never permission now reads "only a human answer is permission".

@@ -4,7 +4,22 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+### Added
+- **The human answers a gated call in the chat or in a dialog (W-96 to W-100d; docs/12, ADR-13).** `jade level high` (human only; `off` makes JADE only watch, `unset` returns to 0.4.0) turns it on. In the main session in `auto` or `bypassPermissions` the gate tells the agent to ask with AskUserQuestion; the hook replaces the question text with its own (rule, rationale, the command, what is not shown), reads the answer from the host's response, and Allow makes a single-use grant for that call (10 minutes, this session). A subagent has no AskUserQuestion, so the hook shows a macOS dialog and waits (PreToolUse timeout 130 s). Live JADE wiring, secrets, unknown host modes and every call with no level keep the signed permit. Safety invariants are never asked.
+- **A failed call closes its decision (`PostToolUseFailure` hook).** Five hooks are installed now; a call that ran under a grant or a permit and failed is recorded as an observed failure, so the next identical call is asked again instead of held by SI-07. An interrupted call keeps its hold.
+- **Ask guards.** The 3rd Deny of a call is a plain refusal; 30 unanswered asks pause asking for the session; computer-use tools of a session are refused while one of its asks is open; the Stop hook points once at an ask that never reached the question; each new ask posts a macOS notification written by the hook.
+- **Decisions record the answer.** Route `ASK`, an `ask` block (channel, ask id, answer) and `human_only`/`ho_ids` on the decision schema; the state machine refuses to accept an ASK decision without the recorded Allow. Every answer is a `hint` row in `human_answers`; `jade review` lists them. `jade ledger stats` gains an `asks` block: answers by channel, terminal approvals per 100 gated calls, asks by rule.
+- **`jade upgrade` lists the changed files and needs a typed `yes`.** The files under `jade/`, `policies/`, `registry/` and `scripts/` between the installed commit and the release (GitHub's compare answer, reduced to a path and a status); anything but the word `yes` stops it.
+- **Human-only classes (W-98a).** Live JADE wiring, mod files, R-17 and the terminal panel are named on the assessment (`ho_ids`); once a level is set a human-only class is high work. `uv tool install|upgrade|reinstall|uninstall` of JADE is live wiring. A test walks every alternative of R-13 and pins its class.
+- **SI-12 and the level (W-99).** Writes to the JADE config directory are blocked once a level is set; SI-09 to SI-12 block even in advisory gate mode at a level.
+- **PR-0 host probe (W-96).** `evals/probes/hook_ask/` and its results on Claude Code 2.1.314: which ask channels work in `auto` and `bypassPermissions`.
+
+### Fixed
+- **Gate false positives (W-105).** `sed -n` and `grep` reads, `command -v`, `plutil -lint`, and the harness bookkeeping tools (M-06b) no longer trip rules built for writes.
+- **`jade hooks install` writes `onFailure: block` on hosts from 2.1.295** so a crashed or hung gate blocks instead of letting the call run; `jade check` reports an entry with a shorter timeout or a missing field as out of date.
+
 ### Changed
+- **Hook install changes.** PreToolUse timeout 130 s (it was 10 s) and the AskUserQuestion matcher; run `jade hooks install` after `jade upgrade`, then open a new session. The rule in the agent's instructions that a probability is never permission now reads: only a human answer is permission (`docs/claude-md-jev-section.md`, `skills/jade/SKILL.md`).
 - **Routine `git push` of a named branch and `gh pr create` are medium (new R-19, recorded not gated); R-10 stays high for everything irreversible.** Under enforce on a host with no permission prompt, every push and PR asked for a permit. R-10 now keeps high: merge (`gh pr merge`, `glab mr merge`), `gh release create`, publish, `docker push`, `composio execute`, and any `git push` that is not a plain push of one named branch (bare push, force, force-with-lease, delete, tag or tag-like name, `--tags`, `--mirror`, `--all`, `main`/`master`/`HEAD`, a refspec). A chain is rated by its highest part. Covered by `tests/acceptance/test_r10_split_routine_push.py`; the tests that used `git push origin feat-x` as their "high command" now use a tag-like branch name (`v1-feat-x`). Not measured against the real ledger. A user overlay may not lower a shipped high rule, so this had to be a shipped change.
 
 ## [0.4.0] - 2026-11-13

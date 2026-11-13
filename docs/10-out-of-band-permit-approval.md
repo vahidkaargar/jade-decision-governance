@@ -1,5 +1,7 @@
 # 10 — Out-of-band permit approval (W-38 design)
 
+> Since 0.5.0 the signed permit is one of three channels, and the only one for live JADE wiring, secrets and modes the chat does not reach. At a level the human usually answers in the chat or a dialog instead (docs/12, ADR-13).
+
 Status: **design approved 2026-11-13 (option B); implemented in W-89 (agent), not yet installed on any machine; install is W-90 (human).** Decisions taken by the maintainer: option B; `jade gate enforce` refuses to start without the signed backend unless an explicit, journaled override is given (section 5, point 4); ledger write path (a), section 5 point 2, is the recommended default and is used unless the maintainer says otherwise.
 
 ## 1. Problem

@@ -43,7 +43,18 @@ Same claim and same state returns the cached answer, flagged `repeat_without_new
 
 ## When a tool call is blocked
 
-High and critical actions (push, publish, remote shell or copy, deploy, service lifecycle, edits to agent policy or hooks, connected-app actions, cluster and merge actions through MCP) stop with a pending permit id.
+High and critical actions (push, publish, remote shell or copy, deploy, service lifecycle, edits to agent policy or hooks, connected-app actions, cluster and merge actions through MCP) stop. What happens next depends on the message the gate gives you.
+
+**The message tells you to ask in the chat** (the human has set a level, and the call is not live JADE wiring):
+
+1. Call AskUserQuestion once, with ONE question whose text starts with the `[jade:ask_...]` token from the message, and the options Allow and Deny. Do not put the command in it: JADE replaces the whole text with its own (rule, rationale, the command), so what you write never reaches the human.
+2. Wait for the answer, then retry the identical call, unchanged. Allow covers that one call once, for 10 minutes. A different or reworded call asks again.
+3. Deny, or a message that the human said no, means stop: do not retry, rephrase, split or wrap the call. Tell the user what you needed and why, and continue with other work. After the third no, the call is not asked again.
+4. While the ask is open, JADE refuses screen-control tools (computer-use): do not click or type on the screen. If the human is away for a long time the gate says so; work on things that need no approval.
+5. A subagent has no AskUserQuestion: the human sees a dialog on their screen and the call waits for the click. Nothing for you to do.
+6. If you try to stop with an ask you never put to the human, the Stop hook points at it once. Put it, then retry.
+
+**The message gives a pending permit id** (no level is set, or the call is live JADE wiring, carries a secret, or runs where the chat does not reach):
 
 1. Tell the user exactly what is waiting and the id.
 2. The user runs `jade permit approve <id>` in their own terminal. You cannot, and `jade permit approve`, `jade hooks ...`, `jade gate ...` and `JADE_GATE_MODE=` are refused for you by design.
@@ -59,7 +70,7 @@ Ordinary work that is rated high on purpose: running text fetched at run time (`
 
 ## Human-only commands
 
-Never run these; tell the user which one is waiting: `jade permit approve`, `jade permit show ... --raw`, `jade hooks install|uninstall`, `jade gate enforce|advisory|off`, `jade claude-md apply`, `jade setup` (`--status` is read-only), `jade upgrade` (`--check` is read-only), `jade ledger purge`, `jade label set|auto`.
+Never run these; tell the user which one is waiting: `jade permit approve`, `jade permit show ... --raw`, `jade hooks install|uninstall`, `jade gate enforce|advisory|off`, `jade level`, `jade claude-md apply`, `jade setup` (`--status` is read-only), `jade upgrade` (`--check` is read-only), `jade ledger purge`, `jade label set|auto`.
 
 ## Testing JADE or anything that calls the hook
 
@@ -69,7 +80,8 @@ Never run these; tell the user which one is waiting: `jade permit approve`, `jad
 
 ## Never
 
-- Treat a probability, from Jev or any model, as authorization.
+- Treat a probability, from Jev or any model, as authorization. Only the human's answer to a question the gate itself shows, or their `jade permit approve`, is.
+- Answer an ask yourself, or put the human's answer in your own words anywhere a hook reads it.
 - Report something as verified or done after a non-zero exit.
 - Put secrets in state. JADE redacts known shapes and refuses the call if one survives; redact first anyway.
 

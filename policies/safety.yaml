@@ -7,7 +7,7 @@ schema_version: 1.0.0
 invariants:
   - id: SI-01
     description: "No model output authorizes a side effect"
-    enforcement: "permit.approval_reference must be tty:* and the principal human:*, checked by the hook at use for every high or critical command (not only recorded); jade ask never writes permits"
+    enforcement: "permit.approval_reference must be tty:* and the principal human:*, checked by the hook at use for every high or critical command (not only recorded); jade ask never writes permits. At a level a human answer may also be an Allow to a question or dialog the hook itself shows: the hook replaces the agent's question text, reads the answer from the host's tool response, and the grant is single use, bound to the session and the call, and never valid for live JADE wiring (docs/12)"
   - id: SI-02
     description: "Local model servers and backends never bind a public address"
     scan_content: true     # also checked on the content a Write/Edit/MultiEdit/NotebookEdit or MCP call carries (new text only, never old_string)
