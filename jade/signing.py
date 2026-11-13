@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -24,18 +25,45 @@ from .util import canonical
 
 NAMESPACE = "jade-permit-approval"
 IDENTITY = "jade-approver"
-APPROVER_USER = "jadeapprove"
+APPROVER_USER = "_jadeapprove"
 DEFAULT_ANCHOR = Path("/Library/Application Support/jade/allowed_signers" if sys.platform == "darwin" else "/etc/jade/allowed_signers")
 ANCHOR_ENV = "JADE_APPROVER_ANCHOR"   # one of the gate-override variables (paths.gate_overrides, SI-11): the test suite points it at a temporary file; a value in the host's
                                       # environment is reported by `jade check` and is a weakening override unless it names the default path
-HELPER = Path("/usr/local/libexec/jade-approve-sign")
+HELPER = Path("/Library/PrivilegedHelperTools/jade-approve-sign" if sys.platform == "darwin" else "/usr/lib/jade/jade-approve-sign")
+# Absolute, root-owned programs only. A bare name is looked up in PATH, whose first entries are the agent user's own bin directories on a typical setup: a
+# `ssh-keygen` placed there that exits 0 would make every forged approval verify.
+SSH_KEYGEN = "/usr/bin/ssh-keygen"
+SUDO = "/usr/bin/sudo"
 TRUSTED_UID = 0                  # the trust anchor and its directory must belong to this user (root); tests set it to their own uid
 VERIFY_TIMEOUT_S = 5
 SIGN_TIMEOUT_S = 300
 
 
 def anchor_path() -> Path:
+    """The default root-owned anchor wins whenever it exists: neither the environment nor the config can move the check away from an installed anchor (a missing
+    override target would otherwise read as "no anchor", which is a downgrade to terminal approval). The override is honoured only while no default anchor exists,
+    which is the test suite's case."""
+    if os.path.lexists(DEFAULT_ANCHOR):
+        return DEFAULT_ANCHOR
     return Path(os.environ[ANCHOR_ENV]) if os.environ.get(ANCHOR_ENV) else DEFAULT_ANCHOR
+
+
+def chain_refusal(path: Path) -> str | None:
+    """Why the directories above `path` cannot be trusted, or None. Every ancestor must belong to root (or TRUSTED_UID) and must not be writable by group or
+    others, except a sticky directory such as /tmp: whoever can rename a directory on the way can put their own file at the path."""
+    try:
+        d = Path(os.path.realpath(path.parent))
+        while True:
+            st = os.stat(d)
+            if st.st_uid not in (0, TRUSTED_UID):
+                return f"{d} is owned by uid {st.st_uid}"
+            if st.st_mode & 0o020 or (st.st_mode & 0o002 and not st.st_mode & 0o1000):
+                return f"{d} is writable by group or others (mode {st.st_mode & 0o7777:o})"
+            if d == d.parent:
+                return None
+            d = d.parent
+    except OSError as e:
+        return f"{path} cannot be inspected ({e.strerror})"
 
 MESSAGE_RE = re.compile(r"^jade-permit-approval v1 \| permit prm_[0-9a-f]{12} \| plan [0-9a-f]{64} \| pre [0-9a-f]{64} \| policy [0-9a-f]{7,40} \| risk (?:high|critical) "
                         r"\| principal human:[a-z0-9._-]+ \| valid_until [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z \| nonce [0-9a-f]{32}$")
@@ -63,14 +91,14 @@ def anchor_state() -> tuple[str, str]:
         return "absent", f"{anchor_path()} does not exist"
     except OSError as e:
         return "untrusted", f"{anchor_path()} cannot be inspected ({e.strerror})"
-    import stat
     if not stat.S_ISREG(st.st_mode):
         return "untrusted", f"{anchor_path()} is not a regular file"
-    for what, s in (("file", st), ("directory", os.stat(anchor_path().parent))):
-        if s.st_uid != TRUSTED_UID:
-            return "untrusted", f"the trust anchor {what} is owned by uid {s.st_uid}, not {TRUSTED_UID}"
-        if s.st_mode & 0o022:
-            return "untrusted", f"the trust anchor {what} is writable by group or others (mode {s.st_mode & 0o777:o})"
+    if st.st_uid != TRUSTED_UID:
+        return "untrusted", f"the trust anchor file is owned by uid {st.st_uid}, not {TRUSTED_UID}"
+    if st.st_mode & 0o022:
+        return "untrusted", f"the trust anchor file is writable by group or others (mode {st.st_mode & 0o777:o})"
+    if (why := chain_refusal(anchor_path())):
+        return "untrusted", f"the trust anchor's directories cannot be trusted: {why}"
     if not os.access(anchor_path(), os.R_OK):
         return "untrusted", f"{anchor_path()} is not readable by this user"
     return "ok", ""
@@ -98,7 +126,7 @@ def verify(msg: str, signature: str) -> str | None:
         sig_file = Path(name)
         with os.fdopen(fd, "w") as fh:
             fh.write(signature if signature.endswith("\n") else signature + "\n")
-        r = subprocess.run(["ssh-keygen", "-Y", "verify", "-f", str(anchor_path()), "-I", IDENTITY, "-n", NAMESPACE, "-s", str(sig_file)],
+        r = subprocess.run([SSH_KEYGEN, "-Y", "verify", "-f", str(anchor_path()), "-I", IDENTITY, "-n", NAMESPACE, "-s", str(sig_file)],
                            input=msg.encode(), capture_output=True, timeout=VERIFY_TIMEOUT_S, check=False)
     except (OSError, subprocess.SubprocessError) as e:
         return f"the signature could not be checked ({type(e).__name__})"
@@ -108,9 +136,21 @@ def verify(msg: str, signature: str) -> str | None:
     return None if r.returncode == 0 else "the approval signature does not verify against the approver key"
 
 
+def helper_refusal() -> str | None:
+    try:
+        st = os.lstat(HELPER)
+    except OSError as e:
+        return f"it is not installed ({e.strerror}); run scripts/install-approver.sh (docs/10)"
+    if not stat.S_ISREG(st.st_mode):
+        return "it is not a regular file"
+    if st.st_uid != 0 or st.st_mode & 0o022:
+        return "it is not root-owned or is writable by group or others"
+    return chain_refusal(HELPER)
+
+
 def helper_command() -> list[str]:
     """What runs the approver's signing helper: `sudo -u <approver> <helper>`, which asks the human for their login password on /dev/tty."""
-    return ["sudo", "-u", APPROVER_USER, str(HELPER)]
+    return [SUDO, "-u", APPROVER_USER, str(HELPER)]
 
 
 def sign_with_helper(msg: str) -> str:
@@ -119,6 +159,10 @@ def sign_with_helper(msg: str) -> str:
     if not MESSAGE_RE.match(msg):
         raise RuntimeError("refusing to sign a message that is not a permit approval")
     cmd = helper_command()
+    if cmd[0] == SUDO:   # the real helper: it runs as another user through sudo, so it and every directory above it must belong to root
+        why = helper_refusal()
+        if why:
+            raise RuntimeError(f"the approver helper {HELPER} cannot be used: {why}; nothing was signed")
     try:
         r = subprocess.run(cmd, input=msg.encode(), stdout=subprocess.PIPE, timeout=SIGN_TIMEOUT_S, check=False)
     except (OSError, subprocess.SubprocessError) as e:

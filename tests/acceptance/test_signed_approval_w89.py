@@ -137,7 +137,7 @@ def forge_with_key(db, p, key: Path):
     until = ts_in(1800)
     doc.update(state="ISSUED", principal="human:x", approval_reference="sig:x@" + ts(), issued_at=ts(), expires_at=until, approval_valid_until=until)
     msg = permits._approval_message(r, doc, until)
-    sig = subprocess.run(["ssh-keygen", "-Y", "sign", "-f", str(key), "-n", signing.NAMESPACE], input=msg.encode(), capture_output=True, check=True).stdout.decode()
+    sig = subprocess.run(["/usr/bin/ssh-keygen", "-Y", "sign", "-f", str(key), "-n", signing.NAMESPACE], input=msg.encode(), capture_output=True, check=True).stdout.decode()
     doc["approval_signature"] = sig
     with db.tx() as con:
         con.execute("UPDATE permits SET state='ISSUED', issued_at=?, expires_at=? WHERE permit_id=?", (doc["issued_at"], doc["expires_at"], p.permit_id))
@@ -296,3 +296,85 @@ def test_the_new_variable_is_a_reported_override_and_an_si11_name(approver):
     from jade import policy
     assert "SI-11" in policy.assess("Bash", {"command": "export JADE_APPROVER_ANCHOR=/tmp/mine"}, "/tmp/case").blocked
     assert "SI-11" in policy.assess("Bash", {"command": "JADE_APPROVER_ANCHOR=/tmp/mine uv run pytest"}, "/tmp/case").blocked
+
+
+# ---- review findings (install review, 2026-11-13) -------------------------------------------------------
+def test_a_fake_ssh_keygen_first_in_path_cannot_make_a_forgery_verify(approver, tmp_path, monkeypatch):
+    """The user's own bin directories come first in PATH on a typical setup. Verification runs the root-owned program by absolute path."""
+    attacker = keygen(tmp_path, "attacker2")   # made before PATH is poisoned
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "ssh-keygen").write_text("#!/bin/sh\nexit 0\n")
+    (fake / "ssh-keygen").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}:{os.environ['PATH']}")
+    db, p = blocked()
+    forge_with_key(db, p, attacker)
+    assert retry() == 2
+
+
+def test_the_program_paths_are_absolute_and_root_owned_locations():
+    assert signing.SSH_KEYGEN.startswith("/usr/bin/") and signing.SUDO.startswith("/usr/bin/")
+    assert signing.helper_command()[0] == signing.SUDO
+
+
+def test_the_scripts_pin_their_own_path():
+    for name in ("jade-approve-sign", "install-approver.sh"):
+        text = (HELPER.parent / name).read_text()
+        assert "export PATH=/usr/bin:/bin" in text, name
+    install = (HELPER.parent / "install-approver.sh").read_text()
+    assert "visudo -cf" in install and "exit 1" in install.split("visudo -cf", 1)[1].split("sudo install -m 440", 1)[0]   # a failed validation stops the script
+    assert "mktemp -d)" in install and "sudo -u \"$USER_NAME\" /usr/bin/ssh-keygen" in install   # the private key is made by the approver, never in the user's own temp
+
+
+# ---- review findings, second batch ------------------------------------------------------------------------
+def test_an_installed_default_anchor_cannot_be_downgraded_by_the_environment(approver, monkeypatch, tmp_path):
+    """A missing override target used to read as "no anchor", which is terminal approval again. With a default anchor present the override is ignored."""
+    monkeypatch.setattr(signing, "DEFAULT_ANCHOR", approver.anchor)
+    monkeypatch.setenv("JADE_APPROVER_ANCHOR", str(tmp_path / "nothing-here"))
+    assert signing.anchor_path() == approver.anchor and signing.backend() == "signed" and signing.anchor_state()[0] == "ok"
+    monkeypatch.setenv("JADE_APPROVER_ANCHOR", str(tmp_path / "other"))   # and an override pointing at an anchor of the agent's own is ignored too
+    assert signing.anchor_path() == approver.anchor
+
+
+def test_a_directory_above_the_anchor_that_others_can_write_is_not_trusted(approver):
+    approver.dir.chmod(0o775)
+    state, why = signing.anchor_state()
+    assert state == "untrusted" and "directories" in why
+    approver.dir.chmod(0o755)
+    assert signing.anchor_state()[0] == "ok"
+    approver.dir.parent.chmod(0o777)   # no sticky bit: someone could rename the directory and put their own file there
+    try:
+        assert signing.anchor_state()[0] == "untrusted"
+    finally:
+        approver.dir.parent.chmod(0o700)
+
+
+def test_the_real_helper_must_be_installed_root_owned(approver, monkeypatch, tmp_path):
+    monkeypatch.setattr(signing, "helper_command", lambda: [signing.SUDO, "-u", signing.APPROVER_USER, str(signing.HELPER)])
+    monkeypatch.setattr(signing, "HELPER", tmp_path / "missing-helper")
+    msg = good_message(approver)
+    with pytest.raises(RuntimeError, match="not installed"):
+        signing.sign_with_helper(msg)
+    helper = tmp_path / "helper"
+    helper.write_text("#!/bin/sh\n")
+    helper.chmod(0o777)
+    monkeypatch.setattr(signing, "HELPER", helper)
+    with pytest.raises(RuntimeError, match="root-owned|writable|cannot be used"):
+        signing.sign_with_helper(msg)
+
+
+def test_the_helper_ignores_its_test_overrides_when_run_through_sudo(approver):
+    msg = good_message(approver)
+    tty = approver.dir / "tty"
+    tty.write_text(signing.code_of(msg) + "\n")
+    env = {**os.environ, "SUDO_USER": "someone", "JADE_APPROVER_KEY": str(approver.key), "JADE_APPROVER_TTY": str(tty), "JADE_APPROVER_TTY_OUT": "/dev/null"}
+    r = subprocess.run(["bash", str(HELPER)], input=msg, capture_output=True, text=True, env=env, check=False, stdin=None)
+    assert r.returncode != 0 and "BEGIN SSH SIGNATURE" not in r.stdout   # the override key and the fake terminal are not used: no key, no tty, no signature
+
+
+def test_the_installer_orders_its_steps_so_a_failure_never_leaves_a_half_install():
+    text = (HELPER.parent / "install-approver.sh").read_text()
+    anchor_install = text.index('sudo install -m 644 -o root "$CONF/allowed_signers.tmp"')
+    assert text.index("visudo -cf") < anchor_install and text.index('sudo install -m 755 -o root "$HERE/jade-approve-sign"') < anchor_install   # the anchor is the last step
+    assert 'RULE_DENY="$ME ALL=($USER_NAME) !ALL"' in text and "Type INSTALL to continue" in text and "dscl . -create" in text
+    assert text.count("approval_backend") >= 1   # uninstall also removes a configured signed backend
