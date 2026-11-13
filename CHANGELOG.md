@@ -4,6 +4,9 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+### Changed
+- **SI-11 no longer blocks a scratch `JADE_HOME` or `JADE_CONFIG` prefix in front of a test, lint or jade call (W-48).** `JADE_HOME=$(mktemp -d) JADE_SOURCE=test uv run pytest -q`, `JADE_HOME=/tmp/s jade check --offline` and the other synthetic-payload forms that `skills/jade/SKILL.md` tells an agent to use were blocked, with no permit able to lift it: 821 of the 942 `safety_block` events of the first advisory week. The exemption is one narrow shape: a leading assignment of `JADE_HOME` or `JADE_CONFIG` whose value is `$(mktemp -d)`, empty, or a path under `/tmp`, `/private/tmp` or `/var/folders`, in front of `pytest`, `ruff`, `jade` or `jev` (also behind `uv run` or `python -m`). `JADE_GATE_MODE`, `JADE_POLICY_DIR`, `export`, `env`, a real path, a `..` segment, a variable and any other program stay blocked; SI-09 still blocks `jade permit approve` and the other human-only commands inside the same command. Evidence: `tests/acceptance/test_si11_scratch_prefix_w48.py` (32 cases); the W-71 twin for `JADE_HOME=/tmp/x uv run pytest` now names the real home. Needs a human review before a release because it narrows a safety invariant (docs/05 T19).
+
 ## [0.3.3] - 2026-11-09
 
 Skill and rules text only, no code change. `skills/jade/SKILL.md` and the CLAUDE.md section (`docs/claude-md-jev-section.md`) now say: a permit for Write, Edit and MCP calls is bound to its content; what to do with a command that carries an inline secret (`permit_reveal`, `jade permit show --raw`); which ordinary work is rated high on purpose; the full list of human-only commands; and how to test without touching the live ledger (`JADE_HOME=$(mktemp -d)`, `JADE_SOURCE=test`, reopen a ledger connection after other processes write). To pick it up: `jade upgrade`, then `jade setup` (replaces the skill file after a backup) and `jade claude-md apply` in your terminal.

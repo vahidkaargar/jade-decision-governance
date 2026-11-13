@@ -123,7 +123,7 @@ EFFECT = [
     ("cat ~/.local/share/jade/*.key", "SI-10"),
     # SI-11: set, export, env-prefix or inline a gate variable
     ("JADE_POLICY_DIR=/tmp/empty git status", "SI-11"),
-    ("JADE_HOME=/tmp/x uv run pytest -q", "SI-11"),
+    ("JADE_HOME=/Users/x/.local/share/jade uv run pytest -q", "SI-11"),   # a scratch path in front of pytest is exempt since W-48 (test_si11_scratch_prefix_w48.py); the real home is not
     ("export JADE_CONFIG=/tmp/x", "SI-11"),
     ("export JADE_HOME=/x # not a data position", "SI-11"),
     ("env JADE_HOME=/tmp/e jade check", "SI-11"),

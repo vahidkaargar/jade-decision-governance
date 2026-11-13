@@ -208,7 +208,7 @@ rules:
     reversibility: reversible
     blast_radius: file
     # What the gate cannot read and only records (level low: every existing low-risk expectation stays true, and the hook still journals it) (W-31, W-33; docs/05 T18): `jade/policy.py` and `jade/shellnorm.py` add `blind:<label> ` to the text of a segment that runs a program or
-    # reads a script whose text is not on the command line. Labels: `script-file` (`bash x.sh`, `python3 x.py`, `source f`, `./x`, `cat x.sh | sh`, `sh < x.sh`), `script-option`
+    # reads a script whose text is not on the command line. Labels (`script-option` and `computed-cwd` are rated medium by R-32 above, listed first; this rule keeps the rest): `script-file` (`bash x.sh`, `python3 x.py`, `source f`, `./x`, `cat x.sh | sh`, `sh < x.sh`), `script-option`
     # (`sed -f`, `awk -f`), `eval-file` (`eval "$(cat f)"`), `eval-var` (`eval "$CMD"`, `sh -c "$CMD"`), `computed-cwd` (a relative write after `cd $VAR`). Not gated. The hook
     # journals event `blind_spot` (rule, label, tool, session; never the command or a path; once per session and label), so a soak report can size what a floor at high would
     # cost before a human decides it. A file that the same command wrote and ran is read (jade/blind.py `written_scripts`) and is not a blind spot. Never lowers a higher rating.
