@@ -223,7 +223,7 @@ def _install_with_matcher(matcher):
 
 def test_check_reports_an_installed_matcher_that_misses_the_read_tools(human_env, jade_stub):
     _install_with_matcher(OLD_MATCHER)
-    assert ops.pretool_matcher_gaps() == ["Read", "Grep", "Glob"]
+    assert ops.pretool_matcher_gaps() == ["Read", "Grep", "Glob", "AskUserQuestion"]   # AskUserQuestion: the chat channel (docs/12, W-100b)
     rows = {n: (ok, d) for n, ok, d in ops.check(live=False)}
     ok, detail = rows["pretool matcher"]
     assert not ok

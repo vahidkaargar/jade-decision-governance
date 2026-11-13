@@ -25,12 +25,12 @@ from .util import is_human_tty, now, ts, user
 def pretool_matcher() -> str:
     """Every built-in tool the gate assesses (policy.GATED_BUILTIN) and every MCP tool. Agent/Task are not listed: they need no gate,
     and the tool calls a subagent makes reach the same hook."""
-    return "|".join((*policy.GATED_BUILTIN, "mcp__.*"))
+    return "|".join((*policy.GATED_BUILTIN, "AskUserQuestion", "mcp__.*"))
 
 
 def posttool_matcher() -> str:
     """The calls that can run under a permit (policy.POST_TOOLS and every MCP tool): PostToolUse closes the decision of each (W-40)."""
-    return "|".join((*policy.POST_TOOLS, "mcp__.*"))
+    return "|".join((*policy.POST_TOOLS, "AskUserQuestion", "mcp__.*"))
 
 
 HOOKS = {"PreToolUse": (pretool_matcher(), "pretool", 10), "PostToolUse": (posttool_matcher(), "posttool", 10),
@@ -506,7 +506,7 @@ def pretool_matcher_gaps() -> list[str] | None:
     if not matchers:
         return None
     gaps = []
-    for tool in (*policy.GATED_BUILTIN, "mcp__server__tool"):
+    for tool in (*policy.GATED_BUILTIN, "AskUserQuestion", "mcp__server__tool"):
         try:
             if not any(re.fullmatch(m, tool) if m else True for m in matchers):
                 gaps.append(tool)

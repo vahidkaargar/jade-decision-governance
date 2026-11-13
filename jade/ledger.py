@@ -45,6 +45,10 @@ CREATE TABLE IF NOT EXISTS outcomes(outcome_id TEXT PRIMARY KEY, decision_id TEX
 CREATE TABLE IF NOT EXISTS labels(call_id TEXT PRIMARY KEY, label INTEGER NOT NULL, source TEXT NOT NULL, note TEXT, ts TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS work_items(id TEXT PRIMARY KEY, status TEXT, doc_json TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS improvements(candidate_id TEXT PRIMARY KEY, decision TEXT, doc_json TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS asks(
+  ask_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, agent_id TEXT, decision_id TEXT, plan_hash TEXT NOT NULL, hold_key TEXT NOT NULL,
+  fingerprints_json TEXT NOT NULL, rule_id TEXT NOT NULL, level TEXT NOT NULL, tool TEXT NOT NULL, question_json TEXT NOT NULL, status TEXT NOT NULL,
+  created_ts TEXT NOT NULL, answered_ts TEXT, expires_ts TEXT NOT NULL, source TEXT);
 CREATE TABLE IF NOT EXISTS human_answers(
   answer_id TEXT PRIMARY KEY, ts TEXT NOT NULL, session_id TEXT, decision_id TEXT, rule_id TEXT NOT NULL, class_key TEXT, exact_key TEXT NOT NULL,
   answer TEXT NOT NULL, channel TEXT NOT NULL, strength TEXT NOT NULL DEFAULT 'hint', confirmed_ts TEXT, source TEXT);
@@ -66,6 +70,7 @@ CREATE INDEX IF NOT EXISTS permits_test ON permits(source) WHERE source='test';
 CREATE INDEX IF NOT EXISTS calls_evaluating ON jev_calls(ts) WHERE state='EVALUATING';
 CREATE INDEX IF NOT EXISTS human_answers_exact ON human_answers(exact_key, strength);
 CREATE INDEX IF NOT EXISTS human_answers_ts ON human_answers(ts);
+CREATE INDEX IF NOT EXISTS asks_call ON asks(session_id, hold_key, status);
 """
 MIGRATIONS = {"jev_calls": [("language", "TEXT"), ("source", "TEXT")], "decisions": [("hold_key", "TEXT"), ("source", "TEXT")],
               "permits": [("source", "TEXT")], "events": [("source", "TEXT")]}   # columns added after the first release: (name, type)
