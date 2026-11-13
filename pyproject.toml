@@ -22,6 +22,7 @@ jev = "jade.compat:main"
 dev = [
     "jsonschema>=4.26.0",
     "pytest>=9.2.0",
+    "pytest-xdist>=3.8.0",
     "pyyaml>=6.0.3",
     "ruff>=0.17.4",
 ]
@@ -45,3 +46,4 @@ packages = ["jade", "policies"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["timing: asserts a wall-clock budget; CI runs these serially (`-m timing`) after the parallel run (`-n auto -m \"not timing\"`) so that load from other workers cannot fail them"]
