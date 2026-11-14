@@ -4,6 +4,15 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+### Added
+- **Clear questions (docs/12 section 12).** The chat question and the dialog start with a plain line for what the call does, a risk line, and an "Also in this call" line. The text comes only from the gate (`jade/askplain.py`).
+- **Bigger scopes from the chat.** Options "Allow, suggest ..." record a hint with a scope (`kind_project`, `kind_any`, `merge_project`). A hint decides nothing; `jade review confirm` in a terminal makes it standing. Confirm shows the scope, its lifetime (30 days after last use, never more than 180) and the undo `jade knows rm ID`.
+- **A narrow merge scope.** One plain `gh pr merge` in one named project, with flags from an allow-list. Any other flag, `-R`, a `cd` to another folder or a joined call gives no scope.
+- **Ledger scope columns.** Memory matches scope keys for confirmed answers only.
+- **`jade knows edit` template.** Two model sentences and one line per kind of answer, with its risk.
+- Agent rule "Send one risky action per call" in the skill and in `docs/claude-md-jev-section.md`.
+- Threat row T30 in `docs/05` (a scope that covers more than the owner meant).
+
 ## [0.6.1] - 2026-11-14
 
 ### Fixed
