@@ -1,6 +1,6 @@
 [project]
 name = "jade-decision-governance"
-version = "0.5.0"
+version = "0.6.0"
 description = "Adaptive decision governance for AI agents using TypeSafe Jev: journaled decisions, calibrated thresholds, human-held execution permits"
 readme = "README.md"
 license = "MIT"
