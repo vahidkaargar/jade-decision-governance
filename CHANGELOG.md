@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+### Fixed
+
+- `jade level` crashed with `KeyError: 'level'`: the command was parsed and handled but missing from the dispatch table in `jade/cli.py`. It reads and sets the level again. `tests/test_cli_level_dispatch.py` runs it through `cli.main`.
+
 ## [0.6.0] - 2026-11-14
 
 ### Documentation
