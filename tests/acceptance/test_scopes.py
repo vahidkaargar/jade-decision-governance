@@ -82,6 +82,49 @@ def test_merge_scope_given_for_each_allowed_flag(repo, flags):
     assert kinds(f"gh pr merge 940 {flags}".strip(), repo) == ["merge_project"]
 
 
+def test_a_quoted_value_with_spaces_still_gets_the_scope(repo):
+    assert kinds('gh pr merge 940 --squash --subject "Fix the thing" --body "More words here"', repo) == ["merge_project"]
+    assert kinds("gh pr merge 940 --squash --subject 'Fix the thing' --body 'More words here'", repo) == ["merge_project"]
+    assert kinds(f'cd "{repo}" && gh pr merge 940 --squash --body "a b"', "/") == ["merge_project"]
+
+
+# Fix round 1, finding 1: the segment key drops `NAME=value` prefixes, `env`, `sudo` and the directory of the program, so these all have the key `gh pr merge 940 ...`.
+@pytest.mark.parametrize("cmd", ["GH_REPO=other/repo gh pr merge 940 --squash", "env GH_REPO=other/repo gh pr merge 940", "GH_HOST=evil.example gh pr merge 940",
+                                 "/tmp/evil/gh pr merge 940", "./gh pr merge 940", "~/bin/gh pr merge 940", "sudo gh pr merge 940", "command gh pr merge 940", "nohup gh pr merge 940",
+                                 "time gh pr merge 940", "env -i gh pr merge 940", "FOO=1 BAR=2 gh pr merge 940 --squash"])
+def test_merge_scope_refused_for_a_prefix_a_launcher_or_a_program_path(repo, cmd):
+    a = assessed(cmd, repo)
+    assert a.seg_keys and a.seg_keys[0].startswith("gh pr merge 940"), (cmd, a.seg_keys)   # the gate itself sees a plain merge: only the scope can tell
+    assert offered(cmd, repo) == [], cmd
+    assert scopes.keys_for(a, "Bash", {"command": cmd}, {}, repo) == []
+
+
+# Fix round 1, finding 2: only gated segments reach `seg_keys`, so an earlier command that is not gated (an export, a function, a remote change) is invisible there.
+@pytest.mark.parametrize("cmd", ["export GH_REPO=other/repo && gh pr merge 940 --squash", "GH_REPO=other/repo; gh pr merge 940 --squash",
+                                 "gh repo set-default other/repo && gh pr merge 940", "git remote set-url origin https://example.com/o/r.git && gh pr merge 940",
+                                 "gh() { command gh -R other/repo \"$@\"; }; gh pr merge 940", "alias gh='gh -R other/repo'; gh pr merge 940",
+                                 "F='x -d'; gh pr merge 940 --body $F", "gh pr merge 940 --squash && echo done", "gh pr merge 940 --squash | tail -1",
+                                 "gh pr merge 940 --squash; ls", "ls && gh pr merge 940 --squash", "gh pr merge 940 --squash &"])
+def test_merge_scope_refused_unless_the_call_is_one_simple_command(repo, cmd):
+    a = assessed(cmd, repo)
+    assert a.seg_keys and a.seg_keys[-1].startswith("gh pr merge 940") and len(a.seg_keys) == 1, (cmd, a.seg_keys)   # one gated segment, as the reviewer showed
+    assert offered(cmd, repo) == [], cmd
+    assert offered(f"cd {repo} && {cmd}", "/") == [], cmd                                                          # also behind a leading cd
+
+
+@pytest.mark.parametrize("cmd", ["F='x -d'; gh pr merge 940 --body $F", "gh pr merge 940 --body $F", "gh pr merge 940 --body=$F", "gh pr merge 940 --subject $F",
+                                 'gh pr merge 940 --body "$F"', "gh pr merge 940 --body ${F}", "gh pr merge 940 --body `echo -d`", "gh pr merge 940 --body $(echo -d)",
+                                 "gh pr merge 940 --body *", "gh pr merge 940 --body ?", "gh pr merge 940 --body [a]", "gh pr merge 940 --body ~", "gh pr merge 940 --body-file ~/n.txt",
+                                 "gh pr merge 940 --body {-d,x}", "gh pr merge 940 --body {a..c}"])   # a literal brace list is expanded by the skeleton, so `-d` shows as a flag
+def test_merge_scope_refused_for_a_word_the_shell_may_expand_or_split(repo, cmd):
+    assert offered(cmd, repo) == [], cmd
+
+
+def test_a_merge_with_one_simple_command_after_a_leading_cd_still_gets_the_scope(repo, repo_b):
+    assert kinds(f"cd {repo_b} && gh pr merge 940 --squash", repo) == ["merge_project"]
+    assert kinds(f"cd {repo_b}   &&   gh pr merge 940   --squash", repo) == ["merge_project"]
+
+
 def test_a_number_after_a_value_flag_is_that_flags_value_not_the_pr_number(repo):
     assert kinds("gh pr merge 940 --subject 123 --body hi", repo) == ["merge_project"]
     assert kinds("gh pr merge --subject 123 --squash", repo) == []   # no PR number after merge

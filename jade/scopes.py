@@ -39,6 +39,7 @@ _OTHER_CD = re.compile(r"(?:^|[\s;&|(`{])(?:cd|pushd|popd)(?=[\s;&|)`}]|$)")
 # Options that move a git command to another repository. The segment key drops them, so the working folder says nothing about where the call acts.
 _ELSEWHERE = re.compile(r"(?:^|\s)(?:-C|--git-dir|--work-tree)(?=[\s=]|$)|(?:^|[\s;&|(])(?:GIT_DIR|GIT_WORK_TREE)=")
 _DIGITS = re.compile(r"^[0-9]+$")
+_EXPANDS = re.compile(r"[$`*?\[~{]")   # a word the shell may expand or split: a variable can hold `-d`, a glob or a brace can add words
 
 
 @dataclass(frozen=True)
@@ -117,11 +118,25 @@ def _is_plain_shell_call(a, tool: str, tool_input: dict | None) -> bool:
     return not memory._INLINE.search(a.subject or "")
 
 
+def _simple_command_words(subject: str) -> list[str] | None:
+    """The words of the call when, after a leading `cd PATH &&`, it is exactly one simple command: no separator, pipe, background `&`, group or second command of any
+    kind (a gated segment is not the only one that can change what a merge does: an export, a function, a remote change is not gated). None otherwise."""
+    m = _LEADING_CD.match(subject)
+    skeleton = shellnorm.skeleton(subject[m.end():] if m else subject)
+    if shellnorm.SPLIT.search(skeleton):
+        return None
+    words = skeleton.split()
+    return None if not words or any(_EXPANDS.search(w) for w in words) else words
+
+
 def _merge_project(a, tool: str, tool_input: dict | None, project: str | None) -> str | None:
+    """The key of the merge scope, or None. The segment key is not enough: it drops `NAME=value` prefixes, `env`, `sudo` and the directory of the program, so the
+    words are read from the call itself. The program must be exactly `gh`, with no prefix, and no word may be one the shell expands or splits."""
     if project is None or not _is_plain_shell_call(a, tool, tool_input):
         return None
     keys = list(getattr(a, "seg_keys", None) or [])
-    if len(keys) != 1 or not _merge_segment(keys[0].split(" ")):
+    words = _simple_command_words(a.subject or "")
+    if len(keys) != 1 or words is None or not _merge_segment(words):
         return None
     return memory.sha256(memory.canonical({"kind": "merge_project", "family": "gh pr merge N", "project": project}))
 
