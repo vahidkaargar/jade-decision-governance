@@ -45,6 +45,8 @@ Same claim and same state returns the cached answer, flagged `repeat_without_new
 
 High and critical actions (push, publish, remote shell or copy, deploy, service lifecycle, edits to agent policy or hooks, connected-app actions, cluster and merge actions through MCP) stop. What happens next depends on the message the gate gives you.
 
+Send one risky action per call. Do not join a merge, a delete or a push with other commands using `;` or `&&`; the human then sees one clear question. A joined call makes the human answer for every part at once.
+
 **The message tells you to ask in the chat** (the human has set a level, and the call is not live JADE wiring):
 
 1. Call AskUserQuestion once, with ONE question whose text starts with the `[jade:ask_...]` token from the message, and the options Allow and Deny. Do not put the command in it: JADE replaces the whole text with its own (rule, rationale, the command), so what you write never reaches the human.
