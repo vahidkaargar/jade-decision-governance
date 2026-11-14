@@ -712,10 +712,11 @@ def review_lines(db, since_s: float | None) -> list[str]:
     """What the standing answers are doing: how often a question was avoided, what the human marked wrong, and how far the answer count is from the 50 that a later
     step needs. Counts and rule ids only; no command text beyond the label the human already saw in `jade review confirm`."""
     live, since = ledger.LIVE.format(a=""), ts(now() - timedelta(seconds=since_s)) if since_s is not None else ""
-    silent = db.con.execute(f"SELECT entity_id, detail_json, ts FROM events WHERE kind='memory_allowed' AND ts>=? AND {live} ORDER BY id DESC", (since,)).fetchall()   # noqa: S608
+    silent = db.con.execute(f"SELECT entity_id, detail_json, ts, kind FROM events WHERE kind IN ('memory_allowed','jev_allowed') AND ts>=? AND {live} ORDER BY id DESC", (since,)).fetchall()   # noqa: S608
+    jev = db.con.execute("SELECT latency_ms, cost_usd FROM jev_calls WHERE question_id='q.human_proxy.would_allow' AND ts>=? AND COALESCE(source,'')<>'test' AND state='DONE'", (since,)).fetchall()
     asked = db.con.execute(f"SELECT COUNT(*) FROM human_answers WHERE COALESCE(ho,0)=0 AND ts>=? AND {live}", (since,)).fetchone()[0]   # noqa: S608
     plain_all = db.con.execute(f"SELECT COUNT(*) FROM human_answers WHERE COALESCE(ho,0)=0 AND {live}").fetchone()[0]   # noqa: S608
-    if not silent and not plain_all:
+    if not silent and not plain_all and not jev:
         return []
     marks = _latest_marks(db, since)
     decisions = {}
@@ -732,9 +733,17 @@ def review_lines(db, since_s: float | None) -> list[str]:
     elif silent:
         out.append("none of the silent runs is marked yet: `jade review mark DECISION_ID right|wrong` in your terminal (wrong makes JADE ask that call, and its kind, again)")
     out.append(f"owner-answered plain-high calls: {plain_all} of {JEV_BAND_ANSWERS} (a model deciding for you stays off until then)")
+    if jev:
+        allowed = sum(1 for r in silent if r["kind"] == "jev_allowed")
+        lat = sorted(r["latency_ms"] or 0.0 for r in jev)
+        out.append(f"Jev for you: {len(jev)} call(s), {allowed} allowed, {len(jev) - allowed} left to you; cost ${sum(r['cost_usd'] or 0.0 for r in jev):.4f}, median latency {lat[len(lat) // 2]:.0f} ms")
     for r in silent[:5]:
         did = json.loads(r["detail_json"]).get("decision_id") if r["detail_json"] else None
-        a = db.con.execute("SELECT rule_id, label FROM human_answers WHERE answer_id=?", (r["entity_id"],)).fetchone()
+        if r["kind"] == "jev_allowed":
+            det = json.loads(r["detail_json"])
+            a = {"rule_id": det.get("rule"), "label": det.get("label")}
+        else:
+            a = db.con.execute("SELECT rule_id, label FROM human_answers WHERE answer_id=?", (r["entity_id"],)).fetchone()
         out.append(f"  {did}  [{a['rule_id'] if a else '?'}]  {(a['label'] if a else '') or ''}  {('(marked ' + marks[did] + ')') if did in marks else ''}".rstrip())
     return out
 
@@ -757,13 +766,22 @@ def review_mark(decision_id: str, mark: str, stdin_isatty: bool | None = None) -
             raise ValueError("this decision was not answered by an ask or a standing answer, so there is nothing to mark")
         if ask.get("channel") == "memory":
             answers = db.con.execute("SELECT answer_id, exact_key, class_key FROM human_answers WHERE answer_id=?", (f"ans_{ask['ask_id']}",)).fetchall()
+        elif ask.get("channel") == "jev":
+            ev = db.con.execute("SELECT detail_json FROM events WHERE kind='jev_allowed' AND entity_id=?", (f"call_{ask['ask_id']}",)).fetchone()
+            det = json.loads(ev["detail_json"]) if ev and ev["detail_json"] else {}
+            answers = [{"answer_id": None, "exact_key": det.get("exact_key"), "class_key": det.get("class_key")}] if det.get("exact_key") else []
         else:
             a = db.con.execute("SELECT hold_key, fingerprints_json FROM asks WHERE ask_id=?", (ask["ask_id"],)).fetchone()
             answers = db.con.execute("SELECT answer_id, exact_key, class_key FROM human_answers WHERE exact_key=? AND answer='allow'",
                                      (memory.exact_key(a["hold_key"], a["fingerprints_json"]),)).fetchall() if a else []
         with db.tx():
-            db.event(decision_id, "review_mark", guard=f"jade review mark {mark}", actor=f"human:{user()}", detail={"mark": mark, "answer_ids": [r["answer_id"] for r in answers]})
+            db.event(decision_id, "review_mark", guard=f"jade review mark {mark}", actor=f"human:{user()}", detail={"mark": mark, "answer_ids": [r["answer_id"] for r in answers if r["answer_id"]]})
             retired = sum(db.retire_answers(r["exact_key"], r["class_key"]) for r in answers) if mark == "wrong" else 0
+            if mark == "wrong" and ask.get("channel") == "jev":
+                from . import proxy
+
+                for r in answers:
+                    proxy.distrust(db, r["exact_key"], r["class_key"])
     finally:
         db.close()
     return f"marked {decision_id} {mark}" + (f"; {retired} answer(s) retired, JADE asks again" if mark == "wrong" else "")

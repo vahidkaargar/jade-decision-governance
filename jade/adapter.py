@@ -269,8 +269,8 @@ def _exchange(payload: dict, key: str, deadline: float, expired: threading.Event
 class OpenRouterProvider:
     name = "openrouter"
 
-    def __init__(self, transport=http_transport, key_fn=get_key, sleep=time.sleep, deadline_s: float = DEADLINE_S):
-        self.transport, self.key_fn, self.sleep, self.deadline_s = transport, key_fn, sleep, deadline_s
+    def __init__(self, transport=http_transport, key_fn=get_key, sleep=time.sleep, deadline_s: float = DEADLINE_S, max_retries: int = MAX_RETRIES):
+        self.transport, self.key_fn, self.sleep, self.deadline_s, self.max_retries = transport, key_fn, sleep, deadline_s, max_retries
 
     def ask(self, state: dict, questions: dict, model: str = DEFAULT_MODEL) -> Result:
         start = time.monotonic()   # the deadline covers the key lookup too (a slow Keychain no longer adds to a full exchange)
@@ -297,7 +297,7 @@ class OpenRouterProvider:
             if result.ok and time.monotonic() - start > self.deadline_s + 0.25:   # a late answer is not accepted
                 result = Result(ok=False, error_kind="UNAVAILABLE", detail="response arrived after the deadline", latency_ms=result.latency_ms, attempts=attempt)
             retryable = result.error_kind == "RATE_LIMITED" or status == 529
-            if result.ok or not retryable or attempt > MAX_RETRIES:
+            if result.ok or not retryable or attempt > self.max_retries:
                 return result
             wait = min(8.0, 0.5 * 2 ** (attempt - 1)) + random.uniform(0, 0.25)  # noqa: S311 - jitter, not security
             retry_after = {str(k).lower(): v for k, v in (headers or {}).items()}.get("retry-after")
