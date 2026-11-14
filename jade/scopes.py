@@ -10,7 +10,8 @@ Three kinds, at most two offered per call:
 - `kind_any`: the same kind of call in any project. Its key is `memory.class_key`, so it is the key memory already matches.
 - `merge_project`: `gh pr merge N` with the flags in MERGE_FLAGS_ALLOWED, in one named project. `memory.eligibility` calls every merge exact-only; this scope narrows
   that on purpose, and it is computed here from the segment text, never from `eligibility`. Any PR number, any allowed flag and any flag value is the same scope;
-  a flag outside the list (delete, admin, auto, another repo, force) gives no scope at all.
+  a flag outside the list (delete, admin, auto, another repo, force, a body file) gives no scope at all. The key also holds the repository the folder points to:
+  the `remote` and `url` sections of its git config file (`_repo_identity`), so `gh repo set-default` or `git remote set-url` gives another key.
 
 Never offered: a human-only class, a blocked call, the never rules, a call the gate could not read, an inline program, and two or more risky commands in one call.
 No scope covers delete, force, tag or release.
@@ -27,9 +28,19 @@ from dataclasses import dataclass
 
 from . import memory, policy, redact, shellnorm
 
-MERGE_FLAGS_ALLOWED = frozenset({"--squash", "-s", "--merge", "-m", "--rebase", "-r", "--subject", "-t", "--body", "-b", "--body-file", "-F", "--match-head-commit"})
-MERGE_FLAGS_WITH_VALUE = frozenset({"--subject", "-t", "--body", "-b", "--body-file", "-F", "--match-head-commit"})
+# `--body-file`/`-F` are not on the list: they read a local file and upload it to GitHub as the merge commit body, so a standing scope would let the agent send any file.
+MERGE_FLAGS_ALLOWED = frozenset({"--squash", "-s", "--merge", "-m", "--rebase", "-r", "--subject", "-t", "--body", "-b", "--match-head-commit"})
+MERGE_FLAGS_WITH_VALUE = frozenset({"--subject", "-t", "--body", "-b", "--match-head-commit"})
 LABEL_MAX = 120
+CONFIG_MAX = 1 << 20   # a git config file larger than this is not read: no merge scope
+# What each scope allows, in simple English. The chat question and `jade review confirm` (jade/ops.py) both show this text, so they say the same thing.
+COVERS: dict[str, str] = {
+    "kind_project": "The same kind of command in this project. The same exact call is also remembered.",
+    "kind_any": "The same kind of command in any project. Delete, force, tag and release still ask.",
+    "merge_project": "Merging any pull request in this project, with the listed options only. The same exact call is also remembered.",
+}
+# A section header of a git config file: `[name]`, `[name "sub"]` or `[name.sub]`.
+_SECTION = re.compile(r'^\[\s*([A-Za-z0-9.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]')
 _ELLIPSIS = "…"
 
 # `cd PATH &&` at the very start. PATH is a literal: double quotes without an expansion, single quotes, or a bare word without a shell character.
@@ -89,6 +100,74 @@ def project_of(subject: str, cwd: str) -> str | None:
         here = parent
 
 
+def _git_dir(project: str) -> str | None:
+    """The git folder of a project: its `.git` folder, or the folder a linked worktree's `.git` file names (`gitdir: PATH`, relative to the project)."""
+    dot = os.path.join(project, ".git")
+    if os.path.isdir(dot):
+        return dot
+    if not os.path.isfile(dot):
+        return None
+    with open(dot, encoding="utf-8") as f:
+        first = f.read(4096).splitlines()[:1]
+    if not first or not first[0].startswith("gitdir:"):
+        return None
+    gitdir = first[0][len("gitdir:"):].strip()
+    if not gitdir:
+        return None
+    return gitdir if os.path.isabs(gitdir) else os.path.join(project, gitdir)
+
+
+def _repo_identity(project: str) -> list[str] | None:
+    """Which repository a merge in `project` acts on: every line of the `remote` and `url` sections of its git config file (remote URLs, `gh-resolved` from
+    `gh repo set-default`, an `insteadOf` rewrite), sorted. The file is read as plain text; no subprocess runs. A worktree's git folder names the shared folder in
+    `commondir`, and the config is there. None (so no merge scope) when the config cannot be read, is not UTF-8, is too large, has a header this reader does not
+    know, or includes another file (whose remotes it would not see). Other sections (a branch, core) do not change the result."""
+    try:
+        gitdir = _git_dir(project)
+        if gitdir is None:
+            return None
+        common = gitdir
+        pointer = os.path.join(gitdir, "commondir")
+        if os.path.isfile(pointer):
+            with open(pointer, encoding="utf-8") as f:
+                rel = f.read(4096).strip()
+            if not rel:
+                return None
+            common = rel if os.path.isabs(rel) else os.path.join(gitdir, rel)
+        config = os.path.join(common, "config")
+        if not os.path.isfile(config):
+            return None
+        with open(config, encoding="utf-8") as f:
+            text = f.read(CONFIG_MAX + 1)
+    except (OSError, ValueError):   # UnicodeDecodeError is a ValueError
+        return None
+    if len(text) > CONFIG_MAX:
+        return None
+    out: list[str] = []
+    section, keep = "", False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line[0] in "#;":
+            continue
+        if line.startswith("["):
+            m = _SECTION.match(line)
+            if not m:
+                return None
+            name = m.group(1).lower()
+            base = name.split(".", 1)[0]
+            if base in ("include", "includeif"):
+                return None
+            section = name if m.group(2) is None else f'{name} "{m.group(2)}"'
+            keep = base in ("remote", "url")
+            rest = line[m.end():].strip()
+            if keep and rest and rest[0] not in "#;":
+                out.append(f"{section}\t{rest}")
+            continue
+        if keep:
+            out.append(f"{section}\t{line}")
+    return sorted(out)
+
+
 def _merge_segment(tokens: list[str]) -> bool:
     """`gh pr merge <digits> [allowed flags]`: a flag that takes a value consumes the next token, so a number there is a value and not the PR number."""
     if len(tokens) < 4 or tokens[:3] != ["gh", "pr", "merge"] or not _DIGITS.match(tokens[3]):
@@ -138,7 +217,10 @@ def _merge_project(a, tool: str, tool_input: dict | None, project: str | None) -
     words = _simple_command_words(a.subject or "")
     if len(keys) != 1 or words is None or not _merge_segment(words):
         return None
-    return memory.sha256(memory.canonical({"kind": "merge_project", "family": "gh pr merge N", "project": project}))
+    remotes = _repo_identity(project)
+    if remotes is None:
+        return None   # the repository cannot be told: fail closed
+    return memory.sha256(memory.canonical({"kind": "merge_project", "family": "gh pr merge N", "project": project, "remotes": remotes}))
 
 
 def _kind_project_key(a, project: str) -> str:
@@ -146,14 +228,20 @@ def _kind_project_key(a, project: str) -> str:
     return memory.sha256(memory.canonical({"kind": "kind_project", "family": family, "project": project}))
 
 
+def _one_line(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _label(command: str, where: str) -> str:
-    """`COMMAND in WHERE` on one line, at most LABEL_MAX characters. A path too long to fit is cut from the left (`…/tail`); the command stays visible."""
-    command = re.sub(r"\s+", " ", redact.redact_obj(command, secrets_only=True)[0]).strip()
+    """`COMMAND in WHERE` on one line, at most LABEL_MAX characters. A path too long to fit is cut from the left (`…/tail`); the command stays visible. Every run of
+    whitespace, a newline in a folder name included, becomes one space: the label is shown in the chat question and in `jade review confirm` and must not add a line."""
+    command = _one_line(redact.redact_obj(command, secrets_only=True)[0])
     command = command[:LABEL_MAX // 2 + 20]
+    where = _one_line(where)
     room = LABEL_MAX - len(command) - len(" in ")
     if len(where) > room:
         where = _ELLIPSIS + where[len(where) - max(room - 1, 1):] if room > 1 else _ELLIPSIS
-    return (f"{command} in {where}")[:LABEL_MAX]
+    return _one_line(f"{command} in {where}")[:LABEL_MAX]
 
 
 def _family(a) -> str:
@@ -168,13 +256,10 @@ def offered(a, tool: str, tool_input: dict | None, fp: dict | None, cwd: str) ->
     if memory.eligibility(a, tool, tool_input, fp) == "class":
         family = _family(a)
         if project:
-            out.append(Scope("kind_project", _kind_project_key(a, project), _label(family, project),
-                             "The same kind of command in this project only. Other projects still ask.", "Same command, this project"))
-        out.append(Scope("kind_any", memory.class_key(a), _label(family, "any project"),
-                         "The same kind of command in any project. Delete, force, tag and release still ask.", "Same command, any project"))
+            out.append(Scope("kind_project", _kind_project_key(a, project), _label(family, project), COVERS["kind_project"], "Same command, this project"))
+        out.append(Scope("kind_any", memory.class_key(a), _label(family, "any project"), COVERS["kind_any"], "Same command, any project"))
     if (key := _merge_project(a, tool, tool_input, project)) is not None:
-        out.append(Scope("merge_project", key, _label("gh pr merge *", project),
-                         "Merging any pull request in this project, with the safe options only. Everything else still asks.", "Merge in this project"))
+        out.append(Scope("merge_project", key, _label("gh pr merge *", project), COVERS["merge_project"], "Merge in this project"))
     return out
 
 

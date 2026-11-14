@@ -40,6 +40,7 @@ def short():
 def repo(short):
     root = short / "repoA"
     (root / ".git").mkdir(parents=True)
+    (root / ".git" / "config").write_text('[remote "origin"]\n\turl = https://github.com/owner/repoA.git\n')   # the merge scope reads the remotes (final review finding 2)
     return str(root)
 
 
@@ -47,6 +48,7 @@ def repo(short):
 def repo_b(short):
     root = short / "repoB"
     (root / ".git").mkdir(parents=True)
+    (root / ".git" / "config").write_text('[remote "origin"]\n\turl = https://github.com/owner/repoB.git\n')   # the merge scope reads the remotes (final review finding 2)
     return str(root)
 
 
@@ -404,3 +406,42 @@ def test_the_scope_lookup_does_not_scan_the_answers_table(repo):
     finally:
         d.close()
     assert "human_answers_scope" in plan and "SCAN human_answers" not in plan, plan
+
+
+# ------------------------------------------------------------------ final whole-branch review
+
+def test_record_human_answer_puts_the_scope_label_on_one_line():
+    """Finding 4, defence in depth: a label from anywhere becomes one line before it is stored, so `jade review confirm` and `jade knows list` cannot show a forged line."""
+    d = db()
+    try:
+        with d.tx():
+            aid = d.record_human_answer(session=SESSION, decision_id=None, rule_id="R-10", class_key=None, exact_key="e-one-line", answer="allow", channel="chat",
+                                        scope={"kind": "merge_project", "key": "k" * 64, "label": "gh pr merge * in /x/a\nLine two\r\t forged\x0b\x0cend\n", "covers": "c",
+                                               "short": "s"})
+    finally:
+        d.close()
+    assert rows("SELECT scope_label FROM human_answers WHERE answer_id=?", (aid,))[0]["scope_label"] == "gh pr merge * in /x/a Line two forged end"
+
+
+def test_review_mark_wrong_on_a_chat_answered_call_retires_the_sibling_scope_rows(repo):
+    """Finding 8: the chat-ask branch of `review mark` read no scope key, so a wrong mark left the other rows of the same scope standing."""
+    sibling = store("gh pr merge 942 --rebase", repo, "merge_project")
+    hold = "hold-chat-ask-final-0001"
+    exact = memory.exact_key(hold, "{}")
+    scope = dataclasses.asdict(first_scope(MERGE, repo, "merge_project"))
+    d = db()
+    try:
+        with d.tx():
+            answered = d.record_human_answer(session=SESSION, decision_id=None, rule_id="R-10", class_key=None, exact_key=exact, answer="allow", channel="chat",
+                                             label=MERGE, scope=scope)
+            d.con.execute("INSERT INTO asks(ask_id, session_id, plan_hash, hold_key, fingerprints_json, rule_id, level, tool, question_json, status, created_ts, expires_ts) "
+                          "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", ("chatfinal0001", SESSION, "plan-x", hold, "{}", "R-10", "high", "Bash", "{}", "answered", ts(), ts()))
+            d.con.execute("INSERT INTO decisions(decision_id, status, doc_json, created_at, updated_at, expires_at) VALUES(?,?,?,?,?,?)",
+                          ("dec_chatfinal0001", "allowed", json.dumps({"ask": {"ask_id": "chatfinal0001", "channel": "chat"}}), ts(), ts(), ts()))
+    finally:
+        d.close()
+    assert "retired" in ops.review_mark("dec_chatfinal0001", "wrong", stdin_isatty=True)
+    strength = {r["answer_id"]: r["strength"] for r in rows("SELECT answer_id, strength FROM human_answers")}
+    assert strength[answered] == "revoked"
+    assert strength[sibling] == "revoked"
+

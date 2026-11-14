@@ -188,3 +188,22 @@ def test_every_human_only_class_has_a_phrase():
 def test_the_merge_sentence_names_the_real_target(cmd, line):
     a = assess(cmd)
     assert a.seg_keys and askplain.what_line(a, "Bash") == line
+
+
+# Final whole-branch review, finding 3: the value of a flag that takes one is not the PR number.
+@pytest.mark.parametrize("cmd,line", [
+    ("gh pr merge --body 5 940", "Merge a pull request."),
+    ("gh pr merge -b 5 940", "Merge a pull request."),
+    ("gh pr merge --subject 7 940", "Merge a pull request."),
+    ("gh pr merge -t 7 940", "Merge a pull request."),
+    ("gh pr merge --squash --body 5 940", "Merge a pull request."),
+    ("gh pr merge --match-head-commit 123 940", "Merge a pull request."),
+    ("gh pr merge 940 --squash", "Merge pull request 940."),
+    ("gh pr merge 940 --body 5", "Merge pull request 940."),
+    ("gh pr merge --squash 940", "Merge pull request 940."),
+    ("gh pr merge --squash --delete-branch 940", "Merge pull request 940."),
+    ("gh pr merge --body=5 940", "Merge pull request 940."),
+])
+def test_a_value_flag_before_the_number_does_not_name_a_pull_request(cmd, line):
+    a = assess(cmd)
+    assert a.seg_keys and askplain.what_line(a, "Bash") == line, a.seg_keys

@@ -778,7 +778,7 @@ def review_mark(decision_id: str, mark: str, stdin_isatty: bool | None = None) -
             answers = [{"answer_id": None, "exact_key": det.get("exact_key"), "class_key": det.get("class_key"), "coarse_key": det.get("coarse_key")}] if det.get("exact_key") else []
         else:
             a = db.con.execute("SELECT hold_key, fingerprints_json FROM asks WHERE ask_id=?", (ask["ask_id"],)).fetchone()
-            answers = db.con.execute("SELECT answer_id, exact_key, class_key FROM human_answers WHERE exact_key=? AND answer='allow'",
+            answers = db.con.execute("SELECT answer_id, exact_key, class_key, scope_key FROM human_answers WHERE exact_key=? AND answer='allow'",
                                      (memory.exact_key(a["hold_key"], a["fingerprints_json"]),)).fetchall() if a else []
         with db.tx():
             db.event(decision_id, "review_mark", guard=f"jade review mark {mark}", actor=f"human:{user()}", detail={"mark": mark, "answer_ids": [r["answer_id"] for r in answers if r["answer_id"]]})
@@ -797,19 +797,21 @@ def _pending_hints(db) -> list:
     return [r for r in db.human_answers(strength="hint", limit=100000) if r["answer"] == "allow"][::-1]
 
 
-_SCOPE_COVERS = {
-    "kind_project": "The same kind of command in this project. The same exact call is also remembered.",
-    "kind_any": "The same kind of command in any project. Delete, force, tag and release still ask.",
-    "merge_project": "Merging any pull request in this project, with the safe options only. The same exact call is also remembered.",
-}
+def _confirm_group(r) -> tuple:
+    """(rule, class or exact key, is a class, scope key): the group of `jade review confirm` a hint is shown in. A hint with a scope is grouped by its rule and scope
+    only: one yes makes the scope standing for every call it covers, so all hints of that scope (one per PR for a merge) are one question."""
+    if r["scope_key"]:
+        return (r["rule_id"], None, False, r["scope_key"])
+    return (r["rule_id"], r["class_key"] or r["exact_key"], bool(r["class_key"]), None)
 
 
 def _scope_lines(r) -> list[str]:
-    """The plain-words lines for a hint that carries a scope: what it would become, what it covers, how long it lasts, how to undo it."""
-    from . import memory
+    """The plain-words lines for a hint that carries a scope: what it would become, what it covers (`scopes.COVERS`, the text the chat showed), how long it lasts,
+    how to undo it."""
+    from . import memory, scopes
 
     lines = [f"Would become standing for: {r['scope_label']} ({memory.USE_DAYS} days after last use)"]
-    covers = _SCOPE_COVERS.get(r["scope_kind"])
+    covers = scopes.COVERS.get(r["scope_kind"])
     if covers:
         lines.append(covers)
     lines.append(f"Confirming makes this proposal standing. It lasts {memory.USE_DAYS} days after its last use, and never more than {memory.CAP_DAYS} days. "
@@ -831,7 +833,7 @@ def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, al
             return 0
         groups: dict[tuple, list] = {}
         for r in rows:
-            groups.setdefault((r["rule_id"], r["class_key"] or r["exact_key"], bool(r["class_key"]), r["scope_key"]), []).append(r)
+            groups.setdefault(_confirm_group(r), []).append(r)
         chosen: list = []
         for (rule, _, is_class, scope_key), rs in groups.items():
             if scope_key:
@@ -848,7 +850,7 @@ def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, al
         if not chosen:
             say("nothing confirmed")
             return 0
-        say(f"{len(chosen)} answer(s) in {len({(r['rule_id'], r['class_key'] or r['exact_key'], r['scope_key']) for r in chosen})} group(s) become standing: from now on, at level low or medium, a call that matches "
+        say(f"{len(chosen)} answer(s) in {len({_confirm_group(r) for r in chosen})} group(s) become standing: from now on, at level low or medium, a call that matches "
             f"runs without a question for {memory.USE_DAYS} days after its last use (never more than {memory.CAP_DAYS} days). `jade knows list` shows them, `jade knows rm ID` forgets one.")
         if ask("Type yes to confirm: ").strip() != "yes":
             say("cancelled; nothing changed")

@@ -32,6 +32,7 @@ def enforce(monkeypatch):
 def repo():
     root = Path(tempfile.mkdtemp(prefix="jaskscope-", dir="/tmp")).resolve() / "repoA"
     (root / ".git").mkdir(parents=True)
+    (root / ".git" / "config").write_text('[remote "origin"]\n\turl = https://github.com/owner/repoA.git\n')   # the merge scope reads the remotes (final review finding 2)
     yield str(root)
     shutil.rmtree(root.parent, ignore_errors=True)
 

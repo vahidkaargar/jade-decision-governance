@@ -30,6 +30,7 @@ def human_terminal(monkeypatch):
 def repo():
     root = Path(tempfile.mkdtemp(prefix="jrscope-", dir="/tmp")).resolve() / "repoA"
     (root / ".git").mkdir(parents=True)
+    (root / ".git" / "config").write_text('[remote "origin"]\n\turl = https://github.com/owner/repoA.git\n')   # the merge scope reads the remotes (final review finding 2)
     yield str(root)
     shutil.rmtree(root.parent, ignore_errors=True)
 
@@ -96,6 +97,7 @@ def test_two_scopes_of_one_rule_are_two_groups(repo):
 def test_two_merge_scopes_in_two_projects_do_not_merge_into_one_group(repo):
     other = str(Path(repo).parent / "repoB")
     (Path(other) / ".git").mkdir(parents=True)
+    (Path(other) / ".git" / "config").write_text('[remote "origin"]\n\turl = https://github.com/owner/repoB.git\n')
     hint(MERGE, repo, "merge_project")
     hint("gh pr merge 12 --squash", other, "merge_project")
     _, text = confirm(["n", "n"])
@@ -148,3 +150,34 @@ def test_knows_list_without_scope_is_unchanged(repo):
     confirm(["y", "yes"])
     out = ops.knows_list()
     assert "kind" in out and CLASS_CMD in out and "scope" not in out
+
+
+# ------------------------------------------------------------------ final whole-branch review
+
+def test_two_merge_hints_of_one_scope_for_two_prs_are_one_group(repo):
+    """Finding 5: one "y" makes the shared scope standing for every PR, so the hints of one scope are one question, not one per PR."""
+    a = hint(MERGE, repo, "merge_project")
+    b = hint("gh pr merge 941 --rebase", repo, "merge_project")
+    said, prompts = [], []
+
+    def ask(prompt=""):
+        prompts.append(prompt)
+        return "yes" if prompt.startswith("Type yes") else "y"
+
+    n = ops.review_confirm(stdin_isatty=True, ask=ask, say=said.append)
+    text = "\n".join(said)
+    assert sum(1 for p in prompts if "stand for this?" in p) == 1, prompts
+    assert text.count("Would become standing for:") == 1 and "allowed 2x" in text
+    assert "in 1 group(s)" in text
+    assert n == 2 and strength(a) == strength(b) == "strong"
+
+
+@pytest.mark.parametrize("cmd,kind", [(MERGE, "merge_project"), (CLASS_CMD, "kind_project"), (CLASS_CMD, "kind_any")])
+def test_the_confirm_text_is_the_scope_covers_text(repo, cmd, kind):
+    """Finding 7: the terminal says what the chat said; the text has one source, `scopes.COVERS`."""
+    a = policy.assess("Bash", {"command": cmd}, repo)
+    sc = next(s for s in scopes.offered(a, "Bash", {"command": cmd}, {}, repo) if s.kind == kind)
+    hint(cmd, repo, kind)
+    _, text = confirm(["n"])
+    assert f"   {sc.covers}" in text.splitlines(), text
+

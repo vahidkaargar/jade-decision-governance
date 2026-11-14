@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import sqlite3
 import time
 import zlib
@@ -324,7 +325,7 @@ class Ledger:
             sk, skey = scope.get("kind"), scope.get("key")
             if sk != "kind_any":
                 ck = None   # a project scope is narrower than the class key, which matches in every project: the row must not carry both
-            sl = redact.redact(scope["label"], secrets_only=True)[0][:120] if scope.get("label") else None
+            sl = re.sub(r"\s+", " ", redact.redact(scope["label"], secrets_only=True)[0]).strip()[:120] if scope.get("label") else None   # one line in a terminal
         self.con.execute("INSERT INTO human_answers(answer_id, ts, session_id, decision_id, rule_id, class_key, exact_key, answer, channel, strength, source, label, ho, "
                          "scope_kind, scope_key, scope_label) VALUES(?,?,?,?,?,?,?,?,?,'hint',?,?,?,?,?,?)",
                          (aid, ts(), session, decision_id, rule_id, ck, exact_key, answer, channel, self.source, lb, 1 if ho else 0, sk, skey, sl))

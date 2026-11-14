@@ -92,7 +92,9 @@ def risk_line(rule_id: str, ho_ids=()) -> str:
 _Render = tuple[re.Pattern, str]
 SEGMENT_TEXT: list[_Render] = [(re.compile(p), t) for p, t in (
     (r"^gh pr merge\s+\S*/pull/(\d+)\b", r"Merge pull request \1."),
-    (r"^gh pr merge(?:\s+-[-\w=]+)*\s+(\d+)(?:\s|$)", r"Merge pull request \1."),
+    # Only flags that take no value, or `--name=value`, may come before the number: in `--body 5 940` the 5 is the body, so that call says "Merge a pull request."
+    (r"^gh pr merge(?:\s+(?:--squash|-s|--merge|-m|--rebase|-r|--delete-branch|-d|--admin|--auto|--disable-auto|--[\w-]+=\S*))*\s+(\d+)(?:\s|$)",
+     r"Merge pull request \1."),
     (r"^gh pr merge\s+([A-Za-z][\w./-]*)(?:\s|$)", r"Merge the pull request of branch \1."),
     (r"^gh pr merge(?:\s+-[-\w=]+)*\s*$", "Merge the pull request of this branch."),
     (r"^gh pr merge\b", "Merge a pull request."),
