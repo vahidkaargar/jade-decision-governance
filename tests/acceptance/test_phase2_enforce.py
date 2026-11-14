@@ -70,14 +70,14 @@ def test_crash_recovery(monkeypatch, tmp_path):
     """Kill between the event insert and the state write: on reopen the decision is unchanged and the event is absent."""
     db = ledger.open(tmp_path / "c.sqlite")
     d = decide.open_decision(db, "Check that the migration ran", command="echo hi")
-    monkeypatch.setattr(state_machine, "_after_event_insert", lambda: (_ for _ in ()).throw(RuntimeError("killed")))
-    with pytest.raises(RuntimeError):
-        decide.step(db, d["decision_id"], "route", idempotency_key="k-crash")
+    with monkeypatch.context() as m:   # scoped: a blanket monkeypatch.undo() would also drop the per-test JADE_HOME and JADE_CONFIG
+        m.setattr(state_machine, "_after_event_insert", lambda: (_ for _ in ()).throw(RuntimeError("killed")))
+        with pytest.raises(RuntimeError):
+            decide.step(db, d["decision_id"], "route", idempotency_key="k-crash")
     db.close()
     db2 = ledger.open(tmp_path / "c.sqlite")
     assert db2.one("SELECT status FROM decisions WHERE decision_id=?", (d["decision_id"],)).status == "CLASSIFIED"
     assert db2.one("SELECT COUNT(*) AS n FROM events WHERE idempotency_key='k-crash'").n == 0
-    monkeypatch.undo()
     assert decide.step(db2, d["decision_id"], "route", idempotency_key="k-crash").applied
     assert sqlite3.connect(tmp_path / "c.sqlite").execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
