@@ -1,6 +1,6 @@
-# 12 — The human answers in the chat (release 0.5.0); Jev decides (release 0.6.0, planned)
+# 12 — The human answers in the chat (release 0.5.0); memory and Jev decide (release 0.6.0)
 
-Status: **0.5.0 is implemented (W-96 to W-100d) and not yet released or installed.** Memory and Jev deciding in the human's place (0.6.0) are planned and not part of this release. This page says what the code does today.
+Status: **0.5.0 is released; 0.6.0 (memory of confirmed answers, Jev deciding in your place, `jade review`) is implemented (W-98b to W-103) and not yet released.** The installed JADE decides what you have: until `jade upgrade`, none of the 0.6.0 behaviour exists on your Mac. This page says what the code does today; section 10 is the owner page for 0.6.0.
 
 ## 1. Why
 
@@ -17,7 +17,8 @@ One value for the whole Mac, set only by a human in a terminal: `jade level high
 | unset | As 0.4.0: a high call waits for the signed terminal permit. |
 | off | JADE only watches. High calls and ordinary safety invariants are advisory. The four governance invariants (SI-09 to SI-12: the permit, the permit key, the state and the config directory) still block. |
 | high | A high call is asked, in the chat or a dialog (section 3). The signed permit stays for live JADE wiring and for what no channel reaches. |
-| low, medium | As high, except that a call you confirmed earlier runs with no question (section 9). Jev joins these two levels in a later 0.6.0 step; today they differ from each other in nothing. |
+| low | As high, except that a call you confirmed earlier runs with no question, and Jev may decide a plain high call in your place at 0.70 (egress at 0.85), once you have answered 50 plain-high calls (section 9). |
+| medium | As low, with Jev's bar at 0.85 and egress always asked. |
 
 A human-only class (section 4) is high work once a level is set, whatever its rule says. Safety invariants are never asked: nobody can approve them.
 
@@ -99,9 +100,9 @@ Measure it with `jade ledger stats`: the `asks` block gives answers by channel a
 - For a long command you approve a summary plus the head and tail, not the full text.
 - Until the new hooks are installed, nothing in 0.5.0 runs: the gate is as it was.
 
-## 8. Not in 0.5.0
+## 8. Not in 0.5.0, and not in 0.6.0
 
-Jev deciding in your place, batch asks, and the per-project level. Memory of confirmed answers (`jade review confirm`, `jade knows`, levels low and medium) is the first 0.6.0 step: section 9.
+Memory of confirmed answers (`jade review confirm`, `jade knows`, levels low and medium) and Jev deciding in your place are 0.6.0: sections 9 and 10. Still not built: batch asks, a per-project level, signed settings for the gate mode, the level and memory together, an "Allow for this session" option, a SessionStart line when Jev's band turns on, Jev's shadow advice at level off, and a calibration of Jev against 200 labels (backlog W-106).
 
 ## 9. Memory of confirmed answers (0.6.0)
 
@@ -135,4 +136,51 @@ At level `low` or `medium` the gate looks for a standing answer before it asks. 
 **Time.** One exchange, no retry, at most 3 s and never past what is left of the 6 s hook budget (1.5 s are kept for the rest of the hook). A hung exchange is left behind in a daemon thread and you are asked. Each call that Jev decides adds its round trip (about 0.7 s, up to 1.5 s).
 
 **Your verdict.** `jade review mark DECISION_ID wrong` on a call Jev let run retires any answer of that kind (your own confirmed answers that share the key too) and makes Jev skip the exact call, its kind and, for a write or another call that has no kind, its target (the rule and the path) from then on. It cannot be undone with a later `right`; `jade review` reports how many calls Jev saw, how many it allowed, their cost and median latency.
+
+## 10. Owner page for 0.6.0: using it, and what you see when something fails
+
+**What changes for you.** At level `high` nothing changes from 0.5.0: every high call is one click. At `low` or `medium`, three things take questions away, in this order: a call you confirmed earlier (section 9), then Jev answering for you (section 9, "Jev in the hook"). What is left is asked as before. Four classes are asked at every level but `off`: live JADE wiring, a delete that cannot be undone, money, a public release. Critical calls (a firewall change, a production deploy, key material), fetch-and-run, writes to agent instruction files and merges are asked too.
+
+**How to start, and how to know it works.**
+
+1. Stay at `jade level high` for the first days. Answer the questions; each answer is a hint.
+2. `jade review confirm` once a day or so, in your terminal: take the groups you would answer the same way every time.
+3. `jade knows edit` once: write plain sentences about what you allow and what you never allow. Jev reads only lines that are not comments.
+4. `jade review` shows the count toward the 50 distinct plain-high calls you have answered. Jev is asked but decides nothing before it. After that, `jade level medium` (Jev needs 0.85) or `jade level low` (0.70).
+5. `jade review` lists the last silent runs with their decision ids. `jade review mark ID right` or `wrong` is your verdict. `wrong` cannot be undone with a later `right`: it retires the answers of that kind (your own confirmed ones too) and Jev skips that call, its kind and its target for good. The 95% bound of the wrong share is printed; 50 clean marks show it is below about 1 in 17, not that it is zero.
+6. Back out at any time: `jade level high` (everything asked), `jade level unset` (0.4.0).
+
+**What it costs.** A call Jev decides adds one round trip to openrouter.ai (about 0.7 s, at most 3 s). The command (or up to 4 KiB of written content), the rule, your preferences and up to 8 confirmed answers of that rule go there, redacted for secret shapes only; ordinary text is not changed. Cost and median latency are in `jade review`.
+
+**What you see when something fails.**
+
+| You see | Cause | Do |
+|---|---|---|
+| "JADE: Jev judged this ... call from your preferences" on stderr | Jev let a plain high call run (rule, probability and bar are in the line) | Nothing; `jade review mark ID wrong` if it was not what you wanted |
+| "JADE: allowed from your confirmed answer" on stderr | memory covered the call | `jade knows rm ID` forgets it |
+| A question for a call you expected to run silently | Jev abstained, rejected, was late or down, is still in shadow (fewer than 50 distinct answers), or the call is one of the classes it never sees | Answer it; `jade review` shows the count and the last runs |
+| The same kind of call is always asked after you marked it wrong | that is the mark: Jev skips the call, its kind and its target | `jade level high` or accept it; a wrong mark cannot be undone |
+| A question for a call you denied before | a call you denied is never decided by Jev | Allow it once if you changed your mind |
+| `jade check` says answers to confirm | hints wait for `jade review confirm` | `jade review confirm` in your terminal |
+| `jade check` shows a level you did not set | the config file holds a level that no `jade level` event recorded | `jade level unset`, then set it again; read `jade ledger stats` for what ran |
+| Jev never decides anything and `jade check` reports no key | no OpenRouter key | add the key yourself (never paste it in the chat); the call is asked as before |
+| A high call is slow | Jev is answering; the wait ends at 3 s or at what is left of the 6 s hook budget | nothing; `jade review` shows the median latency |
+
+**Owner steps for 0.6.0.** Back up `~/.local/share/jade`, `jade upgrade` and read the file list, `jade hooks install`, open a new Claude Code session, `jade check`. The level is yours to move from `high`, as in the steps above.
+
+**Risks accepted in 0.6.0.**
+
+- Inside the bands a wrong Jev yes can run a wrong plain high call. The wrong-rate bound shows how sure you can be; it never reaches zero.
+- A delete, payment or release written in a form the human-only patterns do not match is plain high and may be decided by memory or Jev (T29 in `docs/05`).
+- The model has been judged against fixtures only; its accuracy on your calls is what the 50 answers and your marks measure.
+- Jev's authority check in the state machine requires that an accepted call exists, not that it belongs to this decision: it is not reachable by an agent while `human_accept` needs your terminal, and it stays a hardening item (W-106).
+- Your preferences text, the command and written content go to openrouter.ai on each Jev call, at levels low and medium and, as shadow, at high.
+
+## 11. Proposed text, not applied
+
+These need your approval; `jade claude-md apply` and the skill are yours to change.
+
+**CLAUDE.md, the rule "a probability is never permission".** Proposed: "A probability is never permission, with one exception the human made: at the autonomy level the human set in a terminal (`jade level low` or `medium`), JADE may let a plain high call run in the human's place when a confirmed answer of theirs covers it or when Jev's accept clears the level's bar. The hook says so on stderr. Never treat Jev's number as an approval yourself, never reword a call to draw another sample, and never run `jade level`, `jade review confirm|mark` or `jade knows`."
+
+**continuous-flow skill, rule 8.** Proposed: "When JADE lets a call run on the human's behalf (a confirmed answer or Jev), carry on: do not ask the human to confirm it again. When JADE asks, ask once in the chat with the question the hook shows, continue with other work while it waits, and never ask the same thing a second time in other words."
 
