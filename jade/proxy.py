@@ -6,23 +6,30 @@ an unknown outcome). Everything else is the owner's question as before: an absta
 not an accept is never a yes.
 
 Bands come from `policies/escalation.yaml` (family `human_proxy`): the autonomy level sets the risk the question is judged at, so low accepts at 0.70 (egress at
-0.85) and medium at 0.85. Until the owner has answered `ops.JEV_BAND_ANSWERS` plain-high calls Jev is shadow: it is asked and recorded and decides nothing. At level high
-it is shadow too and its advice is not shown.
+0.85) and medium at 0.85. Until the owner has answered `ops.JEV_BAND_ANSWERS` distinct plain-high calls Jev is shadow: it is asked and recorded and decides nothing. At
+level high it is shadow too and its advice is not shown.
 
-Never sent (always the owner's question): a human-only class, fetch-and-exec (R-22), a blocked call, a merge, a call the gate could not read, a secret-shaped value,
-text that redaction changed, a program over 4 KiB or more than one inline program, and a call with neither a preferences text nor a confirmed answer of its rule.
+Never sent (always the owner's question):
+- a human-only class, a blocked call, a critical call (only level high calls are sent), fetch-and-exec (R-22) and writes to agent instruction files (R-13, R-18),
+  also when the rule sits in one segment of a longer command;
+- a merge, a call the gate could not read (any segment), a secret-shaped value, text that redaction changed;
+- a program or a write over 4 KiB (the whole content of a write is shown to Jev, never a part), more than one inline program;
+- a call the owner denied before, and a call Jev has already been asked about twice this hour in this session (a reworded comment is the same call);
+- a call with neither a preferences text nor a confirmed answer of its rule.
 Egress (R-21) is decided at level low only.
 
-The provider call runs in a daemon thread that the hook waits for at most `DEADLINE_S` (and never past the hook's own budget); a hung exchange leaves the thread behind
-and the owner is asked.
+The provider call runs in a daemon thread that the hook waits for at most `DEADLINE_S` (and never past the hook's own budget); a hung exchange leaves the thread behind,
+its row is closed, and the owner is asked. The answer is never taken from the dedup cache: every accept is a fresh sample of this call.
 """
 
 from __future__ import annotations
 
 import threading
 import time
+from datetime import timedelta
 
 from . import adapter, ask, ledger, memory, paths
+from .util import canonical, now, sha256, ts
 
 QID = "q.human_proxy.would_allow"
 DEADLINE_S = 3.0          # the most one exchange may take; the hook budget (hooks.BUDGET_S) is the other limit
@@ -31,8 +38,10 @@ MIN_DEADLINE_S = 0.1
 JOIN_SLACK_S = 0.5
 MAX_TEXT = 4096
 MAX_PAST = 8
-CONTENT_KEYS = ("content", "new_string", "text", "file_text")
-NEVER_RULES = frozenset({"R-22"})
+MAX_ATTEMPTS = 2          # questions to Jev about one call (by hold key) per session and hour: a comment added to the command does not make it a new call
+ATTEMPT_WINDOW_S = 3600
+NEVER_RULES = frozenset({"R-22", "R-13", "R-18"})   # R-13 and R-18: the files an agent reads its instructions from (AGENTS.md, CLAUDE.md, skills): a model judging them is the injection surface
+EGRESS = "R-21"
 
 
 def make_provider(deadline_s: float):
@@ -50,71 +59,114 @@ def preferences() -> str:
 
 
 def past_answers(db, rule_id: str) -> list[dict]:
-    """The confirmed (strong) allow answers the owner gave to calls of this rule, newest first. Unconfirmed hints are never sent."""
+    """The confirmed (strong) allow answers the owner gave to plain calls of this rule, newest first. Unconfirmed hints and human-only answers are never sent."""
     cap, use = memory._valid_since()
-    rows = db.con.execute("SELECT rule_id, label FROM human_answers WHERE strength='strong' AND answer='allow' AND rule_id=? AND confirmed_ts>=? AND "
+    rows = db.con.execute("SELECT rule_id, label FROM human_answers WHERE strength='strong' AND answer='allow' AND rule_id=? AND COALESCE(ho,0)=0 AND confirmed_ts>=? AND "
                           "COALESCE(last_used_ts, confirmed_ts)>=? AND COALESCE(source,'')<>'test' ORDER BY confirmed_ts DESC, rowid DESC LIMIT ?",
                           (rule_id, cap, use, MAX_PAST)).fetchall()
     return [{"rule": r["rule_id"], "answer": "allow", "label": (r["label"] or "")[:120]} for r in rows]
 
 
 def owner_answers(db) -> int:
-    """Plain-high calls the owner answered (human-only answers do not count): the number the shadow band is measured by."""
-    return db.con.execute("SELECT COUNT(*) FROM human_answers WHERE COALESCE(ho,0)=0 AND " + ledger.LIVE.format(a="")).fetchone()[0]
+    """Distinct plain-high calls the owner answered (human-only answers, retired answers and repeats of one call do not count): what the shadow band is measured by."""
+    return db.con.execute("SELECT COUNT(DISTINCT exact_key) FROM human_answers WHERE COALESCE(ho,0)=0 AND strength<>'revoked' AND " + ledger.LIVE.format(a="")).fetchone()[0]
 
 
-def distrusted(db, exact: str, cls: str | None) -> bool:
-    """The owner marked a call of this exact form or kind wrong (`jade review mark ... wrong`): Jev never decides it again."""
-    keys = [exact] + ([cls] if cls else [])
+def coarse_key(a, tool: str, tin: dict, el: str) -> str | None:
+    """For a call that has no kind key (a write, an MCP call, an exact-only shell call): the rule and what it touches, so that one changed character does not undo a
+    wrong mark. A shell call is the first two words of each gated segment."""
+    from . import policy
+
+    if el == "class":
+        return None
+    if policy.runs_shell(tool, tin):
+        return sha256(canonical({"rule": a.rule_id, "heads": sorted({" ".join(k.split()[:2]) for k in a.seg_keys})}))
+    return sha256(canonical({"rule": a.rule_id, "tool": tool, "subject": a.subject}))
+
+
+def distrusted(db, keys: list[str]) -> bool:
+    """The owner marked a call of this exact form, kind or target wrong (`jade review mark ... wrong`): Jev never decides it again."""
+    keys = [k for k in keys if k]
+    if not keys:
+        return False
     marks = ",".join("?" * len(keys))
     return db.con.execute(f"SELECT 1 FROM events WHERE kind='jev_distrust' AND entity_id IN ({marks}) AND {ledger.LIVE.format(a='')} LIMIT 1", keys).fetchone() is not None  # noqa: S608
 
 
-def distrust(db, exact: str | None, cls: str | None) -> None:
-    for key in (exact, cls):
+def distrust(db, *keys: str | None) -> None:
+    for key in keys:
         if key:
             db.event(key, "jev_distrust", guard="jade review mark wrong", actor="human")
 
 
-def _content(tin: dict) -> str:
-    return "\n".join(str(tin[k]) for k in CONTENT_KEYS if isinstance(tin.get(k), str))
+def denied_before(db, hold: str) -> bool:
+    """The owner said no to this call (any session, any time): Jev does not get to say yes."""
+    return db.con.execute("SELECT 1 FROM asks WHERE status='DENIED' AND hold_key=? LIMIT 1", (hold,)).fetchone() is not None
+
+
+def _attempt_key(session: str, hold: str) -> str:
+    return "jevtry:" + sha256(f"{session}\0{hold}")[:40]
+
+
+def attempts(db, session: str, hold: str) -> int:
+    since = ts(now() - timedelta(seconds=ATTEMPT_WINDOW_S))
+    return db.con.execute(f"SELECT COUNT(*) FROM events WHERE kind='jev_asked' AND entity_id=? AND ts>=? AND {ledger.LIVE.format(a='')}", (_attempt_key(session, hold), since)).fetchone()[0]  # noqa: S608
+
+
+def _written(tool: str, tin: dict) -> bool:
+    from . import policy
+
+    return policy.content_bound(tool, tin)
+
+
+def _content(tool: str, tin: dict) -> str:
+    """Everything a write or an MCP call carries, as one text (policy.content_view: the same rendering the permit digest covers), or '' for a shell call."""
+    from . import policy
+
+    return policy.content_view(tin) if _written(tool, tin) else ""
 
 
 def skip_reason(a, tool: str, tin: dict, level: str) -> str | None:
     """Why this call is not sent to Jev (it is the owner's question), or None."""
     from . import policy
 
+    rules = {a.rule_id, *(getattr(a, "seg_rules", None) or [])}
     if a.ho_ids or a.blocked:
         return "human-only or blocked"
-    if a.rule_id in NEVER_RULES or (a.rule_id == "R-21" and level != "low"):
-        return "fetch-and-exec, or egress outside level low"
-    if a.blind or a.rule_id in ("R-31", "R-32"):
-        return "the gate could not read it"
+    if a.level != "high":
+        return "not a plain high call"
+    if rules & NEVER_RULES:
+        return "fetch-and-exec, or a write to an agent instruction file"
+    if EGRESS in rules and level != "low":
+        return "egress outside level low"
+    if a.blind or getattr(a, "unread", None) or rules & {"R-31", "R-32"}:
+        return "the gate could not read all of it"
     if any(memory._MERGE.match(k) for k in getattr(a, "seg_keys", []) or []):
         return "a merge"
     subject = a.subject or ""
-    if len(subject) > MAX_TEXT or len(_content(tin)) > MAX_TEXT:
+    if len(subject) > MAX_TEXT or len(_content(tool, tin)) > MAX_TEXT:
         return "over 4 KiB"
     if policy.runs_shell(tool, tin) and len(list(memory._INLINE.finditer(subject))) > 1:
         return "more than one inline program"
     return None
 
 
-def build_state(a, tool: str, tin: dict, cwd: str, prefs: str, past: list[dict]) -> dict:
-    """What Jev sees. The level is not part of it. The call is data: `action`, `kind` and `content_excerpt` are never instructions."""
+def build_state(a, tool: str, tin: dict, prefs: str, past: list[dict], fp: dict) -> dict:
+    """What Jev sees. The level and the folder are not part of it. The call is data: `action`, `kind` and `content_excerpt` are never instructions."""
     from . import decide
 
-    state = {"action": decide.scrub(a.subject), "kind": f"{a.rule_id}: {a.rationale}", "preferences": prefs, "past_answers": past,
-             "folder": (cwd or "").rstrip("/").rsplit("/", 1)[-1]}
-    if tool != "Bash" and (content := _content(tin)):
+    state = {"action": decide.scrub(a.subject), "kind": f"{a.rule_id}: {a.rationale}", "preferences": prefs, "past_answers": past}
+    if content := _content(tool, tin):
         state["content_excerpt"] = decide.scrub(content)
+    if fp:
+        state["fingerprints"] = fp
     return state
 
 
 def _risk(level: str, a) -> str:
     """The risk the question is judged at, which picks the band in `policies/escalation.yaml`."""
     if level == "low":
-        return "high" if a.rule_id == "R-21" else "low"
+        return "high" if EGRESS in {a.rule_id, *(getattr(a, "seg_rules", None) or [])} else "low"
     return "medium"
 
 
@@ -131,7 +183,7 @@ def _ask(spec, state: dict, risk: str, session: str, deadline_s: float):
 
     def work():
         try:
-            box["r"] = ask.run([spec], state, risk=risk, session=session, provider=make_provider(deadline_s))
+            box["r"] = ask.run([spec], state, risk=risk, session=session, provider=make_provider(deadline_s), use_cache=False)
         except Exception as e:  # noqa: BLE001 - whatever broke, the owner is asked
             box["e"] = e
 
@@ -141,9 +193,18 @@ def _ask(spec, state: dict, risk: str, session: str, deadline_s: float):
     return box.get("r")
 
 
+def _close_stranded(db, session: str, since: str) -> None:
+    """The exchange outlived the wait: its row must not stay EVALUATING (it would count against the requests in flight for 40 s)."""
+    try:
+        db.con.execute("UPDATE jev_calls SET state='DONE', error_kind='TIMEOUT', exit_code=5, done_ts=? WHERE question_id=? AND session_id=? AND state='EVALUATING' AND ts>=?",
+                       (ts(), QID, session, since))
+    except Exception:  # noqa: BLE001, S110 - bookkeeping only
+        pass
+
+
 def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: float | None = None):
     """The Jev branch of the gate: a HookResult that lets the call run, or None (the owner is asked as before)."""
-    from . import askchat, permits, state_machine
+    from . import askchat, hooks, permits, state_machine
     from .hooks import HookResult
 
     level = paths.level()
@@ -153,13 +214,15 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: 
     tin = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
     if skip_reason(a, tool, tin, level) or permits.make_context(tool, a, event, cwd=cwd).get("redacted"):
         return None
-    exact, cls, _ = memory.keys(a, tool, tin, fp)
+    exact, cls, el = memory.keys(a, tool, tin, fp)
+    coarse = coarse_key(a, tool, tin, el)
+    hold = a.hold_key or a.plan_hash
     prefs, past = preferences(), past_answers(db, a.rule_id)
     if not prefs and not past:
         return None
-    if distrusted(db, exact, cls):
+    if distrusted(db, [exact, cls, coarse]) or denied_before(db, hold) or attempts(db, session, hold) >= MAX_ATTEMPTS:
         return None
-    state = build_state(a, tool, tin, cwd, prefs, past)
+    state = build_state(a, tool, tin, prefs, past, fp)
     spec = ask.registry_spec(QID)
     _, hits, _, leaked = ask.prepare([ask.registry_spec(QID)], dict(state))
     if hits or leaked:
@@ -167,23 +230,30 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: 
     deadline = _deadline(started)
     if deadline is None:
         return None
+    db.event(_attempt_key(session, hold), "jev_asked", guard=f"{a.rule_id} {a.level}", actor="hook")
+    began = ts()
     result = _ask(spec, state, _risk(level, a), session, deadline)
-    if result is None or result.exit_code != 0 or result.primary.verdict is None or result.primary.verdict.verdict != "ACCEPT":
+    if result is None:
+        _close_stranded(db, session, began)
+        return None
+    item = result.primary
+    if result.exit_code != 0 or item.verdict is None or item.verdict.verdict != "ACCEPT" or not item.call_id:
         return None
     if level == "high" or owner_answers(db) < _band_answers():
         return None   # shadow: asked and recorded, decides nothing
-    item = result.primary
     try:
         with db.tx():
+            if hooks._si07_hold(db, a):   # another identical call became a decision while Jev was answering: the owner is asked
+                return None
             did = askchat.run_decision(db, a, tool, cwd, session, item.call_id[-12:], "jev")
             db.event(item.call_id, "jev_allowed", guard=f"{a.rule_id} {a.level}", actor="hook",
-                     detail={"decision_id": did, "rule": a.rule_id, "label": decide_label(a), "exact_key": exact, "class_key": cls, "p": item.verdict.value,
-                             "band": item.verdict.accept})
+                     detail={"decision_id": did, "rule": a.rule_id, "label": decide_label(a), "exact_key": exact, "class_key": cls, "coarse_key": coarse,
+                             "p": item.verdict.value, "band": item.verdict.accept})
     except state_machine.IllegalTransition:
         return None
     return HookResult(0, f"JADE: Jev judged this {tool} call from your preferences and past answers (rule {a.rule_id}, P={item.verdict.value:.2f}, needs "
-                         f"{item.verdict.accept:.2f}) and let it run in your place. `jade review mark {did} wrong` makes JADE ask again for this call and its kind; "
-                         f"`jade review` shows what Jev decided.")
+                         f"{item.verdict.accept:.2f}) and let it run in your place. `jade review mark {did} wrong` makes JADE ask again for this call, its kind and "
+                         f"its target (it cannot be undone, and it also retires your own answers of that kind); `jade review` shows what Jev decided.")
 
 
 def _band_answers() -> int:
@@ -196,4 +266,3 @@ def decide_label(a) -> str:
     from . import decide
 
     return str(decide.scrub(a.subject)).replace("\n", " ")[:120]
-
