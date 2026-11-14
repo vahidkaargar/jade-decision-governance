@@ -10,13 +10,14 @@ Before 0.5.0 every high call under `enforce` with the signed backend needed a ty
 
 ## 2. The level
 
-One value for the whole Mac, set only by a human in a terminal: `jade level high` turns the new behaviour on, `jade level off` makes JADE only watch, `jade level unset` returns to 0.4.0. The value lives in the JADE config file; a bad value counts as unset. `jade check` shows it. Low and medium arrive with 0.6.0.
+One value for the whole Mac, set only by a human in a terminal: `jade level high` turns the new behaviour on, `jade level off` makes JADE only watch, `jade level unset` returns to 0.4.0, and `jade level low` or `jade level medium` (0.6.0) add memory of what you confirmed (section 9). The value lives in the JADE config file; a bad value counts as unset. `jade check` shows it.
 
 | Level | What the gate does |
 |---|---|
 | unset | As 0.4.0: a high call waits for the signed terminal permit. |
 | off | JADE only watches. High calls and ordinary safety invariants are advisory. The four governance invariants (SI-09 to SI-12: the permit, the permit key, the state and the config directory) still block. |
 | high | A high call is asked, in the chat or a dialog (section 3). The signed permit stays for live JADE wiring and for what no channel reaches. |
+| low, medium | As high, except that a call you confirmed earlier runs with no question (section 9). Jev joins these two levels in a later 0.6.0 step; today they differ from each other in nothing. |
 
 A human-only class (section 4) is high work once a level is set, whatever its rule says. Safety invariants are never asked: nobody can approve them.
 
@@ -100,4 +101,24 @@ Measure it with `jade ledger stats`: the `asks` block gives answers by channel a
 
 ## 8. Not in 0.5.0
 
-Memory of confirmed answers, Jev deciding in your place, `jade review confirm`, `jade knows`, levels low and medium, batch asks, and the per-project level. They are the 0.6.0 plan.
+Jev deciding in your place, batch asks, and the per-project level. Memory of confirmed answers (`jade review confirm`, `jade knows`, levels low and medium) is the first 0.6.0 step: section 9.
+
+## 9. Memory of confirmed answers (0.6.0)
+
+Every Allow or Deny you give in the chat or in a dialog is stored as a **hint**. A hint decides nothing. `jade review confirm`, run by you in a terminal, shows the allow answers grouped by kind of call, with the rule id in brackets; you drop a group or take it, then type `yes` after reading how many answers become standing. `jade review confirm --all` takes every group after the one `yes`. A Deny is never made standing.
+
+At level `low` or `medium` the gate looks for a standing answer before it asks. A covered call runs with no question, in any session and in a subagent. It still goes through a decision walked to EXECUTING, so SI-07 holds an unknown outcome, and the decision names the standing answer that covers it. At level `high` nothing is remembered.
+
+**What an answer covers.** Two keys are stored. The *exact* key is the call in the state you answered it in: the canonical gated segments (independent of quoting, prefixes and directory) and the fingerprints the gate computes (the HEAD a push sends, the digest of written content). The *kind* key is the rule plus the sorted set of gated segments, with the number of `gh pr <verb> N` dropped. A kind key exists only where generalising is safe.
+
+| Call | Remembered as |
+|---|---|
+| a plain gated shell command | its kind and its exact call |
+| an inline program (`-c`, `-e`, a heredoc, a here-string, a process substitution), a call the gate could not read, R-14, M-05, M-07 | that exact call only |
+| a git push or merge, `gh pr merge`, `glab mr merge`, a write, an MCP call | that exact call only (the head commit or the content is part of the key) |
+| a human-only class (section 4), R-21 (egress), R-22 (fetch and run), a call a safety invariant blocks, a call with a secret-shaped value | never: asked every time |
+
+**Lifetime.** A standing answer decides while its last confirm or last use is within 30 days, and never more than 180 days after the confirm. `jade knows list` (read-only) shows each one with the day it stops deciding and marks those within 14 days of the 180-day end. `jade knows rm ID` forgets one; `jade knows edit` opens a preferences file (`preferences.md` in the config directory) that starts as a template with one commented-out sentence per standing answer. `jade review confirm`, `jade knows rm` and `jade knows edit` need a human terminal and SI-09 blocks them for an agent. `jade check` has a row that counts allow answers still waiting to be confirmed.
+
+**Limits.** The class of a gated command is the rule that won plus the segments, so two commands that share both are one kind; a command whose danger sits in an argument the key keeps (a path, a branch) is a different kind. A program the agent writes and then runs is not read by the gate (docs/05 T18), so it is remembered only as that exact text.
+

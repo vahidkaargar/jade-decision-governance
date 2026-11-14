@@ -208,6 +208,8 @@ class Assessment:
     recorded: bool = False  # R-30 and R-31: a read-only command or a Read/Grep/Glob call named a credential file (a write that names one is R-30 too and is not counted)
     ho_ids: list[str] = field(default_factory=list)   # docs/12: the human-only classes the call falls in (HO_* below). Never changes `level` or `rule_id`
     elevated: bool = False   # set by the hook, not here: a level was set and a human-only class raised the call to high
+    seg_keys: list[str] = field(default_factory=list)    # shell only: the canonical key of each gated segment (what memory generalises over, jade/memory.py)
+    seg_rules: list[str] = field(default_factory=list)   # shell only: the rule each gated segment matched
 
     @property
     def human_only(self) -> bool:
@@ -1234,6 +1236,7 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     active: list[str] = []
     keys: list[str] = []
     gated_keys: list[str] = []
+    gated_rules: list[str] = []
     text_in = subject.replace("\x00", "")  # a shell ignores a NUL byte in a command; the plan hash still covers the text as written
     secret_read = False
     proxied = bool(egress.PROXY_ENV.search(text_in))   # a proxy variable anywhere in the command routes a send in any segment (`export https_proxy=...; curl ...`)
@@ -1287,6 +1290,7 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         keys.append(key)
         if LEVELS[seg_best["level"]] >= LEVELS[permit_floor()]:
             gated_keys.append(key)
+            gated_rules.append(seg_best["id"])
     best = best or risk()["rules"][-1]
     if labels and best["level"] == "low":   # R-31 is low, so it never wins a level comparison: nothing above low matched, and what the gate could not read is the finding
         best = next(r for r in risk()["rules"] if r["id"] == "R-31")
@@ -1328,6 +1332,7 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         _ho_add(a, HO_R17)
     _seal(a, tool, subject, cwd, subject)
     a.hold_key = sha256(canonical({"shell": sorted(set(gated_keys or keys))}))
+    a.seg_keys, a.seg_rules = sorted(set(gated_keys)), sorted(set(gated_rules))
     return a
 
 

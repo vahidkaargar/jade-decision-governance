@@ -21,7 +21,7 @@ import subprocess
 import sys
 from datetime import timedelta
 
-from . import askchat, paths
+from . import askchat, memory, paths
 from .util import canonical, new_id, now, ts
 
 DIALOG_WAIT_S = 120       # how long the dialog stays up before it gives up
@@ -111,7 +111,7 @@ def _finish(db, ask_id: str, status: str, ttl_s: int, answered: bool) -> None:
 
 def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
     """The dialog branch of the gate for a subagent call: a HookResult (run it, or refuse it) or None when the signed terminal permit applies."""
-    from . import hooks, permits, state_machine
+    from . import decide, hooks, permits, state_machine
     from .hooks import HookResult
 
     if not applicable(mode, a, event):
@@ -150,7 +150,9 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
             if did:
                 db.con.execute("UPDATE asks SET decision_id=? WHERE ask_id=?", (did, ask_id))
             db.event(ask_id, "ask_allowed" if allow else "ask_denied", guard=f"{a.rule_id} {a.level}", actor="human", detail={"channel": "dialog", "decision_id": did})
-            db.record_human_answer(session=session, decision_id=did, rule_id=a.rule_id, class_key=a.rule_id, exact_key=hold[:64], answer="allow" if allow else "deny", channel="dialog")
+            exact, cls, _ = memory.keys(a, tool, event.get("tool_input"), fp)
+            db.record_human_answer(session=session, decision_id=did, rule_id=a.rule_id, class_key=cls, exact_key=exact, answer="allow" if allow else "deny", channel="dialog",
+                                   label=decide.scrub(a.subject).replace("\n", " ")[:120])
     except state_machine.IllegalTransition as e:
         return HookResult(2, f"JADE gate: the dialog approval for this {tool} call could not be used ({e}). Ask the human to run `jade decide list` and look at it.")
     if allow:

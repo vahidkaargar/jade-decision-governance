@@ -96,10 +96,16 @@ def test_unset_removes_the_key_and_off_is_a_level():
     assert paths.level() == "off"
 
 
-@pytest.mark.parametrize("v", ["low", "medium", "extreme", "", "HIGH"])
-def test_this_release_accepts_only_unset_off_and_high(v):
+@pytest.mark.parametrize("v", ["extreme", "", "HIGH", "Medium"])
+def test_only_the_five_levels_are_accepted(v):
     with pytest.raises(ValueError):
         ops.set_level(v, stdin_isatty=True)
+
+
+@pytest.mark.parametrize("v", ["unset", "off", "low", "medium", "high"])
+def test_each_of_the_five_levels_can_be_set(v):
+    ops.set_level(v, stdin_isatty=True)
+    assert paths.level() == (None if v == "unset" else v)
 
 
 def test_high_is_refused_when_the_config_holds_a_level_no_jade_level_recorded():

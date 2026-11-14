@@ -73,7 +73,7 @@ CREATE INDEX IF NOT EXISTS human_answers_ts ON human_answers(ts);
 CREATE INDEX IF NOT EXISTS asks_call ON asks(session_id, hold_key, status);
 """
 MIGRATIONS = {"jev_calls": [("language", "TEXT"), ("source", "TEXT")], "decisions": [("hold_key", "TEXT"), ("source", "TEXT")],
-              "permits": [("source", "TEXT")], "events": [("source", "TEXT")]}   # columns added after the first release: (name, type)
+              "permits": [("source", "TEXT")], "events": [("source", "TEXT")], "asks": [("class_key", "TEXT"), ("label", "TEXT")], "human_answers": [("last_used_ts", "TEXT"), ("label", "TEXT")]}   # columns added after the first release: (name, type)
 # PRAGMA user_version of a file once SCHEMA, the migrations and INDEXES have been applied to it; a file already at this value skips all three (W-58). It is a
 # digest of those three, so changing any of them changes the version and every file is brought up to date once: nobody has to remember to bump a number.
 SCHEMA_VERSION = zlib.crc32(json.dumps([SCHEMA, INDEXES, MIGRATIONS], sort_keys=True).encode()) & 0x7FFFFFFF
@@ -308,17 +308,33 @@ class Ledger:
     ANSWER_CHANNELS = ("chat", "dialog", "terminal")
 
     def record_human_answer(self, *, session: str | None, decision_id: str | None, rule_id: str, class_key: str | None, exact_key: str, answer: str,
-                            channel: str) -> str:
-        """Store what the human answered to an ask, as a `hint` (docs/12): it decides nothing and goes to no model until `jade review confirm` (0.6.0).
+                            channel: str, label: str | None = None) -> str:
+        """Store what the human answered to an ask, as a `hint` (docs/12): it decides nothing and goes to no model until `jade review confirm`.
         `exact_key` identifies the call, `class_key` the kind of call. Returns the answer id."""
         if answer not in self.HUMAN_ANSWERS or channel not in self.ANSWER_CHANNELS or not exact_key or not rule_id:
             raise ValueError(f"a human answer needs answer in {self.HUMAN_ANSWERS}, channel in {self.ANSWER_CHANNELS}, an exact key and a rule id")
         aid = new_id("ans")
         ck = redact.redact(class_key, secrets_only=True)[0] if class_key else None
-        self.con.execute("INSERT INTO human_answers(answer_id, ts, session_id, decision_id, rule_id, class_key, exact_key, answer, channel, strength, source) "
-                         "VALUES(?,?,?,?,?,?,?,?,?,'hint',?)", (aid, ts(), session, decision_id, rule_id, ck, exact_key, answer, channel, self.source))
+        lb = redact.redact(label, secrets_only=True)[0][:120] if label else None   # what the human sees in `jade review confirm`: the call, one line, secrets removed
+        self.con.execute("INSERT INTO human_answers(answer_id, ts, session_id, decision_id, rule_id, class_key, exact_key, answer, channel, strength, source, label) "
+                         "VALUES(?,?,?,?,?,?,?,?,?,'hint',?,?)", (aid, ts(), session, decision_id, rule_id, ck, exact_key, answer, channel, self.source, lb))
         self.event(aid, "human_answer", guard=f"{rule_id} {answer} via {channel}", actor="human", detail={"decision_id": decision_id, "rule_id": rule_id})
         return aid
+
+    def confirm_answers(self, answer_ids) -> int:
+        """Hints become `strong` (the human confirmed them in a terminal: jade/memory.py reads strong allow rows). Returns how many changed."""
+        n = 0
+        for aid in answer_ids:
+            n += self.con.execute("UPDATE human_answers SET strength='strong', confirmed_ts=? WHERE answer_id=? AND strength='hint' AND answer='allow'", (ts(), aid)).rowcount
+            self.event(aid, "human_answer_confirmed", guard="jade review confirm", actor="human")
+        return n
+
+    def revoke_answer(self, answer_id: str) -> bool:
+        """`jade knows rm`: a strong row stops deciding. The row stays for the audit trail."""
+        ok = self.con.execute("UPDATE human_answers SET strength='revoked' WHERE answer_id=? AND strength='strong'", (answer_id,)).rowcount == 1
+        if ok:
+            self.event(answer_id, "human_answer_revoked", guard="jade knows rm", actor="human")
+        return ok
 
     def human_answers(self, strength: str | None = None, since_s: float | None = None, limit: int = 500):
         """The recorded answers, newest first; live rows only (a verification run's rows are left out, W-72)."""
