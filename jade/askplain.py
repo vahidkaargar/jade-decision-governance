@@ -143,7 +143,7 @@ def header(a, tool: str) -> list[str]:
     lines = [what_line(a, tool), risk_line(a.rule_id)]
     n = other_count(a)
     if n:
-        lines.append(f"Also in this call: {n} other command that only reads." if n == 1 else f"Also in this call: {n} other commands that only read.")
+        lines.append(f"Also in this call: {n} other command that JADE rates as low risk." if n == 1 else f"Also in this call: {n} other commands that JADE rates as low risk.")
     risky = len(getattr(a, "seg_keys", None) or [])
     if risky >= 2:
         lines.append(f"This call joins {risky} risky commands. Ask the agent to send them one by one.")

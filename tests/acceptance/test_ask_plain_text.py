@@ -56,7 +56,7 @@ def test_the_owner_example_says_the_merge_and_counts_the_rest():
     head = askplain.header(a, "Bash")
     assert head[0].startswith("Merge pull request 940")
     assert head[1] == askplain.risk_line("R-10")
-    assert head[2] == "Also in this call: 3 other commands that only read."
+    assert head[2] == "Also in this call: 3 other commands that JADE rates as low risk."
     assert len(head) == 3
 
 
@@ -68,7 +68,15 @@ def test_a_call_with_no_other_commands_has_no_also_line():
 
 def test_one_other_command_is_said_in_the_singular():
     a = assess("gh pr merge 940 --squash; cat a.txt")
-    assert "Also in this call: 1 other command that only reads." in askplain.header(a, "Bash")
+    head = askplain.header(a, "Bash")
+    assert "Also in this call: 1 other command that JADE rates as low risk." in head
+    assert all("only read" not in line for line in head[2:])   # a low-risk command may also write (git commit), so the line never says it only reads
+
+
+def test_a_low_risk_write_is_counted_without_claiming_it_only_reads():
+    a = assess("gh pr merge 940 --squash; git commit -m x")
+    assert askplain.other_count(a) == 1
+    assert "Also in this call: 1 other command that JADE rates as low risk." in askplain.header(a, "Bash")
 
 
 def test_the_chat_question_starts_with_the_plain_lines_and_the_command_comes_after():
