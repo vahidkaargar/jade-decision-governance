@@ -152,7 +152,7 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
             db.event(ask_id, "ask_allowed" if allow else "ask_denied", guard=f"{a.rule_id} {a.level}", actor="human", detail={"channel": "dialog", "decision_id": did})
             exact, cls, _ = memory.keys(a, tool, event.get("tool_input"), fp)
             db.record_human_answer(session=session, decision_id=did, rule_id=a.rule_id, class_key=cls, exact_key=exact, answer="allow" if allow else "deny", channel="dialog",
-                                   label=decide.scrub(a.subject).replace("\n", " ")[:120])
+                                   label=decide.scrub(a.subject).replace("\n", " ")[:120], ho=bool(a.ho_ids))
     except state_machine.IllegalTransition as e:
         return HookResult(2, f"JADE gate: the dialog approval for this {tool} call could not be used ({e}). Ask the human to run `jade decide list` and look at it.")
     if allow:
