@@ -4,8 +4,12 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+### Added
+- **Human-only classes HO-delete, HO-money and HO-release (W-98b; docs/12 section 4).** `jade/humanonly.py` names deletes that cannot be undone, money movement and public releases in a shell command, in the commands of a script file the command runs, and in the name of an MCP tool, each with a corpus of commands that must not match (`git fetch --prune`, `get_invoice`, `docker push localhost:5000/x`, `rm -rf node_modules`, a dry run). A git push of a name that is a tag in the repository (loose or packed) is a release push. With a level set, a call in a class is raised to high so a person is asked; the class never changes the rule or level, and from 0.6.0 no memory or model decides it. **Newly asked at a level:** `rm -r` without `-f` of a directory other than a build or cache directory (R-11 only rated `rm -rf`), `find -delete` and `find -exec rm`, and the money, delete and release commands above that no existing rule rated high. Measured over 150 recent transcripts (3780 Bash and MCP calls): 31 calls in a class, 8 of them newly asked (0.21%), all deletes.
+- **`evals/ho_replay.py`.** Counts, over Claude Code transcripts, the calls in each class and how many a level would newly ask about; prints counts only, never a command, path or input.
+
 ### Changed
-- **CI runs the tests in parallel.** `pytest-xdist` joins the dev dependencies; the CI step is `pytest -n auto -m "not timing"` followed by `pytest -m timing`. The two wall-clock budget tests of `test_ledger_scale_w58.py` carry the new `timing` marker and run serially so load from other workers cannot fail them. 5192 tests, about 240 s serial and about 70 s with 8 workers on the development machine. Plain `uv run pytest -q` still works and runs everything in one process.
+- **CI runs the tests in parallel.** `pytest-xdist` joins the dev dependencies; the CI step is `pytest -n auto --dist loadgroup -m "not timing"` followed by `pytest -m timing`. The two wall-clock budget tests of `test_ledger_scale_w58.py` carry the new `timing` marker and run serially so load from other workers cannot fail them. 5192 tests, about 240 s serial and about 70 s with 8 workers on the development machine. Plain `uv run pytest -q` still works and runs everything in one process.
 
 ## [0.5.0] - 2026-11-14
 

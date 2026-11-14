@@ -12,7 +12,7 @@ JADE is an alpha runtime (design approved and implemented, not yet validated on 
 ```bash
 uv sync
 uv run ruff check .
-uv run pytest -q -n auto -m "not timing"   # parallel (pytest-xdist); plain `uv run pytest -q` runs the same tests one by one
+uv run pytest -q -n auto --dist loadgroup -m "not timing"   # parallel (pytest-xdist); plain `uv run pytest -q` runs the same tests one by one
 uv run pytest -q -m timing                 # the wall-clock budget tests, serially: load from other workers would fail them
 uv run python evals/run_cases.py
 ```

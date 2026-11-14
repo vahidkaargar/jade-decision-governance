@@ -9,6 +9,10 @@ from pathlib import Path
 
 import pytest
 
+# One worker runs the whole module: the module fixture builds the wheel from the checkout, and several workers doing that at once starve each
+# other (190 s per build on 8 workers) and share the checkout's build directory. Needs `--dist loadgroup`.
+pytestmark = pytest.mark.xdist_group("verify_install")
+
 ROOT = Path(__file__).resolve().parents[1]
 # A CI runner has an empty uv cache: let the script download there (UV_OFFLINE=0). Locally it stays offline unless the caller says otherwise.
 _NET = {"UV_OFFLINE": "0"} if os.environ.get("CI") else {}
