@@ -349,12 +349,12 @@ def test_f11_the_pending_request_is_replaced_when_the_repository_moved(tmp_path,
 
 def test_f11_a_changed_policy_revokes_open_permits(human_env, monkeypatch):
     db, p = blocked_then_approved()
-    monkeypatch.setattr(paths, "policy_version", lambda: "0" * 12)
-    r = hooks.pretool(call(PUSH))
-    assert r.exit_code == 2
-    assert permits.get(db, p.permit_id).state == "REVOKED"
-    q = permits.request(db, "git.push", "e" * 64, risk="high")
-    monkeypatch.undo()
+    with monkeypatch.context() as m:   # only this patch is undone: a blanket monkeypatch.undo() would also drop the per-test JADE_HOME and JADE_CONFIG
+        m.setattr(paths, "policy_version", lambda: "0" * 12)
+        r = hooks.pretool(call(PUSH))
+        assert r.exit_code == 2
+        assert permits.get(db, p.permit_id).state == "REVOKED"
+        q = permits.request(db, "git.push", "e" * 64, risk="high")
     permits.sweep(db)
     assert permits.get(db, q.permit_id).state == "REVOKED"
 

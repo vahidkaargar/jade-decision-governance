@@ -10,6 +10,7 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 - **`evals/ho_replay.py`.** Counts, over Claude Code transcripts, the calls in each class and how many a level would newly ask about; prints counts only, never a command, path or input.
 
 ### Changed
+- **JADE refuses its real state under a test run with no isolation.** `paths.home()` and `paths.config_dir()` raise while pytest runs a test and `JADE_HOME` or `JADE_CONFIG` is not set. `tests/conftest.py` already isolated every test under `tests/`; a test file run from anywhere else never loaded it, and once wrote a level and a confirmed answer into the live config and ledger. Nothing changes outside pytest.
 - **CI runs the tests in parallel.** `pytest-xdist` joins the dev dependencies; the CI step is `pytest -n auto --dist loadgroup -m "not timing"` followed by `pytest -m timing`. The two wall-clock budget tests of `test_ledger_scale_w58.py` carry the new `timing` marker and run serially so load from other workers cannot fail them. 5192 tests, about 240 s serial and about 70 s with 8 workers on the development machine. Plain `uv run pytest -q` still works and runs everything in one process.
 
 ## [0.5.0] - 2026-11-14

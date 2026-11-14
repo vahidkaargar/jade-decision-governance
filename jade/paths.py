@@ -14,7 +14,16 @@ from typing import NamedTuple
 PKG = Path(__file__).resolve().parent
 
 
+def _refuse_real_state_under_pytest(var: str) -> None:
+    """A test run that has not been given its own `JADE_HOME` / `JADE_CONFIG` must not open the human's real ledger or config. tests/conftest.py gives every test
+    its own; a test file run from anywhere else (a scratch file, `pytest /tmp/x.py`) never loads that conftest, and once wrote a level and a confirmed answer into
+    the live JADE state. pytest sets PYTEST_CURRENT_TEST while a test runs, so this is checked there and nowhere else."""
+    if "PYTEST_CURRENT_TEST" in os.environ and not os.environ.get(var):
+        raise RuntimeError(f"JADE refuses to use its real state while a pytest test runs without {var} set (a temporary directory per test: see tests/conftest.py)")
+
+
 def home() -> Path:
+    _refuse_real_state_under_pytest("JADE_HOME")
     p = Path(os.environ.get("JADE_HOME") or Path.home() / ".local" / "share" / "jade")
     p.mkdir(parents=True, exist_ok=True)
     try:
@@ -32,6 +41,7 @@ def row_source() -> str | None:
 
 
 def config_dir() -> Path:
+    _refuse_real_state_under_pytest("JADE_CONFIG")
     return Path(os.environ.get("JADE_CONFIG") or Path.home() / ".config" / "jade")
 
 
