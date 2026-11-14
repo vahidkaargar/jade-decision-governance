@@ -797,6 +797,26 @@ def _pending_hints(db) -> list:
     return [r for r in db.human_answers(strength="hint", limit=100000) if r["answer"] == "allow"][::-1]
 
 
+_SCOPE_COVERS = {
+    "kind_project": "The same kind of command in this project. The same exact call is also remembered.",
+    "kind_any": "The same kind of command in any project. Delete, force, tag and release still ask.",
+    "merge_project": "Merging any pull request in this project, with the safe options only. The same exact call is also remembered.",
+}
+
+
+def _scope_lines(r) -> list[str]:
+    """The plain-words lines for a hint that carries a scope: what it would become, what it covers, how long it lasts, how to undo it."""
+    from . import memory
+
+    lines = [f"Would become standing for: {r['scope_label']} ({memory.USE_DAYS} days after last use)"]
+    covers = _SCOPE_COVERS.get(r["scope_kind"])
+    if covers:
+        lines.append(covers)
+    lines.append(f"Confirming makes this proposal standing. It lasts {memory.USE_DAYS} days after its last use, and never more than {memory.CAP_DAYS} days. "
+                 "Undo it with jade knows rm ID.")
+    return lines
+
+
 def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, all_: bool = False) -> int:
     """`jade review confirm`: the human turns the allow answers they gave in the chat or in a dialog into standing answers, in a terminal. Groups of the same kind of
     call are shown with their rule id; each group can be dropped (or all taken with `--all`); a typed `yes` after the list of what becomes standing seals it."""
@@ -811,11 +831,16 @@ def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, al
             return 0
         groups: dict[tuple, list] = {}
         for r in rows:
-            groups.setdefault((r["rule_id"], r["class_key"] or r["exact_key"], bool(r["class_key"])), []).append(r)
+            groups.setdefault((r["rule_id"], r["class_key"] or r["exact_key"], bool(r["class_key"]), r["scope_key"]), []).append(r)
         chosen: list = []
-        for (rule, _, is_class), rs in groups.items():
-            kind = "this kind of call" if is_class else "this exact call only"
-            say(f"{rs[-1]['label'] or '(no text kept)'}  [{rule}]  allowed {len(rs)}x  ->  would be standing for {kind}")
+        for (rule, _, is_class, scope_key), rs in groups.items():
+            if scope_key:
+                say(f"{rs[-1]['label'] or '(no text kept)'}  [{rule}]  allowed {len(rs)}x")
+                for line in _scope_lines(rs[-1]):
+                    say(f"   {line}")
+            else:
+                kind = "this kind of call" if is_class else "this exact call only"
+                say(f"{rs[-1]['label'] or '(no text kept)'}  [{rule}]  allowed {len(rs)}x  ->  would be standing for {kind}")
             if rule in memory.NEVER_RULES:
                 say("   (rule is always asked; confirming it changes nothing)")
             if all_ or ask("  stand for this? [y/N] ").strip().lower() in ("y", "yes"):
@@ -823,7 +848,7 @@ def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, al
         if not chosen:
             say("nothing confirmed")
             return 0
-        say(f"{len(chosen)} answer(s) in {len({(r['rule_id'], r['class_key'] or r['exact_key']) for r in chosen})} group(s) become standing: from now on, at level low or medium, a call that matches "
+        say(f"{len(chosen)} answer(s) in {len({(r['rule_id'], r['class_key'] or r['exact_key'], r['scope_key']) for r in chosen})} group(s) become standing: from now on, at level low or medium, a call that matches "
             f"runs without a question for {memory.USE_DAYS} days after its last use (never more than {memory.CAP_DAYS} days). `jade knows list` shows them, `jade knows rm ID` forgets one.")
         if ask("Type yes to confirm: ").strip() != "yes":
             say("cancelled; nothing changed")
@@ -856,7 +881,8 @@ def knows_list() -> str:
         cap_end = parse_ts(r["confirmed_ts"]) + timedelta(days=memory.CAP_DAYS)
         end = min(x for x in (use_end, cap_end) if x)
         note = "  (near its 180-day end: confirm again to keep it)" if (cap_end - now()) <= timedelta(days=memory.NEAR_CAP_DAYS) else ""
-        out.append(f"{r['answer_id']}  [{r['rule_id']}]  {'kind' if r['class_key'] else 'exact'}  {r['label'] or ''}  stops deciding {ts(end)[:10]}{note}")
+        scope = f"  scope  {r['scope_label']}" if r["scope_label"] else ""
+        out.append(f"{r['answer_id']}  [{r['rule_id']}]  {'kind' if r['class_key'] else 'exact'}  {r['label'] or ''}{scope}  stops deciding {ts(end)[:10]}{note}")
     return "\n".join(out) or "no standing answers"
 
 
