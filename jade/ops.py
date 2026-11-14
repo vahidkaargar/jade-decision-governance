@@ -771,7 +771,7 @@ def review_mark(decision_id: str, mark: str, stdin_isatty: bool | None = None) -
         if not isinstance(ask, dict) or not ask.get("ask_id"):
             raise ValueError("this decision was not answered by an ask or a standing answer, so there is nothing to mark")
         if ask.get("channel") == "memory":
-            answers = db.con.execute("SELECT answer_id, exact_key, class_key FROM human_answers WHERE answer_id=?", (f"ans_{ask['ask_id']}",)).fetchall()
+            answers = db.con.execute("SELECT answer_id, exact_key, class_key, scope_key FROM human_answers WHERE answer_id=?", (f"ans_{ask['ask_id']}",)).fetchall()
         elif ask.get("channel") == "jev":
             ev = db.con.execute("SELECT detail_json FROM events WHERE kind='jev_allowed' AND entity_id=?", (f"call_{ask['ask_id']}",)).fetchone()
             det = json.loads(ev["detail_json"]) if ev and ev["detail_json"] else {}
@@ -782,7 +782,7 @@ def review_mark(decision_id: str, mark: str, stdin_isatty: bool | None = None) -
                                      (memory.exact_key(a["hold_key"], a["fingerprints_json"]),)).fetchall() if a else []
         with db.tx():
             db.event(decision_id, "review_mark", guard=f"jade review mark {mark}", actor=f"human:{user()}", detail={"mark": mark, "answer_ids": [r["answer_id"] for r in answers if r["answer_id"]]})
-            retired = sum(db.retire_answers(r["exact_key"], r["class_key"]) for r in answers) if mark == "wrong" else 0
+            retired = sum(db.retire_answers(r["exact_key"], r["class_key"], r["scope_key"] if "scope_key" in r.keys() else None) for r in answers) if mark == "wrong" else 0
             if mark == "wrong" and ask.get("channel") == "jev":
                 from . import proxy
 
