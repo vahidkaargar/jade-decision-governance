@@ -576,8 +576,10 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
                 return HookResult(0, f"JADE: permit {found.permit_id} consumed for this {tool} call.")
         if (res := replayed()) is not None:   # a parallel delivery of the same call spent the permit between the lookup above and the use
             return res
-        from . import askchat
+        from . import askchat, memory
 
+        if (res := memory.step(db, mode, a, tool, event, fp, cwd)) is not None:   # docs/12: a call the human confirmed earlier runs without a question (levels low and medium)
+            return res
         if (res := askchat.step(db, mode, a, tool, event, fp, cwd)) is not None:   # docs/12: the human answers in the chat (consumes a grant, or asks)
             return res
         from . import askdialog

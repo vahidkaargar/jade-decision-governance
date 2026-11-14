@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from typing import NamedTuple
 
 from . import ledger, paths, policy, signing
-from .util import is_human_tty, now, ts, user
+from .util import is_human_tty, now, parse_ts, ts, user
 
 
 def pretool_matcher() -> str:
@@ -592,7 +592,7 @@ def set_gate_mode(mode: str, stdin_isatty: bool | None = None, allow_unsigned: b
     atomic_write(paths.config_dir() / "config.json", json.dumps(cfg, indent=1) + "\n")
 
 
-LEVEL_CHOICES = ("unset", "off", "high")   # 0.5.0: low and medium arrive with memory and Jev (docs/12, release 0.6.0)
+LEVEL_CHOICES = ("unset", "off", "low", "medium", "high")   # low and medium use what you confirmed (jade/memory.py); Jev joins them in a later release (docs/12)
 
 
 def _recorded_level() -> str | None:
@@ -616,7 +616,7 @@ def set_level(value: str, stdin_isatty: bool | None = None) -> None:
     that no `level` event recorded was written some other way, so setting a new one is refused until the human clears it with `unset`."""
     _require_human("jade level", stdin_isatty)
     if value not in LEVEL_CHOICES:
-        raise ValueError(f"level must be one of {', '.join(LEVEL_CHOICES)} in this release (low and medium come with memory and Jev, docs/12), not {value!r}")
+        raise ValueError(f"level must be one of {', '.join(LEVEL_CHOICES)}, not {value!r}")
     cfg = paths.config()
     if value != "unset" and "level" in cfg and cfg["level"] != _recorded_level():
         raise HumanOnly("the config holds a level that no `jade level` command recorded (it was written some other way): run `jade level unset`, check "
@@ -676,6 +676,122 @@ def review(since_s: float | None = None) -> str:
     lines.append("by rule: " + ", ".join(f"{k} {a + d} ({a} allow, {d} deny)" for k, (a, d) in sorted(tally("rule_id").items())))
     lines.append("by channel: " + ", ".join(f"{k} {a + d}" for k, (a, d) in sorted(tally("channel").items())))
     return "\n".join(lines)
+
+
+def _pending_hints(db) -> list:
+    return [r for r in db.human_answers(strength="hint", limit=100000) if r["answer"] == "allow"][::-1]
+
+
+def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, all_: bool = False) -> int:
+    """`jade review confirm`: the human turns the allow answers they gave in the chat or in a dialog into standing answers, in a terminal. Groups of the same kind of
+    call are shown with their rule id; each group can be dropped (or all taken with `--all`); a typed `yes` after the list of what becomes standing seals it."""
+    from . import memory
+
+    _require_human("jade review confirm", stdin_isatty)
+    db = ledger.open(timeout=5)
+    try:
+        rows = _pending_hints(db)
+        if not rows:
+            say("no unconfirmed allow answers")
+            return 0
+        groups: dict[tuple, list] = {}
+        for r in rows:
+            groups.setdefault((r["rule_id"], r["class_key"] or r["exact_key"], bool(r["class_key"])), []).append(r)
+        chosen: list = []
+        for (rule, _, is_class), rs in groups.items():
+            kind = "this kind of call" if is_class else "this exact call only"
+            say(f"{rs[-1]['label'] or '(no text kept)'}  [{rule}]  allowed {len(rs)}x  ->  would be standing for {kind}")
+            if rule in memory.NEVER_RULES:
+                say("   (rule is always asked; confirming it changes nothing)")
+            if all_ or ask("  stand for this? [y/N] ").strip().lower() in ("y", "yes"):
+                chosen += rs
+        if not chosen:
+            say("nothing confirmed")
+            return 0
+        say(f"{len(chosen)} answer(s) in {len({(r['rule_id'], r['class_key'] or r['exact_key']) for r in chosen})} group(s) become standing: from now on, at level low or medium, a call that matches "
+            f"runs without a question for {memory.USE_DAYS} days after its last use (never more than {memory.CAP_DAYS} days). `jade knows list` shows them, `jade knows rm ID` forgets one.")
+        if ask("Type yes to confirm: ").strip() != "yes":
+            say("cancelled; nothing changed")
+            return 0
+        with db.tx():
+            n = db.confirm_answers([r["answer_id"] for r in chosen])
+        say(f"{n} answer(s) confirmed")
+        return n
+    finally:
+        db.close()
+
+
+def knows_list() -> str:
+    """`jade knows list` (read-only): the standing answers, with when each stops deciding."""
+    from . import memory
+
+    db = ledger.open(timeout=5)
+    try:
+        rows = db.human_answers(strength="strong", limit=100000)
+    finally:
+        db.close()
+    if not rows:
+        return "no standing answers (`jade review confirm` makes some from what you allowed in the chat)"
+    out = []
+    for r in rows:
+        if r["answer"] != "allow":
+            continue
+        last = max(filter(None, [r["confirmed_ts"], r["last_used_ts"]]))
+        use_end = (parse_ts(last) + timedelta(days=memory.USE_DAYS)) if last else None
+        cap_end = parse_ts(r["confirmed_ts"]) + timedelta(days=memory.CAP_DAYS)
+        end = min(x for x in (use_end, cap_end) if x)
+        note = "  (near its 180-day end: confirm again to keep it)" if (cap_end - now()) <= timedelta(days=memory.NEAR_CAP_DAYS) else ""
+        out.append(f"{r['answer_id']}  [{r['rule_id']}]  {'kind' if r['class_key'] else 'exact'}  {r['label'] or ''}  stops deciding {ts(end)[:10]}{note}")
+    return "\n".join(out) or "no standing answers"
+
+
+def knows_rm(answer_id: str, stdin_isatty: bool | None = None) -> bool:
+    _require_human("jade knows rm", stdin_isatty)
+    db = ledger.open(timeout=5)
+    try:
+        with db.tx():
+            return db.revoke_answer(answer_id)
+    finally:
+        db.close()
+
+
+PREFERENCES_FILE = "preferences.md"
+
+
+def preferences_path() -> Path:
+    return paths.config_dir() / PREFERENCES_FILE
+
+
+def knows_edit(stdin_isatty: bool | None = None, editor: str | None = None) -> Path:
+    """`jade knows edit`: open the preferences file in the human's editor. It starts as a template with one commented-out sentence per standing kind of call."""
+    _require_human("jade knows edit", stdin_isatty)
+    p = preferences_path()
+    if not p.exists():
+        lines = ["# What JADE may decide for you. Write plain sentences; a later release reads this file when it decides in your place.",
+                 "# Lines that start with # are ignored.", ""]
+        db = ledger.open(timeout=5)
+        try:
+            for r in db.human_answers(strength="strong", limit=1000):
+                if r["answer"] == "allow" and r["label"]:
+                    lines.append(f"# I am fine with: {r['label']}  [{r['rule_id']}]")
+        finally:
+            db.close()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(p, "\n".join(lines) + "\n")
+    subprocess.run([editor or os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi", str(p)], check=False)
+    return p
+
+
+def pending_row() -> tuple[str, bool, str]:
+    try:
+        db = ledger.open(timeout=5)
+    except Exception:  # noqa: BLE001 - an unreadable ledger is reported by its own row
+        return ("answers to confirm", True, "unknown")
+    try:
+        n = len(_pending_hints(db))
+    finally:
+        db.close()
+    return ("answers to confirm", True, "none" if not n else f"{n} allow answer(s) wait: `jade review confirm` (in a terminal) makes them standing")
 
 
 def claude_md_section() -> str:
@@ -1255,6 +1371,7 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
         rows.append(("pretool matcher", not gaps, "covers every gated tool" if not gaps else f"does not cover {', '.join(gaps)}: re-run `jade hooks install` in a terminal"))
     rows.append(_gate_mode_row())
     rows.append(_level_row())
+    rows.append(pending_row())
     rows.append(_overrides_row())
     rows.append(_ack_audit_row())
     rows.append(_permission_row())

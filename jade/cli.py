@@ -565,7 +565,17 @@ def _ops(a) -> int:
                 ops.set_gate_mode(a.action, allow_unsigned=a.allow_unsigned)
                 print(f"gate mode {a.action}")
         elif a.cmd == "review":
-            print(ops.review(ops.parse_since(a.since) if a.since else None))
+            if a.action == "confirm":
+                ops.review_confirm(all_=a.all)
+            else:
+                print(ops.review(ops.parse_since(a.since) if a.since else None))
+        elif a.cmd == "knows":
+            if a.action == "list":
+                print(ops.knows_list())
+            elif a.action == "rm":
+                print("forgotten" if ops.knows_rm(a.id) else "no standing answer with that id")
+            else:
+                print(f"preferences saved in {ops.knows_edit()}")
         elif a.cmd == "level":
             if a.value is None:
                 print(paths.level() or "unset")
@@ -760,10 +770,15 @@ def build_parser() -> argparse.ArgumentParser:
     pgate = sub.add_parser("gate")
     pgate.add_argument("action", choices=("status", "enforce", "advisory", "off"))
     pgate.add_argument("--allow-unsigned", action="store_true", help="enforce without the signed approval backend (docs/10); journaled")
-    preview = sub.add_parser("review", help="read-only: what you answered to JADE's asks (counts by rule and channel)")
+    preview = sub.add_parser("review", help="what you answered to JADE's asks (counts by rule and channel); `review confirm` (human terminal) makes allow answers standing")
+    preview.add_argument("action", nargs="?", choices=("confirm",))
     preview.add_argument("--since", help="a window such as 90m, 24h or 7d (default: all time)")
-    plevel = sub.add_parser("level", help="human only: show or set the autonomy level (docs/12): unset, off or high; no argument prints it")
-    plevel.add_argument("value", nargs="?", choices=("unset", "off", "high"))
+    preview.add_argument("--all", action="store_true", help="with confirm: take every group, then one typed yes")
+    pknows = sub.add_parser("knows", help="the answers JADE remembers (docs/12): list (read-only); rm and edit need a human terminal")
+    pknows.add_argument("action", choices=("list", "rm", "edit"))
+    pknows.add_argument("id", nargs="?")
+    plevel = sub.add_parser("level", help="human only: show or set the autonomy level (docs/12): unset, off, low, medium or high; no argument prints it")
+    plevel.add_argument("value", nargs="?", choices=("unset", "off", "low", "medium", "high"))
     sub.add_parser("claude-md").add_argument("action", choices=("show", "apply"))
     gh = sub.add_parser("git-hook", help="the standalone pre-push guard for the default branch (SI-08): `script` prints it, `check <repo>` says whether a repository runs it").add_subparsers(dest="action", required=True)
     gh.add_parser("script", help="print the self-contained POSIX sh pre-push hook (installs nothing; install it yourself, docs/08 section 2.7)")
@@ -831,7 +846,7 @@ def main(argv: list[str] | None = None) -> int:
         print(ops.launchd_plist(a.label), end="")
         return 0
     table = {"permit": _permit, "decide": _decide, "ack": _ack, "question": _question, "route": _route, "fast": _fast, "work": _work,
-             "label": _label, "eval": _eval, "improve": _improve, "hooks": _ops, "gate": _ops, "review": _ops, "claude-md": _ops, "maintain": _maintain, "git-hook": _git_hook}
+             "label": _label, "eval": _eval, "improve": _improve, "hooks": _ops, "gate": _ops, "review": _ops, "knows": _ops, "claude-md": _ops, "maintain": _maintain, "git-hook": _git_hook}
     return table[a.cmd](a)
 
 

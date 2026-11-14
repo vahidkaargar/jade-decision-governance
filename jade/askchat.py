@@ -20,7 +20,7 @@ import json
 import re
 from datetime import timedelta
 
-from . import paths
+from . import memory, paths
 from .util import canonical, new_id, now, ts
 
 CHAT_MODES = ("auto", "bypassPermissions")
@@ -125,16 +125,16 @@ def run_decision(db, a, tool: str, cwd: str, session: str, ask_id: str, where: s
     did = doc["decision_id"]
     decide.step(db, did, "route", guard=f"route=ASK: the human answers in the {where}")
     decide.step(db, did, "escalate", guard=f"{where} ask {ask_id}", ttl_s=permits.DEFAULT_TTL_S)
-    decide.step(db, did, "human_accept", guard=f"Allow answered in the {where} (ask {ask_id})", actor="human",
+    decide.step(db, did, "human_accept", guard=f"Allow answered in the {where} (ask {ask_id})" if where != "memory" else f"confirmed answer {ask_id} covers this call", actor="human",
                 patch={"ask": {"channel": where, "ask_id": ask_id, "answer": "allow", "answered_at": ts()}})
-    decide.step(db, did, "authorize", permit_ok=True, guard=f"{where} grant {ask_id}: single use, unexpired, same session, same call")
+    decide.step(db, did, "authorize", permit_ok=True, guard=f"{where} grant {ask_id}: single use, unexpired, same session, same call" if where != "memory" else f"memory: confirmed answer {ask_id}, within its lifetime")
     decide.step(db, did, "execute", guard=f"PreToolUse saw the matching call; {where} grant consumed", actor="hook", ttl_s=3600)
     return did
 
 
 def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
     """The chat branch of the gate: a HookResult (run the call, or refuse it with the instruction) or None when this call does not take the chat channel."""
-    from . import permits, state_machine
+    from . import decide, permits, state_machine
     from .hooks import HookResult
 
     if not applicable(mode, a, event):
@@ -164,9 +164,11 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
                     return None   # the human is away: the signed permit path, not another ask that would only expire
                 ask_id = new_id("a")[2:]   # twelve hex characters
                 q = question_for(ask_id, a, tool, ctx)
-                db.con.execute("INSERT INTO asks(ask_id, session_id, agent_id, plan_hash, hold_key, fingerprints_json, rule_id, level, tool, question_json, status, created_ts, expires_ts, source) "
-                               "VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',?,?,?)",
-                               (ask_id, session, event.get("agent_id"), a.plan_hash, hold, fpj, a.rule_id, a.level, tool, json.dumps(q), ts(), ts(now() + timedelta(seconds=ASK_TTL_S)), db.source))
+                _, cls, _ = memory.keys(a, tool, event.get("tool_input"), fp)
+                db.con.execute("INSERT INTO asks(ask_id, session_id, agent_id, plan_hash, hold_key, fingerprints_json, rule_id, level, tool, question_json, status, created_ts, expires_ts, source, class_key, label) "
+                               "VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',?,?,?,?,?)",
+                               (ask_id, session, event.get("agent_id"), a.plan_hash, hold, fpj, a.rule_id, a.level, tool, json.dumps(q), ts(), ts(now() + timedelta(seconds=ASK_TTL_S)), db.source, cls,
+                                decide.scrub(a.subject).replace("\n", " ")[:120]))
                 db.event(ask_id, "ask_opened", guard=f"{a.rule_id} {a.level}", actor="hook", detail={"tool": tool, "ho_ids": list(a.ho_ids)})
                 from . import askdialog
 
@@ -232,8 +234,8 @@ def settle(event: dict):
                                   ("ALLOWED" if allow else "DENIED", ts(), until, row.ask_id)).rowcount != 1:
                     continue
                 db.event(row.ask_id, "ask_allowed" if allow else "ask_denied", guard=f"{row.rule_id} {row.level}", actor="human", detail={"channel": "chat"})
-                db.record_human_answer(session=row.session_id, decision_id=row.decision_id, rule_id=row.rule_id, class_key=row.rule_id, exact_key=row.hold_key[:64],
-                                       answer="allow" if allow else "deny", channel="chat")
+                db.record_human_answer(session=row.session_id, decision_id=row.decision_id, rule_id=row.rule_id, class_key=row.class_key,
+                                       exact_key=memory.exact_key(row.hold_key, row.fingerprints_json), answer="allow" if allow else "deny", channel="chat", label=row.label)
     finally:
         db.close()
     return HookResult()
