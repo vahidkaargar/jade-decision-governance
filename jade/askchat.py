@@ -20,7 +20,7 @@ import json
 import re
 from datetime import timedelta
 
-from . import memory, paths
+from . import askplain, memory, paths
 from .util import canonical, new_id, now, ts
 
 CHAT_MODES = ("auto", "bypassPermissions")
@@ -48,7 +48,7 @@ def _clip(text: str) -> str:
 
 def question_for(ask_id: str, a, tool: str, ctx: dict) -> dict:
     """The one question the human sees. Everything in it comes from the gate, none from the agent."""
-    lines = [f"[jade:ask_{ask_id}] JADE gate: {a.level} risk, rule {a.rule_id}. {a.rationale}"]
+    lines = [f"[jade:ask_{ask_id}] JADE gate: {a.level} risk, rule {a.rule_id}.", *askplain.header(a, tool)]
     if a.ho_ids:
         lines.append("Classes: " + ", ".join(a.ho_ids) + " (only you can decide these)")
     lines.append(f"Tool: {tool}")
