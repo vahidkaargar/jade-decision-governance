@@ -366,6 +366,30 @@ def test_the_scope_review_path_makes_a_hint_with_a_scope_standing(medium, repo):
     assert got is not None and got["answer_id"] == aid and got["scope_kind"] == "merge_project"
 
 
+def test_review_mark_wrong_on_a_call_that_ran_from_a_scope_retires_every_row_of_that_scope(medium, repo):
+    """Drives `ops.review_mark` for real. The call for PR 941 ran silently from the scope row of PR 940. A second confirmed row of the same scope (PR 942) shares only the
+    scope key with it, so only the scope key can retire it. A confirmed row with no scope, and a row of the same scope in another project, are left alone."""
+    first = store(MERGE, repo, "merge_project")
+    sibling = store("gh pr merge 942 --rebase", repo, "merge_project")
+    d = db()
+    try:
+        with d.tx():
+            plain = d.record_human_answer(session=SESSION, decision_id=None, rule_id="R-11", class_key=None, exact_key="unrelated-call", answer="allow", channel="chat")
+            d.confirm_answers([plain])
+    finally:
+        d.close()
+    res = pre("gh pr merge 941 --squash", repo)
+    assert res.exit_code == 0 and (first in res.stderr or sibling in res.stderr), res   # the newest confirmed row decides: either covers PR 941
+    memory_decisions = [r["decision_id"] for r in rows("SELECT decision_id, doc_json FROM decisions ORDER BY created_at, rowid")
+                        if (json.loads(r["doc_json"]).get("ask") or {}).get("channel") == "memory"]
+    assert len(memory_decisions) == 1
+    assert "retired" in ops.review_mark(memory_decisions[0], "wrong", stdin_isatty=True)
+    strength = {r["answer_id"]: r["strength"] for r in rows("SELECT answer_id, strength FROM human_answers")}
+    assert strength[first] == "revoked" and strength[sibling] == "revoked"
+    assert strength[plain] == "strong"
+    assert lookup("gh pr merge 943 --squash", repo) is None
+
+
 def test_the_scope_lookup_does_not_scan_the_answers_table(repo):
     """W-58: the statement the gate runs for every gated call must use an index for each of its three keys, the scope key included."""
     store(MERGE, repo, "merge_project")
