@@ -125,9 +125,11 @@ def run_decision(db, a, tool: str, cwd: str, session: str, ask_id: str, where: s
     did = doc["decision_id"]
     decide.step(db, did, "route", guard=f"route=ASK: the human answers in the {where}")
     decide.step(db, did, "escalate", guard=f"{where} ask {ask_id}", ttl_s=permits.DEFAULT_TTL_S)
-    decide.step(db, did, "human_accept", guard=f"Allow answered in the {where} (ask {ask_id})" if where != "memory" else f"confirmed answer {ask_id} covers this call", actor="human",
+    accept_why = {"memory": f"confirmed answer {ask_id} covers this call", "jev": f"Jev accepted this call in the owner's place (call_{ask_id}, within the level's band)"}.get(where)
+    authorize_why = {"memory": f"memory: confirmed answer {ask_id}, within its lifetime", "jev": f"jev: accepted call_{ask_id}, within the level's band"}.get(where)
+    decide.step(db, did, "human_accept", guard=accept_why or f"Allow answered in the {where} (ask {ask_id})", actor="human",
                 patch={"ask": {"channel": where, "ask_id": ask_id, "answer": "allow", "answered_at": ts()}})
-    decide.step(db, did, "authorize", permit_ok=True, guard=f"{where} grant {ask_id}: single use, unexpired, same session, same call" if where != "memory" else f"memory: confirmed answer {ask_id}, within its lifetime")
+    decide.step(db, did, "authorize", permit_ok=True, guard=authorize_why or f"{where} grant {ask_id}: single use, unexpired, same session, same call")
     decide.step(db, did, "execute", guard=f"PreToolUse saw the matching call; {where} grant consumed", actor="hook", ttl_s=3600)
     return did
 

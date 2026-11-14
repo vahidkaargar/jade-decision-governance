@@ -28,6 +28,12 @@ families:
   evidence_quality:
     score: { gates: false }
     noul: { accept: 0.50, reject: 0.20 }   # companion `evidence_is_raw`: only a clear "this is a summary" counts against
+  human_proxy:                         # Jev deciding in the owner's place (jade/proxy.py): the risk it is asked at is the band, so the owner's autonomy level sets how sure it must be
+    noul: { accept: 0.70, reject: 0.30 }
+    by_risk:
+      medium:   { accept: 0.85 }
+      high:     { accept: 0.85 }
+    abstain_to: human
   candidate_fit:
     noul: { accept: 0.70, reject: 0.30 }
     abstain_to: fast

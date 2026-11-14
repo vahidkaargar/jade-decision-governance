@@ -16,11 +16,13 @@ import re
 import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 
 from . import paths, policy
 from .util import at_least, now, ts
 
+_STARTED: float | None = None   # time.monotonic() when this PreToolUse call began
 BUDGET_S = 6.0          # whole PreToolUse handler; the dialog path (askdialog) raises its own alarm for the wait, the installed host timeout (ops.HOOKS) covers it
 LEDGER_TIMEOUT_S = 1.5  # one wait for the ledger lock (open waits at most twice: busy timeout, then the schema step)
 GIT_TIMEOUT_S = 2.0     # one git call made to resolve a push destination
@@ -371,6 +373,8 @@ def _policy_failure(mode: str, event: dict, tool: str, tool_input: dict, cwd: st
 
 
 def pretool(event: dict, permit=None) -> HookResult:
+    global _STARTED
+    _STARTED = time.monotonic()   # Jev in the hook (proxy.step) is given what is left of BUDGET_S
     mode = paths.gate_mode()
     if mode == "off":
         return HookResult()
@@ -576,9 +580,11 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
                 return HookResult(0, f"JADE: permit {found.permit_id} consumed for this {tool} call.")
         if (res := replayed()) is not None:   # a parallel delivery of the same call spent the permit between the lookup above and the use
             return res
-        from . import askchat, memory
+        from . import askchat, memory, proxy
 
         if (res := memory.step(db, mode, a, tool, event, fp, cwd)) is not None:   # docs/12: a call the human confirmed earlier runs without a question (levels low and medium)
+            return res
+        if (res := proxy.step(db, mode, a, tool, event, fp, cwd, _STARTED)) is not None:   # docs/12: Jev decides in the owner's place, inside its band (levels low and medium)
             return res
         if (res := askchat.step(db, mode, a, tool, event, fp, cwd)) is not None:   # docs/12: the human answers in the chat (consumes a grant, or asks)
             return res

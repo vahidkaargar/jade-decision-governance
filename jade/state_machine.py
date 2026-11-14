@@ -120,11 +120,14 @@ def apply(path, ev: dict):
             src = row["status"]
             if ev["event"] == "human_accept" and row["route"] == "ASK":   # the authority to accept an ASK decision is the recorded answer, never a bare event (docs/12)
                 ask = (ev.get("patch") or {}).get("ask")
-                if not (isinstance(ask, dict) and ask.get("answer") == "allow" and ask.get("channel") in ("chat", "dialog", "memory") and ask.get("ask_id")):
-                    raise IllegalTransition("a decision routed ASK is accepted only with the recorded Allow answer of an ask (chat or dialog) or a standing answer (memory)")
+                if not (isinstance(ask, dict) and ask.get("answer") == "allow" and ask.get("channel") in ("chat", "dialog", "memory", "jev") and ask.get("ask_id")):
+                    raise IllegalTransition("a decision routed ASK is accepted only with the recorded Allow answer of an ask (chat or dialog) or a standing answer (memory) or an accepted Jev call (jev)")
                 if ask["channel"] == "memory" and con.execute("SELECT 1 FROM human_answers WHERE answer_id=? AND strength='strong' AND answer='allow'",
                                                               (f"ans_{ask['ask_id']}",)).fetchone() is None:
                     raise IllegalTransition("a decision that memory accepts needs a standing answer (`jade review confirm`) that exists; this one does not")
+                if ask["channel"] == "jev" and con.execute("SELECT 1 FROM jev_calls WHERE call_id=? AND question_id='q.human_proxy.would_allow' AND verdict='ACCEPT' AND exit_code=0",
+                                                           (f"call_{ask['ask_id']}",)).fetchone() is None:
+                    raise IllegalTransition("a decision that Jev accepts needs an accepted call of q.human_proxy.would_allow that exists; this one does not")
             caller = ev.get("caller_session")
             if caller is not None and ev["event"] not in ({"cancel"} | HUMAN_EVENTS) and not _same(row["session_id"], caller):
                 raise IllegalTransition("this decision belongs to another session; a session may only cancel it or answer for the human")

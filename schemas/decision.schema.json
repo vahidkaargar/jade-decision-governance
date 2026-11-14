@@ -47,7 +47,7 @@
     "human_only": { "type": "boolean" },
     "ho_ids": { "type": "array", "items": { "type": "string", "pattern": "^HO-[a-z0-9-]+$" }, "maxItems": 16 },
     "ask": { "type": "object", "additionalProperties": false, "required": ["channel", "ask_id", "answer", "answered_at"],
-      "properties": { "channel": { "enum": ["chat", "dialog", "memory"] }, "ask_id": { "type": "string", "pattern": "^[0-9a-f]{12}$" },
+      "properties": { "channel": { "enum": ["chat", "dialog", "memory", "jev"] }, "ask_id": { "type": "string", "pattern": "^[0-9a-f]{12}$" },
                       "answer": { "enum": ["allow", "deny"] }, "answered_at": { "$ref": "_defs.schema.json#/$defs/ts" } } }
   }
 }

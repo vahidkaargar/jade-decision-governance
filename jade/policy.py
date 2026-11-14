@@ -210,6 +210,7 @@ class Assessment:
     elevated: bool = False   # set by the hook, not here: a level was set and a human-only class raised the call to high
     seg_keys: list[str] = field(default_factory=list)    # shell only: the canonical key of each gated segment (what memory generalises over, jade/memory.py)
     seg_rules: list[str] = field(default_factory=list)   # shell only: the rule each gated segment matched
+    unread: list[str] = field(default_factory=list)      # shell only: the labels of what the gate could not read in ANY segment, also when a higher rule won (`blind` is only set when R-31 wins)
 
     @property
     def human_only(self) -> bool:
@@ -1296,6 +1297,7 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         best = next(r for r in risk()["rules"] if r["id"] == "R-31")
     a = _from_rule(best, loader.environment_of(risk(), text_in))
     a.recorded = secret_read and bool(best.get("reads"))
+    a.unread = sorted(dict.fromkeys(labels))
     if best["id"] in ("R-31", "R-32"):   # nothing higher matched: what the gate could not read is counted, by label and never by text (W-31)
         a.recorded = True
         a.blind = sorted(dict.fromkeys(labels))

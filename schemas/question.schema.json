@@ -10,7 +10,7 @@
     "question_id": { "type": "string", "pattern": "^q\\.[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$" },
     "version": { "type": "integer", "minimum": 1 },
     "primitive": { "$ref": "_defs.schema.json#/$defs/primitive" },
-    "task_family": { "enum": ["verify_claim", "root_cause", "strategy_choice", "risk_triage", "evidence_quality", "candidate_fit", "routing"] },
+    "task_family": { "enum": ["verify_claim", "root_cause", "strategy_choice", "risk_triage", "evidence_quality", "candidate_fit", "routing", "human_proxy"] },
     "objective": { "type": "string", "minLength": 8 },
     "input_schema": { "type": "object" },
     "output_schema": { "type": "object" },
