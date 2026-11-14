@@ -903,22 +903,54 @@ def preferences_path() -> Path:
     return paths.config_dir() / PREFERENCES_FILE
 
 
+KNOWS_MAX_LINES = 40
+KNOWS_LABEL_CHARS = 90
+_KNOWS_MODELS = (
+    "# Example, an ssh host: For ssh <user@host> (the <name> project): allow anything, except <what must stay a question>. Always ask me before <what must stay a question>.",
+    "# Example, code projects: For the <name> projects on GitHub and GitLab: allow reading and writing, like <the commands you use>. "
+    "Always ask me before any delete. Never push to the main branch.",
+)
+
+
+def knows_template(rows) -> str:
+    """The first text of the preferences file (pure): two header lines, two model sentences with placeholders, then one commented line per kind of standing answer.
+    Rows of one scope (same rule and scope key) are one line with the scope label; rows without a scope are grouped by rule and first word and show the newest call.
+    Every line starts with `#`, and there are at most KNOWS_MAX_LINES lines."""
+    from . import askplain
+
+    out = ["# What JADE may decide for you. Write plain sentences; a later release reads this file when it decides in your place.",
+           "# Lines that start with # are ignored.", "#", *_KNOWS_MODELS, "#"]
+    seen: dict[tuple, str] = {}
+    for r in rows:   # newest first, so the first row of a group names it
+        text = r["scope_label"] or r["label"]
+        if r["answer"] != "allow" or not text:
+            continue
+        key = (r["rule_id"], r["scope_key"]) if r["scope_key"] else (r["rule_id"], None, (r["label"] or "").split(" ", 1)[0])
+        if key in seen:
+            continue
+        text = " ".join(text.split())
+        if len(text) > KNOWS_LABEL_CHARS:
+            text = text[:KNOWS_LABEL_CHARS - 3] + "..."
+        seen[key] = f"# I am fine with: {text}  [{r['rule_id']}]  (risk: {askplain.risk_line(r['rule_id'])})"
+    lines = list(seen.values())
+    room = KNOWS_MAX_LINES - len(out)
+    if len(lines) > room:
+        lines = [*lines[:room - 1], "# (more kinds are not shown here: `jade knows list` shows all)"]
+    return "\n".join([*out, *lines])
+
+
 def knows_edit(stdin_isatty: bool | None = None, editor: str | None = None) -> Path:
     """`jade knows edit`: open the preferences file in the human's editor. It starts as a template with one commented-out sentence per standing kind of call."""
     _require_human("jade knows edit", stdin_isatty)
     p = preferences_path()
     if not p.exists():
-        lines = ["# What JADE may decide for you. Write plain sentences; a later release reads this file when it decides in your place.",
-                 "# Lines that start with # are ignored.", ""]
         db = ledger.open(timeout=5)
         try:
-            for r in db.human_answers(strength="strong", limit=1000):
-                if r["answer"] == "allow" and r["label"]:
-                    lines.append(f"# I am fine with: {r['label']}  [{r['rule_id']}]")
+            text = knows_template(db.human_answers(strength="strong", limit=1000))
         finally:
             db.close()
         p.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write(p, "\n".join(lines) + "\n")
+        atomic_write(p, text + "\n")
     subprocess.run([editor or os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi", str(p)], check=False)
     return p
 
