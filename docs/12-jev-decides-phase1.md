@@ -184,7 +184,7 @@ These need your approval; `jade claude-md apply` and the skill are yours to chan
 
 **continuous-flow skill, rule 8.** Proposed: "When JADE lets a call run on the human's behalf (a confirmed answer or Jev), carry on: do not ask the human to confirm it again. When JADE asks, ask once in the chat with the question the hook shows, continue with other work while it waits, and never ask the same thing a second time in other words."
 
-## 12. Clear questions and bigger scopes (0.7.0)
+## 12. Clear questions and bigger scopes (next release)
 
 **The question.** The chat question and the dialog now start with plain lines. Line one says what the call does, in simple words. Line two says the risk. A third line, "Also in this call", counts the other commands. The command itself comes after. The text comes only from the gate (`jade/askplain.py`), never from the agent.
 
@@ -198,7 +198,7 @@ These need your approval; `jade claude-md apply` and the skill are yours to chan
 | `kind_any` | the same kind of command, in any project |
 | `merge_project` | `gh pr merge N` in one named project, any PR number |
 
-**The merge scope is narrow.** It exists only for one plain `gh pr merge` command in one named project. Only these flags are allowed: `--squash`, `-s`, `--merge`, `-m`, `--rebase`, `-r`, `--subject`, `-t`, `--body`, `-b`, `--body-file`, `-F`, `--match-head-commit`. Any other flag gives no scope: `-R`, `--delete-branch`, `--admin`, `--auto`. A `cd` to another folder, a variable, or a joined call gives no scope too. No scope ever covers delete, force, tag or release.
+**The merge scope is narrow.** It exists only for one plain `gh pr merge` command in one named project. Only these flags are allowed: `--squash`, `-s`, `--merge`, `-m`, `--rebase`, `-r`, `--subject`, `-t`, `--body`, `-b`, `--body-file`, `-F`, `--match-head-commit`. Any other flag gives no scope: `-R`, `--delete-branch`, `--admin`, `--auto`. A joined call gives no scope too. A leading `cd` to another git project gives that project's own scope, which does not match this project's scope. A second `cd`, `pushd`, a subshell, a variable, a missing folder, or a folder that is not a git project gives no scope. No scope ever covers delete, force, tag or release.
 
 **Confirm.** `jade review confirm` shows the scope, how long it lives, and how to undo it. A scope lives 30 days after its last use and never more than 180 days after you confirm it. Undo it with `jade knows rm ID`. `jade knows list` shows the scope label.
 
