@@ -4,6 +4,8 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-14
+
 ### Documentation
 - **Owner page for memory and Jev (W-104; docs/12 sections 10 and 11).** How to start (high, confirm, preferences, the 50 answers, medium or low), how to read `jade review` and mark a call, a table of what you see when something fails, the risks accepted, and the proposed CLAUDE.md and continuous-flow texts (not applied). docs/05 adds T25 to T29 (forged chat answers; level, preferences and memory changed by an agent; a standing answer that covers too much; a wrong Jev yes; a delete, payment or release no pattern names) and extends T1, T5 and T14. docs/09 gets the owner steps for the upgrade; the agent text in `docs/claude-md-jev-section.md` says what a call run on the human's behalf is.
 

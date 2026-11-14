@@ -1,6 +1,6 @@
 # 12 — The human answers in the chat (release 0.5.0); memory and Jev decide (release 0.6.0)
 
-Status: **0.5.0 is released; 0.6.0 (memory of confirmed answers, Jev deciding in your place, `jade review`) is implemented (W-98b to W-103) and not yet released.** The installed JADE decides what you have: until `jade upgrade`, none of the 0.6.0 behaviour exists on your Mac. This page says what the code does today; section 10 is the owner page for 0.6.0.
+Status: **0.5.0 and 0.6.0 (memory of confirmed answers, Jev deciding in your place, `jade review`; W-98b to W-104) are released.** The installed JADE decides what you have: until `jade upgrade`, none of the 0.6.0 behaviour exists on your Mac. This page says what the code does today; section 10 is the owner page for 0.6.0.
 
 ## 1. Why
 
