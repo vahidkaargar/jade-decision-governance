@@ -137,3 +137,54 @@ def test_what_line_for_other_tools():
     assert askplain.what_line(a, "Edit").startswith("Edit")
     head = askplain.header(a, "mcp__kube__kubectl_apply")
     assert head[0].startswith("Use ") and all(not line.startswith("Also") for line in head)
+
+
+# ------------------------------------------------------------------ a human-only class on a low call: the risk line must not say "only reads"
+
+def test_a_delete_class_on_a_low_call_says_it_can_delete_data():
+    a = assess('psql -c "DROP TABLE x"')
+    assert a.rule_id == "R-99" and "HO-delete" in a.ho_ids
+    head = askplain.header(a, "Bash")
+    assert "only reads" not in " ".join(head) and "edits a local file" not in " ".join(head)
+    assert head[1] == "This call can delete data, and only you can decide that."
+    q = askchat.question_for("0123456789ab", a, "Bash", {})["question"]
+    assert "can delete data" in q and "only reads" not in q and "can delete data" in askdialog.text_for(a, "Bash", {})
+
+
+def test_a_money_class_on_a_low_call_says_it_can_move_money():
+    a = assess("stripe refunds create --charge ch_1 --live")
+    assert a.rule_id == "R-99" and "HO-money" in a.ho_ids
+    assert askplain.header(a, "Bash")[1] == "This call can move money, and only you can decide that."
+
+
+def test_an_unknown_class_gets_the_generic_line():
+    assert askplain.risk_line("R-99", ("HO-new-thing",)) == "A rule that only you can decide matches this call."
+    assert askplain.risk_line("R-99", ("HO-delete", "HO-new-thing")) == "A rule that only you can decide matches this call."
+
+
+def test_every_class_phrase_is_short_and_the_line_keeps_the_rule_text_for_a_high_rule():
+    for ho in askplain.HO_TEXT:
+        assert words(askplain.risk_line("R-99", (ho,))) <= 20, ho
+    assert askplain.risk_line("R-11", ("HO-delete",)) == askplain.RISK_TEXT["R-11"]
+
+
+def test_every_human_only_class_has_a_phrase():
+    from jade import humanonly
+    for ho in (*humanonly.ALL, "HO-wiring", "HO-checkout-install", "HO-settings-shadow", "HO-state-path", "HO-mod", "HO-R17", "HO-terminal"):
+        assert ho in askplain.HO_TEXT, ho
+
+
+# ------------------------------------------------------------------ the merge sentence names the real target
+
+@pytest.mark.parametrize("cmd,line", [
+    ("gh pr merge https://github.com/o/r/pull/940 --squash", "Merge pull request 940."),
+    ("gh pr merge feature-branch --squash", "Merge the pull request of branch feature-branch."),
+    ("gh pr merge 940", "Merge pull request 940."),
+    ("gh pr merge --squash 940", "Merge pull request 940."),
+    ("gh pr merge", "Merge the pull request of this branch."),
+    ("gh pr merge --squash --delete-branch", "Merge the pull request of this branch."),
+    ("gh pr merge --body done --squash", "Merge a pull request."),
+])
+def test_the_merge_sentence_names_the_real_target(cmd, line):
+    a = assess(cmd)
+    assert a.seg_keys and askplain.what_line(a, "Bash") == line

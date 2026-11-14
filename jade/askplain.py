@@ -52,18 +52,53 @@ RISK_TEXT: dict[str, str] = {
 GENERIC_RISK = "This call needs your decision."
 
 
-def risk_line(rule_id: str) -> str:
-    """The plain sentence of one rule, or a generic one when the rule is not known (a rule of a local overlay)."""
+GENERIC_HO = "A rule that only you can decide matches this call."
+# What a human-only class (jade/humanonly.py, jade/policy.py HO_*) lets the call do, as the end of "This call ...".
+HO_TEXT: dict[str, str] = {
+    "HO-delete": "can delete data",
+    "HO-money": "can move money",
+    "HO-release": "can publish or release something",
+    "HO-wiring": "can change how JADE is wired in",
+    "HO-checkout-install": "can change the JADE tool that is installed",
+    "HO-settings-shadow": "can switch off the hooks in a settings file",
+    "HO-state-path": "can touch the state files of JADE",
+    "HO-mod": "can change a mod of the app",
+    "HO-R17": "can switch off the guard on the main branch",
+    "HO-terminal": "can run a script in your terminal",
+}
+
+
+def _mild(rule_id: str) -> bool:
+    """Is the rule's own sentence a low or medium one (reads, local edits, recorded only)? Read from the policy, so a local overlay rule counts too."""
+    doc = policy.risk()
+    for r in (*doc.get("rules", ()), *doc.get("mcp_tools", ())):
+        if r.get("id") == rule_id:
+            return r.get("level") in ("low", "medium")
+    return False
+
+
+def risk_line(rule_id: str, ho_ids=()) -> str:
+    """The plain sentence of one rule, or a generic one when the rule is not known (a rule of a local overlay).
+    A call that a human-only class holds but a low or medium rule rated says what the class lets it do: the rule's own sentence ("only reads") would be false."""
+    if ho_ids and _mild(rule_id):
+        known = [HO_TEXT[i] for i in ho_ids if i in HO_TEXT]
+        if len(known) != len(ho_ids):
+            return GENERIC_HO
+        return f"This call {' and '.join(known)}, and only you can decide that."
     return RISK_TEXT.get(rule_id, GENERIC_RISK)
 
 
 # What a gated command does, as one sentence. The first pattern that matches the canonical key of a gated segment wins. `{1}` style groups are filled with `m.expand`.
 _Render = tuple[re.Pattern, str]
 SEGMENT_TEXT: list[_Render] = [(re.compile(p), t) for p, t in (
-    (r"^gh pr merge\b[^\n]*?\s(\d+)\b", r"Merge pull request \1."),
-    (r"^gh pr merge\b", "Merge the pull request of this branch."),
-    (r"^glab mr merge\b[^\n]*?\s(\d+)\b", r"Merge merge request \1."),
-    (r"^glab mr merge\b", "Merge the merge request of this branch."),
+    (r"^gh pr merge\s+\S*/pull/(\d+)\b", r"Merge pull request \1."),
+    (r"^gh pr merge(?:\s+-[-\w=]+)*\s+(\d+)(?:\s|$)", r"Merge pull request \1."),
+    (r"^gh pr merge\s+([A-Za-z][\w./-]*)(?:\s|$)", r"Merge the pull request of branch \1."),
+    (r"^gh pr merge(?:\s+-[-\w=]+)*\s*$", "Merge the pull request of this branch."),
+    (r"^gh pr merge\b", "Merge a pull request."),
+    (r"^glab mr merge(?:\s+-[-\w=]+)*\s+(\d+)(?:\s|$)", r"Merge merge request \1."),
+    (r"^glab mr merge(?:\s+-[-\w=]+)*\s*$", "Merge the merge request of this branch."),
+    (r"^glab mr merge\b", "Merge a merge request."),
     (r"^gh release create\b", "Create a release on GitHub."),
     (r"^gh release merge\b", "Merge a release on GitHub."),
     (r"^npm publish\b", "Publish a package to npm."),
@@ -140,7 +175,7 @@ def other_count(a) -> int:
 
 def header(a, tool: str) -> list[str]:
     """The lines every question starts with, in this order: what, why it is risky, what else is in the call, and a hint when risky commands are joined."""
-    lines = [what_line(a, tool), risk_line(a.rule_id)]
+    lines = [what_line(a, tool), risk_line(a.rule_id, a.ho_ids)]
     n = other_count(a)
     if n:
         lines.append(f"Also in this call: {n} other command that JADE rates as low risk." if n == 1 else f"Also in this call: {n} other commands that JADE rates as low risk.")
