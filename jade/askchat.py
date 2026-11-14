@@ -165,10 +165,10 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
                 ask_id = new_id("a")[2:]   # twelve hex characters
                 q = question_for(ask_id, a, tool, ctx)
                 _, cls, _ = memory.keys(a, tool, event.get("tool_input"), fp)
-                db.con.execute("INSERT INTO asks(ask_id, session_id, agent_id, plan_hash, hold_key, fingerprints_json, rule_id, level, tool, question_json, status, created_ts, expires_ts, source, class_key, label) "
-                               "VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',?,?,?,?,?)",
+                db.con.execute("INSERT INTO asks(ask_id, session_id, agent_id, plan_hash, hold_key, fingerprints_json, rule_id, level, tool, question_json, status, created_ts, expires_ts, source, class_key, label, ho) "
+                               "VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',?,?,?,?,?,?)",
                                (ask_id, session, event.get("agent_id"), a.plan_hash, hold, fpj, a.rule_id, a.level, tool, json.dumps(q), ts(), ts(now() + timedelta(seconds=ASK_TTL_S)), db.source, cls,
-                                decide.scrub(a.subject).replace("\n", " ")[:120]))
+                                decide.scrub(a.subject).replace("\n", " ")[:120], 1 if a.ho_ids else 0))
                 db.event(ask_id, "ask_opened", guard=f"{a.rule_id} {a.level}", actor="hook", detail={"tool": tool, "ho_ids": list(a.ho_ids)})
                 from . import askdialog
 
@@ -235,7 +235,7 @@ def settle(event: dict):
                     continue
                 db.event(row.ask_id, "ask_allowed" if allow else "ask_denied", guard=f"{row.rule_id} {row.level}", actor="human", detail={"channel": "chat"})
                 db.record_human_answer(session=row.session_id, decision_id=row.decision_id, rule_id=row.rule_id, class_key=row.class_key,
-                                       exact_key=memory.exact_key(row.hold_key, row.fingerprints_json), answer="allow" if allow else "deny", channel="chat", label=row.label)
+                                       exact_key=memory.exact_key(row.hold_key, row.fingerprints_json), answer="allow" if allow else "deny", channel="chat", label=row.label, ho=bool(row.ho))
     finally:
         db.close()
     return HookResult()

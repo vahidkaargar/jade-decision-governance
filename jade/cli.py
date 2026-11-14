@@ -567,6 +567,10 @@ def _ops(a) -> int:
         elif a.cmd == "review":
             if a.action == "confirm":
                 ops.review_confirm(all_=a.all)
+            elif a.action == "mark":
+                if len(a.rest) != 2:
+                    raise SystemExit("usage: jade review mark DECISION_ID right|wrong")
+                print(ops.review_mark(a.rest[0], a.rest[1]))
             else:
                 print(ops.review(ops.parse_since(a.since) if a.since else None))
         elif a.cmd == "knows":
@@ -770,8 +774,9 @@ def build_parser() -> argparse.ArgumentParser:
     pgate = sub.add_parser("gate")
     pgate.add_argument("action", choices=("status", "enforce", "advisory", "off"))
     pgate.add_argument("--allow-unsigned", action="store_true", help="enforce without the signed approval backend (docs/10); journaled")
-    preview = sub.add_parser("review", help="what you answered to JADE's asks (counts by rule and channel); `review confirm` (human terminal) makes allow answers standing")
-    preview.add_argument("action", nargs="?", choices=("confirm",))
+    preview = sub.add_parser("review", help="what you answered to JADE's asks (counts by rule and channel); `review confirm` (human terminal) makes allow answers standing; `review mark ID right|wrong` is your verdict on a call")
+    preview.add_argument("action", nargs="?", choices=("confirm", "mark"))
+    preview.add_argument("rest", nargs="*", help="with mark: DECISION_ID right|wrong")
     preview.add_argument("--since", help="a window such as 90m, 24h or 7d (default: all time)")
     preview.add_argument("--all", action="store_true", help="with confirm: take every group, then one typed yes")
     pknows = sub.add_parser("knows", help="the answers JADE remembers (docs/12): list (read-only); rm and edit need a human terminal")

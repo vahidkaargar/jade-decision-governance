@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import plistlib
 import re
@@ -660,8 +661,13 @@ def review(since_s: float | None = None) -> str:
     finally:
         db.close()
     window = "all time" if since_s is None else f"last {int(since_s // 3600)}h" if since_s >= 3600 else f"last {int(since_s // 60)}m"
+    db = ledger.open(timeout=5)
+    try:
+        extra = review_lines(db, since_s)
+    finally:
+        db.close()
     if not rows:
-        return f"no answers recorded ({window})"
+        return "\n".join([f"no answers recorded ({window})", *extra])
 
     def tally(key):
         out: dict[str, list[int]] = {}
@@ -675,7 +681,92 @@ def review(since_s: float | None = None) -> str:
     lines = [f"{len(rows)} answer(s) ({window}): {allow} allow, {len(rows) - allow} deny; {hints} hint, {len(rows) - hints} confirmed"]
     lines.append("by rule: " + ", ".join(f"{k} {a + d} ({a} allow, {d} deny)" for k, (a, d) in sorted(tally("rule_id").items())))
     lines.append("by channel: " + ", ".join(f"{k} {a + d}" for k, (a, d) in sorted(tally("channel").items())))
-    return "\n".join(lines)
+    return "\n".join(lines + extra)
+
+
+JEV_BAND_ANSWERS = 50   # owner-answered plain-high calls before a model may decide in the owner's place (plan v3)
+
+
+def wrong_rate_upper(wrong: int, n: int) -> float:
+    """The 95% upper bound of the share of wrong runs among n marked ones: 3/n when none is wrong (the rule of three; 50 clean marks show the error rate is below
+    about 1 in 17), the Wilson upper bound otherwise."""
+    if n <= 0:
+        return 1.0
+    if wrong == 0:
+        return min(1.0, 3 / n)
+    z, p = 1.96, wrong / n
+    return min(1.0, (p + z * z / (2 * n) + z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))) / (1 + z * z / n))
+
+
+def _latest_marks(db, since: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for r in db.con.execute("SELECT entity_id, detail_json FROM events WHERE kind='review_mark' AND ts>=? AND " + ledger.LIVE.format(a="") + " ORDER BY id", (since,)):
+        try:
+            out[r["entity_id"]] = json.loads(r["detail_json"])["mark"]
+        except (ValueError, KeyError, TypeError):
+            continue
+    return out
+
+
+def review_lines(db, since_s: float | None) -> list[str]:
+    """What the standing answers are doing: how often a question was avoided, what the human marked wrong, and how far the answer count is from the 50 that a later
+    step needs. Counts and rule ids only; no command text beyond the label the human already saw in `jade review confirm`."""
+    live, since = ledger.LIVE.format(a=""), ts(now() - timedelta(seconds=since_s)) if since_s is not None else ""
+    silent = db.con.execute(f"SELECT entity_id, detail_json, ts FROM events WHERE kind='memory_allowed' AND ts>=? AND {live} ORDER BY id DESC", (since,)).fetchall()   # noqa: S608
+    asked = db.con.execute(f"SELECT COUNT(*) FROM human_answers WHERE COALESCE(ho,0)=0 AND ts>=? AND {live}", (since,)).fetchone()[0]   # noqa: S608
+    plain_all = db.con.execute(f"SELECT COUNT(*) FROM human_answers WHERE COALESCE(ho,0)=0 AND {live}").fetchone()[0]   # noqa: S608
+    if not silent and not plain_all:
+        return []
+    marks = _latest_marks(db, since)
+    decisions = {}
+    for r in silent:
+        try:
+            decisions[json.loads(r["detail_json"])["decision_id"]] = r
+        except (ValueError, KeyError, TypeError):
+            continue
+    marked = {d: m for d, m in marks.items() if d in decisions}
+    wrong = sum(1 for m in marked.values() if m == "wrong")
+    out = [f"silent runs from standing answers: {len(silent)}; questions answered: {asked}; silent share {100 * len(silent) // (len(silent) + asked) if len(silent) + asked else 0}% of plain-high calls"]
+    if marked:
+        out.append(f"marked: {len(marked)} silent run(s), {len(marked) - wrong} right, {wrong} wrong; wrong runs are below {100 * wrong_rate_upper(wrong, len(marked)):.0f}% of such runs (95% bound)")
+    elif silent:
+        out.append("none of the silent runs is marked yet: `jade review mark DECISION_ID right|wrong` in your terminal (wrong makes JADE ask that call, and its kind, again)")
+    out.append(f"owner-answered plain-high calls: {plain_all} of {JEV_BAND_ANSWERS} (a model deciding for you stays off until then)")
+    for r in silent[:5]:
+        did = json.loads(r["detail_json"]).get("decision_id") if r["detail_json"] else None
+        a = db.con.execute("SELECT rule_id, label FROM human_answers WHERE answer_id=?", (r["entity_id"],)).fetchone()
+        out.append(f"  {did}  [{a['rule_id'] if a else '?'}]  {(a['label'] if a else '') or ''}  {('(marked ' + marks[did] + ')') if did in marks else ''}".rstrip())
+    return out
+
+
+def review_mark(decision_id: str, mark: str, stdin_isatty: bool | None = None) -> str:
+    """`jade review mark DECISION_ID right|wrong` (human terminal): a verdict on a call that ran from a standing answer or from your answer in the chat or a dialog.
+    `right` is a hint and changes nothing. `wrong` retires the answer behind the call and every answer of the same exact call or kind, so JADE asks next time."""
+    from . import memory
+
+    _require_human("jade review mark", stdin_isatty)
+    if mark not in ("right", "wrong"):
+        raise ValueError("the mark must be right or wrong")
+    db = ledger.open(timeout=5)
+    try:
+        row = db.con.execute("SELECT doc_json FROM decisions WHERE decision_id=?", (decision_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"no decision {decision_id}")
+        ask = (json.loads(row["doc_json"]) or {}).get("ask")
+        if not isinstance(ask, dict) or not ask.get("ask_id"):
+            raise ValueError("this decision was not answered by an ask or a standing answer, so there is nothing to mark")
+        if ask.get("channel") == "memory":
+            answers = db.con.execute("SELECT answer_id, exact_key, class_key FROM human_answers WHERE answer_id=?", (f"ans_{ask['ask_id']}",)).fetchall()
+        else:
+            a = db.con.execute("SELECT hold_key, fingerprints_json FROM asks WHERE ask_id=?", (ask["ask_id"],)).fetchone()
+            answers = db.con.execute("SELECT answer_id, exact_key, class_key FROM human_answers WHERE exact_key=? AND answer='allow'",
+                                     (memory.exact_key(a["hold_key"], a["fingerprints_json"]),)).fetchall() if a else []
+        with db.tx():
+            db.event(decision_id, "review_mark", guard=f"jade review mark {mark}", actor=f"human:{user()}", detail={"mark": mark, "answer_ids": [r["answer_id"] for r in answers]})
+            retired = sum(db.retire_answers(r["exact_key"], r["class_key"]) for r in answers) if mark == "wrong" else 0
+    finally:
+        db.close()
+    return f"marked {decision_id} {mark}" + (f"; {retired} answer(s) retired, JADE asks again" if mark == "wrong" else "")
 
 
 def _pending_hints(db) -> list:
