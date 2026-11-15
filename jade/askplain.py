@@ -91,7 +91,7 @@ def risk_line(rule_id: str, ho_ids=()) -> str:
 # What a gated command does, as one sentence. The first pattern that matches the canonical key of a gated segment wins. `{1}` style groups are filled with `m.expand`.
 _Render = tuple[re.Pattern, str]
 SEGMENT_TEXT: list[_Render] = [(re.compile(p), t) for p, t in (
-    (r"^gh pr merge\b[^\n]*\s(?:-R|--repo)(?:=|\s|$)", "Merge a pull request."),
+    (r"^gh pr merge\b[^\n]*\s(?:-R\S*|--repo(?:=\S*)?)(?:\s|$)", "Merge a pull request."),
     (r"^gh pr merge\s+\S*/pull/(\d+)\b", r"Merge pull request \1."),
     # Only flags that take no value, or `--name=value`, may come before the number: in `--body 5 940` the 5 is the body, so that call says "Merge a pull request."
     (r"^gh pr merge(?:\s+(?:--squash|-s|--merge|-m|--rebase|-r|--delete-branch|-d|--admin|--auto|--disable-auto|--[\w-]+=\S*))*\s+(\d+)(?:\s|$)",
@@ -99,7 +99,7 @@ SEGMENT_TEXT: list[_Render] = [(re.compile(p), t) for p, t in (
     (r"^gh pr merge\s+([A-Za-z][\w./-]*)(?:\s|$)", r"Merge the pull request of branch \1."),
     (r"^gh pr merge(?:\s+-[-\w=]+)*\s*$", "Merge the pull request of this branch."),
     (r"^gh pr merge\b", "Merge a pull request."),
-    (r"^glab mr merge\b[^\n]*\s(?:-R|--repo)(?:=|\s|$)", "Merge a merge request."),
+    (r"^glab mr merge\b[^\n]*\s(?:-R\S*|--repo(?:=\S*)?)(?:\s|$)", "Merge a merge request."),
     (r"^glab mr merge(?:\s+(?:--squash|-s|--rebase|-r|--remove-source-branch|-d|--yes|-y|--auto-merge|--[\w-]+=\S*))*\s+(\d+)(?:\s|$)", r"Merge merge request \1."),
     (r"^glab mr merge(?:\s+-[-\w=]+)*\s*$", "Merge the merge request of this branch."),
     (r"^glab mr merge\b", "Merge a merge request."),
@@ -132,12 +132,13 @@ _NONPIPE_SPLIT = re.compile(r"\n|;|&&|\|\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\}") 
 
 
 _NAMED = re.compile(r"[\w./-]+")
+_CURRENT = frozenset({"HEAD", "@"})
 _PUSH_VALUE_FLAGS = frozenset({"-o", "--push-option", "--receive-pack", "--exec", "--repo"})
 
 
 def _push_line(key: str) -> str:
     """One plain sentence for a `git push` key. Every refspec is read, and the worst thing in the call is named: force, then delete, then the main branch."""
-    force = delete = tags = mirror = False
+    force = delete = tags = mirror = prune = False
     positional: list[str] = []
     skip = False
     ended = False
@@ -154,6 +155,7 @@ def _push_line(key: str) -> str:
             delete |= name == "--delete"
             tags |= name in ("--tags", "--tag")
             mirror |= name == "--mirror"
+            prune |= name == "--prune"
             skip = name in _PUSH_VALUE_FLAGS and "=" not in tok
         elif not ended and tok.startswith("-") and len(tok) > 1:
             force |= "f" in tok
@@ -163,10 +165,10 @@ def _push_line(key: str) -> str:
             positional.append(tok)
     if mirror:
         return "Push and delete to match every branch and tag."
-    dests: list[str] = []
-    n_delete = 0
-    n_tag_delete = 0
+    dests: list[str] = []      # every destination, deletes included
+    pushed: list[str] = []     # destinations that are written, not deleted
     del_dests: list[str] = []
+    n_tag_delete = 0
     colon_single = False
     for spec in positional[1:]:
         plus = spec.startswith("+")
@@ -181,28 +183,45 @@ def _push_line(key: str) -> str:
             n_tag_delete += is_delete
         else:
             dst = dst.removeprefix("refs/heads/")
-        n_delete += is_delete
-        if is_delete:
-            del_dests.append(dst)
         colon_single = bool(colon)
         dests.append(dst)
-    named = len(dests) == 1 and bool(_NAMED.fullmatch(dests[0]))
-    if (force and (n_delete or delete)):
-        return "Force push and delete branches on a remote."
-    if force:
-        refspec_force = any(sp.startswith("+") for sp in positional[1:])
-        return f"Force push to {dests[0]}." if named and refspec_force else "Force push to a remote."
-    if delete:
-        return "Delete a branch or tag on a remote."
-    if n_delete:
-        if n_delete == 1 and _NAMED.fullmatch(del_dests[0]):
+        (del_dests if is_delete else pushed).append(dst)
+    one = len(dests) == 1 and bool(_NAMED.fullmatch(dests[0])) and dests[0] not in _CURRENT
+    cur = (not positional[1:] and not tags and not delete) or (len(dests) == 1 and dests[0] in _CURRENT)   # no named branch: the current one goes
+    main = any(d in ("main", "master") for d in pushed)
+    dele = bool(del_dests) or delete
+    prune_text = "delete remote branches that are gone here"
+    sole = sum(bool(x) for x in (force, main, dele, prune, tags)) <= 1 and not (cur and (force or main or dele or prune or tags))
+    if sole and dele and not force:
+        if delete:
+            return "Delete a branch or tag on a remote."
+        if len(del_dests) == 1 and _NAMED.fullmatch(del_dests[0]):
             return f"Delete the remote {'tag' if n_tag_delete else 'branch'} {del_dests[0]}."
         return "Delete branches on a remote."
-    if any(d in ("main", "master") for d in dests):
-        return f"Push to {dests[0]}." if named and colon_single else "Push to the main branch."
+    if sole and main and not force:
+        return f"Push to {dests[0]}." if one and colon_single else "Push to the main branch."
+    if prune and not (force or main or dele or tags):
+        return "Push and delete remote branches that are gone here."
+    clauses: list[str] = []
+    if force and (dele or prune):
+        clauses.append("force push and " + (prune_text if prune and not dele else "delete branches on a remote"))
+    elif force:
+        where = f"to {dests[0]}" if one else "the current branch to a remote" if cur else "to a remote"
+        clauses.append(f"force push {where}" + (", including the main branch" if main and not one else ""))
+    elif main:
+        clauses.append("push to the main branch")
+    if dele and not force:
+        clauses.append("delete branches on a remote")
+    if prune and (not force or dele):
+        clauses.append(prune_text)
     if tags:
-        return "Push tags to a remote."
-    return f"Push to {dests[0]}." if named else "Push to a remote."
+        clauses.append("push tags to a remote")
+    if not clauses:
+        clauses.append(f"push to {dests[0]}" if one else "push the current branch to a remote" if cur else "push to a remote")
+    elif cur and not force:
+        clauses.append("push the current branch to a remote")
+    text = ", ".join(clauses[:-1]) + (" and " if len(clauses) > 1 else "") + clauses[-1]
+    return text[0].upper() + text[1:] + "."
 
 
 def _render(key: str) -> str:

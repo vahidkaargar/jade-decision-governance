@@ -31,7 +31,7 @@ def line_of(cmd: str) -> str:
     ("git push origin main:main", "Push to main."),
     ("git push origin HEAD:refs/heads/main", "Push to main."),
     ("git push -u origin main", "Push to the main branch."),
-    ("git push --force origin feature", "Force push to a remote."),
+    ("git push --force origin feature", "Force push to feature."),
     ("git push origin --delete feature", "Delete a branch or tag on a remote."),
 ])
 def test_push_refspec_lines(cmd, expected):
@@ -40,15 +40,25 @@ def test_push_refspec_lines(cmd, expected):
 
 @pytest.mark.parametrize("cmd,expected", [
     ("git push origin :feat1 +x:main", "Force push and delete branches on a remote."),
-    ("git push origin main +feature", "Force push to a remote."),
-    ("git push origin main :feature", "Delete the remote branch feature."),
-    ("git push -fu origin HEAD:main", "Force push to a remote."),
-    ("git push -uf origin feature", "Force push to a remote."),
+    ("git push origin main +feature", "Force push to a remote, including the main branch."),
+        ("git push -fu origin HEAD:main", "Force push to main."),
+    ("git push -uf origin feature", "Force push to feature."),
     ("git push origin +refs/heads/*:refs/heads/*", "Force push to a remote."),
     ("git push origin :a :b", "Delete branches on a remote."),
     ("git push origin :refs/tags/v1", "Delete the remote tag v1."),
     ("git push --mirror origin", "Push and delete to match every branch and tag."),
-    ("git push origin feature +x:main", "Force push to a remote."),
+    ("git push origin feature +x:main", "Force push to a remote, including the main branch."),
+    ("git push origin main :feature", "Push to the main branch and delete branches on a remote."),
+    ("git push origin HEAD", "Push the current branch to a remote."),
+    ("git push origin @", "Push the current branch to a remote."),
+    ("git push", "Push the current branch to a remote."),
+    ("git push --prune origin", "Push and delete remote branches that are gone here."),
+    ("git push --prune origin main", "Push to the main branch and delete remote branches that are gone here."),
+    ("git push --force --prune origin", "Force push and delete remote branches that are gone here."),
+    ("git push --force origin HEAD", "Force push the current branch to a remote."),
+    ("git push --tags origin main", "Push to the main branch and push tags to a remote."),
+    ("gh pr merge 12 -Ro/r", "Merge a pull request."),
+    ("glab mr merge -Ro/r 12", "Merge a merge request."),
     ("git push --tags origin", "Push tags to a remote."),
     ("git push origin main feature", "Push to the main branch."),
     ("git push origin x:*", "Push to a remote."),
@@ -98,7 +108,7 @@ def test_no_jargon_in_risk_lines():
 
 def test_no_jargon_in_segment_and_push_lines():
     sentences = [t for _, t in askplain.SEGMENT_TEXT]
-    for cmd in ("git push origin :a", "git push -f origin x", "git push --mirror origin", "git push origin :refs/tags/v", "git push origin :a +b:main"):
+    for cmd in ("git push origin :a", "git push --prune origin main", "git push --force origin HEAD", "git push origin main :a --tags", "git push -f origin x", "git push --mirror origin", "git push origin :refs/tags/v", "git push origin :a +b:main"):
         sentences.append(askplain._push_line(cmd))
     bad = [(s, w) for s in sentences for w in HARD_WORDS if re.search(rf"\b{re.escape(w)}s?\b", s, re.I)]
     assert bad == []
