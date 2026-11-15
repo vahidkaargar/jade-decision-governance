@@ -20,7 +20,7 @@ from types import SimpleNamespace
 from typing import NamedTuple
 
 from . import ledger, paths, policy, signing
-from .util import is_human_tty, now, parse_ts, ts, user
+from .util import is_human_tty, now, one_line, parse_ts, ts, user
 
 
 def pretool_matcher() -> str:
@@ -750,7 +750,7 @@ def review_lines(db, since_s: float | None) -> list[str]:
             a = {"rule_id": det.get("rule"), "label": det.get("label")}
         else:
             a = db.con.execute("SELECT rule_id, label FROM human_answers WHERE answer_id=?", (r["entity_id"],)).fetchone()
-        out.append(f"  {did}  [{a['rule_id'] if a else '?'}]  {(a['label'] if a else '') or ''}  {('(marked ' + marks[did] + ')') if did in marks else ''}".rstrip())
+        out.append(f"  {did}  [{a['rule_id'] if a else '?'}]  {one_line(a['label'] if a else '')}  {('(marked ' + marks[did] + ')') if did in marks else ''}".rstrip())
     return out
 
 
@@ -810,7 +810,7 @@ def _scope_lines(r) -> list[str]:
     how to undo it."""
     from . import memory, scopes
 
-    lines = [f"Would become standing for: {r['scope_label']} ({memory.USE_DAYS} days after last use)"]
+    lines = [f"Would become standing for: {one_line(r['scope_label'])} ({memory.USE_DAYS} days after last use)"]
     covers = scopes.COVERS.get(r["scope_kind"])
     if covers:
         lines.append(covers)
@@ -837,12 +837,12 @@ def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, al
         chosen: list = []
         for (rule, _, is_class, scope_key), rs in groups.items():
             if scope_key:
-                say(f"{rs[-1]['label'] or '(no text kept)'}  [{rule}]  allowed {len(rs)}x")
+                say(f"{one_line(rs[-1]['label']) or '(no text kept)'}  [{rule}]  allowed {len(rs)}x")
                 for line in _scope_lines(rs[-1]):
                     say(f"   {line}")
             else:
                 kind = "this kind of call" if is_class else "this exact call only"
-                say(f"{rs[-1]['label'] or '(no text kept)'}  [{rule}]  allowed {len(rs)}x  ->  would be standing for {kind}")
+                say(f"{one_line(rs[-1]['label']) or '(no text kept)'}  [{rule}]  allowed {len(rs)}x  ->  would be standing for {kind}")
             if rule in memory.NEVER_RULES:
                 say("   (rule is always asked; confirming it changes nothing)")
             if all_ or ask("  stand for this? [y/N] ").strip().lower() in ("y", "yes"):
@@ -850,8 +850,10 @@ def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, al
         if not chosen:
             say("nothing confirmed")
             return 0
-        say(f"{len(chosen)} answer(s) in {len({_confirm_group(r) for r in chosen})} group(s) become standing: from now on, at level low or medium, a call that matches "
-            f"runs without a question for {memory.USE_DAYS} days after its last use (never more than {memory.CAP_DAYS} days). `jade knows list` shows them, `jade knows rm ID` forgets one.")
+        say(f"{len(chosen)} answer(s) in {len({_confirm_group(r) for r in chosen})} group(s) will become standing.")
+        say("At level low or medium, a matching call then runs without a question.")
+        say(f"It lasts {memory.USE_DAYS} days after its last use, never more than {memory.CAP_DAYS} days.")
+        say("Undo with jade knows rm ID.")
         if ask("Type yes to confirm: ").strip() != "yes":
             say("cancelled; nothing changed")
             return 0
@@ -883,8 +885,8 @@ def knows_list() -> str:
         cap_end = parse_ts(r["confirmed_ts"]) + timedelta(days=memory.CAP_DAYS)
         end = min(x for x in (use_end, cap_end) if x)
         note = "  (near its 180-day end: confirm again to keep it)" if (cap_end - now()) <= timedelta(days=memory.NEAR_CAP_DAYS) else ""
-        scope = f"  scope  {r['scope_label']}" if r["scope_label"] else ""
-        out.append(f"{r['answer_id']}  [{r['rule_id']}]  {'kind' if r['class_key'] else 'exact'}  {r['label'] or ''}{scope}  stops deciding {ts(end)[:10]}{note}")
+        scope = f"  scope  {one_line(r['scope_label'])}" if r["scope_label"] else ""
+        out.append(f"{r['answer_id']}  [{r['rule_id']}]  {'kind' if r['class_key'] else 'exact'}  {one_line(r['label'])}{scope}  stops deciding {ts(end)[:10]}{note}")
     return "\n".join(out) or "no standing answers"
 
 
@@ -924,17 +926,19 @@ def knows_template(rows) -> str:
            "# Lines that start with # are ignored.", "#", *_KNOWS_MODELS, "#"]
     seen: dict[tuple, str] = {}
     for r in rows:   # newest first, so the first row of a group names it
-        text = r["scope_label"] or r["label"]
-        if r["answer"] != "allow" or not text:
+        text = one_line(r["scope_label"] or r["label"])
+        if not text:
             continue
-        key = (r["rule_id"], r["scope_key"]) if r["scope_key"] else (r["rule_id"], None, (r["label"] or "").split(" ", 1)[0])
+        key = (r["rule_id"], r["scope_key"]) if r["scope_key"] else (r["rule_id"], None, one_line(r["label"]).split(" ", 1)[0])
         if key in seen:
             continue
-        text = " ".join(text.split())
+        if r["answer"] != "allow":
+            seen[key] = ""   # the newest row of a group decides: a deny hides every older allow of the group
+            continue
         if len(text) > KNOWS_LABEL_CHARS:
             text = text[:KNOWS_LABEL_CHARS - 3] + "..."
         seen[key] = f"# I am fine with: {text}  [{r['rule_id']}]  (risk: {askplain.risk_line(r['rule_id'])})"
-    lines = list(seen.values())
+    lines = [x for x in seen.values() if x]
     room = KNOWS_MAX_LINES - len(out)
     if len(lines) > room:
         lines = [*lines[:room - 1], "# (more kinds are not shown here: `jade knows list` shows all)"]

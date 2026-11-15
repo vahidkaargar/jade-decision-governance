@@ -30,6 +30,7 @@ import stat
 from dataclasses import dataclass
 
 from . import memory, policy, redact, shellnorm
+from .util import one_line
 
 # `--body-file`/`-F` are not on the list: they read a local file and upload it to GitHub as the merge commit body, so a standing scope would let the agent send any file.
 MERGE_FLAGS_ALLOWED = frozenset({"--squash", "-s", "--merge", "-m", "--rebase", "-r", "--subject", "-t", "--body", "-b", "--match-head-commit"})
@@ -330,21 +331,16 @@ def _kind_project_key(a, project: str) -> str:
     return memory.sha256(memory.canonical({"kind": "kind_project", "family": family, "project": project}))
 
 
-def _one_line(text: str) -> str:
-    """One printable line: every control character (ESC, BEL, a line break) becomes a space, then each run of spaces becomes one."""
-    return re.sub(r"\s+", " ", "".join(c if c.isprintable() else " " for c in text)).strip()
-
-
 def _label(command: str, where: str) -> str:
     """`COMMAND in WHERE` on one line, at most LABEL_MAX characters. A path too long to fit is cut from the left (`…/tail`); the command stays visible. Every run of
     whitespace, a newline in a folder name included, becomes one space: the label is shown in the chat question and in `jade review confirm` and must not add a line."""
-    command = _one_line(redact.redact_obj(command, secrets_only=True)[0])
+    command = one_line(redact.redact_obj(command, secrets_only=True)[0])
     command = command[:LABEL_MAX // 2 + 20]
-    where = _one_line(where)
+    where = one_line(where)
     room = LABEL_MAX - len(command) - len(" in ")
     if len(where) > room:
         where = _ELLIPSIS + where[len(where) - max(room - 1, 1):] if room > 1 else _ELLIPSIS
-    return _one_line(f"{command} in {where}")[:LABEL_MAX]
+    return one_line(f"{command} in {where}")[:LABEL_MAX]
 
 
 def _family(a) -> str:
