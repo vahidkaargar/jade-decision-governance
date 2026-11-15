@@ -14,7 +14,7 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 - Threat row T30 in `docs/05` (a scope that covers more than the owner meant).
 
 ### Fixed
-- **Review and knows output is one printable line.** `jade knows list`, `jade review` and `jade review confirm` pass every label through `util.one_line` (no ESC, BEL or line break). The confirm summary is four short sentences. In the `jade knows edit` template a newer deny hides older allows of the same kind of command, and an unconfirmed allow is never listed.
+- **Review and knows output is one printable line.** `jade knows list`, `jade review` and `jade review confirm` pass every label through `util.one_line` (no ESC, BEL or line break). The confirm summary is four short sentences. In the `jade knows edit` template one line is one kind of answer by its stored keys (scope key, else class key, else exact key, with the rule), never by words of the label. A newer deny hides an older allow that shares its rule and any of its keys, so a deny spelled `cd PATH && ...`, `git -C PATH ...`, `VAR=1 ...` or `/usr/bin/git ...` hides the allow of the same kind when the gate gives both one class key. Calls the gate keeps exact-only (pushes, merges) have one key per call, so a deny hides only that same call. An unconfirmed allow is never listed.
 
 ## [0.6.1] - 2026-11-14
 

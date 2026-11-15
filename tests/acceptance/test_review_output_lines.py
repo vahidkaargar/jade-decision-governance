@@ -101,20 +101,24 @@ def test_confirm_summary_is_three_short_sentences():
     assert "Undo one with jade knows rm ID." in text and "jade knows list shows each ID." in text
 
 
-def row(label, answer, rule="R-11"):
-    return {"answer": answer, "label": label, "rule_id": rule, "scope_kind": None, "scope_key": None, "scope_label": None, "class_key": None, "exact_key": "x", "strength": "strong"}
+def row(label, answer, rule="R-11", class_key=None, exact_key="x", scope_key=None):
+    return {"answer": answer, "label": label, "rule_id": rule, "scope_kind": None, "scope_key": scope_key, "scope_label": None, "class_key": class_key, "exact_key": exact_key, "strength": "strong"}
 
 
 def fine(rows):
     return [x for x in ops.knows_template(rows).splitlines() if "I am fine with" in x]
 
 
-def test_a_newer_deny_hides_an_older_allow():
-    assert fine([row("git reset --hard HEAD~1", "deny"), row("git reset --hard HEAD~2", "allow")]) == []
+def test_a_newer_deny_hides_an_older_allow_of_the_same_class_key():
+    assert fine([row("git reset --hard HEAD~1", "deny", class_key="C", exact_key="e1"), row("git reset --hard HEAD~2", "allow", class_key="C", exact_key="e2")]) == []
 
 
 def test_a_newer_allow_over_an_older_deny_still_shows():
-    assert len(fine([row("git reset --hard HEAD~1", "allow"), row("git reset --hard HEAD~2", "deny")])) == 1
+    assert len(fine([row("git reset --hard HEAD~1", "allow", class_key="C", exact_key="e1"), row("git reset --hard HEAD~2", "deny", class_key="C", exact_key="e2")])) == 1
+
+
+def test_a_deny_does_not_hide_an_allow_with_other_keys_of_the_same_rule():
+    assert len(fine([row("gh pr create", "deny", exact_key="e1"), row("gh pr merge 5", "allow", exact_key="e2")])) == 1
 
 
 # ---- through the real caller: knows_edit reads the ledger, writes the preferences file
@@ -124,16 +128,25 @@ def edit_and_read():
     return [x for x in p.read_text().splitlines() if "I am fine with" in x]
 
 
-def record(answer, label, key, rule="R-11", scope=None, confirm=False):
+def record(answer, label, key, rule="R-11", scope=None, confirm=False, class_key=None):
     db = ledger.open(timeout=5)
     try:
         with db.tx():
-            aid = db.record_human_answer(session="sess-out-0002", decision_id=None, rule_id=rule, class_key=None, exact_key=key, answer=answer, channel="chat",
+            aid = db.record_human_answer(session="sess-out-0002", decision_id=None, rule_id=rule, class_key=class_key, exact_key=key, answer=answer, channel="chat",
                                          label=label, scope=scope)
             if confirm:
                 db.confirm_answers([aid])
     finally:
         db.close()
+
+
+def record_call(answer, cmd, confirm=False):
+    """Record a call the way the chat answer does: the gate's own exact key and class key (jade.memory.keys of policy.assess)."""
+    from jade import memory, policy
+
+    a = policy.assess("Bash", {"command": cmd}, "/tmp/x")
+    exact, cls, _ = memory.keys(a, "Bash", {"command": cmd}, None)
+    record(answer, cmd, exact, rule=a.rule_id, confirm=confirm, class_key=cls)
 
 
 def test_knows_edit_a_later_deny_hides_a_confirmed_allow():
@@ -146,8 +159,14 @@ def test_knows_edit_a_later_deny_hides_a_confirmed_allow():
 
 def test_knows_edit_a_later_deny_hides_a_confirmed_scope_line():
     record("allow", "gh pr merge 940 --squash", "k940", rule="R-10", scope={"kind": "merge_project", "key": "S1", "label": "gh pr merge * in /p"}, confirm=True)
-    record("deny", "gh pr merge 941 --squash", "k941", rule="R-10")
+    record("deny", "gh pr merge 940 --squash", "k940", rule="R-10")
     assert edit_and_read() == []
+
+
+def test_knows_edit_a_deny_of_another_merge_leaves_the_scope_line():
+    record("allow", "gh pr merge 940 --squash", "k940", rule="R-10", scope={"kind": "merge_project", "key": "S1", "label": "gh pr merge * in /p"}, confirm=True)
+    record("deny", "gh pr merge 941 --squash", "k941", rule="R-10")
+    assert len(edit_and_read()) == 1
 
 
 def test_knows_edit_a_hint_allow_never_appears():
@@ -155,12 +174,28 @@ def test_knows_edit_a_hint_allow_never_appears():
     assert edit_and_read() == []
 
 
-def test_knows_edit_a_deny_with_a_cd_prefix_hides_the_scope_line():
-    record("allow", "gh pr merge 940 --squash", "k940", rule="R-10", scope={"kind": "merge_project", "key": "S1", "label": "gh pr merge * in /p"}, confirm=True)
-    record("deny", "cd /p && cd q && gh pr merge 941 --squash", "k941", rule="R-10")
+@pytest.mark.parametrize("deny", ['cd "/a b" && git reset --hard HEAD~1', "cd /p; git reset --hard HEAD~1", "git -C /p reset --hard HEAD~1",
+                                  "VAR=1 git reset --hard HEAD~1", "/usr/bin/git reset --hard HEAD~1"])
+def test_knows_edit_a_deny_in_another_spelling_hides_the_allow_of_the_same_kind(deny):
+    record_call("allow", "git reset --hard HEAD~1", confirm=True)
+    assert len(edit_and_read()) == 1
+    ops.preferences_path().unlink()
+    record_call("deny", deny)
     assert edit_and_read() == []
 
 
+def test_knows_edit_a_deny_of_gh_pr_create_does_not_hide_gh_pr_merge():
+    record_call("allow", "gh pr merge 5", confirm=True)
+    record_call("deny", "gh pr create --title x")
+    assert len(edit_and_read()) == 1   # same first two words, other kind of call
+
+
+def test_knows_edit_two_cd_allows_stay_two_lines():
+    record_call("allow", "cd /p && git push origin a", confirm=True)
+    record_call("allow", "cd /p && git push origin main", confirm=True)
+    assert len(edit_and_read()) == 2   # each push has its own key: the shared `cd /p &&` start does not merge them
+
+
 def test_knows_edit_a_cd_prefix_on_the_allow_still_prints_it():
-    record("allow", "cd /p && gh pr merge 940 --squash", "k940", rule="R-10", confirm=True)
+    record_call("allow", "cd /p && gh pr merge 940 --squash", confirm=True)
     assert len(edit_and_read()) == 1

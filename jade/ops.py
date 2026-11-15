@@ -916,28 +916,31 @@ _KNOWS_MODELS = (
 )
 
 
-_CD_PREFIX = re.compile(r"^(?:cd\s+\S+\s*&&\s*)+")   # a leading `cd PATH &&` is not part of the kind of call
+def _answer_keys(r) -> set[tuple]:
+    """Every stored key of an answer row, each with its rule: two rows that share one are the same kind of call."""
+    rule = r["rule_id"]
+    return {(rule, "exact", r["exact_key"]), *(((rule, "class", r["class_key"]),) if r["class_key"] else ()), *(((rule, "scope", r["scope_key"]),) if r["scope_key"] else ())}
 
 
 def knows_template(rows) -> str:
     """The first text of the preferences file (pure): two header lines, two model sentences with placeholders, then one commented line per kind of standing answer.
-    Rows of one scope (same rule and scope key) are one line with the scope label; rows without a scope are grouped by rule and first word and show the newest call.
+    A kind is the answer's stored keys, never words of its label: one line per (rule, scope key), else per (rule, class key), else per (rule, exact key), showing the newest call.
+    A newer deny hides an older allow that shares its rule and any of its keys (exact, class, scope) with it.
     Every line starts with `#`, and there are at most KNOWS_MAX_LINES lines."""
     from . import askplain
 
     out = ["# What JADE may decide for you. Write plain sentences; a later release reads this file when it decides in your place.",
            "# Lines that start with # are ignored.", "#", *_KNOWS_MODELS, "#"]
     seen: dict[tuple, str] = {}
-    denied: set[tuple] = set()   # (rule, first two words of the call) of every deny met so far; rows come newest first, so these denies are newer than the rows after them
+    denied: set[tuple] = set()   # every key of every deny met so far; rows come newest first, so these denies are newer than the rows after them
     for r in rows:   # newest first, so the first row of a group names it
-        family = (r["rule_id"], " ".join(_CD_PREFIX.sub("", one_line(r["label"])).split(" ")[:2]))
         if r["answer"] == "deny":
-            denied.add(family)
+            denied |= _answer_keys(r)
             continue
         text = one_line(r["scope_label"] or r["label"])
-        if r["answer"] != "allow" or r["strength"] != "strong" or not text or family in denied:
+        if r["answer"] != "allow" or r["strength"] != "strong" or not text or _answer_keys(r) & denied:
             continue   # only a standing allow is printed, and a newer deny of the same kind of call hides it
-        key = (r["rule_id"], r["scope_key"]) if r["scope_key"] else (r["rule_id"], None, one_line(r["label"]).split(" ", 1)[0])
+        key = (r["rule_id"], "scope", r["scope_key"]) if r["scope_key"] else (r["rule_id"], "class", r["class_key"]) if r["class_key"] else (r["rule_id"], "exact", r["exact_key"])
         if key in seen:
             continue
         if len(text) > KNOWS_LABEL_CHARS:
