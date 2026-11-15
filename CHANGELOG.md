@@ -13,6 +13,9 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 - Agent rule "Send one risky action per call" in the skill and in `docs/claude-md-jev-section.md`.
 - Threat row T30 in `docs/05` (a scope that covers more than the owner meant).
 
+### Fixed
+- **Push and merge lines say what really happens.** Every target of a `git push` is read: a force (`+main`, `-f`, `-fu`), a delete (`:main`, `--prune`, `--mirror`) or the main branch is named, worst first. `git push origin HEAD` says the current branch. A value flag before the number (`glab mr merge --message 5 12`) or `-R`/`--repo` gives no number. Risk lines use plain words (no "reflog", "deployment", "credential").
+
 ## [0.6.1] - 2026-11-14
 
 ### Fixed
