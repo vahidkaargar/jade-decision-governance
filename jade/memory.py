@@ -86,11 +86,16 @@ def lookup(db, a, tool: str, tool_input: dict | None, fp: dict | None, cwd: str 
         return None
     scope_keys = scopes.keys_for(a, tool, tool_input, fp, cwd)
     cap, use = valid_since()
+    same = "exact_key=?" + (" OR class_key=?" if cls else "") + (f" OR scope_key IN ({','.join('?' * len(scope_keys))})" if scope_keys else "")
+    keys_args = [exact] + ([cls] if cls else []) + scope_keys
+    # A deny of any strength that is newer than the allow, with the same exact key, class key or scope key as this call, takes that allow out: the owner's newest answer
+    # wins. A deny row stores the exact key and (for a class call) the class key, and no scope key, so a deny blocks a scope allow only for the very call it was given for.
     sql = ("SELECT * FROM human_answers WHERE strength='strong' AND answer='allow' AND confirmed_ts>=? AND COALESCE(last_used_ts, confirmed_ts)>=? "
-           "AND COALESCE(source,'')<>'test' AND (exact_key=?" + (" OR class_key=?" if cls else "") + (f" OR scope_key IN ({','.join('?' * len(scope_keys))})" if scope_keys else "")
-           + ") ORDER BY confirmed_ts DESC, rowid DESC LIMIT 1")
-    args = [cap, use, exact] + ([cls] if cls else []) + scope_keys
-    return db.con.execute(sql, args).fetchone()
+           f"AND COALESCE(source,'')<>'test' AND ({same}) "
+           "AND NOT EXISTS (SELECT 1 FROM human_answers d WHERE d.answer='deny' AND d.strength IN ('hint','strong') AND COALESCE(d.source,'')<>'test' "
+           f"AND d.ts>human_answers.ts AND ({same.replace('exact_key', 'd.exact_key').replace('class_key', 'd.class_key').replace('scope_key', 'd.scope_key')})) "
+           "ORDER BY confirmed_ts DESC, rowid DESC LIMIT 1")
+    return db.con.execute(sql, [cap, use] + keys_args + keys_args).fetchone()
 
 
 def use(db, answer_id: str) -> None:
