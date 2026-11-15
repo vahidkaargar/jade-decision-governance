@@ -13,6 +13,9 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 - Agent rule "Send one risky action per call" in the skill and in `docs/claude-md-jev-section.md`.
 - Threat row T30 in `docs/05` (a scope that covers more than the owner meant).
 
+### Fixed
+- **Review and knows output is one printable line.** `jade knows list`, `jade review` and `jade review confirm` pass every label through `util.one_line` (no ESC, BEL or line break). The confirm summary is four short sentences. In the `jade knows edit` template a newer deny hides older allows of the same kind of command, and an unconfirmed allow is never listed.
+
 ## [0.6.1] - 2026-11-14
 
 ### Fixed
