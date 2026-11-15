@@ -327,7 +327,7 @@ def _on_default_branch(cwd: str, command: str) -> bool:
     (GitUnresolved), never "not main".
     """
     extra, _ = policy.hidden(command, cwd)   # a git alias that expands to a push, a script the command writes and runs (W-31)
-    segs = policy.segments_cwd(command + "".join("\n" + e for e in extra), cwd)
+    segs = policy.segments_cwd(command + "".join("\n" + e for e in extra), cwd, literal_end=len(command))
     pushes = [(call, dirs) for seg, dirs in segs if not policy.is_read_only(seg) for call in policy.git_calls(seg) if call.sub == "push"]
     if not pushes:
         return False

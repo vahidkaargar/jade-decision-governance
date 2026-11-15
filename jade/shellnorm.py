@@ -790,9 +790,13 @@ def git_env_danger(name: str, val: str) -> bool:
 
 
 class _Scan:
-    def __init__(self, s: str, depth: int, budget: list[int]):
+    def __init__(self, s: str, depth: int, budget: list[int], literal_end: int = 0):
         self.s, self.n, self.depth, self.budget = s, len(s), depth, budget
         self.nest = 0
+        # Single quotes before this index are literal to the shell that runs the text: only the top-level text the outer shell parses. A body that is
+        # re-parsed (`bash -c "..."`, `eval`, `| sh`, a here-string, a heredoc, a script the command writes) may hold text the outer shell already
+        # expanded, so `'$X'` there stays a live expansion (security review PRE2-1).
+        self.literal_end = literal_end if depth == 0 else 0
 
     def _sub(self, text: str) -> str:
         return skeleton(text, self.depth + 1, self.budget)
@@ -1021,7 +1025,8 @@ class _Scan:
                 emit(re.sub(r"\s", "\x01", plain))  # keep a directory with spaces readable for cwd tracking
             else:
                 inert = _INERT.sub("\x06", plain)   # `awk 'NR>1'`: a quoted `>` is data, not a redirect
-                emit('""' if re.search(r"\s", plain) else inert.replace("$", "\x06") if quote == "'" else inert)   # `'$HOME'` is literal: it never expands
+                literal_sq = quote == "'" and i <= self.literal_end   # `'$HOME'` at the top level is literal: it never expands
+                emit('""' if re.search(r"\s", plain) else inert.replace("$", "\x06") if literal_sq else inert)
 
         while i < n:
             c = s[i]
@@ -1188,26 +1193,29 @@ class _Scan:
 
 
 @functools.lru_cache(maxsize=16)
-def _skeleton_top(command: str) -> str:
-    return _skeleton(command, 0, None)
+def _skeleton_top(command: str, literal_end: int) -> str:
+    return _skeleton(command, 0, None, literal_end)
 
 
-def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None) -> str:
+def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None, literal_end: int | None = None) -> str:
     """The command with quoting, escapes, comments, heredoc bodies and expansions resolved; separators are left for SPLIT.
+
+    `literal_end`: single quotes before this index are literal (default: the whole text). A caller that appends text the command runs without writing
+    it on the command line (a script it writes, an alias expansion) passes the length of the command, so the appended text keeps `'$X'` live.
 
     The top-level call is pure on a string, and one assessment asks for the same text several times (views, segments, masks),
     so it is memoised: a 2 MB command is scanned once, not once per caller."""
     if _depth == 0 and _budget is None:
-        return _skeleton_top(command)
+        return _skeleton_top(command, len(command) if literal_end is None else literal_end)
     return _skeleton(command, _depth, _budget)
 
 
-def _skeleton(command: str, _depth: int, _budget: list[int] | None) -> str:
+def _skeleton(command: str, _depth: int, _budget: list[int] | None, literal_end: int = 0) -> str:
     budget = _budget if _budget is not None else [BUDGET]
     budget[0] -= len(command)
     if _depth > MAX_DEPTH or budget[0] < 0:
         return " ; " + _code(command) + " ; "
-    text, _ = _Scan(command, _depth, budget).run(0, None)
+    text, _ = _Scan(command, _depth, budget, literal_end).run(0, None)
     return expand_braces(NULL_REDIRECT.sub(" ", text))
 
 
@@ -1218,15 +1226,16 @@ def segments(command: str) -> list[str]:
 SEG_TOKEN = re.compile(r"(\n|;|&&|\|\||(?<!>)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\})")
 
 
-def segments_cwd(command: str, cwd: str = "") -> list[tuple[str, tuple[str, ...]]]:
+def segments_cwd(command: str, cwd: str = "", literal_end: int | None = None) -> list[tuple[str, tuple[str, ...]]]:
     """Like `segments`, with the directories the segment may run in: `cd`/`pushd`/`popd` are followed, a subshell keeps its own.
+    `literal_end`: as in `skeleton`.
 
     A command that carries substitutions is ordered by the canonical text, not by execution, so every directory the
     command passes through counts for every segment then.
     """
     import os
 
-    text = skeleton(command)
+    text = skeleton(command, literal_end=literal_end)
     cur, prev = cwd, None
     stack: list[str] = []
     dirs: list[str] = []
@@ -1322,6 +1331,7 @@ class GitCall:
     dirs: list[str] = field(default_factory=list)
     git_dir: str | None = None
     work_tree: str | None = None
+    config_work_tree: str | None = None   # `-c core.worktree=D`: the work tree when no --work-tree is given
     danger: list[str] = field(default_factory=list)
 
 
@@ -1368,6 +1378,8 @@ def git_calls(text: str) -> tuple[str, list[GitCall]]:
                     call.work_tree = val
                 elif name in ("-c", "--config-env"):
                     key = val.split("=", 1)[0].strip().lower()
+                    if name == "-c" and key == "core.worktree" and "=" in val:
+                        call.config_work_tree = val.split("=", 1)[1]
                     if not key or "$" in key or '"' in key or DANGEROUS_KEY.search(key):
                         call.danger.append(f"{name} {key or '?'}")
             elif name == "--exec-path":
