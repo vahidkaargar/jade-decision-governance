@@ -133,7 +133,13 @@ _NONPIPE_SPLIT = re.compile(r"\n|;|&&|\|\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\}") 
 
 _NAMED = re.compile(r"[\w./-]+")
 _CURRENT = frozenset({"HEAD", "@"})
-_PUSH_VALUE_FLAGS = frozenset({"-o", "--push-option", "--receive-pack", "--exec", "--repo"})
+_PUSH_PLAIN_FLAGS = frozenset({"-u", "--set-upstream", "-v", "--verbose", "-q", "--quiet", "-n", "--dry-run", "--porcelain", "--atomic", "--signed", "--no-verify", "--progress", "--ipv4", "-4", "--ipv6", "-6"})
+_PUSH_LETTERS = frozenset("uvqnfd46")
+_REMOTE = re.compile(r"[A-Za-z0-9._-]+")
+_REFSPEC = re.compile(r"\+?[\w./@~*:-]*")
+_WORST_PUSH = "This push can force push, delete branches and tags, and include the main branch."
+_GLOBAL_GIT = re.compile(r"\bgit\s+-|\bGIT_\w+=")   # a git option before the subcommand, or a GIT_ variable: the key drops them
+_DANGEROUS = ("--force", "--delete", "--mirror", "--all", "--branches", "--prune", "--tags", "--follow-tags")
 
 
 _MAIN = ("main", "master")
@@ -155,17 +161,16 @@ def _push_line(key: str) -> str:
     """One plain sentence for a `git push` key. Every refspec is read. When the line cannot be sure, it names the worst outcome. Order of clauses: force, delete, main branch, tags, named branch."""
     force = flag_delete = tags = tags_only = mirror = prune = every = False
     positional: list[str] = []
-    skip = False
-    ended = False
+    unknown = False   # anything the lines below do not read: the worst line is shown
     for tok in key.split()[2:]:
         tok = tok.strip("'\"")
-        if skip:
-            skip = False
-            continue
-        if not ended and tok == "--":
-            ended = True
-        elif not ended and tok.startswith("--"):
+        if tok == "--" or not tok:
+            unknown = True
+        elif tok.startswith("--"):
             name = tok.split("=", 1)[0]
+            dangerous = name.startswith("--force") or any(_abbr(name, d) for d in _DANGEROUS) or name == "--tag"
+            if not dangerous and (name not in _PUSH_PLAIN_FLAGS or "=" in tok):
+                unknown = True
             force |= _abbr(name, "--force") or name.startswith("--force")
             flag_delete |= _abbr(name, "--delete")
             tags_only |= _abbr(name, "--tags") or name == "--tag"
@@ -173,15 +178,17 @@ def _push_line(key: str) -> str:
             mirror |= _abbr(name, "--mirror")
             prune |= _abbr(name, "--prune")
             every |= _abbr(name, "--all") or _abbr(name, "--branches")
-            skip = name in _PUSH_VALUE_FLAGS and "=" not in tok
-        elif not ended and tok.startswith("-") and len(tok) > 1:
-            cluster = tok[1:]
-            letters, o, _ = cluster.partition("o")   # what follows `o` is the value of -o
+        elif tok.startswith("-") and len(tok) > 1:
+            letters = tok[1:]
+            unknown |= not set(letters) <= _PUSH_LETTERS
             force |= "f" in letters
             flag_delete |= "d" in letters
-            skip = o == "o" and cluster.endswith("o")
-        elif tok:
+        else:
             positional.append(tok)
+    unknown |= bool(positional) and not _REMOTE.fullmatch(positional[0])
+    unknown |= not all(_REFSPEC.fullmatch(t) for t in positional[1:])
+    if unknown:
+        return _WORST_PUSH
     if mirror:
         return "Push and delete to match every branch and tag."
     pushed: list[str] = []      # destinations that are written
@@ -289,7 +296,8 @@ def what_line(a, tool: str) -> str:
     """One plain sentence for what will happen. A shell call is read from its gated segments, any other tool from its name."""
     keys = list(getattr(a, "seg_keys", None) or [])
     if keys:
-        return " ".join(dict.fromkeys(_render(k) for k in keys))
+        raw_global = bool(_GLOBAL_GIT.search(getattr(a, "subject", "") or ""))
+        return " ".join(dict.fromkeys(_WORST_PUSH if raw_global and (k == "git push" or k.startswith("git push ")) else _render(k) for k in keys))
     if tool.startswith("mcp__"):
         parts = tool.split("__")
         return f"Use {parts[1]}: {parts[-1].replace('_', ' ')}." if len(parts) > 2 else f"Use the tool {tool}."

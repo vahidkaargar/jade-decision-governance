@@ -200,3 +200,65 @@ def test_short_long_flags_read_as_the_worst(cmd, expected):
 def test_f_and_fo_are_force_and_tags(cmd):
     line = line_of(cmd)
     assert line.startswith("Force push") and "tags" in line and len(line.split()) <= 20
+
+
+WORST = "This push can force push, delete branches and tags, and include the main branch."
+
+
+@pytest.mark.parametrize("cmd", [
+    "git push --recurse-submodules check origin",
+    "git push --recurse-submodules=on-demand origin feature",
+    "git push --recurse-submodules on-demand origin",
+    "git push --push ci.skip origin",
+    "git push --pu x origin",
+    "git push --push-option=x origin feature",
+    "git push --rep x origin",
+    "git push --repo=x origin",
+    "git push --recu check origin",
+    "git push -o x origin feature",
+    "git push -of origin feature",
+    "git push --unknown origin feature",
+    "git push --no-force-with-lease origin feature",
+    "git push -- origin main",
+    "git push https://x/y.git main",
+    "git push ./repo main",
+    "git push git@host:o/r.git main",
+    "git push origin '^main'",
+    "git -c remote.origin.mirror=true push origin",
+    "git -c push.default=matching push",
+    "git --config-env=remote.origin.mirror=M push origin",
+    "git -C /tmp push origin main",
+    "git --git-dir=/x push origin main",
+    "git --work-tree=/x push origin main",
+    "git --exec-path=/x push origin main",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true git push origin",
+    "GIT_DIR=/x git push origin main",
+])
+def test_unknown_push_shape_gets_the_worst_line(cmd):
+    assert line_of(cmd) == WORST
+
+
+def test_worst_line_is_short_and_names_the_worst():
+    assert len(WORST.split()) <= 20
+    for w in ("force", "delete", "tags", "main"):
+        assert w in WORST
+
+
+@pytest.mark.parametrize("cmd,expected", [
+    ("git push -u origin main", "Push to the main branch."),
+    ("git push --set-upstream origin main", "Push to the main branch."),
+    ("git push -n -v origin feature", "Push to feature."),
+    ("git push --dry-run --porcelain --atomic --no-verify origin feature", "Push to feature."),
+    ("git push -4 -q origin feature", "Push to feature."),
+    ("git push --force-with-lease=main:abc origin feature", "Force push to feature."),
+    ("git push --force-if-includes origin feature", "Force push to feature."),
+    ("git push -uf origin feature", "Force push to feature."),
+    ("git push my-remote.2 main", "Push to the main branch."),
+])
+def test_known_shapes_keep_their_line(cmd, expected):
+    assert line_of(cmd) == expected
+
+
+@pytest.mark.parametrize("cmd", ["git push --receive-pack=x origin main", "git push --exec=x origin main"])
+def test_code_running_push_flag_still_says_the_worst(cmd):
+    assert WORST in line_of(cmd)   # the call is also an unsafe one, which adds its own Run: line
