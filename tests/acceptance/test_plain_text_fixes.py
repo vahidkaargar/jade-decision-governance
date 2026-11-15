@@ -48,7 +48,6 @@ def test_push_refspec_lines(cmd, expected):
     ("git push origin main +feature", "Force push to a remote, including the main branch."),
         ("git push -fu origin HEAD:main", "Force push to main."),
     ("git push -uf origin feature", "Force push to feature."),
-    ("git push origin +refs/heads/*:refs/heads/*", "Force push every matching branch to a remote, which can include the main branch."),
     ("git push origin :a :b", "Delete branches on a remote."),
     ("git push origin :refs/tags/v1", "Delete the remote tag v1."),
     ("git push --mirror origin", "Push and delete to match every branch and tag."),
@@ -66,7 +65,6 @@ def test_push_refspec_lines(cmd, expected):
     ("glab mr merge -Ro/r 12", "Merge a merge request."),
     ("git push --tags origin", "Push tags to a remote."),
     ("git push origin main feature", "Push to the main branch."),
-    ("git push origin x:*", MANY),
     ("glab mr merge 12 -R o/r", "Merge a merge request."),
     ("glab mr merge --repo=o/r 12", "Merge a merge request."),
     ("gh pr merge --repo=o/r 12", "Merge a pull request."),
@@ -141,8 +139,6 @@ def test_ho_without_segments_has_two_lines():
     ("git push --branches origin", MANY),
     ("git push --all --force origin", FMANY),
     ("git push -f --branches origin", FMANY),
-    ("git push origin '*:*'", MANY),
-    ("git push --prune origin 'refs/heads/*:refs/heads/*'", "This push can delete branches, and can include the main branch."),  # 21 words in full: the short worst-case form
     ("git push origin :", MANY),
     ("git push origin +:", FMANY),
     ("git push origin HEAD", CUR),
@@ -262,3 +258,111 @@ def test_known_shapes_keep_their_line(cmd, expected):
 @pytest.mark.parametrize("cmd", ["git push --receive-pack=x origin main", "git push --exec=x origin main"])
 def test_code_running_push_flag_still_says_the_worst(cmd):
     assert WORST in line_of(cmd)   # the call is also an unsafe one, which adds its own Run: line
+
+
+# RR8: the push line reads the raw words of the call, not only the key. Quotes, escapes, `$`, glob characters, odd spacing,
+# a prefix before `git push`, or any other command in the same call (a leading `cd PATH` aside) can change what git does.
+@pytest.mark.parametrize("cmd", [
+    '"git" -c remote.origin.mirror=true push origin',
+    "'git' -c remote.origin.mirror=true push origin",
+    'git "-c" remote.origin.mirror=true push origin',
+    "git '-c' remote.origin.mirror=true push origin",
+    "git ''-c remote.origin.mirror=true push origin",
+    "git \\\n-c remote.origin.mirror=true push origin",
+    "gi\\t -c remote.origin.mirror=true push origin",
+    'g""it -c remote.origin.mirror=true push origin',
+    "\\git -c remote.origin.mirror=true push origin",
+    "HOME=/tmp/evil git push origin",
+    "XDG_CONFIG_HOME=/tmp/evil git push origin",
+    "git  push origin main",
+    "git push\torigin main",
+    "git push origin 'main'",
+    "git push origin $B",
+])
+def test_rr8_1_quotes_escapes_and_spacing_give_the_worst_line(cmd):
+    assert line_of(cmd) == WORST
+
+
+@pytest.mark.parametrize("cmd", [
+    "touch :main && git push origin :*",
+    "touch -- --mirror && git push origin *",
+    "git push origin :*",
+    "git push origin *",
+    "git push -f origin *",
+    "git push origin f*",
+    "git push origin HEAD*",
+    "git push origin x:*",
+    "git push origin +refs/heads/*:refs/heads/*",
+    "git push origin '*:*'",
+    "git push origin fe?ture:main",
+    "git push origin [m]ain",
+    "git push origin {feature,:main}",
+])
+def test_rr8_2_glob_characters_give_the_worst_line(cmd):
+    assert line_of(cmd) == WORST
+
+
+@pytest.mark.parametrize("cmd", [
+    "git config remote.origin.mirror true && git push origin",
+    "git config remote.origin.push +refs/heads/*:refs/heads/* && git push origin",
+    "git symbolic-ref refs/heads/x refs/heads/main && git push --no-verify origin x",
+    "git config remote.origin.push refs/heads/feature:refs/heads/main && git push --no-verify origin feature",
+    "export GIT_CONFIG_COUNT=1; git push origin main",
+    "git push origin main; git status",
+    "git push origin main | tail -1",
+    "cd /repo && git status && git push origin main",
+    "cd '/repo' && git push origin main",
+    "cd $HOME && git push origin main",
+])
+def test_rr8_4_another_command_in_the_call_gives_the_worst_line(cmd):
+    assert line_of(cmd) == WORST
+
+
+@pytest.mark.parametrize("cmd", [
+    "git push origin feature tag v1",
+    "git push origin tag v1",
+])
+def test_rr8_5_the_word_tag_gives_the_worst_line(cmd):
+    assert line_of(cmd) == WORST
+
+
+@pytest.mark.parametrize("cmd", [
+    "git push .. feature",
+    "git push . feature:main",
+    "git push ... feature:main",
+    "git push ../other feature:main",
+])
+def test_rr8_6_dot_remotes_give_the_worst_line(cmd):
+    assert line_of(cmd) == WORST
+
+
+@pytest.mark.parametrize("cmd,expected", [
+    ("git push origin main", "Push to the main branch."),
+    ("git push -f origin main", "Force push to main."),
+    ("git push --delete origin v1", "Delete a branch or tag on a remote."),
+    ("git push origin HEAD", CUR),
+    ("git push", CUR),
+    ("git push origin", CUR),
+    ("cd /repo && git push origin main", "Push to the main branch."),
+    ("cd /repo; git push -f origin main", "Force push to main."),
+    ("  git push origin main  ", "Push to the main branch."),
+    ("git push my-remote.2 main", "Push to the main branch."),
+])
+def test_rr8_plain_cases_stay_specific(cmd, expected):
+    assert line_of(cmd) == expected
+
+
+@pytest.mark.parametrize("key,expected", [
+    ("git push origin +refs/heads/*:refs/heads/*", FMANY),
+    ("git push origin x:*", MANY),
+    ("git push origin '*:*'", MANY),
+    ("git push --prune origin 'refs/heads/*:refs/heads/*'", "This push can delete branches, and can include the main branch."),  # 21 words in full: the short worst-case form
+])
+def test_key_reader_still_reads_a_refspec_glob(key, expected):
+    assert askplain._push_line(key) == expected   # the key reader alone; what_line gives the worst line for any glob in the raw call
+
+
+def test_push_key_without_raw_subject_gives_the_worst_line():
+    from types import SimpleNamespace
+    a = SimpleNamespace(seg_keys=["git push origin main"], subject="")
+    assert askplain.what_line(a, "Bash") == WORST

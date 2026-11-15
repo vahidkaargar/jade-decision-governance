@@ -138,7 +138,9 @@ _PUSH_LETTERS = frozenset("uvqnfd46")
 _REMOTE = re.compile(r"[A-Za-z0-9._-]+")
 _REFSPEC = re.compile(r"\+?[\w./@~*:-]*")
 _WORST_PUSH = "This push can force push, delete branches and tags, and include the main branch."
-_GLOBAL_GIT = re.compile(r"\bgit\s+-|\bGIT_\w+=")   # a git option before the subcommand, or a GIT_ variable: the key drops them
+_SEG_SPLIT = re.compile(r"\n|;|&&|\|\||\|&?|(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\}")   # shellnorm.SPLIT and the single pipe: every command of the call
+_SHELL_SPECIAL = re.compile(r"['\"\\$*?\[]")   # quotes, escapes, variables and glob characters: the shell changes the word before git sees it
+_LEAD_CD = re.compile(r"cd [^\s'\"\\$*?\[]+")
 _DANGEROUS = ("--force", "--delete", "--mirror", "--all", "--branches", "--prune", "--tags", "--follow-tags")
 
 
@@ -185,7 +187,8 @@ def _push_line(key: str) -> str:
             flag_delete |= "d" in letters
         else:
             positional.append(tok)
-    unknown |= bool(positional) and not _REMOTE.fullmatch(positional[0])
+    unknown |= bool(positional) and (not _REMOTE.fullmatch(positional[0]) or set(positional[0]) == {"."})   # `.` and `..` are repositories, not remote names
+    unknown |= "tag" in positional[1:]   # `tag v1` pushes a tag: not read here
     unknown |= not all(_REFSPEC.fullmatch(t) for t in positional[1:])
     if unknown:
         return _WORST_PUSH
@@ -292,12 +295,26 @@ def _render(key: str) -> str:
     return "Run: " + key[:FALLBACK_CHARS]
 
 
+def _plain_push_call(subject: str) -> bool:
+    """True only when the call is one `git push` command, at most after a leading `cd PATH`, written in plain words: no quote, escape, `$` or glob
+    character, no prefix before `git push`, single spaces. Anything else can change what git does before or while it reads the key (a quoted `"git" -c`,
+    a `*` the shell expands, a `git config` in the same call), so its push line is the worst one."""
+    pieces = [p.strip(" ") for p in _SEG_SPLIT.split(subject) if p.strip(" ")]
+    if len(pieces) == 2 and _LEAD_CD.fullmatch(pieces[0]):
+        pieces = pieces[1:]
+    if len(pieces) != 1:
+        return False
+    seg = pieces[0]
+    words = seg.split()
+    return words[:2] == ["git", "push"] and seg == " ".join(words) and not _SHELL_SPECIAL.search(seg) and not any(w.startswith("~") for w in words)
+
+
 def what_line(a, tool: str) -> str:
     """One plain sentence for what will happen. A shell call is read from its gated segments, any other tool from its name."""
     keys = list(getattr(a, "seg_keys", None) or [])
     if keys:
-        raw_global = bool(_GLOBAL_GIT.search(getattr(a, "subject", "") or ""))
-        return " ".join(dict.fromkeys(_WORST_PUSH if raw_global and (k == "git push" or k.startswith("git push ")) else _render(k) for k in keys))
+        plain = _plain_push_call(getattr(a, "subject", "") or "")
+        return " ".join(dict.fromkeys(_WORST_PUSH if not plain and (k == "git push" or k.startswith("git push ")) else _render(k) for k in keys))
     if tool.startswith("mcp__"):
         parts = tool.split("__")
         return f"Use {parts[1]}: {parts[-1].replace('_', ' ')}." if len(parts) > 2 else f"Use the tool {tool}."

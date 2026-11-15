@@ -102,7 +102,7 @@ def test_a_call_with_two_risky_commands_says_so():
     head = askplain.header(a, "Bash")
     assert "This call joins 2 risky commands. Ask the agent to send them one by one." in head
     assert head[0].startswith("Merge pull request 940")
-    assert "Force push" in head[0]
+    assert "This push can force push, delete branches and tags, and include the main branch." in head[0]   # another command in the call: the worst push line
     q = askchat.question_for("0123456789ab", a, "Bash", {})["question"]
     assert "joins 2 risky commands" in q and "joins 2 risky commands" in askdialog.text_for(a, "Bash", {})
 
