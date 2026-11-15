@@ -344,7 +344,7 @@ def test_rr8_6_dot_remotes_give_the_worst_line(cmd):
     ("git push", CUR),
     ("git push origin", CUR),
     ("cd /repo && git push origin main", "Push to the main branch."),
-    ("cd /repo; git push -f origin main", "Force push to main."),
+    ("cd /repo&&git push origin main", "Push to the main branch."),
     ("  git push origin main  ", "Push to the main branch."),
     ("git push my-remote.2 main", "Push to the main branch."),
 ])
@@ -366,3 +366,17 @@ def test_push_key_without_raw_subject_gives_the_worst_line():
     from types import SimpleNamespace
     a = SimpleNamespace(seg_keys=["git push origin main"], subject="")
     assert askplain.what_line(a, "Bash") == WORST
+
+
+@pytest.mark.parametrize("cmd", [
+    "cd x>~/.zshrc && git push origin main",
+    "cd x || git push origin main",
+    "cd x | git push origin main",
+    "cd x & git push origin main",
+    "cd x; git push origin main",
+    "cd x\ngit push origin main",
+    "cd x && && git push origin main",
+    "cd /repo; git push -f origin main",
+])
+def test_rr9_only_cd_path_and_and_may_lead_a_push(cmd):
+    assert line_of(cmd) == WORST

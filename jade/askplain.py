@@ -140,7 +140,7 @@ _REFSPEC = re.compile(r"\+?[\w./@~*:-]*")
 _WORST_PUSH = "This push can force push, delete branches and tags, and include the main branch."
 _SEG_SPLIT = re.compile(r"\n|;|&&|\|\||\|&?|(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\}")   # shellnorm.SPLIT and the single pipe: every command of the call
 _SHELL_SPECIAL = re.compile(r"['\"\\$*?\[]")   # quotes, escapes, variables and glob characters: the shell changes the word before git sees it
-_LEAD_CD = re.compile(r"cd [^\s'\"\\$*?\[]+")
+_LEAD_CD = re.compile(r"cd [\w./~@%+,:=-]+ ?&& ?([^\s;&|(){}`].*)", re.S)   # `cd PATH && ` only: a plain path word, one `&&`, then the command
 _DANGEROUS = ("--force", "--delete", "--mirror", "--all", "--branches", "--prune", "--tags", "--follow-tags")
 
 
@@ -299,9 +299,10 @@ def _plain_push_call(subject: str) -> bool:
     """True only when the call is one `git push` command, at most after a leading `cd PATH`, written in plain words: no quote, escape, `$` or glob
     character, no prefix before `git push`, single spaces. Anything else can change what git does before or while it reads the key (a quoted `"git" -c`,
     a `*` the shell expands, a `git config` in the same call), so its push line is the worst one."""
+    subject = subject.strip(" ")
+    if m := _LEAD_CD.fullmatch(subject):
+        subject = m.group(1)
     pieces = [p.strip(" ") for p in _SEG_SPLIT.split(subject) if p.strip(" ")]
-    if len(pieces) == 2 and _LEAD_CD.fullmatch(pieces[0]):
-        pieces = pieces[1:]
     if len(pieces) != 1:
         return False
     seg = pieces[0]
