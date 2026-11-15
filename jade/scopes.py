@@ -117,30 +117,30 @@ def _git_dir(project: str) -> str | None:
     return gitdir if os.path.isabs(gitdir) else os.path.join(project, gitdir)
 
 
-def _repo_identity(project: str) -> list[str] | None:
-    """Which repository a merge in `project` acts on: every line of the `remote` and `url` sections of its git config file (remote URLs, `gh-resolved` from
-    `gh repo set-default`, an `insteadOf` rewrite), sorted. The file is read as plain text; no subprocess runs. A worktree's git folder names the shared folder in
-    `commondir`, and the config is there. None (so no merge scope) when the config cannot be read, is not UTF-8, is too large, has a header this reader does not
-    know, or includes another file (whose remotes it would not see). Other sections (a branch, core) do not change the result."""
+def GLOBAL_CONFIGS() -> list[str]:
+    """The user-level git config files, read at each call so a changed HOME or XDG_CONFIG_HOME is seen: `~/.gitconfig` and `$XDG_CONFIG_HOME/git/config`
+    (default `~/.config/git/config`). `$GIT_CONFIG_GLOBAL` is not read: when it is set, `_repo_identity` gives no merge scope."""
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return [os.path.join(os.path.expanduser("~"), ".gitconfig"), os.path.join(xdg, "git", "config")]
+
+
+# System-level files git may read on this Mac (Apple, Homebrew, Xcode). A module-level tuple so a test can replace it.
+SYSTEM_CONFIGS: tuple[str, ...] = (
+    "/etc/gitconfig", "/opt/homebrew/etc/gitconfig", "/usr/local/etc/gitconfig",
+    "/Library/Developer/CommandLineTools/usr/share/git-core/gitconfig",
+    "/Applications/Xcode.app/Contents/Developer/usr/share/git-core/gitconfig",
+)
+# Any of these changes which config or repository git or gh uses, in a way a file read cannot see: no merge scope.
+GIT_ENV_OVERRIDES = ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG", "GH_REPO", "GH_HOST")
+
+
+def _config_lines(path: str, keep_sections: tuple[str, ...]) -> list[str] | None:
+    """The lines of the `keep_sections` of one git config file, each as `SECTION<TAB>line`. `[]` when the file does not exist. None when it exists but cannot be
+    read, is not UTF-8, is over CONFIG_MAX, has a header this reader does not know, or includes another file (whose lines it would not see). No subprocess."""
+    if not os.path.lexists(path):
+        return []
     try:
-        gitdir = _git_dir(project)
-        if gitdir is None:
-            return None
-        common = gitdir
-        pointer = os.path.join(gitdir, "commondir")
-        if os.path.isfile(pointer):
-            with open(pointer, encoding="utf-8") as f:
-                rel = f.read(4096).strip()
-            if not rel:
-                return None
-            common = rel if os.path.isabs(rel) else os.path.join(gitdir, rel)
-        config = os.path.join(common, "config")
-        if not os.path.isfile(config):
-            return None
-        # A per-worktree config (`extensions.worktreeConfig`) can add or change a remote, and this reader does not merge it: no merge scope (fail closed).
-        if os.path.lexists(os.path.join(gitdir, "config.worktree")) or os.path.lexists(os.path.join(common, "config.worktree")):
-            return None
-        with open(config, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             text = f.read(CONFIG_MAX + 1)
     except (OSError, ValueError):   # UnicodeDecodeError is a ValueError
         return None
@@ -161,13 +161,53 @@ def _repo_identity(project: str) -> list[str] | None:
             if base in ("include", "includeif"):
                 return None
             section = name if m.group(2) is None else f'{name} "{m.group(2)}"'
-            keep = base in ("remote", "url")
+            keep = base in keep_sections
             rest = line[m.end():].strip()
             if keep and rest and rest[0] not in "#;":
                 out.append(f"{section}\t{rest}")
             continue
         if keep:
             out.append(f"{section}\t{line}")
+    return out
+
+
+def _repo_identity(project: str) -> list[str] | None:
+    """Which repository a merge in `project` acts on: every line of the `remote` and `url` sections of its git config file (remote URLs, `gh-resolved` from
+    `gh repo set-default`, an `insteadOf` rewrite), plus the same lines of the global and system git config files (prefixed `global` / `system`: an `insteadOf` there
+    rewrites the remote too), sorted. Files are read as plain text; no subprocess runs. A worktree's git folder names the shared folder in `commondir`, and the config
+    is there. None (so no merge scope) when an env override is set (GIT_ENV_OVERRIDES), or any file cannot be read, is not UTF-8, is too large, has a header this
+    reader does not know, or includes another file. Other sections (a branch, core, user) do not change the result."""
+    if any(os.environ.get(name) for name in GIT_ENV_OVERRIDES):
+        return None
+    try:
+        gitdir = _git_dir(project)
+        if gitdir is None:
+            return None
+        common = gitdir
+        pointer = os.path.join(gitdir, "commondir")
+        if os.path.isfile(pointer):
+            with open(pointer, encoding="utf-8") as f:
+                rel = f.read(4096).strip()
+            if not rel:
+                return None
+            common = rel if os.path.isabs(rel) else os.path.join(gitdir, rel)
+        config = os.path.join(common, "config")
+        if not os.path.isfile(config):
+            return None
+        # A per-worktree config (`extensions.worktreeConfig`) can add or change a remote, and this reader does not merge it: no merge scope (fail closed).
+        if os.path.lexists(os.path.join(gitdir, "config.worktree")) or os.path.lexists(os.path.join(common, "config.worktree")):
+            return None
+    except (OSError, ValueError):
+        return None
+    out = _config_lines(config, ("remote", "url"))
+    if out is None:
+        return None
+    for label, paths in (("global", GLOBAL_CONFIGS()), ("system", SYSTEM_CONFIGS)):
+        for path in paths:
+            lines = _config_lines(path, ("remote", "url"))
+            if lines is None:
+                return None
+            out.extend(f"{label}\t{line}" for line in lines)
     return sorted(out)
 
 
@@ -197,7 +237,7 @@ def _is_plain_shell_call(a, tool: str, tool_input: dict | None) -> bool:
         return False
     if a.ho_ids or a.blocked or a.blind or getattr(a, "unread", None) or a.level == "critical" or a.rule_id in memory.NEVER_RULES:
         return False
-    return not memory._INLINE.search(a.subject or "")
+    return not memory.INLINE.search(a.subject or "")
 
 
 def _simple_command_words(subject: str) -> list[str] | None:

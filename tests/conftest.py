@@ -78,6 +78,12 @@ def isolated(tmp_path, monkeypatch):
     from jade import askdialog as _askdialog
 
     monkeypatch.setattr(_askdialog, "available", lambda: False)   # W-100c: no test ever shows a real macOS dialog; the dialog tests switch it on and stub `run_dialog`
+    from jade import scopes as _scopes
+
+    monkeypatch.setattr(_scopes, "GLOBAL_CONFIGS", lambda: [])   # PR-C: the merge scope reads global and system git config; no test depends on this machine's (the scope tests point them at tmp files)
+    monkeypatch.setattr(_scopes, "SYSTEM_CONFIGS", ())
+    for _name in _scopes.GIT_ENV_OVERRIDES:
+        monkeypatch.delenv(_name, raising=False)
     monkeypatch.delenv("JADE_GATE_MODE", raising=False)
     monkeypatch.delenv("JADE_SOURCE", raising=False)
     monkeypatch.delenv("JADE_POLICY_DIR", raising=False)

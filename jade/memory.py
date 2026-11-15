@@ -30,8 +30,8 @@ NEAR_CAP_DAYS = 14
 NEVER_RULES = frozenset({"R-21", "R-22"})
 EXACT_ONLY_RULES = frozenset({"R-14", "M-05", "M-07"})
 _PR_NUMBER = re.compile(r"^((?:gh pr|glab mr) [\w-]+) \d+(?= |$)")
-_MERGE = re.compile(r"^(?:gh pr merge|glab mr merge|git merge)(?= |$)")
-_INLINE = re.compile(r"(?:^|\s)-[A-Za-z]*[ce](?=\s|\Z)|<<|<\(")
+MERGE = re.compile(r"^(?:gh pr merge|glab mr merge|git merge)(?= |$)")
+INLINE = re.compile(r"(?:^|\s)-[A-Za-z]*[ce](?=\s|\Z)|<<|<\(")
 
 
 def normalise_segment(key: str) -> str:
@@ -55,9 +55,9 @@ def eligibility(a, tool: str, tool_input: dict | None, fp: dict | None) -> str:
         return "exact"
     if a.rule_id in EXACT_ONLY_RULES or set(getattr(a, "seg_rules", []) or []) & EXACT_ONLY_RULES or a.blind or a.rule_id in ("R-31", "R-32"):
         return "exact"
-    if fp or _INLINE.search(a.subject or ""):
+    if fp or INLINE.search(a.subject or ""):
         return "exact"
-    if any(_MERGE.match(k) for k in getattr(a, "seg_keys", []) or []) or not getattr(a, "seg_keys", None):
+    if any(MERGE.match(k) for k in getattr(a, "seg_keys", []) or []) or not getattr(a, "seg_keys", None):
         return "exact"
     return "class"
 
@@ -72,7 +72,7 @@ def keys(a, tool: str, tool_input: dict | None, fp: dict | None) -> tuple[str, s
     return exact_key(a.hold_key or a.plan_hash, fp), (class_key(a) if el == "class" else None), el
 
 
-def _valid_since() -> tuple[str, str]:
+def valid_since() -> tuple[str, str]:
     return ts(now() - timedelta(days=CAP_DAYS)), ts(now() - timedelta(days=USE_DAYS))
 
 
@@ -85,7 +85,7 @@ def lookup(db, a, tool: str, tool_input: dict | None, fp: dict | None, cwd: str 
     if el == "never":
         return None
     scope_keys = scopes.keys_for(a, tool, tool_input, fp, cwd)
-    cap, use = _valid_since()
+    cap, use = valid_since()
     sql = ("SELECT * FROM human_answers WHERE strength='strong' AND answer='allow' AND confirmed_ts>=? AND COALESCE(last_used_ts, confirmed_ts)>=? "
            "AND COALESCE(source,'')<>'test' AND (exact_key=?" + (" OR class_key=?" if cls else "") + (f" OR scope_key IN ({','.join('?' * len(scope_keys))})" if scope_keys else "")
            + ") ORDER BY confirmed_ts DESC, rowid DESC LIMIT 1")
