@@ -29,7 +29,7 @@ import time
 from datetime import timedelta
 
 from . import adapter, ask, ledger, memory, paths
-from .util import canonical, now, sha256, ts
+from .util import canonical, now, parse_ts, sha256, ts
 
 QID = "q.human_proxy.would_allow"
 DEADLINE_S = 3.0          # the most one exchange may take; the hook budget (hooks.BUDGET_S) is the other limit
@@ -61,12 +61,21 @@ def preferences() -> str:
 def past_answers(db, rule_id: str) -> list[dict]:
     """What the owner answered to plain calls of this rule: the confirmed (strong) allows that `memory.lookup` still honours (`memory.honoured_allows`: a newer deny
     that shares a key with every call the allow covers takes it out), newest first, then the owner's denies of the rule, newest first, each list at most MAX_PAST.
-    Unconfirmed allow hints and human-only answers are never sent; a deny is sent as given (it can only make Jev say no)."""
+    Unconfirmed allow hints and human-only answers are never sent. An allow carries its label, which the owner read in `jade review confirm`. A deny is never
+    confirmed, so its label is text the agent wrote (a comment in the command, a host, a path of a call kept off the network): it stays in the ledger, and the deny
+    is sent as its rule, the answer and its age in whole days only."""
     allows = memory.honoured_allows(db, "rule_id=? AND COALESCE(ho,0)=0", [rule_id], limit=MAX_PAST)
-    denies = db.con.execute(f"SELECT rule_id, label FROM human_answers WHERE {memory.DENY_SQL} AND rule_id=? AND COALESCE(ho,0)=0 ORDER BY ts DESC, rowid DESC LIMIT ?",  # noqa: S608
+    denies = db.con.execute(f"SELECT rule_id, ts FROM human_answers WHERE {memory.DENY_SQL} AND rule_id=? AND COALESCE(ho,0)=0 ORDER BY ts DESC, rowid DESC LIMIT ?",  # noqa: S608
                             (rule_id, MAX_PAST)).fetchall()
     return ([{"rule": r["rule_id"], "answer": "allow", "label": (r["label"] or "")[:120]} for r in allows]
-            + [{"rule": r["rule_id"], "answer": "deny", "label": (r["label"] or "")[:120]} for r in denies])
+            + [{"rule": r["rule_id"], "answer": "deny", "age_days": _age_days(r["ts"])} for r in denies])
+
+
+def _age_days(stamp: str | None) -> int | None:
+    try:
+        return max(0, (now() - parse_ts(stamp)).days) if stamp else None
+    except (TypeError, ValueError):
+        return None
 
 
 def owner_answers(db) -> int:

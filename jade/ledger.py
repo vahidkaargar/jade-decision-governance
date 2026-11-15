@@ -313,7 +313,8 @@ class Ledger:
 
     def record_human_answer(self, *, session: str | None, decision_id: str | None, rule_id: str, class_key: str | None, exact_key: str, answer: str,
                             channel: str, label: str | None = None, ho: bool = False, scope: dict | None = None) -> str:
-        """Store what the human answered to an ask, as a `hint` (docs/12): it decides nothing and goes to no model until `jade review confirm`.
+        """Store what the human answered to an ask, as a `hint` (docs/12): it decides nothing, and its label goes to no model until `jade review confirm` (only an allow
+        is confirmed; a deny is sent to Jev as its rule, answer and age only, `proxy.past_answers`, and its label stays here).
         `exact_key` identifies the call, `class_key` the kind of call. `scope` is `dataclasses.asdict(scopes.Scope)`: the bigger scope the answer was given with; its
         kind, key and label are stored, and `memory.lookup` matches the key once the row is confirmed. Returns the answer id."""
         if answer not in self.HUMAN_ANSWERS or channel not in self.ANSWER_CHANNELS or not exact_key or not rule_id:
