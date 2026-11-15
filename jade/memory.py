@@ -109,20 +109,79 @@ def standing(r, since: tuple[str, str] | None = None) -> bool:
     """A confirmed (strong) allow, live (not a test row), confirmed within CAP_DAYS and confirmed or used within USE_DAYS."""
     cap, use = since or valid_since()
     confirmed = _col(r, "confirmed_ts")
+    used = _col(r, "last_used_ts")
     return (r["answer"] == "allow" and r["strength"] == "strong" and (_col(r, "source") or "") != "test" and bool(confirmed) and confirmed >= cap
-            and (_col(r, "last_used_ts") or confirmed) >= use)
+            and (confirmed if used is None else used) >= use)   # COALESCE(last_used_ts, confirmed_ts): only NULL falls back to the confirm
+
+
+# The deny rows that take an allow out: any strength the human gave (hint or strong), not a test row. DENY_SQL selects the same rows in SQL.
+DENY_SQL = "answer='deny' AND strength IN ('hint','strong') AND COALESCE(source,'')<>'test'"
+ALLOW_SQL = "answer='allow' AND strength='strong' AND COALESCE(source,'')<>'test'"   # the rows `standing` can pass; it still checks the dates
+
+
+def is_deny(d) -> bool:
+    return d["answer"] == "deny" and d["strength"] in ("hint", "strong") and (_col(d, "source") or "") != "test"
+
+
+def deny_index(denies) -> dict[tuple[str, str], str]:
+    """For each typed key, the time of the newest deny that stores it. Built once, so that `taken_out` is one dict lookup per key."""
+    idx: dict[tuple[str, str], str] = {}
+    for d in denies:
+        if is_deny(d):
+            for k in stored_keys(d):
+                if d["ts"] > idx.get(k, ""):
+                    idx[k] = d["ts"]
+    return idx
 
 
 def taken_out(r, denies, keys: set[tuple[str, str]]) -> bool:
-    """A deny of any strength the human gave (hint or strong, not a test row), newer than the allow `r`, that shares one of `keys`: the owner's newest answer wins."""
-    return any(d["answer"] == "deny" and d["strength"] in ("hint", "strong") and (_col(d, "source") or "") != "test" and d["ts"] > r["ts"] and stored_keys(d) & keys
-               for d in denies)
+    """A deny (`is_deny`) newer than the allow `r` that shares one of `keys`: the owner's newest answer wins. `denies` is a `deny_index` or the deny rows."""
+    idx = denies if isinstance(denies, dict) else deny_index(denies)
+    return any(idx.get(k, "") > r["ts"] for k in keys)
 
 
 def honoured(r, denies, keys: set[tuple[str, str]], since: tuple[str, str] | None = None) -> bool:
-    """Does the allow row `r` still decide a call with these typed keys? The one test `lookup` (keys of the call in front of the gate) and the `jade knows edit`
-    template (`covered_keys(r)`: is there a call it still decides) both use."""
+    """Does the allow row `r` still decide a call with these typed keys? The one test `lookup` (keys of the call in front of the gate), the `jade knows edit`
+    template and the past answers sent to Jev (`covered_keys(r)`: is there a call it still decides) all use."""
     return standing(r, since) and not taken_out(r, denies, keys)
+
+
+def honoured_allows(db, where: str, args, since: tuple[str, str] | None = None, limit: int | None = None) -> list:
+    """The strong allow rows that match `where` (newest confirm first) and that `honoured` with their `covered_keys` still counts: the denies read are only those
+    that share a key with one of the allows (exact, class or family, scope), so the work grows with the rows of the keys in question, not with the ledger."""
+    since = since or valid_since()
+    allows = db.con.execute(f"SELECT * FROM human_answers WHERE {ALLOW_SQL} AND confirmed_ts>=? AND ({where}) ORDER BY confirmed_ts DESC, rowid DESC",  # noqa: S608
+                            [since[0], *args]).fetchall()
+    allows = [r for r in allows if standing(r, since)]
+    if not allows:
+        return []
+    exact = sorted({r["exact_key"] for r in allows})
+    cls = sorted({k for r in allows for k in (_col(r, "class_key"), _col(r, "family_key")) if k})
+    scope = sorted({r["scope_key"] for r in allows if _col(r, "scope_key")})
+    idx = deny_index(_rows_by_keys(db, DENY_SQL, exact, cls, scope))
+    out = []
+    for r in allows:
+        if not taken_out(r, idx, covered_keys(r)):
+            out.append(r)
+            if limit is not None and len(out) >= limit:
+                break
+    return out
+
+
+_CHUNK = 300
+
+
+def _rows_by_keys(db, where: str, exact, cls, scope) -> list:
+    """Rows matching `where` that store one of these keys, typed by column (exact_key, class_key, scope_key); queried in chunks to stay under SQLite's variable cap."""
+    out, seen = [], set()
+    for col, ks in (("exact_key", exact), ("class_key", cls), ("scope_key", scope)):
+        for i in range(0, len(ks), _CHUNK):
+            part = ks[i:i + _CHUNK]
+            for d in db.con.execute(f"SELECT * FROM human_answers WHERE {where} AND {col} IN ({','.join('?' * len(part))})", part):  # noqa: S608 - code-defined columns
+                if d["answer_id"] not in seen:
+                    seen.add(d["answer_id"])
+                    out.append(d)
+    return out
 
 
 def lookup(db, a, tool: str, tool_input: dict | None, fp: dict | None, cwd: str = ""):
@@ -137,10 +196,13 @@ def lookup(db, a, tool: str, tool_input: dict | None, fp: dict | None, cwd: str 
     scope_keys = scopes.keys_for(a, tool, tool_input, fp, cwd)
     same = "exact_key=?" + (" OR class_key=?" if cls else "") + (f" OR scope_key IN ({','.join('?' * len(scope_keys))})" if scope_keys else "")
     args = [exact] + ([cls] if cls else []) + scope_keys
-    rows = db.con.execute(f"SELECT * FROM human_answers WHERE ({same}) ORDER BY confirmed_ts DESC, rowid DESC", args).fetchall()
-    denies = [r for r in rows if r["answer"] == "deny"]
     since, ck = valid_since(), call_keys(exact, cls, scope_keys)
-    return next((r for r in rows if honoured(r, denies, ck, since)), None)
+    allows = db.con.execute(f"SELECT * FROM human_answers WHERE {ALLOW_SQL} AND confirmed_ts>=? AND ({same}) ORDER BY confirmed_ts DESC, rowid DESC",  # noqa: S608
+                            [since[0], *args]).fetchall()
+    if not allows:
+        return None
+    idx = deny_index(db.con.execute(f"SELECT * FROM human_answers WHERE {DENY_SQL} AND ({same})", args).fetchall())  # noqa: S608
+    return next((r for r in allows if honoured(r, idx, ck, since)), None)
 
 
 def use(db, answer_id: str) -> None:

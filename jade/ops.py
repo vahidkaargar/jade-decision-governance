@@ -771,14 +771,15 @@ def review_mark(decision_id: str, mark: str, stdin_isatty: bool | None = None) -
         if not isinstance(ask, dict) or not ask.get("ask_id"):
             raise ValueError("this decision was not answered by an ask or a standing answer, so there is nothing to mark")
         if ask.get("channel") == "memory":
-            answers = db.con.execute("SELECT answer_id, exact_key, class_key, scope_key FROM human_answers WHERE answer_id=?", (f"ans_{ask['ask_id']}",)).fetchall()
+            answers = db.con.execute("SELECT answer_id, exact_key, COALESCE(class_key, family_key) AS class_key, scope_key FROM human_answers WHERE answer_id=?",
+                                     (f"ans_{ask['ask_id']}",)).fetchall()   # a project-scoped row keeps the class key of its kind as family_key
         elif ask.get("channel") == "jev":
             ev = db.con.execute("SELECT detail_json FROM events WHERE kind='jev_allowed' AND entity_id=?", (f"call_{ask['ask_id']}",)).fetchone()
             det = json.loads(ev["detail_json"]) if ev and ev["detail_json"] else {}
             answers = [{"answer_id": None, "exact_key": det.get("exact_key"), "class_key": det.get("class_key"), "coarse_key": det.get("coarse_key")}] if det.get("exact_key") else []
         else:
             a = db.con.execute("SELECT hold_key, fingerprints_json FROM asks WHERE ask_id=?", (ask["ask_id"],)).fetchone()
-            answers = db.con.execute("SELECT answer_id, exact_key, class_key, scope_key FROM human_answers WHERE exact_key=? AND answer='allow'",
+            answers = db.con.execute("SELECT answer_id, exact_key, COALESCE(class_key, family_key) AS class_key, scope_key FROM human_answers WHERE exact_key=? AND answer='allow'",
                                      (memory.exact_key(a["hold_key"], a["fingerprints_json"]),)).fetchall() if a else []
         with db.tx():
             db.event(decision_id, "review_mark", guard=f"jade review mark {mark}", actor=f"human:{user()}", detail={"mark": mark, "answer_ids": [r["answer_id"] for r in answers if r["answer_id"]]})
@@ -928,7 +929,7 @@ def knows_template(rows, since: tuple[str, str] | None = None) -> str:
     out = ["# What JADE may decide for you. Write plain sentences; a later release reads this file when it decides in your place.",
            "# Lines that start with # are ignored.", "#", *_KNOWS_MODELS, "#"]
     since = since or memory.valid_since()
-    denies = [r for r in rows if r["answer"] == "deny"]
+    denies = memory.deny_index(r for r in rows if r["answer"] == "deny")   # built once: one dict lookup per key and row
     seen: dict[tuple, str] = {}
     for r in rows:   # newest first, so the first row of a group names it
         if r["answer"] != "allow" or not memory.honoured(r, denies, memory.covered_keys(r), since):
@@ -947,6 +948,18 @@ def knows_template(rows, since: tuple[str, str] | None = None) -> str:
     return "\n".join([*out, *lines])
 
 
+def knows_rows(db) -> list:
+    """What the template reads: the standing allows (live, newest first) and the denies that share a key with one of them. A newer deny hides an older allow;
+    the rest of the ledger is not read."""
+    since = memory.valid_since()
+    allows = db.con.execute(f"SELECT * FROM human_answers WHERE {memory.ALLOW_SQL} AND confirmed_ts>=? ORDER BY ts DESC, rowid DESC LIMIT 100000", (since[0],)).fetchall()  # noqa: S608
+    allows = [r for r in allows if memory.standing(r, since)]
+    exact = sorted({r["exact_key"] for r in allows})
+    cls = sorted({k for r in allows for k in (r["class_key"], r["family_key"]) if k})
+    scope = sorted({r["scope_key"] for r in allows if r["scope_key"]})
+    return [*allows, *memory._rows_by_keys(db, memory.DENY_SQL, exact, cls, scope)]
+
+
 def knows_edit(stdin_isatty: bool | None = None, editor: str | None = None) -> Path:
     """`jade knows edit`: open the preferences file in the human's editor. It starts as a template with one commented-out sentence per standing kind of call."""
     _require_human("jade knows edit", stdin_isatty)
@@ -954,7 +967,7 @@ def knows_edit(stdin_isatty: bool | None = None, editor: str | None = None) -> P
     if not p.exists():
         db = ledger.open(timeout=5)
         try:
-            text = knows_template(db.human_answers(limit=100000))   # strong allows and every deny: a newer deny hides an older allow
+            text = knows_template(knows_rows(db))
         finally:
             db.close()
         p.parent.mkdir(parents=True, exist_ok=True)

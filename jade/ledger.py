@@ -71,6 +71,7 @@ CREATE INDEX IF NOT EXISTS permits_test ON permits(source) WHERE source='test';
 CREATE INDEX IF NOT EXISTS calls_evaluating ON jev_calls(ts) WHERE state='EVALUATING';
 CREATE INDEX IF NOT EXISTS human_answers_exact ON human_answers(exact_key, strength);
 CREATE INDEX IF NOT EXISTS human_answers_scope ON human_answers(scope_key, strength);
+CREATE INDEX IF NOT EXISTS human_answers_class ON human_answers(class_key, strength);
 CREATE INDEX IF NOT EXISTS human_answers_ts ON human_answers(ts);
 CREATE INDEX IF NOT EXISTS asks_call ON asks(session_id, hold_key, status);
 """
@@ -350,11 +351,11 @@ class Ledger:
         return ok
 
     def retire_answers(self, exact_key: str, class_key: str | None, scope_key: str | None = None) -> int:
-        """`jade review mark wrong`: every hint or standing allow of this exact call, of its kind, and of the scope it ran under, stops counting (it can no longer be confirmed
-        or decide). Returns how many."""
+        """`jade review mark wrong`: every hint or standing allow of this exact call, of its kind (its class key, or the `family_key` of a project-scoped row of the
+        kind), and of the scope it ran under, stops counting (it can no longer be confirmed or decide). Returns how many."""
         ids = [r["answer_id"] for r in self.con.execute(
             "SELECT answer_id FROM human_answers WHERE strength IN ('hint','strong') AND answer='allow' AND (exact_key=? OR (class_key IS NOT NULL AND class_key=?) "
-            "OR (scope_key IS NOT NULL AND scope_key=?))", (exact_key, class_key, scope_key))]
+            "OR (family_key IS NOT NULL AND family_key=?) OR (scope_key IS NOT NULL AND scope_key=?))", (exact_key, class_key, class_key, scope_key))]
         for aid in ids:
             self.con.execute("UPDATE human_answers SET strength='revoked' WHERE answer_id=?", (aid,))
             self.event(aid, "human_answer_revoked", guard="jade review mark wrong", actor="human")
