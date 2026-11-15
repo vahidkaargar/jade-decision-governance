@@ -304,7 +304,7 @@ def _simple_command_words(subject: str) -> list[str] | None:
     if _ODD_SPACE.search(raw) or _ODD_SPACE.search(skeleton) or shellnorm.SPLIT.search(skeleton):
         return None
     words = [w for w in re.split(r"[ \t]+", skeleton) if w]
-    return None if not words or any(_EXPANDS.search(w) for w in words) else words
+    return None if not words or any(_EXPANDS.search(w) or "\\" in w for w in words) else words   # a backslash may join words the skeleton shows apart
 
 
 def _merge_project(a, tool: str, tool_input: dict | None, project: str | None) -> tuple[str, str] | None:

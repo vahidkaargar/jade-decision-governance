@@ -243,10 +243,25 @@ def test_normal_space_and_tab_still_give_the_scope(repo):
 
 def test_a_fake_separator_after_cd_does_not_name_the_project(repo, short):
     other = make_repo(short / "other", "https://github.com/owner/repoA.git")
-    # `cd PATH<NBSP>&&`: the shell cd goes to a folder named with the NBSP, which does not exist; the project is never the one named
-    assert scopes.project_of(f"cd {repo}\u00a0&& gh pr merge 5 --repo {REPO}", other) in (None, other)
-    assert scopes.project_of(f"cd\u00a0{repo} && gh pr merge 5 --repo {REPO}", other) in (None, other)
-    assert scopes.project_of(f"cd {repo} && gh pr merge 5 --repo {REPO}", other) == repo
+    call = f"gh pr merge 5 --repo {REPO}"
+    # `cd PATH<NBSP>&&` and `cd<NBSP>PATH &&`: the shell never cd's to PATH, so no project is named and no merge scope exists
+    for cmd in (f"cd {repo}\u00a0&& {call}", f"cd\u00a0{repo} && {call}"):
+        assert scopes.project_of(cmd, other) is None
+        assert merge_keys(cmd, other) == []
+        assert merge_keys(cmd, repo) == []
+    # `&&<NBSP>gh`: the cd is real and names the project, but the program word is not `gh`
+    cmd = f"cd {repo} &&\u00a0{call}"
+    assert scopes.project_of(cmd, other) == repo
+    assert merge_keys(cmd, other) == [] and merge_keys(cmd, repo) == []
+    assert scopes.project_of(f"cd {repo} && {call}", other) == repo
+
+
+def test_a_backslash_in_a_word_gives_no_merge_scope(repo):
+    # bash and zsh pass `x --repo github.com/...` as ONE word after `x\ `; the skeleton shows it as separate words
+    assert merge_keys(f"gh pr merge 5 --squash --body x\\ --repo {REPO}", repo) == []
+    assert merge_keys(f"gh pr merge 5 --repo {REPO} --squash --body x\\ y", repo) == []
+    assert len(merge_keys(f"gh pr merge 5 --repo {REPO} --squash", repo)) == 1
+
 
 
 def test_a_line_ending_with_a_backslash_gives_no_scope(short):
