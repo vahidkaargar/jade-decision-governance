@@ -22,8 +22,10 @@ entry (a folder or a worktree file). No subprocess runs.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
+import stat
 from dataclasses import dataclass
 
 from . import memory, policy, redact, shellnorm
@@ -126,25 +128,77 @@ def GLOBAL_CONFIGS() -> list[str]:
 
 # System-level files git may read on this Mac (Apple, Homebrew, Xcode). A module-level tuple so a test can replace it.
 SYSTEM_CONFIGS: tuple[str, ...] = (
-    "/etc/gitconfig", "/opt/homebrew/etc/gitconfig", "/usr/local/etc/gitconfig",
+    "/etc/gitconfig", "/opt/homebrew/etc/gitconfig", "/usr/local/etc/gitconfig", "/opt/local/etc/gitconfig",
     "/Library/Developer/CommandLineTools/usr/share/git-core/gitconfig",
     "/Applications/Xcode.app/Contents/Developer/usr/share/git-core/gitconfig",
 )
 # Any of these changes which config or repository git or gh uses, in a way a file read cannot see: no merge scope.
-GIT_ENV_OVERRIDES = ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG", "GH_REPO", "GH_HOST")
+GIT_ENV_OVERRIDES = ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG", "GIT_CONFIG_NOSYSTEM", "GIT_DIR",
+                     "GIT_COMMON_DIR", "GIT_WORK_TREE", "GH_REPO", "GH_HOST", "GH_CONFIG_DIR")
+
+
+def SHELL_STARTUP_FILES() -> list[str]:
+    """The shell startup files the Bash tool's shell may read (zsh and bash), computed at each call. A line in one of them (`export GH_REPO=...`) changes what `gh`
+    does without a trace in this process's environment, so `_repo_identity` hashes them: an edit changes the merge key. `$ZDOTDIR` (default `~`) for zsh, plus
+    `$BASH_ENV` and `$ENV` when set."""
+    home = os.path.expanduser("~")
+    zdot = os.environ.get("ZDOTDIR") or home
+    files = [os.path.join(zdot, n) for n in (".zshenv", ".zprofile", ".zshrc", ".zlogin")] + ["/etc/zshenv", "/etc/zprofile", "/etc/zshrc"]
+    files += [os.path.join(home, n) for n in (".bashrc", ".bash_profile", ".bash_login", ".profile")] + ["/etc/profile", "/etc/bashrc"]
+    files += [v for v in (os.environ.get("BASH_ENV"), os.environ.get("ENV")) if v]
+    return files
+
+
+_MISSING = object()
+
+
+def _read_regular(path: str) -> bytes | object | None:
+    """The bytes of a regular file (at most CONFIG_MAX). `_MISSING` when nothing is there. None for anything else that exists: a FIFO, a device, a directory, an
+    unreadable file, a file over CONFIG_MAX. The file is opened without blocking and checked with fstat, so a FIFO never stalls the gate."""
+    if not os.path.lexists(path):
+        return _MISSING
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return _MISSING   # a dangling symlink is not a file that can change what runs
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as f:
+            data = f.read(CONFIG_MAX + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return None if len(data) > CONFIG_MAX else data
+
+
+def _shell_identity() -> list[str] | None:
+    """One line `shell<TAB>PATH<TAB>SHA256` per existing startup file; None when one exists but is not a readable regular file of at most CONFIG_MAX bytes."""
+    out: list[str] = []
+    for path in SHELL_STARTUP_FILES():
+        data = _read_regular(path)
+        if data is _MISSING:
+            continue
+        if data is None:
+            return None
+        out.append(f"shell\t{path}\t{hashlib.sha256(data).hexdigest()}")
+    return out
 
 
 def _config_lines(path: str, keep_sections: tuple[str, ...]) -> list[str] | None:
     """The lines of the `keep_sections` of one git config file, each as `SECTION<TAB>line`. `[]` when the file does not exist. None when it exists but cannot be
     read, is not UTF-8, is over CONFIG_MAX, has a header this reader does not know, or includes another file (whose lines it would not see). No subprocess."""
-    if not os.path.lexists(path):
+    data = _read_regular(path)
+    if data is _MISSING:
         return []
-    try:
-        with open(path, encoding="utf-8") as f:
-            text = f.read(CONFIG_MAX + 1)
-    except (OSError, ValueError):   # UnicodeDecodeError is a ValueError
+    if data is None:
         return None
-    if len(text) > CONFIG_MAX:
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
         return None
     out: list[str] = []
     section, keep = "", False
@@ -175,8 +229,9 @@ def _repo_identity(project: str) -> list[str] | None:
     """Which repository a merge in `project` acts on: every line of the `remote` and `url` sections of its git config file (remote URLs, `gh-resolved` from
     `gh repo set-default`, an `insteadOf` rewrite), plus the same lines of the global and system git config files (prefixed `global` / `system`: an `insteadOf` there
     rewrites the remote too), sorted. Files are read as plain text; no subprocess runs. A worktree's git folder names the shared folder in `commondir`, and the config
-    is there. None (so no merge scope) when an env override is set (GIT_ENV_OVERRIDES), or any file cannot be read, is not UTF-8, is too large, has a header this
-    reader does not know, or includes another file. Other sections (a branch, core, user) do not change the result."""
+    is there. The shell startup files (SHELL_STARTUP_FILES: where `export GH_REPO=...` would hide) add one `shell` line each with the SHA-256 of the file, so any edit
+    changes the key. None (so no merge scope) when an env override is set (GIT_ENV_OVERRIDES), or any file cannot be read, is not a regular file, is not UTF-8
+    (config files), is too large, has a header this reader does not know, or includes another file. Other sections (a branch, core, user) do not change the result."""
     if any(os.environ.get(name) for name in GIT_ENV_OVERRIDES):
         return None
     try:
@@ -208,7 +263,10 @@ def _repo_identity(project: str) -> list[str] | None:
             if lines is None:
                 return None
             out.extend(f"{label}\t{line}" for line in lines)
-    return sorted(out)
+    shell = _shell_identity()
+    if shell is None:
+        return None
+    return sorted(out + shell)
 
 
 def _merge_segment(tokens: list[str]) -> bool:

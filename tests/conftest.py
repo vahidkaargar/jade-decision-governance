@@ -82,6 +82,7 @@ def isolated(tmp_path, monkeypatch):
 
     monkeypatch.setattr(_scopes, "GLOBAL_CONFIGS", lambda: [])   # PR-C: the merge scope reads global and system git config; no test depends on this machine's (the scope tests point them at tmp files)
     monkeypatch.setattr(_scopes, "SYSTEM_CONFIGS", ())
+    monkeypatch.setattr(_scopes, "SHELL_STARTUP_FILES", lambda: [])   # same for the shell startup files the merge key hashes
     for _name in _scopes.GIT_ENV_OVERRIDES:
         monkeypatch.delenv(_name, raising=False)
     monkeypatch.delenv("JADE_GATE_MODE", raising=False)

@@ -11,6 +11,7 @@ import pytest
 from jade import memory, policy, scopes
 
 MERGE = "gh pr merge 940 --squash"
+REAL_SHELL_STARTUP_FILES = scopes.SHELL_STARTUP_FILES
 REAL_GLOBAL_CONFIGS = scopes.GLOBAL_CONFIGS   # taken at import, before any fixture replaces it
 
 
@@ -30,6 +31,10 @@ def no_real_git_config(short, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(short / "xdg"))
     monkeypatch.setattr(scopes, "GLOBAL_CONFIGS", REAL_GLOBAL_CONFIGS)   # tests/conftest.py empties it for every other test
     monkeypatch.setattr(scopes, "SYSTEM_CONFIGS", ())
+    monkeypatch.setattr(scopes, "SHELL_STARTUP_FILES", lambda: [p for p in REAL_SHELL_STARTUP_FILES() if not p.startswith("/etc/")])   # this machine's /etc files must not matter
+    monkeypatch.delenv("ZDOTDIR", raising=False)
+    monkeypatch.delenv("BASH_ENV", raising=False)
+    monkeypatch.delenv("ENV", raising=False)
     for name in scopes.GIT_ENV_OVERRIDES:
         monkeypatch.delenv(name, raising=False)
     return home
@@ -105,7 +110,7 @@ def test_a_directory_named_gitconfig_gives_no_scope(repo, no_real_git_config):
     assert merge_keys(repo) == []
 
 
-@pytest.mark.parametrize("name", ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG", "GH_REPO", "GH_HOST"])
+@pytest.mark.parametrize("name", ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG", "GIT_CONFIG_NOSYSTEM", "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GH_REPO", "GH_HOST", "GH_CONFIG_DIR"])
 def test_an_env_override_gives_no_scope(repo, monkeypatch, name):
     assert len(merge_keys(repo)) == 1
     monkeypatch.setenv(name, "x")
@@ -146,3 +151,87 @@ def test_the_public_memory_names():
     assert memory.INLINE.search("sh -c x") and memory.MERGE.match("gh pr merge 1")
     assert callable(memory.valid_since)
     assert not any(hasattr(memory, n) for n in ("_INLINE", "_MERGE", "_valid_since"))
+
+
+def test_gh_repo_in_zshenv_changes_the_key(repo, no_real_git_config):
+    before = merge_keys(repo)
+    assert len(before) == 1
+    (no_real_git_config / ".zshenv").write_text("export GH_REPO=evil/repo\n")
+    after = merge_keys(repo)
+    assert len(after) == 1 and after != before
+    (no_real_git_config / ".zshenv").write_text("export GH_REPO=evil/other\n")
+    assert merge_keys(repo) not in (before, after)
+
+
+def test_every_startup_file_family_counts(repo, short, no_real_git_config, monkeypatch):
+    for name in (".zprofile", ".zshrc", ".zlogin", ".bashrc", ".bash_profile", ".bash_login", ".profile"):
+        before = merge_keys(repo)
+        (no_real_git_config / name).write_text("export GH_HOST=x\n")
+        assert merge_keys(repo) not in (before, [])
+    zdot, benv = short / "zdot", short / "benv.sh"
+    zdot.mkdir()
+    before = merge_keys(repo)
+    (zdot / ".zshenv").write_text("export GH_REPO=a/b\n")
+    monkeypatch.setenv("ZDOTDIR", str(zdot))
+    after = merge_keys(repo)
+    assert after not in ([], before)
+    benv.write_text("export GH_REPO=a/b\n")
+    monkeypatch.setenv("BASH_ENV", str(benv))
+    assert merge_keys(repo) not in ([], after)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a mode 000 file")
+def test_an_unreadable_startup_file_gives_no_scope(repo, no_real_git_config):
+    f = no_real_git_config / ".zshenv"
+    f.write_text("echo hi\n")
+    f.chmod(0)
+    try:
+        assert merge_keys(repo) == []
+    finally:
+        f.chmod(0o600)
+
+
+def test_a_fifo_startup_file_gives_no_scope_and_does_not_block(repo, no_real_git_config):
+    os.mkfifo(no_real_git_config / ".zshenv")
+    t = time.perf_counter()
+    assert merge_keys(repo) == []
+    assert time.perf_counter() - t < 2.0
+
+
+def test_an_oversize_startup_file_gives_no_scope(repo, no_real_git_config):
+    (no_real_git_config / ".zshrc").write_text("# " + "x" * scopes.CONFIG_MAX + "\n")
+    assert merge_keys(repo) == []
+
+
+def test_a_fifo_global_config_gives_no_scope_and_does_not_block(repo, no_real_git_config):
+    os.mkfifo(no_real_git_config / ".gitconfig")
+    t = time.perf_counter()
+    assert merge_keys(repo) == []
+    assert time.perf_counter() - t < 2.0
+
+
+def test_no_startup_files_keeps_the_old_identity(repo):
+    assert scopes._repo_identity(repo) == ['remote "origin"\turl = https://github.com/owner/repoA.git']
+
+
+def test_the_identity_has_a_shell_line_with_the_hash(repo, no_real_git_config):
+    (no_real_git_config / ".zshenv").write_bytes(b"x\n")
+    ident = scopes._repo_identity(repo)
+    import hashlib
+    assert f"shell\t{no_real_git_config / '.zshenv'}\t{hashlib.sha256(b'x\n').hexdigest()}" in ident
+
+
+def test_the_default_xdg_path_is_read(repo, no_real_git_config, monkeypatch):
+    monkeypatch.delenv("XDG_CONFIG_HOME")
+    before = merge_keys(repo)
+    (no_real_git_config / ".config" / "git").mkdir(parents=True)
+    (no_real_git_config / ".config" / "git" / "config").write_text('[url "git@evil:"]\n\tinsteadOf = https://github.com/\n')
+    assert merge_keys(repo) not in (before, [])
+
+
+def test_the_startup_list_names_the_system_files_and_the_env_paths(monkeypatch):
+    monkeypatch.setenv("BASH_ENV", "/x/benv")
+    monkeypatch.setenv("ENV", "/x/env")
+    files = REAL_SHELL_STARTUP_FILES()
+    for want in ("/etc/zshenv", "/etc/zprofile", "/etc/zshrc", "/etc/profile", "/etc/bashrc", "/x/benv", "/x/env"):
+        assert want in files
