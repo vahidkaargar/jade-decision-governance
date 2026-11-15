@@ -126,7 +126,11 @@ def test_what_line_renderers(cmd, start):
     if not a.seg_keys:   # a low call has no gated segment: build the key by hand so the renderer is still exercised
         a.seg_keys, a.seg_rules = [cmd], [a.rule_id]
     line = askplain.what_line(a, "Bash")
-    assert line.startswith(start) and words(line) <= 20 + 6   # the fallback may carry 60 characters of the command
+    assert line.startswith(start)
+    if start == "Run: ":   # the fallback row carries at most FALLBACK_CHARS characters of the command
+        assert len(line) <= len("Run: ") + askplain.FALLBACK_CHARS
+    else:
+        assert words(line) <= 20
 
 
 def test_what_line_for_other_tools():
