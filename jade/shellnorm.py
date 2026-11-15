@@ -34,8 +34,8 @@ TEXT_MARK = "@text!"   # prefix of a line the scanner extracted from a program (
 NULL_REDIRECT = re.compile(r"(\d*>&\d+|&>>?\s*/dev/null|\d*>>?\s*/dev/null|\d*<\s*/dev/null)")
 # A redirect as the shell reads it, wherever it stands in the command: an optional descriptor that starts a word (`2>log`; in `a2>log` the 2 is part of `a2`), the
 # operator (`&>`, `&>>`, `>>`, `>&`, `>|`, `>`, `<<<`, `<<HEREDOC` as the scanner spells a heredoc, `<&`, `<>`, `<`), and the target word, which may follow after blanks (`>&-main` closes a descriptor and then names the word `main`: a `-` right after `>&` or `<&` is the whole target).
-REDIRECT = re.compile(r"(?P<fd>(?<!\S)\d+)?(?P<op><<HEREDOC|&>>|&>|>>|>&|>\||<<<|<&|<>|>|<)(?:(?<!HEREDOC)[ \t]*(?P<tgt>(?<=[<>]&)-|[^\s<>&|]*))?")
-SPLIT = re.compile(r"\n|;|&&|\|\||(?<!>)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\}")  # `>&`, `>|` and `&>` are redirections, not separators
+REDIRECT = re.compile(r"(?P<fd>(?<!\S)\d+)?(?P<op><<HEREDOC|(?:&>>?|>>?&?)[|!]?|<<<|<&|<>|<)(?:(?<!HEREDOC)[ \t]*(?P<tgt>(?<=[<>]&)-|[^\s<>&|]*))?")   # `[|!]`: zsh `>|`, `>!`, `>>|`, `>&!`, `&>>|` ...
+SPLIT = re.compile(r"\n|;|&&|\|\||(?<!>)(?<!>&)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\}")  # `>&`, `>|`, `>&|` and `&>` are redirections, not separators
 # Package runners that start the next word as a program: `uv run python -c ...` is `python -c ...` (its quoted code must be scanned, not read as prose).
 _RUN_OPT = r"(?:(?:-w|-p|--with|--with-requirements|--with-editable|--python|--project|--directory|--package|--group|--env-file|--extra|--from|--index|--index-url)\s+\S+|--?[A-Za-z][\w-]*(?:=\S+)?)"
 _RUNNER = (r"(?:uv(?:\s+tool)?\s+run|uvx|poetry\s+run|pdm\s+run|pipenv\s+run|rye\s+run|hatch\s+run|pipx\s+run|conda\s+run|npx|bunx|pnpm\s+(?:exec|dlx)"
@@ -70,6 +70,21 @@ ORDINARY_ESCAPE = set("_./-:=@%+,^")
 def _unescape_dq(body: str) -> str:
     """The text a shell hands to `sh -c "..."`: only \\$ \\` \\" \\\\ and backslash-newline are escapes inside double quotes."""
     return re.sub(r'\\([$`"\\])|\\\r?\n', lambda m: m.group(1) or "", body)
+
+
+_ECHO_ESCAPE = re.compile(r"\\(c.*|0[0-7]{1,3}|x[0-9A-Fa-f]{1,2}|[\\abefnrtv])", re.S)
+
+
+def _echo_escapes(text: str) -> str:
+    """What `echo` of zsh and sh (and `printf`, `print`) prints for `text`: `\\\\` is a backslash, `\\n` a newline, `\\c` ends the output."""
+    def one(m: re.Match) -> str:
+        e = m.group(1)
+        if e[0] == "c":
+            return ""
+        if e[0] in "0x":
+            return chr(int(e[1:] or "0", 16 if e[0] == "x" else 8))
+        return {"\\": "\\", "n": "\n", "t": " ", "v": " ", "f": " ", "r": " "}.get(e, "")
+    return _ECHO_ESCAPE.sub(one, text)
 
 
 def _code(body: str) -> str:
@@ -819,7 +834,12 @@ class _Scan:
         if kind == "shell" and (prog := self._producer_program(raw)):
             return self._interp(prog[0], prog[1], emit_all=True)
         text = " ".join(_dec(w) for w in words_of(PRODUCER.sub("", raw, count=1)))
-        return self._sub(text) if kind == "shell" else self._interp(kind, text)
+        if kind == "shell":
+            out = self._sub(text)
+            if "\\" in text and re.match(r"\s*(?:echo|printf|print)\b", raw):   # zsh, sh and printf read `\\` and `\n` in what they print; bash's echo does not: both readings run
+                out += " ; " + self._sub(_echo_escapes(text))
+            return out
+        return self._interp(kind, text)
 
     def _interp(self, lang: str, body: str, emit_all: bool = False) -> str:
         """What a program in `lang` does (interp.py): its literal commands as nested shell text, its literal write targets as the destination of a
@@ -1128,6 +1148,9 @@ class _Scan:
             elif c == "{" and (j := _brace_span(s, i)) > 0:  # brace expansion word, not a command group
                 emit(s[i:j])
                 i = j
+            elif c in "{}" and not _group_brace(c, s[i + 1:i + 2], cur):   # `a{`, `a}`, `{a`, `}` among the arguments: a literal in bash and zsh, not a group
+                emit("\x06")
+                i += 1
             elif c in ";(){}":
                 if c == "(":
                     paren += 1
@@ -1146,7 +1169,7 @@ class _Scan:
                     end_stage(i, i + step, False)
                     i += step
             elif c == "|":
-                if i and s[i - 1] == ">":
+                if i and (s[i - 1] == ">" or s[i - 2:i] == ">&"):   # `>|f`, and zsh `>&|f`, `>>&|f`
                     emit(c)
                     i += 1
                 elif s[i + 1:i + 2] == "|":
@@ -1182,6 +1205,7 @@ class _Scan:
             body = "\n".join(lines)
             if not quoted:
                 deferred.extend(_Scan(body, self.depth + 1, self.budget).walk(0, None)[2])
+                body = re.sub(r"\\([$`\\])|\\\r?\n", lambda m: m.group(1) or "", body)   # the program reads what the shell wrote: `\\` is `\`, `\$` is `$`
             if kind == "shell":
                 deferred.append(self._sub(body))
             elif kind:
@@ -1213,6 +1237,23 @@ def _skeleton(command: str, _depth: int, _budget: list[int] | None) -> str:
     return _hoist_redirects(expand_braces(NULL_REDIRECT.sub(" ", text)))
 
 
+_GROUP_OPENER = re.compile(r"(?:^|\s)(?:then|do|else|elif|if|while|until|time|always|coproc(?:\s+\S+)?|function\s+\S+|!)\s*$")
+_SHORT_FORM = re.compile(r"\s*(?:if|elif|for|foreach|while|until|repeat|select)\b")   # zsh: `if cond { ... }`, `for x in a b { ... }`, `repeat 3 { ... }`
+
+
+def _group_brace(c: str, nxt: str, cur: str) -> bool:
+    """Is this `{` or `}` the brace of a command group, and so a separator: a word of its own that opens or closes a command, not a part of an argument.
+
+    `{ ls; }` and `then { ls; }` are groups; `a{`, `a}`, `{a`, `}a` and a `{` or `}` among the arguments (`git push origin feature { :main`) are words, so they
+    must not cut the command: the words after them are still its arguments. `cur` is what the scanner has read of the current command."""
+    start = not cur.strip()
+    if c == "}":
+        return start and (nxt == "" or nxt in " \t\n;&|()<>")
+    if nxt not in ("", " ", "\t", "\n"):
+        return False
+    return start or bool(_GROUP_OPENER.search(cur)) or bool(_SHORT_FORM.match(cur))
+
+
 def _redirect_word(m: re.Match) -> str:
     """One redirect in its one spelling, or "" when it names no file (`>&-` closes a descriptor, `<&0` copies one): `&>f`, `>&f` and `>|f` are `> f`, `2>f` is `2> f`."""
     fd, op, tgt = m.group("fd") or "", m.group("op"), m.group("tgt") or ""
@@ -1220,8 +1261,11 @@ def _redirect_word(m: re.Match) -> str:
         return op
     if op in (">&", "<&") and re.fullmatch(r"\d+-?|-", tgt):
         return ""
-    both = op in ("&>", "&>>")
-    op = {"&>": ">", "&>>": ">>", ">&": ">", ">|": ">", "<&": "<"}.get(op, op)
+    both = op.startswith("&")
+    if op[0] in "&>":
+        op = ">>" if ">>" in op else ">"   # `&>`, `>&`, `>|`, `>!`, `>>&|`, `&>>!` ...: a write, or an append, of a file
+    elif op == "<&":
+        op = "<"
     if op in (">", ">>", "<") and tgt:
         return f"{'' if both else fd}{op} {tgt}"   # the target is the word after the operator, as `operands` and `_absolute_operands` read it
     return fd + op + tgt
@@ -1241,17 +1285,26 @@ def _hoist_redirects(text: str) -> str:
         if k % 2 or not REDIRECT.search(piece) or piece.lstrip().startswith(TEXT_MARK):
             out.append(piece)
             continue
-        moved = [w for m in REDIRECT.finditer(piece) if (w := _redirect_word(m))]
-        words = REDIRECT.sub(" ", piece).strip()
-        out.append(" ".join([words, *moved]).strip() + piece[len(piece.rstrip()):] if words or moved else piece)
+        out.append(_hoist_piece(piece))
+        if GLUED_CLOSE.search(piece):
+            out.append(" ; " + _hoist_piece(GLUED_CLOSE.sub(lambda m: (m.group("fd") or "") + m.group("c") + " -", piece)))   # the other shell's reading
     return "".join(out)
+
+
+GLUED_CLOSE = re.compile(r"(?P<fd>(?<!\S)\d+)?(?P<c>[<>])&-(?=[^\s<>&|])")
+
+
+def _hoist_piece(piece: str) -> str:
+    moved = [w for m in REDIRECT.finditer(piece) if (w := _redirect_word(m))]
+    words = REDIRECT.sub(" ", piece).strip()
+    return " ".join([words, *moved]).strip() + piece[len(piece.rstrip()):] if words or moved else piece
 
 
 def segments(command: str) -> list[str]:
     return [re.sub(r"\s+", " ", seg).strip() for seg in SPLIT.split(skeleton(command)) if seg.strip()]
 
 
-SEG_TOKEN = re.compile(r"(\n|;|&&|\|\||(?<!>)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\})")
+SEG_TOKEN = re.compile(r"(\n|;|&&|\|\||(?<!>)(?<!>&)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\})")
 
 
 def segments_cwd(command: str, cwd: str = "") -> list[tuple[str, tuple[str, ...]]]:

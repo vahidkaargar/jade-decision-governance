@@ -53,3 +53,14 @@ Backslash and double backslash before every spelling in `FILE_REDIRECTS` and `FD
 - Differential against `origin/main` (9 373 escaped-operator commands, `diff_wide.py` in the session scratchpad): 336 commands were SI-08 blocked on `main` and are not on the branch. All 336 were checked in bash and zsh: none pushes to the default branch (`a\>&log :main` is the word `a>`, a background `&`, and a separate command `log`). 1 002 commands blocked only on the branch.
 - Found while checking: `git push origin feature a>&-main`. bash closes the descriptor and `main` is a separate word, with no blank. `REDIRECT` took `-main` as the target. A `-` right after `>&` or `<&` is now the whole target. Same hole on `origin/main`.
 - Not fixed, same on `origin/main` (24 strict xfail tests keep it visible): a `{` or `}` inside a word is a literal in bash and zsh, but `SPLIT` cuts the segment there, so `git push origin feature a{ :main` is not stopped (assessment and hook). It needs its own change: only a `{` or `}` that stands as a word of its own is a group.
+
+## Follow-up (W-108, W-109): what the review of the fix found
+
+Fixed in the same PR, with `tests/test_redirect_zsh_and_braces.py` (real bash and zsh, a recording `git`, also through `sh -c`, heredocs and `| zsh`):
+
+- zsh redirect operators (`>>&`, `>>|`, `&>|`, `&>>|`, `>>&|`, `>>&!`, `>!`, `>>!`, `>&|`, `>&!`): added to `REDIRECT`; a `|` after `>&` does not split.
+- `>&-` with a word glued to it: bash closes and the word is an argument, zsh reads a file `-word`. The skeleton holds both readings as two commands.
+- A `{` or `}` that is not a command-group brace is data (`\x06`), decided in the scanner (`_group_brace`): the `{`/`}` hole noted above is closed and its 24 xfail tests are removed.
+- An unquoted heredoc and `echo`/`printf`/`print` halve `\\` before the next shell reads the text; both texts are read.
+
+Not in this PR (W-110, spec B): `git -C my\ repo push`, `a\ #c`, an odd redirect target word, `>! lg`, escape-halving wrappers, `>& -main`, a quoted `-C` value with an operator.

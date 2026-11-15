@@ -49,7 +49,7 @@ OTHERS = [
     "rm -r -f /Users/x/proj",
 ]
 
-_REDIRECT_WORD = re.compile(r"^(?:\d*|&)(?:>>?|<>|<<<|<)[|&]?")
+_REDIRECT_WORD = re.compile(r"^(?:\d*|&)(?:>>?|<>|<<<|<)[|&!]*")
 
 
 def sig(command: str) -> tuple:
@@ -193,23 +193,42 @@ def test_skeleton_puts_the_redirect_last_and_spells_it_one_way():
 
 ESCAPED_OPERATORS = [";", "|", "(", ")", "{", "}", "&", "<", ">", "\\&\\&", "\\|\\|", "\\;\\;"]
 PUSH_TO_MAIN = ["feature :main", "feature main", "feature +feature:main", "feature feature:main", "--no-verify feature +feature:main", "feature --mirror"]
-PRELUDE = "git() { printf '%s\\0' \"$@\" >> \"$ARGV_OUT\"; printf '\\1' >> \"$ARGV_OUT\"; }; export -f git 2>/dev/null; "
+PRELUDE = "git() { printf '%s\\0' \"$@\" >> \"$ARGV_OUT\"; printf '\\1' >> \"$ARGV_OUT\"; }; export -f git 2>/dev/null; "   # the shell that runs the command: a function, fast
+FAKE_GIT = "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\0' \"$a\" >> \"$ARGV_OUT\"; done\nprintf '\\1' >> \"$ARGV_OUT\"\n"
 
 
 def ran_git(command: str, shell: str, where: Path) -> list[list[str]]:
-    """The argument lists the shell passes to `git` for `command` (a function stands in for git, nothing else is run)."""
+    """The argument lists the shells pass to `git` for `command` (a function stands in for git in the shell that runs it, and a program named `git` on PATH in any
+    shell that one starts: `sh -c`, a heredoc or a pipe into `zsh`; nothing else is run)."""
     out = where / "argv"
     out.write_bytes(b"")
+    fake = where / "bin" / "git"
+    if not fake.exists():
+        fake.parent.mkdir(exist_ok=True)
+        fake.write_text(FAKE_GIT)
+        fake.chmod(0o755)
     try:
-        subprocess.run([shell, "-c", PRELUDE + command], cwd=where, env={"PATH": "/usr/bin:/bin", "ARGV_OUT": str(out), "HOME": str(where)},
+        subprocess.run([shell, "-c", PRELUDE + command], cwd=where, env={"PATH": f"{fake.parent}:/usr/bin:/bin", "ARGV_OUT": str(out), "HOME": str(where)},
                        stdin=subprocess.DEVNULL, capture_output=True, timeout=10, check=False)
     except subprocess.TimeoutExpired:
         pass   # a command that waits for input ran what it ran; the arguments recorded so far are what counts
     return [r.decode().split("\0")[:-1] for r in out.read_bytes().split(b"\1") if r]
 
 
+GIT_VALUE_OPTIONS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env")
+
+
+def git_subcommand(args: list[str]) -> list[str]:
+    """`args` without git's global options (`-C dir`, `-c k=v`, `--no-pager`): what follows is the subcommand and its arguments."""
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        i += 2 if args[i] in GIT_VALUE_OPTIONS else 1
+    return args[i:]
+
+
 def pushes_to_default(calls: list[list[str]]) -> bool:
     for args in calls:
+        args = git_subcommand(args)
         if args[:1] != ["push"]:
             continue
         pos, skip = [], False
@@ -282,10 +301,7 @@ def test_escaped_operator_before_a_redirect_still_stops_a_push_to_main(command, 
 @pytest.mark.parametrize("escapes", [1, 2, 3, 4])
 @pytest.mark.parametrize("tail", FILE_REDIRECTS + FD_REDIRECTS + ESCAPED_OPERATORS)
 @pytest.mark.parametrize("base", ["git push origin " + p for p in PUSH_TO_MAIN])
-def test_backslashes_before_any_operator_never_hide_a_push_to_main(base, tail, escapes, tmp_path, request):
-    if tail in ("{", "}") and escapes % 2 == 0:
-        request.applymarker(pytest.mark.xfail(strict=True, reason="found with W-96, same on origin/main: a `{` or `}` inside a word is a literal in the shell but SPLIT cuts the "
-                                                                  "segment there (`git push origin feature a{ :main` is not stopped); a separate fix"))
+def test_backslashes_before_any_operator_never_hide_a_push_to_main(base, tail, escapes, tmp_path):
     command = with_escape(base, escapes, tail)
     agrees_with_the_shell(command, tmp_path)
 
