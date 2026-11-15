@@ -916,6 +916,9 @@ _KNOWS_MODELS = (
 )
 
 
+_CD_PREFIX = re.compile(r"^(?:cd\s+\S+\s*&&\s*)+")   # a leading `cd PATH &&` is not part of the kind of call
+
+
 def knows_template(rows) -> str:
     """The first text of the preferences file (pure): two header lines, two model sentences with placeholders, then one commented line per kind of standing answer.
     Rows of one scope (same rule and scope key) are one line with the scope label; rows without a scope are grouped by rule and first word and show the newest call.
@@ -927,7 +930,7 @@ def knows_template(rows) -> str:
     seen: dict[tuple, str] = {}
     denied: set[tuple] = set()   # (rule, first two words of the call) of every deny met so far; rows come newest first, so these denies are newer than the rows after them
     for r in rows:   # newest first, so the first row of a group names it
-        family = (r["rule_id"], " ".join(one_line(r["label"]).split(" ")[:2]))
+        family = (r["rule_id"], " ".join(_CD_PREFIX.sub("", one_line(r["label"])).split(" ")[:2]))
         if r["answer"] == "deny":
             denied.add(family)
             continue
@@ -954,7 +957,7 @@ def knows_edit(stdin_isatty: bool | None = None, editor: str | None = None) -> P
     if not p.exists():
         db = ledger.open(timeout=5)
         try:
-            text = knows_template(db.human_answers(limit=1000))   # strong allows and every deny: a newer deny hides an older allow
+            text = knows_template(db.human_answers(limit=100000))   # strong allows and every deny: a newer deny hides an older allow
         finally:
             db.close()
         p.parent.mkdir(parents=True, exist_ok=True)

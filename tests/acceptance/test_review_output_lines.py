@@ -153,3 +153,14 @@ def test_knows_edit_a_later_deny_hides_a_confirmed_scope_line():
 def test_knows_edit_a_hint_allow_never_appears():
     record("allow", "git clean -fd", "k2")
     assert edit_and_read() == []
+
+
+def test_knows_edit_a_deny_with_a_cd_prefix_hides_the_scope_line():
+    record("allow", "gh pr merge 940 --squash", "k940", rule="R-10", scope={"kind": "merge_project", "key": "S1", "label": "gh pr merge * in /p"}, confirm=True)
+    record("deny", "cd /p && cd q && gh pr merge 941 --squash", "k941", rule="R-10")
+    assert edit_and_read() == []
+
+
+def test_knows_edit_a_cd_prefix_on_the_allow_still_prints_it():
+    record("allow", "cd /p && gh pr merge 940 --squash", "k940", rule="R-10", confirm=True)
+    assert len(edit_and_read()) == 1
