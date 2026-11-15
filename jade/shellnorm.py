@@ -33,8 +33,8 @@ TEXT_MARK = "@text!"   # prefix of a line the scanner extracted from a program (
 
 NULL_REDIRECT = re.compile(r"(\d*>&\d+|&>>?\s*/dev/null|\d*>>?\s*/dev/null|\d*<\s*/dev/null)")
 # A redirect as the shell reads it, wherever it stands in the command: an optional descriptor that starts a word (`2>log`; in `a2>log` the 2 is part of `a2`), the
-# operator (`&>`, `&>>`, `>>`, `>&`, `>|`, `>`, `<<<`, `<<HEREDOC` as the scanner spells a heredoc, `<&`, `<>`, `<`), and the target word, which may follow after blanks.
-REDIRECT = re.compile(r"(?P<fd>(?<!\S)\d+)?(?<!\\)(?P<op><<HEREDOC|&>>|&>|>>|>&|>\||<<<|<&|<>|>|<)(?:(?<!HEREDOC)[ \t]*(?P<tgt>[^\s<>&|]*))?")
+# operator (`&>`, `&>>`, `>>`, `>&`, `>|`, `>`, `<<<`, `<<HEREDOC` as the scanner spells a heredoc, `<&`, `<>`, `<`), and the target word, which may follow after blanks (`>&-main` closes a descriptor and then names the word `main`: a `-` right after `>&` or `<&` is the whole target).
+REDIRECT = re.compile(r"(?P<fd>(?<!\S)\d+)?(?P<op><<HEREDOC|&>>|&>|>>|>&|>\||<<<|<&|<>|>|<)(?:(?<!HEREDOC)[ \t]*(?P<tgt>(?<=[<>]&)-|[^\s<>&|]*))?")
 SPLIT = re.compile(r"\n|;|&&|\|\||(?<!>)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\}")  # `>&`, `>|` and `&>` are redirections, not separators
 # Package runners that start the next word as a program: `uv run python -c ...` is `python -c ...` (its quoted code must be scanned, not read as prose).
 _RUN_OPT = r"(?:(?:-w|-p|--with|--with-requirements|--with-editable|--python|--project|--directory|--package|--group|--env-file|--extra|--from|--index|--index-url)\s+\S+|--?[A-Za-z][\w-]*(?:=\S+)?)"
@@ -1044,7 +1044,7 @@ class _Scan:
                 elif d == "\r" and s[i + 2:i + 3] == "\n":
                     i += 3
                 else:
-                    emit(d if d.isalnum() or d in ORDINARY_ESCAPE else "\\" + d)
+                    emit(d if d.isalnum() or d in ORDINARY_ESCAPE else "\x06" if _INERT.fullmatch(d) else "\\" + d)   # `a\&>log` is the word `a&` and a `>`: an escaped operator is data, as a quoted one is
                     i += 2
             elif c == "'":
                 j = s.find("'", i + 1)

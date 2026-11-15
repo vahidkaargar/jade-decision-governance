@@ -8,6 +8,8 @@ does too: the call, with the redirect taken out, is what every rule reads (`shel
 
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -169,7 +171,7 @@ def test_a_redirect_is_still_a_write():
 
 def test_quoted_and_escaped_operators_are_data():
     assert shellnorm.segments("echo 'a>b' c") == ["echo a\x06b c"]
-    assert shellnorm.segments("git log --format=%h\\>x") == ["git log --format=%h\\>x"]
+    assert shellnorm.segments("git log --format=%h\\>x") == ["git log --format=%h\x06x"]   # an escaped operator is data the way a quoted one is (W-96)
 
 
 def test_skeleton_puts_the_redirect_last_and_spells_it_one_way():
@@ -180,3 +182,135 @@ def test_skeleton_puts_the_redirect_last_and_spells_it_one_way():
     assert shellnorm.segments("git push origin feature&>>log :main") == ["git push origin feature :main >> log"]
     assert shellnorm.segments("echo a2>log b") == ["echo a2 b > log"]   # the 2 belongs to the word `a2`, not to the redirect
     assert shellnorm.segments("git push 2>log origin") == ["git push origin 2> log"]
+
+
+# ---------------------------------------------------------------- an escaped operator is data, a real one after an escaped backslash is not (W-96)
+#
+# `a\&>log` is the word `a&` and a redirect `>log`; `a\\&>log` is the word `a\` and a redirect `&>log`. The scanner decides which is which (an escaped
+# operator character becomes the inert mark, as a quoted one does), because no regex can tell an escaped backslash from an escape. The oracle below runs the
+# command in the real bash and zsh with a `git` function that records its arguments in a file (never in the redirected output), and the gate must stop every
+# command in which real git would push to the default branch.
+
+ESCAPED_OPERATORS = [";", "|", "(", ")", "{", "}", "&", "<", ">", "\\&\\&", "\\|\\|", "\\;\\;"]
+PUSH_TO_MAIN = ["feature :main", "feature main", "feature +feature:main", "feature feature:main", "--no-verify feature +feature:main", "feature --mirror"]
+PRELUDE = "git() { printf '%s\\0' \"$@\" >> \"$ARGV_OUT\"; printf '\\1' >> \"$ARGV_OUT\"; }; export -f git 2>/dev/null; "
+
+
+def ran_git(command: str, shell: str, where: Path) -> list[list[str]]:
+    """The argument lists the shell passes to `git` for `command` (a function stands in for git, nothing else is run)."""
+    out = where / "argv"
+    out.write_bytes(b"")
+    try:
+        subprocess.run([shell, "-c", PRELUDE + command], cwd=where, env={"PATH": "/usr/bin:/bin", "ARGV_OUT": str(out), "HOME": str(where)},
+                       stdin=subprocess.DEVNULL, capture_output=True, timeout=10, check=False)
+    except subprocess.TimeoutExpired:
+        pass   # a command that waits for input ran what it ran; the arguments recorded so far are what counts
+    return [r.decode().split("\0")[:-1] for r in out.read_bytes().split(b"\1") if r]
+
+
+def pushes_to_default(calls: list[list[str]]) -> bool:
+    for args in calls:
+        if args[:1] != ["push"]:
+            continue
+        pos, skip = [], False
+        for a in args[1:]:
+            if skip:
+                skip = False
+            elif a in ("--mirror", "--all"):
+                return True
+            elif a == "-o":
+                skip = True
+            elif not a.startswith("-"):
+                pos.append(a)
+        for ref in pos[1:]:
+            src, colon, dst = ref.lstrip("+").partition(":")
+            if re.sub(r"^refs/heads/", "", dst if colon else src) in ("main", "master"):
+                return True
+    return False
+
+
+def with_escape(base: str, escapes: int, tail: str) -> str:
+    """`base` with an extra word `a`, `escapes` backslashes and `tail` written against it, before the last word of the push."""
+    head, _, last = base.rpartition(" ")
+    return f"{head} a{chr(92) * escapes}{tail} {last}"
+
+
+def agrees_with_the_shell(command: str, tmp_path: Path) -> None:
+    for shell in ("bash", "zsh"):
+        if shutil.which(shell) and pushes_to_default(ran_git(command, shell, tmp_path)):
+            assert si08(command), f"{shell} pushes to the default branch and the gate does not stop {command!r}"
+
+
+@pytest.mark.parametrize("command", [
+    "git push origin feature a>&-main",              # bash closes a descriptor with `>&-` and the word `main` follows with no blank
+    "git push origin feature a<&-main",
+    "git push origin feature >&-main",
+    "git push origin feature a>&---mirror",
+    "git push origin feature a\\&>log :main",        # the word `a&`, then a redirect: the push goes to main
+    "git push origin feature a\\\\&>log :main",      # the word `a\`, then the redirect `&>log`
+    "git push origin feature a\\\\\\&>log :main",    # `a\&`, then `>log`
+    "git push origin feature a\\\\\\\\&>log :main",
+    "git push origin feature a\\&>>log :main",
+    "git push origin feature a\\\\&>>log :main",
+    "git push origin feature a\\&> log :main",
+    "git push origin feature a\\\\&> log :main",
+    "git push origin feature a\\>log :main",
+    "git push origin feature a\\\\>log :main",
+    "git push origin feature a\\|log :main",
+    "git push origin feature a\\\\>|log :main",
+    "git push origin feature a\\;:main",
+    "git push origin feature a\\;  :main",
+    "git push origin feature a\\(  :main",
+    "git push origin feature a\\{ :main",
+    "git push origin feature a\\}\\& :main",
+    "git push origin feature \"a\\&\" :main",         # inside double quotes the backslash stays and the `&` is data
+    "git push origin feature \"a\\&>log\" :main",
+    "git push origin feature a\\\n&>log :main",       # a backslash at the end of a line joins the lines: `a&>log`
+    "git push origin feature &>log\\\n :main",
+    "bash -c 'git push origin feature a\\&>log :main'",
+    "bash -c 'git push origin feature a\\\\&>log :main'",
+    "sh -c \"git push origin feature a\\\\&>log :main\"",
+    "eval 'git push origin feature a\\&>log :main'",
+    "eval 'git push origin feature a\\\\&>log :main'",
+    "eval \"git push origin feature a\\\\\\\\&>log :main\"",
+])
+def test_escaped_operator_before_a_redirect_still_stops_a_push_to_main(command, tmp_path):
+    assert si08(command), command
+    agrees_with_the_shell(command, tmp_path)
+
+
+@pytest.mark.parametrize("escapes", [1, 2, 3, 4])
+@pytest.mark.parametrize("tail", FILE_REDIRECTS + FD_REDIRECTS + ESCAPED_OPERATORS)
+@pytest.mark.parametrize("base", ["git push origin " + p for p in PUSH_TO_MAIN])
+def test_backslashes_before_any_operator_never_hide_a_push_to_main(base, tail, escapes, tmp_path, request):
+    if tail in ("{", "}") and escapes % 2 == 0:
+        request.applymarker(pytest.mark.xfail(strict=True, reason="found with W-96, same on origin/main: a `{` or `}` inside a word is a literal in the shell but SPLIT cuts the "
+                                                                  "segment there (`git push origin feature a{ :main` is not stopped); a separate fix"))
+    command = with_escape(base, escapes, tail)
+    agrees_with_the_shell(command, tmp_path)
+
+
+@pytest.mark.parametrize("escapes", [1, 2, 3, 4])
+@pytest.mark.parametrize("tail", ["&>log", "&>>log", "&>/dev/null", "&> log", ">log", ">|log", "2>log", "<in"])
+@pytest.mark.parametrize("base", PUSHES + OTHERS)
+def test_backslashes_before_a_redirect_do_not_lower_the_rating(base, tail, escapes):
+    """An extra word (`a&`, `a` and a backslash, `a>log`) written after the subcommand never makes a gated command less gated."""
+    words = base.split(" ")
+    at = 2 if base.startswith("git ") else len(words)   # `rm a -r -f x` is not `rm -rf x` whatever `a` is; that is not about redirects
+    if escapes % 2 and tail.startswith(">|"):
+        pytest.skip("`a\\>|log` is the word `a>` piped to `log`: a different command, not an escaped redirect")
+    command = " ".join([*words[:at], f"a{chr(92) * escapes}{tail}", *words[at:]])
+    ref_level, _rule, ref_blocked, _ho, _keys = sig(base)
+    level, _rule, blocked, _ho, _keys = sig(command)
+    assert policy.LEVELS[level] >= policy.LEVELS[ref_level], command
+    assert set(ref_blocked) <= set(blocked), command
+    if si08(base):
+        assert si08(command), command
+
+
+def test_a_real_operator_after_an_escaped_backslash_is_still_hoisted():
+    assert shellnorm.segments("git push origin feature a\\\\&>log :main") == ["git push origin feature a\\\\ :main > log"]
+    assert shellnorm.segments("git push origin feature a\\&>log :main") == ["git push origin feature a\x06 :main > log"]
+    assert shellnorm.segments("git push origin feature a\\\\\\&>log :main") == ["git push origin feature a\\\\\x06 :main > log"]
+    assert shellnorm.segments('git push origin feature "a\\&" :main') == ["git push origin feature a\\\x06 :main"]
+    assert shellnorm.segments("git push origin feature a\\\n&>log :main") == ["git push origin feature a :main > log"]
