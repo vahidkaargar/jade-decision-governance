@@ -400,3 +400,118 @@ def test_a_work_tree_set_earlier_or_by_config_counts(cmd):
 def test_a_work_tree_elsewhere_or_a_read_is_not_human_only(home, cmd):
     (home / "proj").mkdir()
     assert CLASS not in away(cmd).ho_ids, cmd
+
+
+# ------------------------------------------------------------------ wave 4 (security review PRE3-1 .. PRE3-9)
+
+@pytest.fixture
+def spaced(home):
+    (home / "a b").mkdir()
+    (home / "Library" / "Application Support").mkdir(parents=True)
+    (home / ".claude" / "hooks").mkdir()
+    return home
+
+
+@pytest.mark.parametrize("cmd,want", [
+    ("echo x >> '@H/a b/../.zshenv'", CLASS), ('echo x >> "@H/a b/../.zshenv"', CLASS), ("echo x >> @H/a\\ b/../.zshenv", CLASS),
+    ('tee -a "@H/a b/../.zshenv" < /tmp/x', CLASS), ('echo x >> "$HOME/a b/../.zshenv"', CLASS), ('echo x >> "${HOME}/a b/../.zshrc"', CLASS),
+    ('echo x >> "$HOME/Library/Application Support/../../.zshenv"', CLASS), ('cp /tmp/x "@H/a b/../.zshenv"', CLASS),
+    ('cp /tmp/x "@H/a b/../.claude/hooks/x.sh"', "HO-wiring"), ('cp /tmp/x "@H/a b/../.claude/settings.json"', "HO-settings-shadow"),
+    ('echo x >> "$HOME/Library/Application Support/../../.claude/settings.json"', "HO-wiring"), ("echo x >> $'@H/a b/../.zshenv'", CLASS),
+    ('bash -c \'echo x >> "$HOME/a b/../.zshenv"\'', CLASS), ('cd "@H/a b" && echo x >> "../.zshenv"', CLASS),
+])
+def test_a_path_with_a_space_reaches_the_root_checks(spaced, cmd, want):
+    cmd = cmd.replace("@H", os.path.realpath(spaced))
+    assert want in away(cmd).ho_ids, cmd   # PRE3-1: the shell passes the spaced word as one word, quotes removed
+
+
+@pytest.mark.skipif(not os.path.isdir("/Volumes/Macintosh HD/Users"), reason="the boot volume link exists on macOS only")
+def test_the_boot_volume_link_with_its_space_is_the_same_path(spaced):
+    h = "/Volumes/Macintosh HD" + os.path.realpath(spaced)
+    assert CLASS in away(f'echo x >> "{h}/.zshenv"').ho_ids
+    assert CLASS in away(f"echo x >> {h.replace(' ', chr(92) + ' ')}/.zshenv").ho_ids
+    assert "HO-wiring" in away(f'cp /tmp/x "{h}/.claude/hooks/a.sh"').ho_ids
+
+
+@pytest.mark.parametrize("cmd", ['git commit -m "fix the .zshenv docs"', 'echo "hello world" > notes.txt', 'grep -r "a b" .', 'mkdir -p "x y" && cp a "x y/"'])
+def test_spaced_words_in_normal_work_stay_unflagged(cmd):
+    assert not away(cmd).ho_ids, cmd
+
+
+@pytest.mark.parametrize("cmd,want", [
+    ("echo x >> /.vol/16777233/7358854", CLASS), ("echo x >> /.vol/16777233/268837/.zshenv", CLASS), ("echo x >> /.VOL/1/2", CLASS),
+    ("cp /tmp/x /.vol/16777233/268837/.claude/hooks/a.sh", "HO-wiring"), ("tee /.vol/1/2 < /tmp/x", "HO-mod"), ("ln /.vol/1/2 /tmp/n", CLASS),
+    ("cp /tmp/x /.vol/1/2/settings.json", "HO-settings-shadow"), ("mv /tmp/x /.vol/1/2", CLASS), ("rsync -a /tmp/x/ /.vol/1/2", CLASS),
+])
+def test_a_volfs_name_counts_as_every_root(cmd, want):
+    assert want in away(cmd).ho_ids, cmd   # PRE3-2: /.vol/<dev>/<ino> names any file or folder
+
+
+@pytest.mark.parametrize("tool", ["Write", "Edit", "NotebookEdit"])
+def test_a_tool_write_through_volfs_counts_as_every_root(tool):
+    p = "/.vol/16777233/268837/.claude/settings.json"
+    a = policy.assess(tool, {"file_path": p, "notebook_path": p, "content": "{}", "new_string": "x", "old_string": "y", "new_source": "x"}, os.environ["HOME"])
+    assert {CLASS, "HO-wiring", "HO-mod", "HO-settings-shadow"} <= set(a.ho_ids), (tool, a.ho_ids)
+
+
+def test_reading_through_volfs_is_not_flagged():
+    assert not away("cat /.vol/16777233/7358854").ho_ids
+
+
+@pytest.mark.parametrize("cmd", ["cp -r /tmp/x/.* ~", "cp -R /tmp/x/.z* ~", "cd /tmp/x && cp -r * ~", "rsync -a host:.zshenv ~", "rsync -a host:.claude ~",
+                                 "rsync -a host: ~", "rsync -a host:. ~", "cd /tmp/x && rsync -aR .claude/shell-snapshots ~",
+                                 "rsync -aR /tmp/x/./.claude/shell-snapshots ~", "rsync --relative /tmp/x/./.claude ~", "rsync -a --files-from=/tmp/l /tmp/x ~",
+                                 "rsync -a --files-from /tmp/l /tmp/x ~", "cp -r --parents .claude/shell-snapshots ~", "gcp -r --parents .claude ~",
+                                 "rsync -a host::mod ~", "rsync -a rsync://host/mod ~"])
+def test_a_tree_copy_whose_source_is_not_one_name_counts_as_a_contents_copy(cmd):
+    assert CLASS in away(cmd).ho_ids, cmd   # PRE3-3
+
+
+@pytest.mark.parametrize("cmd", ["rsync -a host:proj ~", "cp -r /tmp/x/*.d ~/Documents", "rsync -a host:dir/proj ~"])
+def test_a_remote_or_glob_tree_copy_elsewhere_is_not_human_only(home, cmd):
+    (home / "Documents").mkdir()
+    assert CLASS not in away(cmd).ho_ids, cmd
+
+
+@pytest.mark.parametrize("cmd,want", [
+    ("ditto /tmp/d/jade ~/.local/bin", "HO-wiring"), ("ditto /tmp/d/jade ~/.local/bin/", "HO-wiring"),
+    ("ditto /tmp/d/settings.json ~/.claude/", "HO-settings-shadow"), ("ditto /tmp/d/settings.json ~/.claude/", "HO-wiring"),
+    ("ditto /tmp/d/plugins ~/.claude", "HO-mod"),
+])
+def test_ditto_gets_the_exact_copy_check(home, cmd, want):
+    (home / ".local" / "bin").mkdir(parents=True)
+    assert want in away(cmd).ho_ids, cmd   # PRE3-4
+
+
+@pytest.mark.parametrize("cmd", [
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.worktree GIT_CONFIG_VALUE_0=~ git --git-dir=~/.dot checkout -- .",
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.worktree GIT_CONFIG_VALUE_0=~; git --git-dir=~/.dot checkout -- .",
+    "GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_1=Core.WorkTree GIT_CONFIG_VALUE_1=$HOME git --git-dir=~/.dot reset --hard",
+    "GIT_WORK_TREE=~ bash -c 'git checkout -- .'", "env GIT_WORK_TREE=~ sh -c 'git checkout -- .'", "GIT_WORK_TREE=~ zsh -c \"git reset --hard\"",
+])
+def test_a_work_tree_from_git_config_env_or_a_shell_prefix_counts(cmd):
+    assert CLASS in away(cmd).ho_ids, cmd   # PRE3-5
+
+
+@pytest.mark.parametrize("cmd", ["GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.worktree GIT_CONFIG_VALUE_0=~/proj git checkout -- .",
+                                 "GIT_WORK_TREE=~/proj bash -c 'git checkout -- .'", "GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=~ git checkout -- ."])
+def test_a_work_tree_from_env_elsewhere_is_not_human_only(home, cmd):
+    (home / "proj").mkdir()
+    assert CLASS not in away(cmd).ho_ids, cmd
+
+
+@pytest.mark.parametrize("cmd", ["ln /tmp/x ~", "cp -al /tmp/snap ~", "ln /tmp/x ~/", "link /tmp/x ~/x"])
+def test_a_hard_link_into_home_under_another_name_is_not_human_only(cmd):
+    assert not away(cmd).ho_ids, cmd   # PRE3-8: makes only ~/x or ~/snap
+
+
+@pytest.mark.parametrize("cmd,want", [("ln /tmp/x/.zshenv ~", CLASS), ("cp -al /tmp/snap/.claude ~", CLASS), ("ln /tmp/jade ~/.local/bin", "HO-wiring"),
+                                      ("ln ~/.zshenv /tmp/n", CLASS)])
+def test_a_hard_link_under_a_root_name_still_counts(home, cmd, want):
+    (home / ".local" / "bin").mkdir(parents=True)
+    assert want in away(cmd).ho_ids, cmd
+
+
+def test_rsync_copy_as_takes_a_value():
+    assert CLASS in away("rsync -a /tmp/x/ ~ --copy-as root").ho_ids   # PRE3-9
+    assert CLASS in away("rsync -a --copy-as=root /tmp/x/ ~").ho_ids

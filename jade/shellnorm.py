@@ -789,9 +789,16 @@ def git_env_danger(name: str, val: str) -> bool:
     return False
 
 
+class _Budget(list):
+    """The scan budget shared by a scan and every body it re-parses; `spaced` marks the path view (`skeleton(spaced=True)`), which every nested scan keeps."""
+
+    spaced = False
+
+
 class _Scan:
     def __init__(self, s: str, depth: int, budget: list[int], literal_end: int = 0):
         self.s, self.n, self.depth, self.budget = s, len(s), depth, budget
+        self.spaced = getattr(budget, "spaced", False)
         self.nest = 0
         # Single quotes before this index are literal to the shell that runs the text: only the top-level text the outer shell parses. A body that is
         # re-parsed (`bash -c "..."`, `eval`, `| sh`, a here-string, a heredoc, a script the command writes) may hold text the outer shell already
@@ -1026,7 +1033,10 @@ class _Scan:
             else:
                 inert = _INERT.sub("\x06", plain)   # `awk 'NR>1'`: a quoted `>` is data, not a redirect
                 literal_sq = quote == "'" and i <= self.literal_end   # `'$HOME'` at the top level is literal: it never expands
-                emit('""' if re.search(r"\s", plain) else inert.replace("$", "\x06") if literal_sq else inert)
+                word = inert.replace("$", "\x06") if literal_sq else inert
+                if re.search(r"\s", plain):   # the path view keeps a word with a quoted space as one word (`_enc`): the root checks read it (PRE3-1)
+                    word = _enc(word) if self.spaced else '""'
+                emit(word)
 
         while i < n:
             c = s[i]
@@ -1047,7 +1057,7 @@ class _Scan:
                 elif d == "\r" and s[i + 2:i + 3] == "\n":
                     i += 3
                 else:
-                    emit(d if d.isalnum() or d in ORDINARY_ESCAPE else "\\" + d)
+                    emit(_enc(d) if self.spaced and d in " \t" else d if d.isalnum() or d in ORDINARY_ESCAPE else "\\" + d)   # `a\ b`: one word (PRE3-1)
                     i += 2
             elif c == "'":
                 j = s.find("'", i + 1)
@@ -1193,20 +1203,25 @@ class _Scan:
 
 
 @functools.lru_cache(maxsize=16)
-def _skeleton_top(command: str, literal_end: int) -> str:
-    return _skeleton(command, 0, None, literal_end)
+def _skeleton_top(command: str, literal_end: int, spaced: bool = False) -> str:
+    budget = _Budget([BUDGET])
+    budget.spaced = spaced
+    return _skeleton(command, 0, budget, literal_end)
 
 
-def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None, literal_end: int | None = None) -> str:
+def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None, literal_end: int | None = None, spaced: bool = False) -> str:
     """The command with quoting, escapes, comments, heredoc bodies and expansions resolved; separators are left for SPLIT.
 
     `literal_end`: single quotes before this index are literal (default: the whole text). A caller that appends text the command runs without writing
     it on the command line (a script it writes, an alias expansion) passes the length of the command, so the appended text keeps `'$X'` live.
 
     The top-level call is pure on a string, and one assessment asks for the same text several times (views, segments, masks),
-    so it is memoised: a 2 MB command is scanned once, not once per caller."""
+    so it is memoised: a 2 MB command is scanned once, not once per caller.
+
+    `spaced`: the path view. A quoted or escaped word with whitespace is kept as one word with its whitespace encoded (`_enc`) instead of `""`; only the
+    root checks read it (policy), the rules keep reading `""`, so quoted prose never matches a path rule (PRE3-1)."""
     if _depth == 0 and _budget is None:
-        return _skeleton_top(command, len(command) if literal_end is None else literal_end)
+        return _skeleton_top(command, len(command) if literal_end is None else literal_end, spaced)
     return _skeleton(command, _depth, _budget)
 
 
@@ -1226,16 +1241,16 @@ def segments(command: str) -> list[str]:
 SEG_TOKEN = re.compile(r"(\n|;|&&|\|\||(?<!>)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\})")
 
 
-def segments_cwd(command: str, cwd: str = "", literal_end: int | None = None) -> list[tuple[str, tuple[str, ...]]]:
+def segments_cwd(command: str, cwd: str = "", literal_end: int | None = None, spaced: bool = False) -> list[tuple[str, tuple[str, ...]]]:
     """Like `segments`, with the directories the segment may run in: `cd`/`pushd`/`popd` are followed, a subshell keeps its own.
-    `literal_end`: as in `skeleton`.
+    `literal_end`, `spaced`: as in `skeleton`.
 
     A command that carries substitutions is ordered by the canonical text, not by execution, so every directory the
     command passes through counts for every segment then.
     """
     import os
 
-    text = skeleton(command, literal_end=literal_end)
+    text = skeleton(command, literal_end=literal_end, spaced=spaced)
     cur, prev = cwd, None
     stack: list[str] = []
     dirs: list[str] = []
