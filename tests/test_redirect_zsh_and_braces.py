@@ -253,6 +253,12 @@ def really_pushes(command: str, tmp_path: Path) -> bool:
     return any(shutil.which(sh) and pushes_to_default(ran_git(command, sh, tmp_path)) for sh in ("bash", "zsh"))
 
 
+def confirm_real_push(command: str, tmp_path: Path) -> None:
+    """The test is right: a shell does push with `command`. Needs both shells (some commands are zsh syntax, some bash); the gate assertions run without them."""
+    if shutil.which("bash") and shutil.which("zsh"):
+        assert really_pushes(command, tmp_path), f"no shell pushes with {command!r}: the test is wrong"
+
+
 ZSH_GROUPS = [
     "if { true } { git push origin feature :main }",                                       # F1: the `}` that closes a brace condition
     "while { true } { git push origin HEAD:main; break }",
@@ -282,7 +288,7 @@ ZSH_GROUPS = [
 
 @pytest.mark.parametrize("command", ZSH_GROUPS)
 def test_zsh_brace_groups_still_stop_a_push_to_main(command, tmp_path):
-    assert really_pushes(command, tmp_path), f"zsh does not push with {command!r}: the test is wrong"
+    confirm_real_push(command, tmp_path)
     assert si08(command), command
 
 
@@ -336,7 +342,7 @@ PRINTED = [
 
 @pytest.mark.parametrize("command", PRINTED)
 def test_text_printed_for_a_shell_is_read_as_that_shell_reads_it(command, tmp_path):
-    assert really_pushes(command, tmp_path), f"no shell pushes with {command!r}: the test is wrong"
+    confirm_real_push(command, tmp_path)
     assert si08(command), command
 
 
@@ -368,7 +374,7 @@ BASH_BANG = [
 
 @pytest.mark.parametrize("command", BASH_BANG)
 def test_bash_bang_redirects_keep_the_word_after_them(command, tmp_path):
-    assert really_pushes(command, tmp_path), f"no shell pushes with {command!r}: the test is wrong"
+    confirm_real_push(command, tmp_path)
     assert si08(command), command
 
 
