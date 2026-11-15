@@ -1223,6 +1223,7 @@ _SYMLINK_LN = re.compile(r"^-[A-Za-z]*s[A-Za-z]*$")
 _NO_TARGET_DIR = re.compile(r"^-[A-Za-z]*T[A-Za-z]*$")
 _RSYNC_RELATIVE = re.compile(r"^-[A-Za-z]*R[A-Za-z]*$")
 _GLOB_CHARS = re.compile(r"[*?\[]")
+_COMPUTED_WORD = re.compile(r"[$`]|[@!+*?]\(")   # `$F`, `${F}`, `"$@"`, `$(...)`, a backtick, an extglob `@(..)`: the shell computes the name
 _RSYNC_REMOTE = re.compile(r"^(?:rsync://[^/]*/?|[^/]*?::|[^/]*?:)")
 
 
@@ -1297,8 +1298,9 @@ def _rsync_operands(args: list[str]) -> list[str]:
 def _hardlink_sources(bare: str) -> list[tuple[str, bool, bool]]:
     """The names a hard-link command (`ln` without `-s`, `cp -l`/`--link`/`-al`, `link`) joins, as (path, parent_too, unless_dir): each source with
     parent_too (PRE2-3), and the new name: the destination itself unless it is a directory, else `dest/name` per source (`ln /tmp/x ~` makes `~/x`
-    only, PRE3-8); a lone source links `./name`. The PRE3-8 narrowing applies to one plain named source only: a glob, a contents source (`DIR/`, `DIR/.`),
-    `-T` or several sources keep the destination check as it was (PRE4-1)."""
+    only, PRE3-8); a lone source links `./name`. The PRE3-8 narrowing applies to one plain literal source only: a glob, a contents source (`DIR/`, `DIR/.`),
+    `-T`, several sources (PRE4-1), or a source the shell computes (`$F`, `"$@"`, `$(...)`, a backtick, an extglob: PRE5-2) keep the destination check
+    as it was."""
     words = [_word(w) for w in bare.split(" ") if w]
     if not words:
         return []
@@ -1315,8 +1317,9 @@ def _hardlink_sources(bare: str) -> list[tuple[str, bool, bool]]:
     else:
         dest, srcs, unless_dir = ".", ops, False
     out = [(src, True, False) for src in srcs]
+    computed = {_word(w) for w in bare.split(" ")[1:] if _COMPUTED_WORD.search(w)}   # PRE5-2: a name the shell computes is not a plain literal
     broad = len(srcs) != 1 or any(w == "--no-target-directory" or _NO_TARGET_DIR.match(w) for w in args) or any(
-        _GLOB_CHARS.search(s) or s in (".", "..") or s.endswith(("/", "/.")) for s in srcs)
+        _GLOB_CHARS.search(s) or s in (".", "..") or s.endswith(("/", "/.")) or s in computed or _COMPUTED_WORD.search(s) for s in srcs)
     if broad and srcs:
         out.append((dest, True, False))   # the old check: the destination with parent_too, directory or not
     elif unless_dir:
@@ -1499,7 +1502,11 @@ _REDIRECT_PREFIX = re.compile(r"^(?:\d+|&)?(?:<>|>>?)[|&]?")
 def _segment_tokens(seg: str) -> tuple[list[str], bool]:
     """The words of a shell segment that may be paths it writes (the write view of the segment, or the whole segment when it may write any operand), cleaned
     of quotes and of an `--opt=` prefix, and whether its verb replaces a directory (rm, mv, find -delete ...): a parent of the operand then counts too."""
-    bare = _bare(seg)
+    return _bare_tokens(_bare(seg))
+
+
+def _bare_tokens(bare: str) -> tuple[list[str], bool]:
+    """`_segment_tokens` of a segment already without its launcher prefixes."""
     words = bare.split(" ")
     verb = words[0].rsplit("/", 1)[-1]
     view = files_view(bare)
@@ -1514,25 +1521,39 @@ def _segment_tokens(seg: str) -> tuple[list[str], bool]:
     return toks, parent_too
 
 
-# Verbs whose operands are paths they write: the path view (PRE3-1) reads their operands; any other verb only its redirect targets (PRE4-5)
-_PATH_VIEW_VERBS = frozenset({"cp", "gcp", "mv", "gmv", "ln", "gln", "link", "install", "ginstall", "rsync", "ditto", "scp", "tar", "gtar", "bsdtar", "unzip",
-                              "7z", "7za", "7zz", "cpio", "pax", "tee", "gtee", "dd", "gdd", "sed", "gsed", "perl", "touch", "gtouch", "mkdir", "gmkdir",
-                              "chmod", "gchmod", "chown", "gchown", "chgrp", "gchgrp", "chflags", "xattr", "rm", "grm", "rmdir", "grmdir", "unlink",
-                              "truncate", "gtruncate", "shred", "gshred"})
-_IN_PLACE = re.compile(r"^(?:-[A-Za-z]*i\S*|--in-place(?:=.*)?)$")
+# The options whose value is text, not a path, per verb: the path view (PRE3-1) drops only these values (PRE4-5, PRE5-1). A deny-list of prose positions:
+# a verb not named here keeps every word, so a new writer fails toward the class.
+_PROSE_OPTS = frozenset({"--note", "--body", "--title", "--message", "-m", "--subject", "--description"})
+_TEXT_OPTS = {"git": _PROSE_OPTS, "gh": _PROSE_OPTS, "glab": _PROSE_OPTS, "jade": _PROSE_OPTS, "curl": frozenset({"-d", "--data", "--data-raw"})}
+_GIT_TEXT_SUBS = frozenset({"commit", "tag", "notes", "merge", "stash", "format-patch", "send-email"})   # git verbs whose `-m`/`--message` is text
 
 
 def _path_view_tokens(bare: str, toks: list[str]) -> list[str]:
-    """The words of a segment the path view reads (PRE4-5): the redirect targets, and the operand words of a verb that writes its operands (`sed`/`perl`
-    with `-i` only, `dd` its `of=`). A quoted argument of any other verb (`--note "..."`, `--body "..."`, `curl -d "..."`) is text, not a path."""
+    """The words of a segment the path view reads: the segment's tokens (`_segment_tokens`, as in e880dfc) without the values of the known text options of
+    `_TEXT_OPTS` (`jade ack --note "..."`, `gh pr create --body "..."`, `git commit -m "..."`, `curl -d "..."`). Every other word, and every word of
+    any other verb, is read as before."""
     words = bare.split(" ")
     verb = words[0].rsplit("/", 1)[-1]
-    redirects = [shellnorm._dec(_REDIRECT_PREFIX.sub("", t.strip("'\"`,;()"))) for t in REDIRECT_TARGET.findall(bare)]
-    if verb not in _PATH_VIEW_VERBS or (verb in ("sed", "gsed", "perl") and not any(_IN_PLACE.match(w) for w in words[1:])):
-        return [t for t in redirects if t]
-    if verb in ("dd", "gdd"):
-        return [t for t in redirects if t] + [_word(w[3:]) for w in words[1:] if w.startswith("of=")]
-    return toks
+    opts = _TEXT_OPTS.get(verb)
+    if verb == "git" and (len(words) < 2 or words[1] not in _GIT_TEXT_SUBS):
+        opts = None   # `git checkout -m PATH`: `-m` is a flag there, the next word a path
+    if not opts:
+        return toks
+    kept: list[str] = []
+    skip = False
+    for w in words[1:]:
+        if skip:
+            skip = False
+            continue
+        if w in opts:
+            skip = True   # the value is the next word
+            continue
+        if w.startswith("--") and w.split("=", 1)[0] in opts and "=" in w:
+            continue
+        kept.append(w)
+    if len(kept) == len(words) - 1:
+        return toks
+    return _bare_tokens(" ".join([words[0], *kept]))[0]
 
 
 def _si12_segment(seg: str, dirs: tuple[str, ...], cwd: str, roots: tuple[str, ...], path_view: bool = False) -> bool:

@@ -639,3 +639,86 @@ def test_many_git_config_key_words_are_linear():
     t = time.perf_counter()
     policy.assess("Bash", {"command": cmd}, os.environ["HOME"])
     assert time.perf_counter() - t < 1.0   # PRE4-6
+
+
+# ------------------------------------------------------------------ wave 6 (security review PRE5-1, PRE5-2): back to the stricter check
+
+@pytest.fixture
+def leveled(wired, monkeypatch):
+    """The config directory under the fake home, with a level set, so SI-12 is live (as in the review probes)."""
+    cfg = wired / ".config" / "jade"
+    cfg.mkdir(parents=True)
+    monkeypatch.setenv("JADE_CONFIG", str(cfg))
+    (cfg / "config.json").write_text(json.dumps({"level": "medium"}))
+    return wired
+
+
+SPACED_TARGETS = [('"$HOME/a b/../.zshenv"', {CLASS}), ('"$HOME/a b/../.claude/settings.json"', {"HO-settings-shadow", "HO-wiring"}),
+                  ('"$HOME/a b/../.local/bin/jade"', {"HO-wiring"}), ('"$HOME/a b/../.claude/hooks/x.sh"', {"HO-wiring"}),
+                  ('"$HOME/a b/../.config/jade/config.json"', {"HO-wiring", "B:SI-12"}), ("@H/a\\ b/../.zshenv", {CLASS}),
+                  ("'@H/a b/../.claude/plugins/p/x'", {"HO-mod"})]
+SPACED_WRITERS = [
+    "vim -c wq {t}", "vi -c wq {t}", "nvim --headless -c wq {t}", "ex -sc 'wq' {t}", "ed -s {t} < /tmp/s", "nano {t}", "emacs --batch {t} -f save-buffer",
+    "awk -i inplace '{{print}}' {t}", "gawk -i inplace 1 {t}", "ruby -i -pe 1 {t}", "curl -o {t} https://e.x/a", "curl -so {t} https://e.x/a",
+    "curl --output {t} https://e.x/a", "wget -O {t} https://e.x/a", "wget -qO {t} https://e.x/a", "sort -o {t} /tmp/x", "uniq /tmp/x {t}",
+    "find /tmp -name x -exec cp {{}} {t} \\;", "find {t} -delete", "patch {t} /tmp/p", "patch -o {t} a /tmp/p", "git archive -o {t} HEAD",
+    "git diff --output={t}", "python3 /tmp/w.py {t}", "python3 -c 'open(\"x\",\"w\")' {t}", "node /tmp/w.js {t}", "gzip {t}", "gunzip {t}", "zip {t} /tmp/x",
+    "openssl enc -in /tmp/x -out {t}", "iconv -f a -t b /tmp/x -o {t}", "sqlite3 {t} 'create table t(x)'", "defaults write {t} k v", "split /tmp/x {t}",
+    "sponge {t} < /tmp/x", "mkfifo {t}", "pip download -d {t} x", "brew bundle dump --file={t}",
+]
+
+
+@pytest.mark.parametrize("target,want", SPACED_TARGETS)
+@pytest.mark.parametrize("tpl", SPACED_WRITERS)
+def test_a_spaced_protected_path_keeps_its_class_for_any_writer(leveled, tpl, target, want):
+    cmd = tpl.format(t=target).replace("@H", str(leveled))
+    a = away(cmd)
+    got = set(a.ho_ids) | {"B:" + b for b in a.blocked}
+    assert want <= got, (cmd, got)   # PRE5-1: e880dfc read every verb's words in the path view; only known text options are prose
+
+
+@pytest.mark.parametrize("cmd", [
+    'jade ack --all --as revised --note "~/.config/jade/config.json is x"', 'gh pr create --body "~/.config/jade/config.json is x"',
+    'gh pr create --title "~/.config/jade/config.json x" --body y', 'git commit -m "~/.config/jade/config.json a b"',
+    'git commit --message="~/.config/jade/config.json a b"', 'curl --data "~/.config/jade/config.json a" https://e.x', 'curl --data-raw "~/.zshenv a" https://e.x',
+    'glab mr create --description "~/.zshenv a b"', 'git format-patch --subject "~/.zshenv a b"',
+])
+def test_text_option_values_stay_prose_with_si12_live(leveled, cmd):
+    a = away(cmd)
+    assert not a.ho_ids and "SI-12" not in a.blocked, (cmd, a.ho_ids, a.blocked)   # PRE4-5 kept under PRE5-1
+
+
+@pytest.mark.parametrize("cmd,want", [
+    ('curl -d "x y" -o "$HOME/a b/../.zshenv" https://e.x', {CLASS}), ('curl -o "$HOME/a b/../.zshenv" -d "$HOME/a b/../.zshenv" https://e.x', {CLASS}),
+    ('gh pr create --body "a b" > "$HOME/a b/../.zshenv"', {CLASS}), ('git commit -m "a b" -- "$HOME/a b/../.zshenv"; cp /tmp/x "$HOME/a b/../.zshenv"', {CLASS}),
+])
+def test_a_text_option_drops_only_its_own_value(leveled, cmd, want):
+    a = away(cmd)
+    assert want <= set(a.ho_ids), (cmd, a.ho_ids)
+
+
+@pytest.mark.parametrize("cmd,want", [
+    ('F=/tmp/x/.zshenv; ln -f "$F" ~', ALL3), ("F=/tmp/x/.zshenv; ln -f $F ~", ALL3), ('ln -f "$F" ~', ALL3), ("ln -f $F ~", ALL3), ("ln -f ${F} ~", ALL3),
+    ('ln -f "${F:-/tmp/x/.zshenv}" ~', ALL3), ("ln -f /tmp/x/$N ~", ALL3), ("ln -f /tmp/x/.zsh$E ~", ALL3), ("ln -f /tmp/x/.zsh${E} ~", ALL3),
+    ('ln -f "/tmp/x/$N" ~', ALL3), ("ln -f /tmp/x/$(echo .zshenv) ~", ALL3), ('ln -f "$(ls /tmp/x/.zshenv)" ~', ALL3), ("ln -f $(cat /tmp/l) ~", ALL3),
+    ("ln -f `cat /tmp/l` ~", ALL3), ('ln -f "$@" ~', ALL3), ('ln -f "${A[@]}" ~', ALL3), ('D=/tmp/snap/; cp -al "$D" ~', ALL3), ('cp -al "$D" ~', ALL3),
+    ("cp -al $D ~/.claude", ALL3), ('ln -f "$J" ~/.local/bin', {"HO-wiring"}), ('ln -f "$S" ~/.claude', ALL3), ("ln -f ~/../$U/.zshenv ~", ALL3),
+])
+def test_a_hard_link_of_one_computed_source_keeps_the_destination_check(wired, cmd, want):
+    a = away(cmd)
+    assert want <= set(a.ho_ids), (cmd, a.ho_ids)   # PRE5-2: the name the shell computes is unknown, so the 1c663a5 check stays
+
+
+@pytest.mark.parametrize("src", ["/tmp/x/@(a|b)", "/tmp/x/!(a)", "/tmp/x/+(a)", "/tmp/x/?(a)", "/tmp/x/*(a)", '"$@"', "$F", "`cat /tmp/l`", "$(cat /tmp/l)"])
+def test_a_computed_hard_link_source_is_broad(src):
+    assert ("/h", True, False) in policy._hardlink_sources(f"ln -f {src} /h")   # PRE5-2, the extglob words as `_hardlink_sources` sees them
+
+
+def test_a_plain_hard_link_source_is_narrow():
+    assert ("/h", True, False) not in policy._hardlink_sources("ln -f /tmp/x/.zshenv /h")   # PRE3-8
+
+
+@pytest.mark.parametrize("cmd,lost", [("ln /tmp/x ~", ALL3), ("cp -al /tmp/snap ~", ALL3), ("ln /tmp/x ~/.claude", ALL3)])
+def test_a_hard_link_of_one_plain_literal_source_stays_narrow(wired, cmd, lost):
+    a = away(cmd)
+    assert not (lost & set(a.ho_ids)), (cmd, a.ho_ids)   # PRE3-8 narrowing: `~/x` is made, nothing protected
