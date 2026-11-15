@@ -157,10 +157,20 @@ def test_knows_edit_a_later_deny_hides_a_confirmed_allow():
     assert edit_and_read() == []
 
 
-def test_knows_edit_a_later_deny_hides_a_confirmed_scope_line():
-    record("allow", "gh pr merge 940 --squash", "k940", rule="R-10", scope={"kind": "merge_project", "key": "S1", "label": "gh pr merge * in /p"}, confirm=True)
+SCOPE = {"kind": "merge_project", "key": "S1", "label": "gh pr merge * in /p"}
+
+
+def test_knows_edit_a_deny_of_a_covered_call_leaves_the_scope_line_one_row():
+    record("allow", "gh pr merge 940 --squash", "k940", rule="R-10", scope=SCOPE, confirm=True)
     record("deny", "gh pr merge 940 --squash", "k940", rule="R-10")
-    assert edit_and_read() == []
+    assert len(edit_and_read()) == 1   # the scope still decides other pull requests
+
+
+def test_knows_edit_a_deny_of_a_covered_call_leaves_the_scope_line_two_rows():
+    record("allow", "gh pr merge 939 --squash", "k939", rule="R-10", scope=SCOPE, confirm=True)
+    record("allow", "gh pr merge 940 --squash", "k940", rule="R-10", scope=SCOPE, confirm=True)
+    record("deny", "gh pr merge 940 --squash", "k940", rule="R-10")
+    assert len(edit_and_read()) == 1   # once, not hidden and not twice
 
 
 def test_knows_edit_a_deny_of_another_merge_leaves_the_scope_line():

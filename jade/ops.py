@@ -925,7 +925,7 @@ def _answer_keys(r) -> set[tuple]:
 def knows_template(rows) -> str:
     """The first text of the preferences file (pure): two header lines, two model sentences with placeholders, then one commented line per kind of standing answer.
     A kind is the answer's stored keys, never words of its label: one line per (rule, scope key), else per (rule, class key), else per (rule, exact key), showing the newest call.
-    A newer deny hides an older allow that shares its rule and any of its keys (exact, class, scope) with it.
+    A newer deny hides an older allow that shares its rule and any of its keys (exact, class, scope) with it; a scope line (rows with a scope key) is hidden only by a deny of the same scope key, because the scope still decides other calls.
     Every line starts with `#`, and there are at most KNOWS_MAX_LINES lines."""
     from . import askplain
 
@@ -938,7 +938,7 @@ def knows_template(rows) -> str:
             denied |= _answer_keys(r)
             continue
         text = one_line(r["scope_label"] or r["label"])
-        if r["answer"] != "allow" or r["strength"] != "strong" or not text or _answer_keys(r) & denied:
+        if r["answer"] != "allow" or r["strength"] != "strong" or not text or (_answer_keys(r) & denied if not r["scope_key"] else (r["rule_id"], "scope", r["scope_key"]) in denied):
             continue   # only a standing allow is printed, and a newer deny of the same kind of call hides it
         key = (r["rule_id"], "scope", r["scope_key"]) if r["scope_key"] else (r["rule_id"], "class", r["class_key"]) if r["class_key"] else (r["rule_id"], "exact", r["exact_key"])
         if key in seen:
