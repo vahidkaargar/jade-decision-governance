@@ -142,8 +142,8 @@ _CUR_SUFFIX = " It can be the main branch."
 
 
 def _abbr(name: str, full: str) -> bool:
-    """Git accepts a long flag cut short (`--del`). A name of four or more characters that starts a flag counts as it, even when git would call it ambiguous: the line then names the worse one."""
-    return len(name) >= 4 and full.startswith(name)
+    """Git accepts a long flag cut short (`--del`). A name of three or more characters (`--` and a letter) that starts a flag counts as every dangerous flag it starts, so `--m` is `--mirror` and `--f` is force and follow-tags. No other option git knows is a prefix of these, so an exact `--atomic` or `--signed` is not touched, even when git would call it ambiguous: the line then names the worse one."""
+    return len(name) >= 3 and full.startswith(name)
 
 
 def _branch(dst: str) -> str:

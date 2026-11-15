@@ -178,3 +178,25 @@ def test_every_worst_case_line_stays_short(cmd):
     line = line_of(cmd)
     assert len(line.split()) <= 20, line
     assert "main" in line
+
+
+@pytest.mark.parametrize("cmd,expected", [
+    ("git push --m origin", "Push and delete to match every branch and tag."),
+    ("git push --mi origin", "Push and delete to match every branch and tag."),
+    ("git push --b origin", MANY),
+    ("git push --b -f origin", FMANY),
+    ("git push --a origin", MANY),
+    ("git push --d origin main", "Delete the main branch on a remote."),
+    ("git push --p origin", "Push and delete remote branches that are gone here. It can be the main branch."),
+    ("git push --t origin", "Push tags to a remote."),
+    ("git push --atomic --signed --no-verify origin feature", "Push to feature."),
+    ("git push --atomic origin feature", "Push to feature."),
+])
+def test_short_long_flags_read_as_the_worst(cmd, expected):
+    assert line_of(cmd) == expected
+
+
+@pytest.mark.parametrize("cmd", ["git push --f origin", "git push --fo origin"])
+def test_f_and_fo_are_force_and_tags(cmd):
+    line = line_of(cmd)
+    assert line.startswith("Force push") and "tags" in line and len(line.split()) <= 20
