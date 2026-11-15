@@ -27,7 +27,7 @@ RISK_TEXT: dict[str, str] = {
     "R-17": "This switches off the guard that stops a push to the main branch.",
     "R-18": "This creates a new skill or agent instruction file that you have not seen.",
     "R-19": "This pushes a named branch or opens a pull request, and it is only recorded.",
-    "R-20": "This rewrites local git history, and git can usually bring it back.",
+    "R-20": "This rewrites or drops local git history, and git can usually bring it back.",
     "R-21": "This sends a file or data to another machine, so the data leaves this Mac.",
     "R-22": "This runs text that is downloaded or decoded while it runs, so nobody can read it first.",
     "R-23": "This edits a git config file, which can make git run a program later.",
@@ -91,6 +91,7 @@ def risk_line(rule_id: str, ho_ids=()) -> str:
 # What a gated command does, as one sentence. The first pattern that matches the canonical key of a gated segment wins. `{1}` style groups are filled with `m.expand`.
 _Render = tuple[re.Pattern, str]
 SEGMENT_TEXT: list[_Render] = [(re.compile(p), t) for p, t in (
+    (r"^gh pr merge\b[^\n]*\s(?:-R|--repo)(?:=|\s|$)", "Merge a pull request."),
     (r"^gh pr merge\s+\S*/pull/(\d+)\b", r"Merge pull request \1."),
     # Only flags that take no value, or `--name=value`, may come before the number: in `--body 5 940` the 5 is the body, so that call says "Merge a pull request."
     (r"^gh pr merge(?:\s+(?:--squash|-s|--merge|-m|--rebase|-r|--delete-branch|-d|--admin|--auto|--disable-auto|--[\w-]+=\S*))*\s+(\d+)(?:\s|$)",
@@ -98,6 +99,7 @@ SEGMENT_TEXT: list[_Render] = [(re.compile(p), t) for p, t in (
     (r"^gh pr merge\s+([A-Za-z][\w./-]*)(?:\s|$)", r"Merge the pull request of branch \1."),
     (r"^gh pr merge(?:\s+-[-\w=]+)*\s*$", "Merge the pull request of this branch."),
     (r"^gh pr merge\b", "Merge a pull request."),
+    (r"^glab mr merge\b[^\n]*\s(?:-R|--repo)(?:=|\s|$)", "Merge a merge request."),
     (r"^glab mr merge(?:\s+(?:--squash|-s|--rebase|-r|--remove-source-branch|-d|--yes|-y|--auto-merge|--[\w-]+=\S*))*\s+(\d+)(?:\s|$)", r"Merge merge request \1."),
     (r"^glab mr merge(?:\s+-[-\w=]+)*\s*$", "Merge the merge request of this branch."),
     (r"^glab mr merge\b", "Merge a merge request."),
@@ -108,14 +110,6 @@ SEGMENT_TEXT: list[_Render] = [(re.compile(p), t) for p, t in (
     (r"^twine upload\b", "Upload a package to PyPI."),
     (r"^docker push\b", "Push a Docker image."),
     (r"^composio execute\b", "Run an action in a connected app."),
-    (r"^git push\b[^\n]*\s(?:--force\S*|-f)(?:\s|$)", "Force push to a remote."),
-    (r"^git push\b[^\n]*\s(?:--delete|-d)(?:\s|$)", "Delete a branch or tag on a remote."),
-    (r"^git push\b[^\n]*\s--tags?(?:\s|$)", "Push tags to a remote."),
-    (r"^git push\b[^\n]*\s(?:main|master)(?:\s|$)", "Push to the main branch."),
-    (r"^git push\b[^\n]*\s:(?:refs/heads/)?([\w./-]+)(?:\s|$)", r"Delete the remote branch \1."),
-    (r"^git push\b[^\n]*\s\+(?:[^\s:]+:)?(?:refs/heads/)?([\w./-]+)(?:\s|$)", r"Force push to \1."),
-    (r"^git push\b[^\n]*\s[^\s:+-][^\s:]*:(?:refs/heads/)?([\w./-]+)(?:\s|$)", r"Push to \1."),
-    (r"^git push\b", "Push to a remote."),
     (r"^git reset\b[^\n]*--ha", "Throw away local changes and move the branch."),
     (r"^git clean\b", "Delete files that git does not track."),
     (r"^git branch\b[^\n]*\s-[a-zA-Z]*[dD]\b", "Delete a local branch."),
@@ -125,7 +119,7 @@ SEGMENT_TEXT: list[_Render] = [(re.compile(p), t) for p, t in (
     (r"^sudo\b", "Run a command with admin rights."),
     (r"^(?:launchctl|systemctl|brew services)\b", "Change a service on this machine."),
     (r"^docker(?: compose)? (?:up|down|rm)\b", "Start, stop or remove containers."),
-    (r"^(?:kubectl|helm|terraform|ansible-playbook|fly deploy|vercel)\b", "Change a live deployment."),
+    (r"^(?:kubectl|helm|terraform|ansible-playbook|fly deploy|vercel)\b", "Change a live server or app."),
     (r"^(?:ssh|scp|sftp|rsync)\b", "Connect to another machine."),
     (r"^egress:upload ", "Send data to a network host."),
     (r"^fetch:exec ", "Run text that was downloaded."),
@@ -137,7 +131,83 @@ SHELL_WORDS = frozenset({"do", "done", "then", "else", "elif", "fi", "esac"})
 _NONPIPE_SPLIT = re.compile(r"\n|;|&&|\|\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\}")   # shellnorm.SPLIT without the single pipe: a pipeline is one command
 
 
+_NAMED = re.compile(r"[\w./-]+")
+_PUSH_VALUE_FLAGS = frozenset({"-o", "--push-option", "--receive-pack", "--exec", "--repo"})
+
+
+def _push_line(key: str) -> str:
+    """One plain sentence for a `git push` key. Every refspec is read, and the worst thing in the call is named: force, then delete, then the main branch."""
+    force = delete = tags = mirror = False
+    positional: list[str] = []
+    skip = False
+    ended = False
+    for tok in key.split()[2:]:
+        tok = tok.strip("'\"")
+        if skip:
+            skip = False
+            continue
+        if not ended and tok == "--":
+            ended = True
+        elif not ended and tok.startswith("--"):
+            name = tok.split("=", 1)[0]
+            force |= name.startswith("--force")
+            delete |= name == "--delete"
+            tags |= name in ("--tags", "--tag")
+            mirror |= name == "--mirror"
+            skip = name in _PUSH_VALUE_FLAGS and "=" not in tok
+        elif not ended and tok.startswith("-") and len(tok) > 1:
+            force |= "f" in tok
+            delete |= "d" in tok
+            skip = tok == "-o"
+        elif tok:
+            positional.append(tok)
+    if mirror:
+        return "Push and delete to match every branch and tag."
+    dests: list[str] = []
+    n_delete = 0
+    n_tag_delete = 0
+    del_dests: list[str] = []
+    colon_single = False
+    for spec in positional[1:]:
+        plus = spec.startswith("+")
+        spec = spec.lstrip("+")
+        src, colon, dst = spec.partition(":")
+        if not colon:
+            dst = spec
+        is_delete = bool(colon) and not src
+        force |= plus
+        if dst.startswith("refs/tags/"):
+            dst = dst[len("refs/tags/"):]
+            n_tag_delete += is_delete
+        else:
+            dst = dst.removeprefix("refs/heads/")
+        n_delete += is_delete
+        if is_delete:
+            del_dests.append(dst)
+        colon_single = bool(colon)
+        dests.append(dst)
+    named = len(dests) == 1 and bool(_NAMED.fullmatch(dests[0]))
+    if (force and (n_delete or delete)):
+        return "Force push and delete branches on a remote."
+    if force:
+        refspec_force = any(sp.startswith("+") for sp in positional[1:])
+        return f"Force push to {dests[0]}." if named and refspec_force else "Force push to a remote."
+    if delete:
+        return "Delete a branch or tag on a remote."
+    if n_delete:
+        if n_delete == 1 and _NAMED.fullmatch(del_dests[0]):
+            return f"Delete the remote {'tag' if n_tag_delete else 'branch'} {del_dests[0]}."
+        return "Delete branches on a remote."
+    if any(d in ("main", "master") for d in dests):
+        return f"Push to {dests[0]}." if named and colon_single else "Push to the main branch."
+    if tags:
+        return "Push tags to a remote."
+    return f"Push to {dests[0]}." if named else "Push to a remote."
+
+
 def _render(key: str) -> str:
+    if key == "git push" or key.startswith("git push "):
+        return _push_line(key)
     for rx, text in SEGMENT_TEXT:
         if m := rx.search(key):
             return m.expand(text)

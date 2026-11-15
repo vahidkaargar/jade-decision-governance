@@ -38,6 +38,28 @@ def test_push_refspec_lines(cmd, expected):
     assert line_of(cmd) == expected
 
 
+@pytest.mark.parametrize("cmd,expected", [
+    ("git push origin :feat1 +x:main", "Force push and delete branches on a remote."),
+    ("git push origin main +feature", "Force push to a remote."),
+    ("git push origin main :feature", "Delete the remote branch feature."),
+    ("git push -fu origin HEAD:main", "Force push to a remote."),
+    ("git push -uf origin feature", "Force push to a remote."),
+    ("git push origin +refs/heads/*:refs/heads/*", "Force push to a remote."),
+    ("git push origin :a :b", "Delete branches on a remote."),
+    ("git push origin :refs/tags/v1", "Delete the remote tag v1."),
+    ("git push --mirror origin", "Push and delete to match every branch and tag."),
+    ("git push origin feature +x:main", "Force push to a remote."),
+    ("git push --tags origin", "Push tags to a remote."),
+    ("git push origin main feature", "Push to the main branch."),
+    ("git push origin x:*", "Push to a remote."),
+    ("glab mr merge 12 -R o/r", "Merge a merge request."),
+    ("glab mr merge --repo=o/r 12", "Merge a merge request."),
+    ("gh pr merge --repo=o/r 12", "Merge a pull request."),
+])
+def test_push_multi_refspec_and_flags(cmd, expected):
+    assert line_of(cmd) == expected
+
+
 def test_push_lines_with_long_branch_stay_short():
     name = "b" * 60
     for cmd in (f"git push origin :{name}", f"git push origin +{name}", f"git push origin HEAD:{name}"):
@@ -72,6 +94,15 @@ def test_no_jargon_in_risk_lines():
     sentences = [*askplain.RISK_TEXT.values(), *askplain.HO_TEXT.values(), askplain.GENERIC_RISK, askplain.GENERIC_HO]
     bad = [(s, w) for s in sentences for w in HARD_WORDS if re.search(rf"\b{re.escape(w)}s?\b", s, re.I)]
     assert bad == []
+
+
+def test_no_jargon_in_segment_and_push_lines():
+    sentences = [t for _, t in askplain.SEGMENT_TEXT]
+    for cmd in ("git push origin :a", "git push -f origin x", "git push --mirror origin", "git push origin :refs/tags/v", "git push origin :a +b:main"):
+        sentences.append(askplain._push_line(cmd))
+    bad = [(s, w) for s in sentences for w in HARD_WORDS if re.search(rf"\b{re.escape(w)}s?\b", s, re.I)]
+    assert bad == []
+    assert all(len(askplain._push_line(c).split()) <= 20 for c in ("git push origin :a +b:main", "git push --mirror origin"))
 
 
 def test_ho_without_segments_has_two_lines():
