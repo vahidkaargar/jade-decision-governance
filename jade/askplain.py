@@ -136,9 +136,24 @@ _CURRENT = frozenset({"HEAD", "@"})
 _PUSH_VALUE_FLAGS = frozenset({"-o", "--push-option", "--receive-pack", "--exec", "--repo"})
 
 
+_MAIN = ("main", "master")
+_MANY = "every matching branch to a remote, which can include the main branch"
+_CUR_SUFFIX = " It can be the main branch."
+
+
+def _abbr(name: str, full: str) -> bool:
+    """Git accepts a long flag cut short (`--del`). A name of four or more characters that starts a flag counts as it, even when git would call it ambiguous: the line then names the worse one."""
+    return len(name) >= 4 and full.startswith(name)
+
+
+def _branch(dst: str) -> str:
+    dst = dst.removeprefix("refs/heads/")
+    return dst.removeprefix("heads/")
+
+
 def _push_line(key: str) -> str:
-    """One plain sentence for a `git push` key. Every refspec is read, and the worst thing in the call is named: force, then delete, then the main branch."""
-    force = delete = tags = mirror = prune = False
+    """One plain sentence for a `git push` key. Every refspec is read. When the line cannot be sure, it names the worst outcome. Order of clauses: force, delete, main branch, tags, named branch."""
+    force = flag_delete = tags = tags_only = mirror = prune = every = False
     positional: list[str] = []
     skip = False
     ended = False
@@ -151,77 +166,114 @@ def _push_line(key: str) -> str:
             ended = True
         elif not ended and tok.startswith("--"):
             name = tok.split("=", 1)[0]
-            force |= name.startswith("--force")
-            delete |= name == "--delete"
-            tags |= name in ("--tags", "--tag")
-            mirror |= name == "--mirror"
-            prune |= name == "--prune"
+            force |= _abbr(name, "--force") or name.startswith("--force")
+            flag_delete |= _abbr(name, "--delete")
+            tags_only |= _abbr(name, "--tags") or name == "--tag"
+            tags |= tags_only or _abbr(name, "--follow-tags")
+            mirror |= _abbr(name, "--mirror")
+            prune |= _abbr(name, "--prune")
+            every |= _abbr(name, "--all") or _abbr(name, "--branches")
             skip = name in _PUSH_VALUE_FLAGS and "=" not in tok
         elif not ended and tok.startswith("-") and len(tok) > 1:
-            force |= "f" in tok
-            delete |= "d" in tok
-            skip = tok == "-o"
+            cluster = tok[1:]
+            letters, o, _ = cluster.partition("o")   # what follows `o` is the value of -o
+            force |= "f" in letters
+            flag_delete |= "d" in letters
+            skip = o == "o" and cluster.endswith("o")
         elif tok:
             positional.append(tok)
     if mirror:
         return "Push and delete to match every branch and tag."
-    dests: list[str] = []      # every destination, deletes included
-    pushed: list[str] = []     # destinations that are written, not deleted
-    del_dests: list[str] = []
+    pushed: list[str] = []      # destinations that are written
+    del_dests: list[str] = []   # destinations that are deleted
     n_tag_delete = 0
     colon_single = False
+    cur = not positional[1:] and not tags_only and not flag_delete and not every
     for spec in positional[1:]:
         plus = spec.startswith("+")
         spec = spec.lstrip("+")
         src, colon, dst = spec.partition(":")
         if not colon:
             dst = spec
-        is_delete = bool(colon) and not src
         force |= plus
-        if dst.startswith("refs/tags/"):
-            dst = dst[len("refs/tags/"):]
-            n_tag_delete += is_delete
-        else:
-            dst = dst.removeprefix("refs/heads/")
+        if "*" in spec or (colon and not src and not dst):
+            every = True      # a wildcard, or `:` alone (matching branches): not a delete
+            continue
+        is_delete = flag_delete or (bool(colon) and not src)
+        is_tag = dst.startswith("refs/tags/")
+        dst = dst[len("refs/tags/"):] if is_tag else _branch(dst)
         colon_single = bool(colon)
-        dests.append(dst)
-        (del_dests if is_delete else pushed).append(dst)
-    one = len(dests) == 1 and bool(_NAMED.fullmatch(dests[0])) and dests[0] not in _CURRENT
-    cur = (not positional[1:] and not tags and not delete) or (len(dests) == 1 and dests[0] in _CURRENT)   # no named branch: the current one goes
-    main = any(d in ("main", "master") for d in pushed)
-    dele = bool(del_dests) or delete
+        if is_delete:
+            del_dests.append(dst)
+            n_tag_delete += is_tag
+        else:
+            pushed.append(dst)
+            cur |= dst in _CURRENT
+    cur &= not every
+    pushed = [d for d in pushed if d not in _CURRENT]
+    main_push = any(d in _MAIN for d in pushed)
+    main_del = any(d in _MAIN for d in del_dests)
+    dele = flag_delete or bool(del_dests)
     prune_text = "delete remote branches that are gone here"
-    sole = sum(bool(x) for x in (force, main, dele, prune, tags)) <= 1 and not (cur and (force or main or dele or prune or tags))
-    if sole and dele and not force:
-        if delete:
-            return "Delete a branch or tag on a remote."
-        if len(del_dests) == 1 and _NAMED.fullmatch(del_dests[0]):
+    only_one = len(pushed) == 1 and not del_dests and not cur and bool(_NAMED.fullmatch(pushed[0]))
+    if dele and not (force or prune or tags or every or cur or pushed):
+        if main_del:
+            return "Delete the main branch on a remote." if len(del_dests) == 1 else "Delete branches on a remote, including the main branch."
+        if len(del_dests) > 1:
+            return "Delete branches on a remote."
+        if not flag_delete and del_dests and _NAMED.fullmatch(del_dests[0]):
             return f"Delete the remote {'tag' if n_tag_delete else 'branch'} {del_dests[0]}."
-        return "Delete branches on a remote."
-    if sole and main and not force:
-        return f"Push to {dests[0]}." if one and colon_single else "Push to the main branch."
-    if prune and not (force or main or dele or tags):
-        return "Push and delete remote branches that are gone here."
+        return "Delete a branch or tag on a remote." if flag_delete else "Delete branches on a remote."
+    if main_push and only_one and colon_single and not (force or dele or prune or tags or every):
+        return f"Push to {pushed[0]}."
+    if prune and not (force or dele or tags or every or main_push):
+        return "Push and delete remote branches that are gone here." + (_CUR_SUFFIX if cur else "")
     clauses: list[str] = []
-    if force and (dele or prune):
-        clauses.append("force push and " + (prune_text if prune and not dele else "delete branches on a remote"))
-    elif force:
-        where = f"to {dests[0]}" if one else "the current branch to a remote" if cur else "to a remote"
-        clauses.append(f"force push {where}" + (", including the main branch" if main and not one else ""))
-    elif main:
-        clauses.append("push to the main branch")
-    if dele and not force:
-        clauses.append("delete branches on a remote")
-    if prune and (not force or dele):
-        clauses.append(prune_text)
-    if tags:
-        clauses.append("push tags to a remote")
-    if not clauses:
-        clauses.append(f"push to {dests[0]}" if one else "push the current branch to a remote" if cur else "push to a remote")
-    elif cur and not force:
-        clauses.append("push the current branch to a remote")
+    delete_clause = "delete branches on a remote" + (", including the main branch" if main_del else "")
+    if force:
+        if every:
+            clauses.append("force push " + _MANY)
+            if dele:
+                clauses.append(delete_clause)
+        elif dele or prune:
+            clauses.append("force push and " + (delete_clause if dele else prune_text) + (", including the main branch" if main_push and not main_del else ""))
+        elif only_one:
+            clauses.append(f"force push to {pushed[0]}")
+        else:
+            where = "the current branch to a remote" if cur and not pushed else "to a remote"
+            clauses.append(f"force push {where}" + (", including the main branch" if main_push else ""))
+        if prune and (every or dele):
+            clauses.append(prune_text)
+        if tags:
+            clauses.append("push tags to a remote")
+    else:
+        if dele:
+            clauses.append(delete_clause)
+        if prune:
+            clauses.append(prune_text)
+        if every:
+            clauses.append("push " + _MANY)
+        elif main_push:
+            clauses.append("push to the main branch")
+        if tags:
+            clauses.append("push tags to a remote")
+        if not (every or main_push):
+            if only_one:
+                clauses.append(f"push to {pushed[0]}")
+            elif pushed:
+                clauses.append("push to a remote")
+            elif cur:
+                clauses.append("push the current branch to a remote")
+            elif not clauses:
+                clauses.append("push to a remote")
     text = ", ".join(clauses[:-1]) + (" and " if len(clauses) > 1 else "") + clauses[-1]
-    return text[0].upper() + text[1:] + "."
+    text = text[0].upper() + text[1:] + "."
+    if cur and not (main_push or every):
+        text += _CUR_SUFFIX
+    if len(text.split()) > 20:   # too long to read: keep the worst parts
+        parts = [w for w, on in (("force push", force), ("delete branches", dele or prune), ("push tags", tags)) if on]
+        text = "This push can " + (", ".join(parts[:-1]) + " and " if len(parts) > 1 else "") + (parts[-1] if parts else "push") + ", and can include the main branch."
+    return text
 
 
 def _render(key: str) -> str:

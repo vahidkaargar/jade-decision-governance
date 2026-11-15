@@ -20,10 +20,15 @@ def line_of(cmd: str) -> str:
     return askplain.what_line(assess(cmd), "Bash")
 
 
+CUR = "Push the current branch to a remote. It can be the main branch."
+MANY = "Push every matching branch to a remote, which can include the main branch."
+FMANY = "Force push every matching branch to a remote, which can include the main branch."
+
+
 @pytest.mark.parametrize("cmd,expected", [
-    ("git push origin :main", "Delete the remote branch main."),
+    ("git push origin :main", "Delete the main branch on a remote."),
     ("git push origin :feature", "Delete the remote branch feature."),
-    ("git push origin :refs/heads/main", "Delete the remote branch main."),
+    ("git push origin :refs/heads/main", "Delete the main branch on a remote."),
     ("git push origin +main", "Force push to main."),
     ("git push origin +feature", "Force push to feature."),
     ("git push origin +HEAD:main", "Force push to main."),
@@ -39,29 +44,29 @@ def test_push_refspec_lines(cmd, expected):
 
 
 @pytest.mark.parametrize("cmd,expected", [
-    ("git push origin :feat1 +x:main", "Force push and delete branches on a remote."),
+    ("git push origin :feat1 +x:main", "Force push and delete branches on a remote, including the main branch."),
     ("git push origin main +feature", "Force push to a remote, including the main branch."),
         ("git push -fu origin HEAD:main", "Force push to main."),
     ("git push -uf origin feature", "Force push to feature."),
-    ("git push origin +refs/heads/*:refs/heads/*", "Force push to a remote."),
+    ("git push origin +refs/heads/*:refs/heads/*", "Force push every matching branch to a remote, which can include the main branch."),
     ("git push origin :a :b", "Delete branches on a remote."),
     ("git push origin :refs/tags/v1", "Delete the remote tag v1."),
     ("git push --mirror origin", "Push and delete to match every branch and tag."),
     ("git push origin feature +x:main", "Force push to a remote, including the main branch."),
-    ("git push origin main :feature", "Push to the main branch and delete branches on a remote."),
-    ("git push origin HEAD", "Push the current branch to a remote."),
-    ("git push origin @", "Push the current branch to a remote."),
-    ("git push", "Push the current branch to a remote."),
-    ("git push --prune origin", "Push and delete remote branches that are gone here."),
-    ("git push --prune origin main", "Push to the main branch and delete remote branches that are gone here."),
-    ("git push --force --prune origin", "Force push and delete remote branches that are gone here."),
-    ("git push --force origin HEAD", "Force push the current branch to a remote."),
+    ("git push origin main :feature", "Delete branches on a remote and push to the main branch."),
+    ("git push origin HEAD", CUR),
+    ("git push origin @", CUR),
+    ("git push", CUR),
+    ("git push --prune origin", "Push and delete remote branches that are gone here. It can be the main branch."),
+    ("git push --prune origin main", "Delete remote branches that are gone here and push to the main branch."),
+    ("git push --force --prune origin", "Force push and delete remote branches that are gone here. It can be the main branch."),
+    ("git push --force origin HEAD", "Force push the current branch to a remote. It can be the main branch."),
     ("git push --tags origin main", "Push to the main branch and push tags to a remote."),
     ("gh pr merge 12 -Ro/r", "Merge a pull request."),
     ("glab mr merge -Ro/r 12", "Merge a merge request."),
     ("git push --tags origin", "Push tags to a remote."),
     ("git push origin main feature", "Push to the main branch."),
-    ("git push origin x:*", "Push to a remote."),
+    ("git push origin x:*", MANY),
     ("glab mr merge 12 -R o/r", "Merge a merge request."),
     ("glab mr merge --repo=o/r 12", "Merge a merge request."),
     ("gh pr merge --repo=o/r 12", "Merge a pull request."),
@@ -122,3 +127,54 @@ def test_ho_without_segments_has_two_lines():
     assert len(lines) == 2
     assert lines[0] == "Run a shell command."
     assert lines[1].startswith("This call ")
+
+
+@pytest.mark.parametrize("cmd,expected", [
+    ("git push origin main --delete", "Delete the main branch on a remote."),
+    ("git push -d origin main", "Delete the main branch on a remote."),
+    ("git push origin --delete main feature", "Delete branches on a remote, including the main branch."),
+    ("git push -ud origin main", "Delete the main branch on a remote."),
+    ("git push origin --delete feature other", "Delete branches on a remote."),
+    ("git push origin --delete refs/heads/main", "Delete the main branch on a remote."),
+    ("git push -fd origin main", "Force push and delete branches on a remote, including the main branch."),
+    ("git push --all origin", MANY),
+    ("git push --branches origin", MANY),
+    ("git push --all --force origin", FMANY),
+    ("git push -f --branches origin", FMANY),
+    ("git push origin '*:*'", MANY),
+    ("git push --prune origin 'refs/heads/*:refs/heads/*'", "This push can delete branches, and can include the main branch."),  # 21 words in full: the short worst-case form
+    ("git push origin :", MANY),
+    ("git push origin +:", FMANY),
+    ("git push origin HEAD", CUR),
+    ("git push -f", "Force push the current branch to a remote. It can be the main branch."),
+    ("git push origin feature:heads/main", "Push to main."),
+    ("git push origin feature:refs/heads/main", "Push to main."),
+    ("git push origin HEAD feature", "Push to a remote. It can be the main branch."),
+])
+def test_rr4_push_lines(cmd, expected):
+    assert line_of(cmd) == expected
+
+
+@pytest.mark.parametrize("cmd", [
+    "git push --follow-tags origin feature",
+    "git push --follow-tags origin",
+    "git push --follow-tags",
+])
+def test_follow_tags_says_tags(cmd):
+    assert "tags" in line_of(cmd)
+
+
+def test_matching_refspec_is_not_a_delete():
+    assert "elete" not in line_of("git push origin :")
+
+
+@pytest.mark.parametrize("cmd", [
+    "git push -fd origin main :a :b +x:main --tags --prune",
+    "git push --all -f --prune --tags -d origin main",
+    "git push -f --prune --tags origin 'refs/heads/*:refs/heads/*' :a HEAD",
+    "git push --follow-tags --prune origin ':' :a",
+])
+def test_every_worst_case_line_stays_short(cmd):
+    line = line_of(cmd)
+    assert len(line.split()) <= 20, line
+    assert "main" in line

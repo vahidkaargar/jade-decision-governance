@@ -14,7 +14,7 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 - Threat row T30 in `docs/05` (a scope that covers more than the owner meant).
 
 ### Fixed
-- **Push and merge lines say what really happens.** Every target of a `git push` is read: a force (`+main`, `-f`, `-fu`), a delete (`:main`, `--prune`, `--mirror`) or the main branch is named, worst first. `git push origin HEAD` says the current branch. A value flag before the number (`glab mr merge --message 5 12`) or `-R`/`--repo` gives no number. Risk lines use plain words (no "reflog", "deployment", "credential").
+- **Push and merge lines say what really happens.** Every target of a `git push` is read, and when the line cannot be sure it names the worst outcome. Order: force (`+main`, `-f`, `-fu`), delete (`--delete`/`-d` makes every target a delete, `:main`, `--prune`, `--mirror`), the main branch, tags (`--tags`, `--follow-tags`), then the named branch (`heads/main` counts as main). `--all`, `--branches`, a `*` refspec and `:` alone say "every matching branch ... which can include the main branch". `git push`, `HEAD` and `@` say the current branch and that it can be the main branch. A line over 20 words falls back to a short worst-case form. A value flag before the number (`glab mr merge --message 5 12`) or `-R`/`--repo` gives no number. Risk lines use plain words (no "reflog", "deployment", "credential").
 
 ## [0.6.1] - 2026-11-14
 
