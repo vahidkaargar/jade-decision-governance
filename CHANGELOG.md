@@ -7,7 +7,7 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 ### Added
 - **Clear questions (docs/12 section 12).** The chat question and the dialog start with a plain line for what the call does, a risk line, and an "Also in this call" line. The text comes only from the gate (`jade/askplain.py`).
 - **Bigger scopes from the chat.** Options "Allow, suggest ..." record a hint with a scope (`kind_project`, `kind_any`, `merge_project`). A hint decides nothing; `jade review confirm` in a terminal makes it standing. Confirm shows the scope, its lifetime (30 days after last use, never more than 180) and the undo `jade knows rm ID`.
-- **A narrow merge scope.** One plain `gh pr merge` in one named project, with flags from an allow-list. Any other flag, `-R`, a `cd` to another folder or a joined call gives no scope.
+- **A narrow merge scope.** One plain `gh pr merge` in one named project, with flags from an allow-list (no `--body-file`/`-F`). Any other flag, `-R` or a joined call gives no scope. The key holds the repository (the remotes in the git config); a changed remote, an unreadable config or a per-worktree config gives a new key or no scope. A merge scope confirmed on an earlier build of this branch no longer matches and is asked again.
 - **Ledger scope columns.** Memory matches scope keys for confirmed answers only.
 - **`jade knows edit` template.** Two model sentences and one line per kind of answer, with its risk.
 - Agent rule "Send one risky action per call" in the skill and in `docs/claude-md-jev-section.md`.

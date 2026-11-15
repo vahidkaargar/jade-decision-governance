@@ -443,3 +443,29 @@ def test_the_covers_texts_come_from_one_table(repo):
     assert "Other projects still ask" not in scopes.COVERS["kind_project"]
     assert "same exact call is also remembered" in scopes.COVERS["kind_project"]
     assert "listed options only" in scopes.COVERS["merge_project"] and "safe options" not in scopes.COVERS["merge_project"]
+
+
+# Final re-review: git also reads a per-worktree config file (`config.worktree`, with `extensions.worktreeConfig`), which can add or change a remote. The reader does
+# not merge it, so a project that has one gets no merge scope at all (fail closed), in the main checkout and in a linked worktree.
+@pytest.mark.parametrize("where", ["main", "linked"])
+def test_no_merge_scope_when_a_per_worktree_config_exists(short, where):
+    main = make_git(short / "main", extra="[extensions]\n\tworktreeConfig = true\n")
+    if where == "main":
+        project, gitdir = main, main / ".git"
+    else:
+        gitdir = main / ".git" / "worktrees" / "wt"
+        gitdir.mkdir(parents=True)
+        (gitdir / "commondir").write_text("../..\n")
+        project = short / "wt"
+        project.mkdir()
+        (project / ".git").write_text(f"gitdir: {gitdir}\n")
+    assert [s.kind for s in offered(MERGE, str(project))] == ["merge_project"]   # the extension alone changes nothing
+    (gitdir / "config.worktree").write_text('[remote "other"]\n\turl = https://github.com/other/repo.git\n\tgh-resolved = base\n')
+    assert offered(MERGE, str(project)) == [], where
+
+
+# Final re-review: a control character (ESC and the like) in a folder name could rewrite lines in a terminal during `jade review confirm`.
+def test_a_folder_name_with_control_characters_has_none_in_the_label(short):
+    odd = make_git(short / "a\x1b[2Kb\x07c\x7fd")
+    for s in offered(MERGE, str(odd)) + offered(CLASS_CMD, str(odd)):
+        assert all(c.isprintable() for c in s.label), repr(s.label)

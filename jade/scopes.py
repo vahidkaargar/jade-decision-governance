@@ -137,6 +137,9 @@ def _repo_identity(project: str) -> list[str] | None:
         config = os.path.join(common, "config")
         if not os.path.isfile(config):
             return None
+        # A per-worktree config (`extensions.worktreeConfig`) can add or change a remote, and this reader does not merge it: no merge scope (fail closed).
+        if os.path.lexists(os.path.join(gitdir, "config.worktree")) or os.path.lexists(os.path.join(common, "config.worktree")):
+            return None
         with open(config, encoding="utf-8") as f:
             text = f.read(CONFIG_MAX + 1)
     except (OSError, ValueError):   # UnicodeDecodeError is a ValueError
@@ -229,7 +232,8 @@ def _kind_project_key(a, project: str) -> str:
 
 
 def _one_line(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+    """One printable line: every control character (ESC, BEL, a line break) becomes a space, then each run of spaces becomes one."""
+    return re.sub(r"\s+", " ", "".join(c if c.isprintable() else " " for c in text)).strip()
 
 
 def _label(command: str, where: str) -> str:
