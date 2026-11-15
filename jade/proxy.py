@@ -32,6 +32,7 @@ from . import adapter, ask, ledger, memory, paths
 from .util import canonical, now, parse_ts, sha256, ts
 
 QID = "q.human_proxy.would_allow"
+MIN_VERSION = 2           # the first version whose template reads `past_answers` as confirmed allows and denies without labels (RR11, RR12)
 DEADLINE_S = 3.0          # the most one exchange may take; the hook budget (hooks.BUDGET_S) is the other limit
 RESERVE_S = 1.5           # what the rest of the hook still needs after Jev answered
 MIN_DEADLINE_S = 0.1
@@ -215,6 +216,40 @@ def _close_stranded(db, session: str, since: str) -> None:
         pass
 
 
+def _spec(db):
+    """The question Jev is asked, or None (the owner is asked as before). A pin to a version the registry does not hold, or to a version older than
+    MIN_VERSION (it reads `past_answers` as confirmed answers only, not in the shape `past_answers` builds now), never blocks the call: the ledger notes
+    it once per reason (event `jev_question_unusable`)."""
+    from . import questions
+
+    try:
+        spec = ask.registry_spec(QID)
+    except questions.InvalidQuestion as e:
+        reason = str(e)
+    else:
+        if spec.version >= MIN_VERSION:
+            return spec
+        reason = f"{QID} version {spec.version} is pinned; Jev decides only with version {MIN_VERSION} or later"
+    reason = reason[:300]
+    db.event(QID, "jev_question_unusable", guard=reason, actor="hook", key="jevq:" + sha256(reason)[:40])
+    return None
+
+
+def replay_past_answers(past) -> list[dict]:
+    """Stored `past_answers` rebuilt in the shape `past_answers` sends now, for a replay of a stored state (`jade improve shadow`): an allow keeps its rule and
+    its label (the owner confirmed it) cut at 120, every other answer keeps its rule, its answer and its age only. A deny label stored before version 2 is
+    dropped; an entry that is not an object is dropped."""
+    out = []
+    for p in past if isinstance(past, list) else []:
+        if not isinstance(p, dict):
+            continue
+        if p.get("answer") == "allow":
+            out.append({"rule": p.get("rule"), "answer": "allow", "label": str(p.get("label") or "")[:120]})
+        else:
+            out.append({"rule": p.get("rule"), "answer": "deny", "age_days": p.get("age_days") if type(p.get("age_days")) is int else None})
+    return out
+
+
 def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: float | None = None):
     """The Jev branch of the gate: a HookResult that lets the call run, or None (the owner is asked as before)."""
     from . import askchat, hooks, permits, state_machine
@@ -236,8 +271,10 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: 
     if distrusted(db, [exact, cls, coarse]) or denied_before(db, hold, cls) or attempts(db, session, hold) >= MAX_ATTEMPTS:
         return None
     state = build_state(a, tool, tin, prefs, past, fp)
-    spec = ask.registry_spec(QID)
-    _, hits, _, leaked = ask.prepare([ask.registry_spec(QID)], dict(state))
+    spec = _spec(db)
+    if spec is None:
+        return None
+    _, hits, _, leaked = ask.prepare([_spec(db)], dict(state))
     if hits or leaked:
         return None   # redaction changed the text: Jev would judge something other than what runs
     deadline = _deadline(started)
