@@ -13,6 +13,9 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 - Agent rule "Send one risky action per call" in the skill and in `docs/claude-md-jev-section.md`.
 - Threat row T30 in `docs/05` (a scope that covers more than the owner meant).
 
+### Security
+- **Human-only: shell start-up files and the shell snapshot (HO-shell-startup, T31).** A write to `~/.zshenv`, `.zshrc`, `.bashrc`, `.profile`, the other zsh and bash start-up files, `$BASH_ENV`, `$ENV`, the files they source by a literal path, or `~/.claude/shell-snapshots` is now asked in the chat or dialog and never decided by memory or Jev. `$HOME` and `${HOME}` in a written path are now expanded for the wiring, mod and start-up checks too.
+
 ## [0.6.1] - 2026-11-14
 
 ### Fixed

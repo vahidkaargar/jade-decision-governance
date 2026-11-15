@@ -860,16 +860,25 @@ def _config_roots() -> tuple[str, ...]:
     return tuple(dict.fromkeys(os.path.realpath(str(p)) for p in (paths.config_dir(), os.path.expanduser("~/.config/jade"))))
 
 
+def _expand_home(p: str) -> str:
+    """`~`, `$HOME` and `${HOME}` at the start of a path word, which the shell expands before the command sees them."""
+    home = os.path.expanduser("~")
+    for var in ("${HOME}", "$HOME"):
+        if p == var or p.startswith(var + "/"):
+            return home + p[len(var):]
+    return os.path.expanduser(p)
+
+
 def _si12_hit(path: str, base: str, roots: tuple[str, ...], parent_too: bool = False) -> bool:
     """True when `path` (relative to `base`) is a config directory, a path inside one, or, for a verb that replaces a directory, a parent of one."""
     if not path or "\x00" in path:
         return False
-    real = os.path.realpath(os.path.join(base or os.getcwd(), os.path.expanduser(path)))
+    real = os.path.realpath(os.path.join(base or os.getcwd(), _expand_home(path)))
     return any(real == r or real.startswith(r + os.sep) or (parent_too and r.startswith(real.rstrip(os.sep) + os.sep)) for r in roots)
 
 
-HO_WIRING, HO_INSTALL, HO_SETTINGS, HO_STATE, HO_MOD, HO_R17, HO_TERMINAL = (
-    "HO-wiring", "HO-checkout-install", "HO-settings-shadow", "HO-state-path", "HO-mod", "HO-R17", "HO-terminal")
+HO_WIRING, HO_INSTALL, HO_SETTINGS, HO_STATE, HO_MOD, HO_R17, HO_TERMINAL, HO_SHELL = (
+    "HO-wiring", "HO-checkout-install", "HO-settings-shadow", "HO-state-path", "HO-mod", "HO-R17", "HO-terminal", "HO-shell-startup")
 HO_DELETE, HO_MONEY, HO_RELEASE = humanonly.HO_DELETE, humanonly.HO_MONEY, humanonly.HO_RELEASE   # W-98b: jade/humanonly.py holds the patterns and their corpus
 _STATE_LITERAL = re.compile(r"\.config/jade(?![\w.-])|\.local/share/jade(?![\w.-])|jade\.sqlite")
 _INSTALL_CMD = re.compile(r"\b(?:uv\s+tool\s+(?:install|upgrade|reinstall)|uv\s+pip\s+install|pip3?\s+install|pipx\s+(?:install|upgrade|reinstall)|python3?\s+-m\s+pip\s+install)\b")
@@ -901,6 +910,54 @@ def _wiring_roots() -> tuple[str, ...]:
 
 def _mod_roots() -> tuple[str, ...]:
     return tuple(_real(p) for p in ("~/.claude/dev-mods", "~/.claude/plugins", "~/.claude/mods"))
+
+
+_SHELL_STARTUP_READ_MAX = 1 << 20
+_SOURCE_LINE = re.compile(r"""^\s*(?:source|\.)\s+(?:"([^"\n]+)"|'([^'\n]+)'|([^\s;&|<>()"'`]+))""")
+
+
+def _read_startup_text(path: str) -> str:
+    """The text of a start-up file when it is a regular file of at most 1 MiB; '' otherwise. Never blocks on a FIFO or a device."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return ""
+    try:
+        st = os.fstat(fd)
+        if not stat_mod.S_ISREG(st.st_mode) or st.st_size > _SHELL_STARTUP_READ_MAX:
+            return ""
+        with os.fdopen(fd, "rb", closefd=False) as fh:
+            return fh.read(_SHELL_STARTUP_READ_MAX).decode("utf-8", "replace")
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
+
+
+def _sourced_path(raw: str) -> str | None:
+    """A literal sourced path with `~`, `$HOME` or `${HOME}` expanded; None for a variable, a glob or a command substitution."""
+    p = _expand_home(raw.strip())
+    if not p or any(c in p for c in "$*?[`\x00") or not os.path.isabs(p):
+        return None
+    return p
+
+
+def _shell_roots() -> tuple[str, ...]:
+    """The real paths of the shell start-up files (zsh, bash, system-wide, $BASH_ENV, $ENV), the Claude shell snapshot directory, and every file those
+    start-up files source by a literal path, one level deep (a variable or a glob is not followed: docs/05 T31). Computed per call."""
+    zd = os.environ.get("ZDOTDIR") or "~"
+    startup = [os.path.join(os.path.expanduser(zd), n) for n in (".zshenv", ".zprofile", ".zshrc", ".zlogin", ".zlogout")]
+    startup += [os.path.expanduser("~/" + n) for n in (".bashrc", ".bash_profile", ".bash_login", ".profile", ".bash_logout")]
+    startup += ["/etc/" + n for n in ("zshenv", "zprofile", "zshrc", "zlogin", "profile", "bashrc")]
+    startup += [os.environ[v] for v in ("BASH_ENV", "ENV") if os.environ.get(v)]
+    out = [_real(p) for p in startup]
+    out.append(_real("~/.claude/shell-snapshots"))
+    for f in list(out[:-1]):
+        for line in _read_startup_text(f).splitlines():
+            m = _SOURCE_LINE.match(line)
+            if m and (sp := _sourced_path(next(g for g in m.groups() if g))):
+                out.append(_real(sp))
+    return tuple(dict.fromkeys(out))
 
 
 def _written_text(tool_input: dict) -> str:
@@ -955,7 +1012,7 @@ def _ho_add(a: Assessment, ident: str) -> None:
 
 def _ho_tool_paths(a: Assessment, tool_input: dict, subjects: list[str], cwd: str) -> None:
     """Human-only classes of a Write/Edit-style or MCP call, from the paths it names."""
-    wroots, mroots = _wiring_roots(), _mod_roots()
+    wroots, mroots, sroots = _wiring_roots(), _mod_roots(), _shell_roots()
     text = None
     for s in subjects:
         if not s.strip():
@@ -964,13 +1021,15 @@ def _ho_tool_paths(a: Assessment, tool_input: dict, subjects: list[str], cwd: st
             _ho_add(a, HO_WIRING)
         if _si12_hit(s, cwd, mroots):
             _ho_add(a, HO_MOD)
+        if _si12_hit(s, cwd, sroots):
+            _ho_add(a, HO_SHELL)
         if _SETTINGS_FILE.search(os.path.realpath(os.path.join(cwd or os.getcwd(), os.path.expanduser(s)))):
             text = _written_text(tool_input) if text is None else text
             if not text or _SETTINGS_DISABLE.search(text):   # unreadable text counts: it could be anything
                 _ho_add(a, HO_SETTINGS)
 
 
-def _ho_segment(a: Assessment, seg: str, dirs: tuple[str, ...], cwd: str, wroots: tuple[str, ...], mroots: tuple[str, ...]) -> None:
+def _ho_segment(a: Assessment, seg: str, dirs: tuple[str, ...], cwd: str, wroots: tuple[str, ...], mroots: tuple[str, ...], sroots: tuple[str, ...]) -> None:
     """Human-only classes of one shell segment that is not read-only."""
     toks, parent_too = _segment_tokens(seg)
     bare = _bare(seg)
@@ -986,6 +1045,8 @@ def _ho_segment(a: Assessment, seg: str, dirs: tuple[str, ...], cwd: str, wroots
                 _ho_add(a, HO_WIRING)
             if _si12_hit(tok, base, mroots, parent_too):
                 _ho_add(a, HO_MOD)
+            if _si12_hit(tok, base, sroots, parent_too):
+                _ho_add(a, HO_SHELL)
             real = os.path.realpath(os.path.join(base or os.getcwd(), os.path.expanduser(tok))) if tok else ""
             if real and _SETTINGS_FILE.search(real):
                 _ho_add(a, HO_SETTINGS)   # a shell write of a settings file: the text is not the gate's to read
@@ -1250,7 +1311,7 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     si12 = False
     ho = Assessment(level="low", rule_id="", rationale="")   # collects the human-only classes of the segments
     sql_client = False   # a segment runs a database client: its statement is quoted text, so the raw command is read for it below
-    wroots, mroots = _wiring_roots(), _mod_roots()
+    wroots, mroots, sroots = _wiring_roots(), _mod_roots(), _shell_roots()
     for seg, dirs in shellnorm.segments_cwd(scan, cwd):
         if seg.startswith(BLIND_MARK):
             labels.append(seg[len(BLIND_MARK):].split(" ", 1)[0])
@@ -1280,7 +1341,7 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
             best = seg_best
         if si12_roots and not si12 and _si12_segment(seg, dirs, cwd, si12_roots):
             si12 = True
-        _ho_segment(ho, seg, dirs, cwd, wroots, mroots)
+        _ho_segment(ho, seg, dirs, cwd, wroots, mroots, sroots)
         sql_client = sql_client or humanonly.is_sql_client(_bare(seg))
         if sf := blind.script_file(words):
             if HO_STATE not in ho.ho_ids and _script_names_state(sf, dirs, cwd):
