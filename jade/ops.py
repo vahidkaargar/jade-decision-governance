@@ -19,7 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import NamedTuple
 
-from . import ledger, paths, policy, signing
+from . import ledger, memory, paths, policy, signing
 from .util import is_human_tty, now, one_line, parse_ts, ts, user
 
 
@@ -916,33 +916,27 @@ _KNOWS_MODELS = (
 )
 
 
-def _answer_keys(r) -> set[tuple]:
-    """Every stored key of an answer row, each with its rule: two rows that share one are the same kind of call."""
-    rule = r["rule_id"]
-    return {(rule, "exact", r["exact_key"]), *(((rule, "class", r["class_key"]),) if r["class_key"] else ()), *(((rule, "scope", r["scope_key"]),) if r["scope_key"] else ())}
-
-
-def knows_template(rows) -> str:
-    """The first text of the preferences file (pure): two header lines, two model sentences with placeholders, then one commented line per kind of standing answer.
+def knows_template(rows, since: tuple[str, str] | None = None) -> str:
+    """The first text of the preferences file (pure but for the clock): two header lines, two model sentences with placeholders, then one commented line per kind of
+    standing answer. A line is printed exactly when `memory.lookup` still honours the answer for some call it covers: `memory.honoured` with the row's
+    `memory.covered_keys`, the same test lookup runs (strong, within the lifetime, no newer deny that shares a key every covered call has). So a deny of one PR
+    leaves a merge scope line, and a deny of the same kind hides a class, `kind_any` or `kind_project` line.
     A kind is the answer's stored keys, never words of its label: one line per (rule, scope key), else per (rule, class key), else per (rule, exact key), showing the newest call.
-    A newer deny hides an older allow that shares its rule and any of its keys (exact, class, scope) with it; a scope line (rows with a scope key) is hidden only by a deny of the same scope key, because the scope still decides other calls.
     Every line starts with `#`, and there are at most KNOWS_MAX_LINES lines."""
     from . import askplain
 
     out = ["# What JADE may decide for you. Write plain sentences; a later release reads this file when it decides in your place.",
            "# Lines that start with # are ignored.", "#", *_KNOWS_MODELS, "#"]
+    since = since or memory.valid_since()
+    denies = [r for r in rows if r["answer"] == "deny"]
     seen: dict[tuple, str] = {}
-    denied: set[tuple] = set()   # every key of every deny met so far; rows come newest first, so these denies are newer than the rows after them
     for r in rows:   # newest first, so the first row of a group names it
-        if r["answer"] == "deny":
-            denied |= _answer_keys(r)
+        if r["answer"] != "allow" or not memory.honoured(r, denies, memory.covered_keys(r), since):
             continue
-        text = one_line(r["scope_label"] or r["label"])
-        if r["answer"] != "allow" or r["strength"] != "strong" or not text or (_answer_keys(r) & denied if not r["scope_key"] else (r["rule_id"], "scope", r["scope_key"]) in denied):
-            continue   # only a standing allow is printed, and a newer deny of the same kind of call hides it
         key = (r["rule_id"], "scope", r["scope_key"]) if r["scope_key"] else (r["rule_id"], "class", r["class_key"]) if r["class_key"] else (r["rule_id"], "exact", r["exact_key"])
         if key in seen:
             continue
+        text = one_line(r["scope_label"] or r["label"]) or "(a call with no label stored)"
         if len(text) > KNOWS_LABEL_CHARS:
             text = text[:KNOWS_LABEL_CHARS - 3] + "..."
         seen[key] = f"# I am fine with: {text}  [{r['rule_id']}]  (risk: {askplain.risk_line(r['rule_id'])})"

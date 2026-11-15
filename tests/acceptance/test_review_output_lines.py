@@ -3,6 +3,7 @@ sentences, and in the preferences template a newer deny hides an older allow of 
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 
 import pytest
 
@@ -105,8 +106,17 @@ def row(label, answer, rule="R-11", class_key=None, exact_key="x", scope_key=Non
     return {"answer": answer, "label": label, "rule_id": rule, "scope_kind": None, "scope_key": scope_key, "scope_label": None, "class_key": class_key, "exact_key": exact_key, "strength": "strong"}
 
 
+def stamped(rows):
+    """Rows come newest first: give each a time one second older than the one before, and confirm each allow at that time (what a real ledger row holds)."""
+    out = []
+    for i, r in enumerate(rows):
+        when = util.ts(util.now() - timedelta(seconds=i))
+        out.append({"ts": when, "confirmed_ts": when if r["answer"] == "allow" else None, "last_used_ts": None, "source": None, **r})
+    return out
+
+
 def fine(rows):
-    return [x for x in ops.knows_template(rows).splitlines() if "I am fine with" in x]
+    return [x for x in ops.knows_template(stamped(rows)).splitlines() if "I am fine with" in x]
 
 
 def test_a_newer_deny_hides_an_older_allow_of_the_same_class_key():
@@ -134,6 +144,8 @@ def record(answer, label, key, rule="R-11", scope=None, confirm=False, class_key
         with db.tx():
             aid = db.record_human_answer(session="sess-out-0002", decision_id=None, rule_id=rule, class_key=class_key, exact_key=key, answer=answer, channel="chat",
                                          label=label, scope=scope)
+            if answer == "allow":   # a minute older: a deny recorded next in the same second is newer, as memory.lookup compares the answer times
+                db.con.execute("UPDATE human_answers SET ts=? WHERE answer_id=?", (util.ts(util.now() - timedelta(minutes=1)), aid))
             if confirm:
                 db.confirm_answers([aid])
     finally:

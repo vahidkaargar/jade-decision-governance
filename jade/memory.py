@@ -76,26 +76,71 @@ def valid_since() -> tuple[str, str]:
     return ts(now() - timedelta(days=CAP_DAYS)), ts(now() - timedelta(days=USE_DAYS))
 
 
+def _col(r, name: str):
+    """A column of an answer row (a sqlite3.Row or a dict); None when the row has no such column."""
+    return r[name] if name in r.keys() else None
+
+
+def stored_keys(r) -> set[tuple[str, str]]:
+    """Every key an answer row stores, typed: ("exact", k), ("class", k), ("scope", k). A deny row stores the exact key and, for a class call, the class key."""
+    return {(kind, k) for kind, k in (("exact", _col(r, "exact_key")), ("class", _col(r, "class_key")), ("scope", _col(r, "scope_key"))) if k}
+
+
+def call_keys(exact: str, cls: str | None, scope_keys) -> set[tuple[str, str]]:
+    """The typed keys of the call in front of the gate: what a row must share to cover it, and what a deny must share to take a row out for it."""
+    return {("exact", exact), *((("class", cls),) if cls else ()), *(("scope", k) for k in scope_keys)}
+
+
+def covered_keys(r) -> set[tuple[str, str]]:
+    """The keys that every call an allow row covers has: a newer deny that shares one of them takes the row out for all of those calls, so the row decides nothing.
+    A `kind_any` scope key is the class key. Every call a `kind_project` scope covers has the class key of the row's family (`family_key`). A `merge_project` scope
+    covers calls with other exact keys and no class key, so a deny of one of them leaves the scope for the others. A class row covers the calls of its class key, an
+    exact row only its own call."""
+    kind, scope = _col(r, "scope_kind"), _col(r, "scope_key")
+    if scope:
+        extra = _col(r, "class_key") if kind == "kind_any" else _col(r, "family_key") if kind == "kind_project" else None
+        return {("scope", scope), *((("class", extra),) if extra else ())}
+    if _col(r, "class_key"):
+        return {("class", r["class_key"])}
+    return {("exact", r["exact_key"])}
+
+
+def standing(r, since: tuple[str, str] | None = None) -> bool:
+    """A confirmed (strong) allow, live (not a test row), confirmed within CAP_DAYS and confirmed or used within USE_DAYS."""
+    cap, use = since or valid_since()
+    confirmed = _col(r, "confirmed_ts")
+    return (r["answer"] == "allow" and r["strength"] == "strong" and (_col(r, "source") or "") != "test" and bool(confirmed) and confirmed >= cap
+            and (_col(r, "last_used_ts") or confirmed) >= use)
+
+
+def taken_out(r, denies, keys: set[tuple[str, str]]) -> bool:
+    """A deny of any strength the human gave (hint or strong, not a test row), newer than the allow `r`, that shares one of `keys`: the owner's newest answer wins."""
+    return any(d["answer"] == "deny" and d["strength"] in ("hint", "strong") and (_col(d, "source") or "") != "test" and d["ts"] > r["ts"] and stored_keys(d) & keys
+               for d in denies)
+
+
+def honoured(r, denies, keys: set[tuple[str, str]], since: tuple[str, str] | None = None) -> bool:
+    """Does the allow row `r` still decide a call with these typed keys? The one test `lookup` (keys of the call in front of the gate) and the `jade knows edit`
+    template (`covered_keys(r)`: is there a call it still decides) both use."""
+    return standing(r, since) and not taken_out(r, denies, keys)
+
+
 def lookup(db, a, tool: str, tool_input: dict | None, fp: dict | None, cwd: str = ""):
     """The strong allow row that covers this call, or None. A row matches by the exact key, the class key, or one of the scope keys of this call (jade/scopes.py:
-    computed from the call in front of the gate, so a new flag or another project gives another key). A scope key is matched for `strong` rows only, like the rest."""
+    computed from the call in front of the gate, so a new flag or another project gives another key). `honoured` decides whether a matching row still counts:
+    standing (strong, within the lifetime) and not taken out by a newer deny with one of this call's keys."""
     from . import scopes
 
     exact, cls, el = keys(a, tool, tool_input, fp)
     if el == "never":
         return None
     scope_keys = scopes.keys_for(a, tool, tool_input, fp, cwd)
-    cap, use = valid_since()
     same = "exact_key=?" + (" OR class_key=?" if cls else "") + (f" OR scope_key IN ({','.join('?' * len(scope_keys))})" if scope_keys else "")
-    keys_args = [exact] + ([cls] if cls else []) + scope_keys
-    # A deny of any strength that is newer than the allow, with the same exact key, class key or scope key as this call, takes that allow out: the owner's newest answer
-    # wins. A deny row stores the exact key and (for a class call) the class key, and no scope key, so a deny blocks a scope allow only for the very call it was given for.
-    sql = ("SELECT * FROM human_answers WHERE strength='strong' AND answer='allow' AND confirmed_ts>=? AND COALESCE(last_used_ts, confirmed_ts)>=? "
-           f"AND COALESCE(source,'')<>'test' AND ({same}) "
-           "AND NOT EXISTS (SELECT 1 FROM human_answers d WHERE d.answer='deny' AND d.strength IN ('hint','strong') AND COALESCE(d.source,'')<>'test' "
-           f"AND d.ts>human_answers.ts AND ({same.replace('exact_key', 'd.exact_key').replace('class_key', 'd.class_key').replace('scope_key', 'd.scope_key')})) "
-           "ORDER BY confirmed_ts DESC, rowid DESC LIMIT 1")
-    return db.con.execute(sql, [cap, use] + keys_args + keys_args).fetchone()
+    args = [exact] + ([cls] if cls else []) + scope_keys
+    rows = db.con.execute(f"SELECT * FROM human_answers WHERE ({same}) ORDER BY confirmed_ts DESC, rowid DESC", args).fetchall()
+    denies = [r for r in rows if r["answer"] == "deny"]
+    since, ck = valid_since(), call_keys(exact, cls, scope_keys)
+    return next((r for r in rows if honoured(r, denies, ck, since)), None)
 
 
 def use(db, answer_id: str) -> None:
