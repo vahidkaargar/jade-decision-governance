@@ -515,3 +515,127 @@ def test_a_hard_link_under_a_root_name_still_counts(home, cmd, want):
 def test_rsync_copy_as_takes_a_value():
     assert CLASS in away("rsync -a /tmp/x/ ~ --copy-as root").ho_ids   # PRE3-9
     assert CLASS in away("rsync -a --copy-as=root /tmp/x/ ~").ho_ids
+
+
+# ------------------------------------------------------------------ wave 5 (security review PRE4-1 .. PRE4-6): a new check only adds, never narrows
+
+ALL3 = {CLASS, "HO-mod", "HO-wiring"}
+
+
+@pytest.fixture
+def wired(home):
+    (home / ".local" / "bin").mkdir(parents=True)
+    (home / ".claude" / "hooks").mkdir()
+    (home / ".claude" / "plugins").mkdir()
+    return home
+
+
+@pytest.mark.parametrize("cmd,want", [
+    ("ln -f /tmp/x/.z* ~", ALL3), ("cd /tmp/x && ln -f .z* ~", ALL3), ("ln -f /tmp/x/.[z]shenv ~", ALL3), ("ln /tmp/x/* ~", ALL3),
+    ("ln /tmp/x/* ~/.claude", ALL3), ("ln -f /tmp/x/* ~/.local/bin", {"HO-wiring"}), ("cp -alf /tmp/x/. ~/.local/bin", {"HO-wiring"}),
+    ("cp -al /tmp/d/ ~/.local/bin", {"HO-wiring"}), ("gcp -alT /tmp/x ~/.local/bin", {"HO-wiring"}), ("cp -alT /tmp/x ~/.local/bin", {"HO-wiring"}),
+    ("cp -al /tmp/d/ ~/.claude", ALL3), ("cp -alT /tmp/x ~/.claude", ALL3), ("cp -al -T /tmp/x ~/.claude", ALL3),
+    ("cp -al --no-target-directory /tmp/x ~/.claude", ALL3), ("cp -alT /tmp/x ~", ALL3), ("cp -al /tmp/snap/ ~", ALL3),
+    ("gcp -alT /tmp/x ~/.claude/plugins", {"HO-mod"}), ("cp -Rl /tmp/d/* ~/.claude/hooks", {"HO-wiring"}), ("ln -t ~ /tmp/x/.z*", ALL3),
+    ("ln /tmp/a /tmp/b ~", ALL3),
+])
+def test_a_hard_link_from_a_glob_contents_or_t_source_keeps_the_destination_check(wired, cmd, want):
+    a = away(cmd)
+    assert want <= set(a.ho_ids), (cmd, a.ho_ids)   # PRE4-1: the names that land are not `dest/basename(src)`
+
+
+@pytest.mark.parametrize("cmd,want", [("ln /tmp/settings.json ~/.claude", "HO-settings-shadow"), ('ln /tmp/.zshenv "$HOME"', CLASS),
+                                      ("cd ~ && ln /tmp/.zshenv .", CLASS), ("ln /tmp/jade ~/.local/bin", "HO-wiring"), ("ln /tmp/hooks ~/.claude", "HO-wiring")])
+def test_a_hard_link_of_one_named_file_keeps_the_class_of_the_name_it_makes(wired, cmd, want):
+    assert want in away(cmd).ho_ids, cmd   # PRE3-8 narrowing: the file that is made still counts
+
+
+@pytest.mark.parametrize("cmd,want", [
+    ("cd /tmp/d && rsync -aR jade ~/.local/bin/", {"HO-wiring"}), ("rsync --relative jade ~/.local/bin", {"HO-wiring"}),
+    ("cd /tmp/d && cp --parents jade ~/.local/bin", {"HO-wiring"}), ("rsync -aR settings.json ~/.claude/", {"HO-settings-shadow", "HO-wiring"}),
+    ("rsync -aR settings.json ~/.claude", {"HO-settings-shadow", "HO-wiring"}),
+    ("rsync -a --relative ./settings.json ~/.claude/", {"HO-settings-shadow", "HO-wiring"}),
+    ("cd /tmp/d && gcp --parents settings.json ~/.claude/", {"HO-settings-shadow", "HO-wiring"}),
+    ("rsync -a --files-from=/tmp/l jade ~/.local/bin", {"HO-wiring"}), ("rsync -aR /tmp/d/./hooks ~/.claude", {"HO-wiring"}),
+    ("rsync -aR .claude/hooks ~", {"HO-wiring"}), ("cd /tmp/d && cp --parents .local/bin/jade ~", {"HO-wiring"}),
+])
+def test_a_relative_copy_gets_the_exact_check_as_well(wired, cmd, want):
+    a = away(cmd)
+    assert want <= set(a.ho_ids), (cmd, a.ho_ids)   # PRE4-2: `dest/<source path>` and `dest/name`, besides the contents check
+
+
+@pytest.mark.parametrize("cmd", [
+    "GIT_WORK_TREE=/tmp/x bash -c 'true'; cd ~ && git checkout -- .", "GIT_WORK_TREE=/tmp/x bash -c 'git status'; git -C ~ checkout -- .",
+    "env GIT_WORK_TREE=/tmp/x sh -c 'true'; cd ~ && git checkout -- .", "GIT_WORK_TREE=/tmp/x zsh -c 'true' && git -C ~ reset --hard",
+    "GIT_CONFIG_KEY_0=core.worktree GIT_CONFIG_VALUE_0=/tmp/x sh -c true; cd ~ && git checkout -- .",
+    "GIT_WORK_TREE=/tmp/x; cd ~ && git checkout .", "export GIT_WORK_TREE=/tmp/x; git -C ~ checkout .",
+    "export GIT_WORK_TREE=/tmp/x; git -C ~ --work-tree=~ checkout .",
+])
+def test_a_carried_work_tree_is_checked_besides_the_real_one(cmd):
+    assert CLASS in away(cmd).ho_ids, cmd   # PRE4-3
+
+
+@pytest.mark.parametrize("cmd", [
+    "cd ~ && GIT_CONFIG_KEY_0=core.worktree GIT_CONFIG_VALUE_0=/tmp/x git checkout -- .",
+    "cd ~ && GIT_CONFIG_KEY_0=core.worktree GIT_CONFIG_VALUE_0=/tmp/x git --git-dir=~/.dot checkout -- .",
+    "cd ~ && GIT_CONFIG_COUNT=0 GIT_CONFIG_KEY_0=core.worktree GIT_CONFIG_VALUE_0=/tmp/x git checkout -- .",
+    "cd ~ && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_5=core.worktree GIT_CONFIG_VALUE_5=/tmp/x git checkout -- .",
+    "cd ~ && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.worktree GIT_CONFIG_VALUE_0=/tmp/x git checkout -- .",
+    "GIT_CONFIG_KEY_0=core.worktree GIT_CONFIG_VALUE_0=/tmp/x git -C ~ checkout -- .",
+    "export GIT_CONFIG_KEY_0=core.worktree GIT_CONFIG_VALUE_0=/tmp/x; git -C ~ checkout .",
+])
+def test_a_core_worktree_from_env_adds_a_location_and_keeps_the_default(cmd):
+    assert CLASS in away(cmd).ho_ids, cmd   # PRE4-4: counted whether or not GIT_CONFIG_COUNT covers the pair
+
+
+@pytest.mark.parametrize("cmd", [
+    'jade ack --all --as revised --note "~/.local/share/jade/ledger.db was locked"', 'jade ack --all --as revised --note "~/.claude/hooks/jade.sh ok"',
+    'gh pr create --title Hooks --body "~/.claude/hooks/jade.sh now fails closed"', 'gh pr create --title t --body "~/.local/share/jade/ledger.db is now WAL"',
+    'gh pr create --title t --body "~/.claude/settings.json gets a new hook"', 'gh pr comment 5 --body "~/.claude/plugins/x is a mod"',
+    'gh issue comment 3 --body "~/.local/bin/jade was replaced"', 'gh pr create --title "x" --body "~/.zshenv is now a start-up root"',
+    'curl -d "~/.claude/x" https://example.com', 'curl -d "~/.claude/hooks/x y" https://example.com', 'git commit -m "~/.claude/hooks/jade.sh fails closed"',
+    'git tag -a v1 -m "~/.zshenv fix"',
+])
+def test_prose_with_a_space_is_not_read_as_a_path(wired, cmd):
+    a = away(cmd)
+    assert not a.ho_ids, (cmd, a.ho_ids)   # PRE4-5: the path view reads only path positions of write verbs
+
+
+@pytest.fixture
+def spaced_home(tmp_path, monkeypatch):
+    h = tmp_path / "Macintosh HD" / "Users" / "u"
+    (h / ".claude" / "hooks").mkdir(parents=True)
+    (h / ".claude" / "shell-snapshots").mkdir()
+    (h / ".local" / "bin").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(h))
+    return str(h.resolve())
+
+
+@pytest.mark.parametrize("cmd,want", [
+    ('cp x "@H/.claude/hooks/a.sh"', "HO-wiring"), ('mv x "@H/.claude/hooks/a.sh"', "HO-wiring"), ('echo x >> "@H/.zshenv"', CLASS),
+    ('tee -a "@H/.zshrc" < /tmp/x', CLASS), ('cp /tmp/x "@H/.claude/settings.json"', "HO-settings-shadow"), ('ln -f /tmp/x "@H/.zshenv"', CLASS),
+    ('touch "@H/.zshenv"', CLASS), ('dd if=/tmp/x of="@H/.zshenv"', CLASS), ('sed -i "" s/a/b/ "@H/.zshrc"', CLASS), ('install /tmp/x "@H/.local/bin/jade"', "HO-wiring"),
+    ('tar -xf /tmp/a.tar -C "@H"', CLASS), ('unzip /tmp/a.zip -d "@H"', CLASS), ('rsync -a /tmp/x/ "@H"', CLASS), ('ditto /tmp/x "@H"', CLASS),
+    ('jade ack --note x > "@H/.zshenv"', CLASS), ('git -C "@H" checkout -- .', CLASS), ('GIT_WORK_TREE="@H" git checkout -- .', CLASS),
+    ('chmod 644 "@H/.zshenv"', CLASS), ('rm -f "@H/.zshenv"', CLASS),
+])
+def test_a_spaced_home_keeps_its_class_in_write_positions(spaced_home, cmd, want):
+    cmd = cmd.replace("@H", spaced_home)
+    a = away(cmd)
+    assert want in a.ho_ids, (cmd, a.ho_ids)
+
+
+@pytest.mark.parametrize("cmd", ['jade ack --all --as revised --note "@H/.claude/hooks/jade.sh was locked"', 'gh pr create --body "@H/.zshenv now"',
+                                 'curl -d "@H/.claude/x" https://example.com'])
+def test_a_spaced_home_in_prose_is_not_a_path(spaced_home, cmd):
+    cmd = cmd.replace("@H", spaced_home)
+    a = away(cmd)
+    assert not a.ho_ids, (cmd, a.ho_ids)
+
+
+def test_many_git_config_key_words_are_linear():
+    cmd = "GIT_CONFIG_KEY_1=core.worktree " * 8000 + "git checkout ."   # 248 KB
+    assert len(cmd) > 240_000
+    t = time.perf_counter()
+    policy.assess("Bash", {"command": cmd}, os.environ["HOME"])
+    assert time.perf_counter() - t < 1.0   # PRE4-6

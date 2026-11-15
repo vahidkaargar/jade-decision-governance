@@ -1174,6 +1174,8 @@ def _ho_segment(a: Assessment, seg: str, dirs: tuple[str, ...], cwd: str, wroots
     `roots_only`: the root checks alone (the path view of a segment, PRE3-1); the pattern classes were read from the rules' view."""
     toks, parent_too = _segment_tokens(seg)
     bare, calls = _analyse(seg)
+    if roots_only:
+        toks = _path_view_tokens(bare, toks)   # PRE4-5: prose arguments are not paths
     links = _hardlink_sources(bare)
     into = _into_targets(bare)
     _ho_shell_segment(a, seg, bare, calls, toks, parent_too, dirs, cwd, sroots, links, into, git_work_tree)
@@ -1295,7 +1297,8 @@ def _rsync_operands(args: list[str]) -> list[str]:
 def _hardlink_sources(bare: str) -> list[tuple[str, bool, bool]]:
     """The names a hard-link command (`ln` without `-s`, `cp -l`/`--link`/`-al`, `link`) joins, as (path, parent_too, unless_dir): each source with
     parent_too (PRE2-3), and the new name: the destination itself unless it is a directory, else `dest/name` per source (`ln /tmp/x ~` makes `~/x`
-    only, PRE3-8); a lone source links `./name`."""
+    only, PRE3-8); a lone source links `./name`. The PRE3-8 narrowing applies to one plain named source only: a glob, a contents source (`DIR/`, `DIR/.`),
+    `-T` or several sources keep the destination check as it was (PRE4-1)."""
     words = [_word(w) for w in bare.split(" ") if w]
     if not words:
         return []
@@ -1312,7 +1315,11 @@ def _hardlink_sources(bare: str) -> list[tuple[str, bool, bool]]:
     else:
         dest, srcs, unless_dir = ".", ops, False
     out = [(src, True, False) for src in srcs]
-    if unless_dir:
+    broad = len(srcs) != 1 or any(w == "--no-target-directory" or _NO_TARGET_DIR.match(w) for w in args) or any(
+        _GLOB_CHARS.search(s) or s in (".", "..") or s.endswith(("/", "/.")) for s in srcs)
+    if broad and srcs:
+        out.append((dest, True, False))   # the old check: the destination with parent_too, directory or not
+    elif unless_dir:
         out.append((dest, True, True))
     out += [(os.path.join(_expand_home(dest), name), True, False) for src in srcs if (name := os.path.basename(src.rstrip("/"))) not in ("", ".", "..")]
     return list(dict.fromkeys(out))
@@ -1348,16 +1355,21 @@ def _into_targets(bare: str) -> list[tuple[str, bool, bool, bool]]:
         copyish = verb in ("cp", "gcp", "rsync")
         recursive = verb == "rsync" or (verb in ("cp", "gcp") and any(_TREE_CP_FLAG.match(w) or w in ("--recursive", "--archive") for w in args))
         # PRE3-3: `rsync -R`/`--relative`, `--files-from` and `cp --parents` write each source's path, or listed files, below dest: a contents copy
-        spread = (verb == "rsync" and any(w == "--relative" or w.startswith("--files-from") or _RSYNC_RELATIVE.match(w) for w in args)) or (
-            verb in ("cp", "gcp") and "--parents" in args)
+        relative = (verb == "rsync" and any(w == "--relative" or _RSYNC_RELATIVE.match(w) for w in args)) or (verb in ("cp", "gcp") and "--parents" in args)
+        spread = relative or (verb == "rsync" and any(w.startswith("--files-from") for w in args))
         out: list[tuple[str, bool, bool, bool]] = []
         for x in srcs:
             if verb == "rsync":
                 x = _rsync_source_path(x)
             glob = bool(_GLOB_CHARS.search(x))
             name = os.path.basename(x.rstrip("/"))
+            if spread:   # added to the checks below, never in place of them (PRE4-2)
+                out.append((dest, True, False, False))
+                rel = os.path.normpath(x.split("/./", 1)[1] if verb == "rsync" and "/./" in x else x.lstrip("/")) if relative and x else "."
+                if rel not in (".", "") and not rel.startswith(".."):   # `rsync -R a/b D` and `cp --parents a/b D` write `D/a/b`
+                    out.append((os.path.join(_expand_home(dest), rel), recursive, True, False))
             # BSD cp and rsync copy what is inside `src/`; a glob source may name anything in its folder (recursive, or a dot pattern: PRE3-3)
-            contents = copyish and (spread or x in ("", ".", "..", "~") or x.endswith(("/", "/.")) or (glob and (recursive or name.startswith((".", "[")))))
+            contents = copyish and (x in ("", ".", "..", "~") or x.endswith(("/", "/.")) or (glob and (recursive or name.startswith((".", "[")))))
             if contents:
                 out.append((dest, True, False, False))
                 continue
@@ -1382,25 +1394,46 @@ def _into_targets(bare: str) -> list[tuple[str, bool, bool, bool]]:
     return []
 
 
-_GIT_CONFIG_KEY_ENV = re.compile(r"(?:^|\s)GIT_CONFIG_KEY_(\d+)=['\"]?core\.worktree['\"]?(?=\s|$)", re.I)
+_GIT_CONFIG_PAIR_ENV = re.compile(r"(?:^|\s)GIT_CONFIG_(KEY|VALUE)_(\d+)=(\S*)", re.I)
 _SHELL_RUNNER = re.compile(r"^(?:[A-Za-z_]\w*=\S*\s+)*(?:(?:\S*/)?env(?:\s+-\S+|\s+[A-Za-z_]\w*=\S*)*\s+)?(?:\S*/)?(?:ba|z|da|k|a|fi)?sh\s+-[A-Za-z]*c(?:\s|$)")
+
+
+def _env_config_work_tree(seg: str) -> str | None:
+    """The value of the first `GIT_CONFIG_KEY_<n>=core.worktree` that has a `GIT_CONFIG_VALUE_<n>=D` in the segment (PRE3-5). Whether GIT_CONFIG_COUNT
+    covers n is not checked: the caller counts this as an added location, never as the only one (PRE4-4). One pass over the text (PRE4-6)."""
+    if "GIT_CONFIG_" not in seg.upper():
+        return None
+    keys: list[str] = []
+    vals: dict[str, str] = {}
+    for m in _GIT_CONFIG_PAIR_ENV.finditer(seg):
+        kind, n, v = m.group(1).upper(), m.group(2), m.group(3)
+        if kind == "KEY":
+            if v.strip("'\"").lower() == "core.worktree":
+                keys.append(n)
+        else:
+            vals.setdefault(n, v)
+    return next((vals[n] for n in keys if n in vals), None)
 
 
 def _env_work_tree(seg: str) -> str | None:
     """The work tree a segment's environment gives git: `GIT_WORK_TREE=D`, or `GIT_CONFIG_KEY_<n>=core.worktree` with its `GIT_CONFIG_VALUE_<n>=D` (PRE3-5)."""
     if m := _GIT_WORK_TREE_ENV.search(seg):
         return m.group(1)
-    for k in _GIT_CONFIG_KEY_ENV.finditer(seg):
-        if v := re.search(rf"(?:^|\s)GIT_CONFIG_VALUE_{k.group(1)}=(\S*)", seg):
-            return v.group(1)
-    return None
+    return _env_config_work_tree(seg)
 
 
 def _git_tree_targets(seg: str, calls: list[shellnorm.GitCall], carried: str | None = None) -> list[tuple[str, bool]]:
     """The work trees a git call writes (`-C D`, `--work-tree D`, `-c core.worktree=D`, `GIT_WORK_TREE=D` in the segment or set by an earlier one
     (`carried`), else the directory it runs in), and the directory a clone or a new worktree fills: a work tree that is home, or holds a start-up file, is
-    replaced file by file (`git --work-tree=~ checkout -- .`)."""
-    env = _env_work_tree(seg) or carried
+    replaced file by file (`git --work-tree=~ checkout -- .`).
+
+    Only a `GIT_WORK_TREE=D` on this segment itself replaces the default location. A `GIT_CONFIG_KEY_<n>=core.worktree` value and a work tree carried
+    from an earlier segment (an export, an assignment, a nested shell's prefix) are added to the locations checked: the directory git runs in (cwd, `-C`)
+    is still counted, unless the call names its own `--work-tree` or `-c core.worktree` (PRE4-3, PRE4-4)."""
+    own = m.group(1) if (m := _GIT_WORK_TREE_ENV.search(seg)) else None
+    cfg = _env_config_work_tree(seg)
+    env = own or cfg or carried
+    extra = [x for x in dict.fromkeys((cfg, carried)) if x]   # added locations, never in place of another
     out = []
     for call in calls:
         sub, args = call.sub, call.args
@@ -1417,6 +1450,10 @@ def _git_tree_targets(seg: str, calls: list[shellnorm.GitCall], carried: str | N
         wt = call.work_tree or call.config_work_tree or env
         if sub not in ("clone", "worktree") and env and wt != env:   # git takes GIT_WORK_TREE over core.worktree: count both, the safe direction
             out.append((os.path.join(base, _expand_home(_word(env))), True))
+        if sub not in ("clone", "worktree"):
+            out += [(os.path.join(base, _expand_home(_word(x))), True) for x in extra if x != wt and x != env]
+            if own is None and extra and not (call.work_tree or call.config_work_tree):
+                out.append((base, True))   # the real work tree: the env value may not reach this git (PRE4-3, PRE4-4)
         if sub == "clone":
             dest = ops[-1] if len(ops) >= 2 else (os.path.basename(ops[0].rstrip("/")).removesuffix(".git") if ops else "")
             out.append((os.path.join(base, _expand_home(_word(dest))), True))
@@ -1477,9 +1514,33 @@ def _segment_tokens(seg: str) -> tuple[list[str], bool]:
     return toks, parent_too
 
 
-def _si12_segment(seg: str, dirs: tuple[str, ...], cwd: str, roots: tuple[str, ...]) -> bool:
-    """SI-12 for one shell segment that is not read-only: does it write the config directory (or replace it, or a parent of it)?"""
+# Verbs whose operands are paths they write: the path view (PRE3-1) reads their operands; any other verb only its redirect targets (PRE4-5)
+_PATH_VIEW_VERBS = frozenset({"cp", "gcp", "mv", "gmv", "ln", "gln", "link", "install", "ginstall", "rsync", "ditto", "scp", "tar", "gtar", "bsdtar", "unzip",
+                              "7z", "7za", "7zz", "cpio", "pax", "tee", "gtee", "dd", "gdd", "sed", "gsed", "perl", "touch", "gtouch", "mkdir", "gmkdir",
+                              "chmod", "gchmod", "chown", "gchown", "chgrp", "gchgrp", "chflags", "xattr", "rm", "grm", "rmdir", "grmdir", "unlink",
+                              "truncate", "gtruncate", "shred", "gshred"})
+_IN_PLACE = re.compile(r"^(?:-[A-Za-z]*i\S*|--in-place(?:=.*)?)$")
+
+
+def _path_view_tokens(bare: str, toks: list[str]) -> list[str]:
+    """The words of a segment the path view reads (PRE4-5): the redirect targets, and the operand words of a verb that writes its operands (`sed`/`perl`
+    with `-i` only, `dd` its `of=`). A quoted argument of any other verb (`--note "..."`, `--body "..."`, `curl -d "..."`) is text, not a path."""
+    words = bare.split(" ")
+    verb = words[0].rsplit("/", 1)[-1]
+    redirects = [shellnorm._dec(_REDIRECT_PREFIX.sub("", t.strip("'\"`,;()"))) for t in REDIRECT_TARGET.findall(bare)]
+    if verb not in _PATH_VIEW_VERBS or (verb in ("sed", "gsed", "perl") and not any(_IN_PLACE.match(w) for w in words[1:])):
+        return [t for t in redirects if t]
+    if verb in ("dd", "gdd"):
+        return [t for t in redirects if t] + [_word(w[3:]) for w in words[1:] if w.startswith("of=")]
+    return toks
+
+
+def _si12_segment(seg: str, dirs: tuple[str, ...], cwd: str, roots: tuple[str, ...], path_view: bool = False) -> bool:
+    """SI-12 for one shell segment that is not read-only: does it write the config directory (or replace it, or a parent of it)?
+    `path_view`: the segment comes from the path view, only its path positions count (PRE4-5)."""
     toks, parent_too = _segment_tokens(seg)
+    if path_view:
+        toks = _path_view_tokens(_bare(seg), toks)
     return any(_si12_hit(tok, d or cwd, roots, parent_too) for tok in toks for d in (dirs or ("",)))
 
 
@@ -1714,7 +1775,7 @@ def _ho_spaced(ho: Assessment, scan: str, literal_end: int, cwd: str, wroots: tu
         git_wt = _carried_work_tree(seg, git_wt)
         if is_read_only(seg):
             continue
-        si12 = si12 or bool(si12_roots and _si12_segment(seg, dirs, cwd, si12_roots))
+        si12 = si12 or bool(si12_roots and _si12_segment(seg, dirs, cwd, si12_roots, path_view=True))
         _ho_segment(ho, seg, dirs, cwd, wroots, mroots, sroots, git_wt, roots_only=True)
     return si12
 
