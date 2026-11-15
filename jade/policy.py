@@ -869,12 +869,33 @@ def _expand_home(p: str) -> str:
     return os.path.expanduser(p)
 
 
+def _case_insensitive() -> bool:
+    """Whether paths are compared case-folded. A macOS volume (APFS and HFS+ by default) and a Windows one ignore case, so `~/.ZSHENV` is `~/.zshenv`;
+    folding on a case-sensitive Mac volume only adds matches, the safe direction (security review PRE-1)."""
+    return sys.platform in ("darwin", "win32")
+
+
+def _path_key(path: str, base: str) -> str:
+    """The form every root check compares: the real path of `path` (relative to `base`, with `~`, `$HOME` and `${HOME}` expanded), case-folded where
+    the volume ignores case. The roots go through `_fold` too."""
+    return _fold(os.path.realpath(os.path.join(base or os.getcwd(), _expand_home(path))))
+
+
+def _fold(p: str) -> str:
+    return p.casefold() if _case_insensitive() else p
+
+
 def _si12_hit(path: str, base: str, roots: tuple[str, ...], parent_too: bool = False) -> bool:
-    """True when `path` (relative to `base`) is a config directory, a path inside one, or, for a verb that replaces a directory, a parent of one."""
+    """True when `path` (relative to `base`) is a config directory, a path inside one, or, for a verb that replaces a directory, a parent of one.
+    Used by every root check (SI-12, wiring, mod, shell start-up), so all of them compare paths the same way (`_path_key`)."""
     if not path or "\x00" in path:
         return False
-    real = os.path.realpath(os.path.join(base or os.getcwd(), _expand_home(path)))
-    return any(real == r or real.startswith(r + os.sep) or (parent_too and r.startswith(real.rstrip(os.sep) + os.sep)) for r in roots)
+    real = _path_key(path, base)
+    for r in roots:
+        r = _fold(r)
+        if real == r or real.startswith(r + os.sep) or (parent_too and r.startswith(real.rstrip(os.sep) + os.sep)):
+            return True
+    return False
 
 
 HO_WIRING, HO_INSTALL, HO_SETTINGS, HO_STATE, HO_MOD, HO_R17, HO_TERMINAL, HO_SHELL = (
@@ -913,7 +934,13 @@ def _mod_roots() -> tuple[str, ...]:
 
 
 _SHELL_STARTUP_READ_MAX = 1 << 20
-_SOURCE_LINE = re.compile(r"""^\s*(?:source|\.)\s+(?:"([^"\n]+)"|'([^'\n]+)'|([^\s;&|<>()"'`]+))""")
+_ETC = "/etc"   # the system-wide start-up files live here; the tests point it at a temporary directory
+_ZSH_FILES = (".zshenv", ".zprofile", ".zshrc", ".zlogin", ".zlogout")
+_SH_WORD = r"""(?:"[^"\n]*"|'[^'\n]*'|\\.|[^\s;&|<>()"'\\])+"""
+_SOURCE_WORD = re.compile(r"(?<![\w.-])(?:source|\.)[ \t]+(" + _SH_WORD + ")")
+_SOURCE_KEYWORDS = frozenset({"then", "do", "else", "if", "elif", "while", "until"})
+_ZDOTDIR_SET = re.compile(r"(?:^|[;&|{(]|\bexport\b)[ \t]*ZDOTDIR=(" + _SH_WORD + ")", re.M)
+_HOME_VAR = re.compile(r"\$(?:HOME(?![A-Za-z0-9_])|\{HOME\})")
 
 
 def _read_startup_text(path: str) -> str:
@@ -934,29 +961,109 @@ def _read_startup_text(path: str) -> str:
         os.close(fd)
 
 
+def _shell_word(raw: str) -> str | None:
+    """One shell word as the shell expands it, when that needs nothing but HOME: quotes removed, a leading unquoted `~` and `$HOME` or `${HOME}` outside
+    single quotes expanded, a single-quoted part kept literal. None when anything else would expand (another variable, `~user`, a command substitution,
+    an unquoted glob)."""
+    home, out, i, n = os.path.expanduser("~"), [], 0, len(raw)
+    if raw.startswith("~"):
+        if n > 1 and raw[1] != "/":
+            return None
+        out.append(home)
+        i = 1
+    while i < n:
+        c = raw[i]
+        if c == "'":
+            j = raw.find("'", i + 1)
+            if j < 0:
+                return None
+            out.append(raw[i + 1:j])
+            i = j + 1
+        elif c == '"':
+            j = i + 1
+            while j < n and raw[j] != '"':
+                d = raw[j]
+                if d == "\\" and j + 1 < n and raw[j + 1] in '$`"\\':
+                    out.append(raw[j + 1])
+                    j += 2
+                elif d == "$" and (m := _HOME_VAR.match(raw, j)):
+                    out.append(home)
+                    j = m.end()
+                elif d in "$`":
+                    return None
+                else:
+                    out.append(d)
+                    j += 1
+            if j >= n:
+                return None
+            i = j + 1
+        elif c == "\\":
+            if i + 1 >= n:
+                return None
+            out.append(raw[i + 1])
+            i += 2
+        elif c == "$" and (m := _HOME_VAR.match(raw, i)):
+            out.append(home)
+            i = m.end()
+        elif c in "$`*?[":
+            return None
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 def _sourced_path(raw: str) -> str | None:
-    """A literal sourced path with `~`, `$HOME` or `${HOME}` expanded; None for a variable, a glob or a command substitution."""
-    p = _expand_home(raw.strip())
-    if not p or any(c in p for c in "$*?[`\x00") or not os.path.isabs(p):
+    """A literal absolute path a start-up file names (`_shell_word`); None for a variable, a glob, a command substitution or a relative path."""
+    p = _shell_word(raw)
+    if not p or "\x00" in p or not os.path.isabs(p):
         return None
     return p
 
 
+def _sourced_files(text: str) -> list[str]:
+    """Every literal path a start-up file sources, wherever on a line the `source` or `.` command stands (comment lines skipped)."""
+    out = []
+    for m in _SOURCE_WORD.finditer(text):
+        lead = text[text.rfind("\n", 0, m.start()) + 1:m.start()]
+        if _starts_command(lead) and (sp := _sourced_path(m.group(1))):
+            out.append(sp)
+    return out
+
+
+def _starts_command(lead: str) -> bool:
+    """Whether a command starts after `lead` (the text before it on its line): nothing, `;`, `&&`, `||`, `|`, `{`, `(`, `!` or a keyword, then any
+    `builtin` or `command` words. A comment line never does."""
+    if lead.lstrip().startswith("#"):
+        return False
+    words = lead.split()
+    while words and words[-1] in ("builtin", "command"):
+        words.pop()
+    if not words:
+        return True
+    last = words[-1]
+    return last[-1] in ";&|{(!" or last in _SOURCE_KEYWORDS or last.rsplit(";", 1)[-1] in _SOURCE_KEYWORDS
+
+
 def _shell_roots() -> tuple[str, ...]:
-    """The real paths of the shell start-up files (zsh, bash, system-wide, $BASH_ENV, $ENV), the Claude shell snapshot directory, and every file those
-    start-up files source by a literal path, one level deep (a variable or a glob is not followed: docs/05 T31). Computed per call."""
-    zd = os.environ.get("ZDOTDIR") or "~"
-    startup = [os.path.join(os.path.expanduser(zd), n) for n in (".zshenv", ".zprofile", ".zshrc", ".zlogin", ".zlogout")]
+    """The real paths of what the agent's shell loads: the shell start-up files (zsh, bash, system-wide, $BASH_ENV, $ENV, and the zsh files of a
+    `ZDOTDIR` that ~/.zshenv sets to a literal path), the Claude shell snapshot and session-env directories (also under $CLAUDE_CONFIG_DIR), and every
+    file those start-up files source by a literal path, one level deep (a variable or a glob is not followed: docs/05 T31). Computed per call."""
+    zd = os.path.expanduser(os.environ.get("ZDOTDIR") or "~")
+    startup = [os.path.join(zd, n) for n in _ZSH_FILES]
     startup += [os.path.expanduser("~/" + n) for n in (".bashrc", ".bash_profile", ".bash_login", ".profile", ".bash_logout")]
-    startup += ["/etc/" + n for n in ("zshenv", "zprofile", "zshrc", "zlogin", "profile", "bashrc")]
+    startup += [os.path.join(_ETC, n) for n in ("zshenv", "zprofile", "zshrc", "zlogin", "zlogout", "profile", "bashrc")]
     startup += [os.environ[v] for v in ("BASH_ENV", "ENV") if os.environ.get(v)]
+    texts = {startup[0]: _read_startup_text(startup[0])}
+    for m in _ZDOTDIR_SET.finditer(texts[startup[0]]):   # PRE-8: the interactive shell that makes the snapshot reads the zsh files there
+        if d := _sourced_path(m.group(1)):
+            startup += [os.path.join(d, n) for n in _ZSH_FILES]
     out = [_real(p) for p in startup]
-    out.append(_real("~/.claude/shell-snapshots"))
-    for f in list(out[:-1]):
-        for line in _read_startup_text(f).splitlines():
-            m = _SOURCE_LINE.match(line)
-            if m and (sp := _sourced_path(next(g for g in m.groups() if g))):
-                out.append(_real(sp))
+    claude = [os.path.expanduser("~/.claude"), *([os.environ["CLAUDE_CONFIG_DIR"]] if os.environ.get("CLAUDE_CONFIG_DIR") else [])]
+    out += [_real(os.path.join(c, n)) for c in claude for n in ("shell-snapshots", "session-env")]   # session-env: Claude Code runs the scripts there
+    for f in dict.fromkeys(startup):
+        text = texts[f] if f in texts else _read_startup_text(f)
+        out += [_real(sp) for sp in _sourced_files(text)]
     return tuple(dict.fromkeys(out))
 
 
@@ -1023,7 +1130,7 @@ def _ho_tool_paths(a: Assessment, tool_input: dict, subjects: list[str], cwd: st
             _ho_add(a, HO_MOD)
         if _si12_hit(s, cwd, sroots):
             _ho_add(a, HO_SHELL)
-        if _SETTINGS_FILE.search(os.path.realpath(os.path.join(cwd or os.getcwd(), os.path.expanduser(s)))):
+        if _SETTINGS_FILE.search(_path_key(s, cwd)):
             text = _written_text(tool_input) if text is None else text
             if not text or _SETTINGS_DISABLE.search(text):   # unreadable text counts: it could be anything
                 _ho_add(a, HO_SETTINGS)
@@ -1032,7 +1139,8 @@ def _ho_tool_paths(a: Assessment, tool_input: dict, subjects: list[str], cwd: st
 def _ho_segment(a: Assessment, seg: str, dirs: tuple[str, ...], cwd: str, wroots: tuple[str, ...], mroots: tuple[str, ...], sroots: tuple[str, ...]) -> None:
     """Human-only classes of one shell segment that is not read-only."""
     toks, parent_too = _segment_tokens(seg)
-    bare = _bare(seg)
+    bare, calls = _analyse(seg)
+    _ho_shell_segment(a, seg, bare, calls, toks, parent_too, dirs, cwd, sroots)
     install = bool(_INSTALL_CMD.search(bare))
     if _UV_TOOL_JADE.search(bare):
         _ho_add(a, HO_WIRING)
@@ -1045,13 +1153,131 @@ def _ho_segment(a: Assessment, seg: str, dirs: tuple[str, ...], cwd: str, wroots
                 _ho_add(a, HO_WIRING)
             if _si12_hit(tok, base, mroots, parent_too):
                 _ho_add(a, HO_MOD)
-            if _si12_hit(tok, base, sroots, parent_too):
-                _ho_add(a, HO_SHELL)
             real = os.path.realpath(os.path.join(base or os.getcwd(), os.path.expanduser(tok))) if tok else ""
-            if real and _SETTINGS_FILE.search(real):
+            if real and _SETTINGS_FILE.search(_fold(real)):
                 _ho_add(a, HO_SETTINGS)   # a shell write of a settings file: the text is not the gate's to read
             if install and real and os.path.isdir(real) and _is_checkout(real):
                 _ho_add(a, HO_INSTALL)
+
+
+_TREE_CP_FLAG = re.compile(r"^-[A-Za-z]*[rRa][A-Za-z]*$")
+_TAR_EXTRACT = re.compile(r"^-[A-Za-z]*x[A-Za-z]*$")
+_GIT_TREE_WRITERS = frozenset({"checkout", "restore", "switch", "pull", "merge", "rebase", "cherry-pick", "revert", "am", "apply", "stash", "reset", "clone",
+                               "worktree", "read-tree", "checkout-index"})
+_GIT_WORK_TREE_ENV = re.compile(r"(?:^|\s)GIT_WORK_TREE=(\S+)")
+_SOURCE_VERBS = frozenset({"source", "."})
+
+
+def _word(w: str) -> str:
+    return w.strip("'\"`,;()")
+
+
+def _option_value(args: list[str], names: tuple[str, ...], long: str = "") -> str | None:
+    """The value of the last `-X V`, `-XV` or `--long=V` among `args` (None when none is given)."""
+    val = None
+    for k, w in enumerate(args):
+        if w in names and k + 1 < len(args):
+            val = args[k + 1]
+        elif long and w.startswith(long + "="):
+            val = w.split("=", 1)[1]
+        elif any(w.startswith(n) and len(w) > len(n) and not n.startswith("--") for n in names):
+            val = w[2:]
+    return val
+
+
+def _target_dir(args: list[str]) -> str | None:
+    """The directory of `-t D`, `-tD`, `-rt D` or `--target-directory[=]D` (cp, install, ln)."""
+    for k, w in enumerate(args):
+        if w.startswith("--target-directory="):
+            return w.split("=", 1)[1]
+        if _is_target_dir_option(w):
+            rest = "" if w == "--target-directory" else w[w.index("t", 1) + 1:]
+            return rest or (args[k + 1] if k + 1 < len(args) else None)
+    return None
+
+
+def _into_targets(bare: str) -> list[tuple[str, bool]]:
+    """Where a copy or unpack verb writes, as (path, parent_too) pairs: a whole tree copied or unpacked into a directory counts that directory and its
+    parents too (it can bring `.zshenv` or `.claude/shell-snapshots/...` with it); a file copied into a directory counts `directory/name`."""
+    words = [_word(w) for w in bare.split(" ") if w]
+    if not words:
+        return []
+    verb, args = words[0].rsplit("/", 1)[-1], words[1:]
+    if verb in ("cp", "gcp", "install", "ln", "rsync", "ditto"):
+        tdir = _target_dir(args) if verb != "rsync" else None
+        ops = operands(args)
+        if tdir:
+            dest, srcs = tdir, [o for o in ops if o != tdir]
+        elif len(ops) >= 2:
+            dest, srcs = ops[-1], ops[:-1]
+        else:
+            return []
+        if verb == "rsync" and re.match(r"^[^/]*:", dest):
+            return []   # a remote destination
+        tree = verb in ("rsync", "ditto") or (verb in ("cp", "gcp") and (any(_TREE_CP_FLAG.match(w) or w in ("--recursive", "--archive") for w in args)
+                                                                          or any(x in (".", "..") or x.endswith(("/.", "/")) for x in srcs)))
+        out = [(dest, True)] if tree else []
+        out += [(os.path.join(_expand_home(dest), name), False) for x in srcs if (name := os.path.basename(x.rstrip("/"))) not in ("", ".", "..")]
+        return out
+    if verb in ("tar", "gtar", "bsdtar"):
+        first = args[0] if args else ""
+        if not (any(w in ("--extract", "--get") or _TAR_EXTRACT.match(w) for w in args) or re.fullmatch(r"[A-Za-z]*x[A-Za-z]*", first)):
+            return []
+        return [(_option_value(args, ("-C", "--directory", "--cd"), "--directory") or ".", True)]
+    if verb == "unzip":
+        if any(_LISTING_UNZIP.match(w) for w in args):
+            return []
+        return [(_option_value(args, ("-d",)) or ".", True)]
+    if verb in ("7z", "7za", "7zz") and args[:1] and args[0] in ("x", "e"):
+        return [(next((w[2:] for w in args if w.startswith("-o") and len(w) > 2), "."), True)]
+    if (verb == "cpio" and any(re.fullmatch(r"-[A-Za-z]*i[A-Za-z]*", w) for w in args)) or (verb == "pax" and any(re.fullmatch(r"-[A-Za-z]*r[A-Za-z]*", w) for w in args)):
+        return [(".", True)]
+    return []
+
+
+def _git_tree_targets(seg: str, calls: list[shellnorm.GitCall]) -> list[tuple[str, bool]]:
+    """The work trees a git call writes (`-C D`, `--work-tree D`, `GIT_WORK_TREE=D`, else the directory it runs in), and the directory a clone or a new
+    worktree fills: a work tree that is home, or holds a start-up file, is replaced file by file (`git --work-tree=~ checkout -- .`)."""
+    env = m.group(1) if (m := _GIT_WORK_TREE_ENV.search(seg)) else None
+    out = []
+    for call in calls:
+        sub, args = call.sub, call.args
+        if sub not in _GIT_TREE_WRITERS:
+            continue
+        ops = [a for a in args if not a.startswith("-")]
+        if (sub == "reset" and not any(a in ("--hard", "--merge", "--keep") for a in args)) or (sub == "stash" and ops[:1] and ops[0] in ("list", "show", "create", "store")):
+            continue
+        if sub == "apply" and any(a in ("--cached", "--check", "--stat", "--numstat", "--summary") for a in args):
+            continue
+        base = "."
+        for d in call.dirs:
+            base = os.path.join(base, _expand_home(_word(d)))
+        wt = call.work_tree or env
+        if sub == "clone":
+            dest = ops[-1] if len(ops) >= 2 else (os.path.basename(ops[0].rstrip("/")).removesuffix(".git") if ops else "")
+            out.append((os.path.join(base, _expand_home(_word(dest))), True))
+        elif sub == "worktree":
+            if ops[:1] == ["add"] and len(ops) >= 2:
+                out.append((os.path.join(base, _expand_home(_word(ops[1]))), True))
+        else:
+            out.append((os.path.join(base, _expand_home(_word(wt))) if wt else base, True))
+    return out
+
+
+def _ho_shell_segment(a: Assessment, seg: str, bare: str, calls: list[shellnorm.GitCall], toks: list[str], parent_too: bool, dirs: tuple[str, ...], cwd: str,
+                      sroots: tuple[str, ...]) -> None:
+    """HO-shell-startup for one shell segment: the paths it writes, the trees it copies or unpacks, the git work trees it writes. `source F` reads F: only
+    its redirects count (PRE-10)."""
+    if not sroots:
+        return
+    if bare.split(" ", 1)[0] in _SOURCE_VERBS:
+        toks = [_word(t) for t in REDIRECT_TARGET.findall(bare)]
+    targets = [(t, parent_too) for t in toks] + _into_targets(bare) + _git_tree_targets(seg, calls)
+    for path, parent in targets:
+        for d in dirs or ("",):
+            if _si12_hit(path, d or cwd, sroots, parent):
+                _ho_add(a, HO_SHELL)
+                return
 
 
 def _si12_tool_paths(a: Assessment, subjects: list[str], cwd: str) -> None:
@@ -1060,6 +1286,9 @@ def _si12_tool_paths(a: Assessment, subjects: list[str], cwd: str) -> None:
     roots = _config_roots()
     if any(_si12_hit(s, cwd, roots) for s in subjects):
         a.blocked.append("SI-12")
+
+
+_REDIRECT_PREFIX = re.compile(r"^(?:\d+|&)?(?:<>|>>?)[|&]?")
 
 
 def _segment_tokens(seg: str) -> tuple[list[str], bool]:
@@ -1074,7 +1303,7 @@ def _segment_tokens(seg: str) -> tuple[list[str], bool]:
     toks = []
     for tok in text.split(" "):
         tok = tok.rpartition("=")[2] if "=" in tok and not tok.startswith("=") else tok
-        tok = tok.strip("'\"`,;()")
+        tok = _REDIRECT_PREFIX.sub("", tok.strip("'\"`,;()"))   # `3>>F`, `&>F`, `>|F`: the file after the operator (PRE-7)
         if tok and not tok.startswith("-") and tok not in (">", ">>"):
             toks.append(tok)
     return toks, parent_too

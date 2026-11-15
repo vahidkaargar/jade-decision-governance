@@ -14,7 +14,7 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 - Threat row T30 in `docs/05` (a scope that covers more than the owner meant).
 
 ### Security
-- **Human-only: shell start-up files and the shell snapshot (HO-shell-startup, T31).** A write to `~/.zshenv`, `.zshrc`, `.bashrc`, `.profile`, the other zsh and bash start-up files, `$BASH_ENV`, `$ENV`, the files they source by a literal path, or `~/.claude/shell-snapshots` is now asked in the chat or dialog and never decided by memory or Jev. `$HOME` and `${HOME}` in a written path are now expanded for the wiring, mod and start-up checks too.
+- **Human-only: shell start-up files and the shell snapshot (HO-shell-startup, T31).** A write to `~/.zshenv`, `.zshrc`, `.bashrc`, `.profile`, the other zsh and bash start-up files (also under a literal `ZDOTDIR` set in `~/.zshenv`), `$BASH_ENV`, `$ENV`, the files they source by a literal path (anywhere on the line, also after `&&`, `builtin` or `command`), `~/.claude/shell-snapshots` or `~/.claude/session-env` (also under `$CLAUDE_CONFIG_DIR`) is now asked in the chat or dialog and never decided by memory or Jev. It also covers a tree copied or unpacked into home or `~/.claude` (`cp -r`, `rsync`, `tar -x -C ~`, `unzip -d ~`), a git command that writes a home work tree (`git -C ~ checkout`, `--work-tree=~`, `GIT_WORK_TREE`) and `exec 3>>~/.zshenv`; `source ~/.zshrc` alone is a read. Every root check (wiring, mod, SI-12, start-up) now compares paths case-folded on macOS, so `~/.ZSHENV` and `~/.Claude/...` no longer get past it. `$HOME` and `${HOME}` in a written path are expanded, quoted or not; a single-quoted `'$HOME'` is literal, as in the shell.
 
 ## [0.6.1] - 2026-11-14
 

@@ -958,7 +958,7 @@ class _Scan:
                 inner = s[i + 2:j - 1]
                 if "$(" in inner or "`" in inner:
                     subs.append(self._sub(inner))
-                plain.append("$X")
+                plain.append("$" + inner if re.fullmatch(r"[A-Za-z_]\w*", inner) else "$X")  # `"${HOME}"` reads as $HOME, as it does unquoted
                 i = j
             else:
                 plain.append(c)
@@ -1020,7 +1020,8 @@ class _Scan:
             elif cur.lstrip().startswith(("cd ", "pushd ")):
                 emit(re.sub(r"\s", "\x01", plain))  # keep a directory with spaces readable for cwd tracking
             else:
-                emit('""' if re.search(r"\s", plain) else _INERT.sub("\x06", plain))   # `awk 'NR>1'`: a quoted `>` is data, not a redirect
+                inert = _INERT.sub("\x06", plain)   # `awk 'NR>1'`: a quoted `>` is data, not a redirect
+                emit('""' if re.search(r"\s", plain) else inert.replace("$", "\x06") if quote == "'" else inert)   # `'$HOME'` is literal: it never expands
 
         while i < n:
             c = s[i]
