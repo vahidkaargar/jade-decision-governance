@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+### Security
+
+- **A redirect written inside a push hid the rest of the push from SI-08 and the risk rules.** `git push origin feature &>log --no-verify +feature:main` was rated medium (R-19) with nothing blocked and no key, and real git (zsh and bash) force-updates `main` with it. The rules read a command up to the next `&`, `|` or `;`, and `&>`, `>&`, `>|` hold one, so the words after the redirect were not read (`--force`, `:main`, `+x:main`, `--mirror`, `--delete`, `--tags`). A redirect before the subcommand (`git >log push origin main`) hid the whole push, and `git reset --hard`, `git clean -fd`, `git branch -D` and `rm -rf` lost their flags the same way. The shell takes a redirect out of the words wherever it stands, so `shellnorm` now does too: every redirect (`&>`, `&>>`, `>&file`, `>|`, `>`, `>>`, `<`, `<>`, `<<<`, a heredoc, with or without a descriptor or a space, even glued to a word as in `feature&>log`) is moved to the end of its command as `> file`, and a descriptor copy or close (`>&-`, `<&-`, `3<&0`) is dropped. A write is still a write: the target stays and is read as before. `tests/test_redirect_anywhere.py` puts 19 file redirects and 13 descriptor redirects at every position of 12 pushes and 8 other gated commands and requires the same level, rule, blocked invariants, human-only classes and keys as the command without them. Side effect: `cd /etc && echo x >pf.conf` (target glued to `>`) is now resolved to `/etc/pf.conf` like `> pf.conf`. Not changed: a very long run of digits before `>` takes quadratic time in the existing `NULL_REDIRECT` (84 s for 200 000 digits, the same on 0.6.1).
+
 ## [0.6.1] - 2026-11-14
 
 ### Fixed

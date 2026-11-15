@@ -32,6 +32,9 @@ UNSAFE_GIT = "git:unsafe-config "
 TEXT_MARK = "@text!"   # prefix of a line the scanner extracted from a program (`import jade.cli`): words for the invariants to read, no operands to resolve
 
 NULL_REDIRECT = re.compile(r"(\d*>&\d+|&>>?\s*/dev/null|\d*>>?\s*/dev/null|\d*<\s*/dev/null)")
+# A redirect as the shell reads it, wherever it stands in the command: an optional descriptor that starts a word (`2>log`; in `a2>log` the 2 is part of `a2`), the
+# operator (`&>`, `&>>`, `>>`, `>&`, `>|`, `>`, `<<<`, `<<HEREDOC` as the scanner spells a heredoc, `<&`, `<>`, `<`), and the target word, which may follow after blanks.
+REDIRECT = re.compile(r"(?P<fd>(?<!\S)\d+)?(?<!\\)(?P<op><<HEREDOC|&>>|&>|>>|>&|>\||<<<|<&|<>|>|<)(?:(?<!HEREDOC)[ \t]*(?P<tgt>[^\s<>&|]*))?")
 SPLIT = re.compile(r"\n|;|&&|\|\||(?<!>)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\}")  # `>&`, `>|` and `&>` are redirections, not separators
 # Package runners that start the next word as a program: `uv run python -c ...` is `python -c ...` (its quoted code must be scanned, not read as prose).
 _RUN_OPT = r"(?:(?:-w|-p|--with|--with-requirements|--with-editable|--python|--project|--directory|--package|--group|--env-file|--extra|--from|--index|--index-url)\s+\S+|--?[A-Za-z][\w-]*(?:=\S+)?)"
@@ -1207,7 +1210,41 @@ def _skeleton(command: str, _depth: int, _budget: list[int] | None) -> str:
     if _depth > MAX_DEPTH or budget[0] < 0:
         return " ; " + _code(command) + " ; "
     text, _ = _Scan(command, _depth, budget).run(0, None)
-    return expand_braces(NULL_REDIRECT.sub(" ", text))
+    return _hoist_redirects(expand_braces(NULL_REDIRECT.sub(" ", text)))
+
+
+def _redirect_word(m: re.Match) -> str:
+    """One redirect in its one spelling, or "" when it names no file (`>&-` closes a descriptor, `<&0` copies one): `&>f`, `>&f` and `>|f` are `> f`, `2>f` is `2> f`."""
+    fd, op, tgt = m.group("fd") or "", m.group("op"), m.group("tgt") or ""
+    if op == "<<HEREDOC":
+        return op
+    if op in (">&", "<&") and re.fullmatch(r"\d+-?|-", tgt):
+        return ""
+    both = op in ("&>", "&>>")
+    op = {"&>": ">", "&>>": ">>", ">&": ">", ">|": ">", "<&": "<"}.get(op, op)
+    if op in (">", ">>", "<") and tgt:
+        return f"{'' if both else fd}{op} {tgt}"   # the target is the word after the operator, as `operands` and `_absolute_operands` read it
+    return fd + op + tgt
+
+
+def _hoist_redirects(text: str) -> str:
+    """Each simple command with its redirects taken out of the words and written after them, so that the words are what a rule reads.
+
+    The shell reads `git push origin feature &>log :main` as the push `git push origin feature :main` with its output sent to `log`: a redirect and its target
+    are not arguments, and they may stand anywhere, even in front of the program (`>log git push`). The rules look for words up to the next `&`, `|` or `;`, and
+    `&>`, `>&`, `>|` hold such a character, so left in place the redirect cut every rule short. A redirect keeps its target (a write is still a write;
+    `cd /etc && echo x >pf.conf` writes `/etc/pf.conf`) and moves to the end of its command, spelled `> file`; a descriptor copy or close (`2>&1`, `>&-`) names no file and goes."""
+    if not REDIRECT.search(text):
+        return text
+    out: list[str] = []
+    for k, piece in enumerate(SEG_TOKEN.split(text)):
+        if k % 2 or not REDIRECT.search(piece) or piece.lstrip().startswith(TEXT_MARK):
+            out.append(piece)
+            continue
+        moved = [w for m in REDIRECT.finditer(piece) if (w := _redirect_word(m))]
+        words = REDIRECT.sub(" ", piece).strip()
+        out.append(" ".join([words, *moved]).strip() + piece[len(piece.rstrip()):] if words or moved else piece)
+    return "".join(out)
 
 
 def segments(command: str) -> list[str]:
