@@ -12,7 +12,7 @@ import shutil
 
 import pytest
 
-from jade import adapter, ask, hooks, improve, ledger, paths, proxy, questions
+from jade import adapter, ask, evals, hooks, improve, ledger, ops, paths, proxy, questions
 from tests.acceptance import test_memory_w101 as m
 from tests.acceptance.test_jev_proxy_w102 import KIND, QID, asked, calls, prov, ready  # noqa: F401  (fixtures)
 from tests.acceptance.test_memory_w101 import enforce, medium, real_terminal_check  # noqa: F401  (fixtures)
@@ -121,3 +121,77 @@ def test_replay_shape_matches_what_past_answers_sends():
     assert proxy.replay_past_answers([{"rule": "R-11", "answer": "deny", "label": "x", "age_days": 3}, "junk",
                                       {"rule": "R-11", "answer": "allow", "label": "y" * 300}]) == \
         [{"rule": "R-11", "answer": "deny", "age_days": 3}, {"rule": "R-11", "answer": "allow", "label": "y" * 120}]
+
+
+# ------------------------------------------------------------------ RR13-1: a pins.json of the wrong shape
+
+WRONG_SHAPES = {
+    "list": [], "str": "x", "num": 5, "null": None,
+    "qid_str": {QID: "abc"}, "qid_list": {QID: [1]}, "qid_null": {QID: None},
+    "champ_list": {QID: {"champion": [1]}}, "champ_dict": {QID: {"champion": {"a": 1}}},
+    "frac_str": {QID: {"challenger": 2, "challenger_fraction": "abc"}},
+    "frac_null": {QID: {"challenger": 2, "challenger_fraction": None}},
+    "frac_list": {QID: {"challenger": 2, "challenger_fraction": [1]}},
+    "chal_str": {QID: {"challenger": "x", "challenger_fraction": 1.0}},
+    "chal_list": {QID: {"challenger": [1], "challenger_fraction": 1.0}},
+}
+
+
+@pytest.mark.parametrize("name", list(WRONG_SHAPES))
+def test_a_pins_file_of_the_wrong_shape_asks_the_owner(ready, name):
+    (paths.home() / "pins.json").write_text(json.dumps(WRONG_SHAPES[name]))
+    r = hooks.pretool(m.call(KIND))
+    assert asked(r), r.stderr
+    assert "failed" not in r.stderr and ready.sent == [] and calls() == []
+    hooks.pretool(m.call(KIND, m.OTHER))
+    assert len(notes()) == 1   # journaled once
+
+
+def test_a_pins_file_nested_without_end_asks_the_owner(ready):
+    (paths.home() / "pins.json").write_text("[" * 100000)
+    r = hooks.pretool(m.call(KIND))
+    assert asked(r), r.stderr
+    assert "failed" not in r.stderr
+
+
+# ------------------------------------------------------------------ RR13-2: the protected check replays the rebuilt state
+
+def test_the_protected_check_never_resends_a_stored_deny_label(tmp_path):
+    db = ledger.open(tmp_path / "home")
+    old = {"action": "git reset --hard HEAD~3", "kind": "R-11: discards work", "preferences": "x",
+           "past_answers": [{"rule": "R-11", "answer": "allow", "label": "git reset --hard HEAD~1"},
+                            {"rule": "R-11", "answer": "deny", "label": PLANTED}]}
+    first = adapter.FixtureProvider(lambda s, q, md: {k: {"type": "noul", "noul": 0.9} for k in q})
+    i = 0
+    while len(db.all("SELECT 1 FROM jev_calls WHERE question_id=?", (QID,))) < 2:
+        sess = f"p{i}"
+        i += 1
+        if evals.bucket(sess) != "protected":
+            continue
+        r = ask.run([ask.registry_spec(QID)], old, provider=first, session=sess, db=db, use_cache=False)
+        evals.set_label(db, r.primary.call_id, 1, "adjudicated")
+    sent = []
+
+    def respond(s, q, md):
+        sent.append(s)
+        return {k: {"type": "noul", "noul": 0.9} for k in q}
+
+    cand = improve.propose("question_template", "replay the proxy question", "y" * 10, path=db)
+    improve.shadow(db, cand.candidate_id, QID, 2, provider=adapter.FixtureProvider(respond))
+    sent.clear()
+    out = improve.protected_check(db, cand.candidate_id, provider=adapter.FixtureProvider(respond), stdin_isatty=True)
+    assert sent and out["results"]["protected"]["n"] >= 1
+    assert all("IGNORE THE OWNER" not in json.dumps(s) for s in sent)
+
+
+# ------------------------------------------------------------------ RR13-3: drift for a ledger that knew version 2
+
+def test_drift_for_a_ledger_that_knew_version_2_names_the_served_version_not_version_1():
+    db = ledger.open()
+    db.meta_set("known_question_versions", json.dumps({QID: [2]}))
+    ops.check_question_drift(db=db)
+    items = [json.loads(r.doc_json) for r in db.all("SELECT doc_json FROM work_items WHERE doc_json LIKE '%QUESTION_DRIFT%'")]
+    items = [w for w in items if QID in w["title"]]   # the other questions are new to this ledger as well
+    assert items
+    assert not any("now has version 1" in w["title"] or "pin it" in w["next_action"] for w in items)
+    assert all("version 2" in w["title"] or "version 2" in w["next_action"] for w in items)

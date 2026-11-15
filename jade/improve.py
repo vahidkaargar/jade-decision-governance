@@ -844,7 +844,7 @@ def protected_check(db: ledger.Ledger, candidate_id: str, provider=None, stdin_i
             row = db.one("SELECT state_text FROM jev_calls WHERE call_id=?", (r["call_id"],))
             if not row or not row.state_text:
                 continue
-            ans = provider.ask(json.loads(row.state_text), {"q": payload})
+            ans = provider.ask(_replay_state(qid, row.state_text), {"q": payload})
             if not ans.ok or "q" not in ans.answers or adapter.check_answer(ans.answers["q"], payload):
                 continue
             champ_p.append(r["p"])

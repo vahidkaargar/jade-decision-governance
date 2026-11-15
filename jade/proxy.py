@@ -226,6 +226,8 @@ def _spec(db):
         spec = ask.registry_spec(QID)
     except questions.InvalidQuestion as e:
         reason = str(e)
+    except Exception as e:   # a pins.json of the wrong shape (not an object, a list champion, a string fraction, nesting too deep): the owner is asked
+        reason = f"{QID}: the pins file cannot be read ({type(e).__name__}: {e})"
     else:
         if spec.version >= MIN_VERSION:
             return spec

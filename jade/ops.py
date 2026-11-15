@@ -201,9 +201,17 @@ def check_question_drift(path=None, db: ledger.Ledger | None = None) -> list:
             if not db.event("question", "QUESTION_DRIFT", next=f"{q}@{v}", guard="question version added to the registry", key=f"question_drift:{q}@{v}"):
                 continue
             wid = "RT-QD-" + sha256(f"{q}@{v}")[:8]
-            item = {"id": wid, "title": f"QUESTION_DRIFT: {q} now has version {v}", "type": "risk", "priority": "P3", "status": "open", "owner": "human",
-                    "next_action": "Informational. The new version is its own calibration group at default thresholds; check its template and pin it as champion or "
-                    "challenger when reviewed (docs/07 section 1).", "retry_or_revisit_trigger": "on_session_start", "created_at": ts()}
+            served = questions.default_version(q)
+            if v < served:   # an older copy kept beside the served version (a rollback target), not a new version to pin
+                title = f"QUESTION_DRIFT: {q} holds version {v} beside the served version {served}"
+                action = (f"Informational. Version {served} is the version served; version {v} is kept as the copy to roll back to. "
+                          "Nothing to pin (docs/07 section 1).")
+            else:
+                title = f"QUESTION_DRIFT: {q} now has version {v}"
+                action = ("Informational. The new version is its own calibration group at default thresholds; check its template and pin it as champion or "
+                          "challenger when reviewed (docs/07 section 1).")
+            item = {"id": wid, "title": title, "type": "risk", "priority": "P3", "status": "open", "owner": "human",
+                    "next_action": action, "retry_or_revisit_trigger": "on_session_start", "created_at": ts()}
             db.con.execute("INSERT OR REPLACE INTO work_items(id, status, doc_json, updated_at) VALUES(?,?,?,?)", (wid, "open", json.dumps(item), ts()))
             found.append(SimpleNamespace(kind="QUESTION_DRIFT", question_id=q, version=v, work_item=wid))
         return found
