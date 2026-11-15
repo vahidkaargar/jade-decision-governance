@@ -13,7 +13,7 @@ def human(monkeypatch):
 
 def row(label, rule="R-11", scope_kind=None, scope_key=None, scope_label=None, answer="allow"):
     return {"answer": answer, "label": label, "rule_id": rule, "scope_kind": scope_kind, "scope_key": scope_key, "scope_label": scope_label,
-            "class_key": None, "exact_key": "x"}
+            "class_key": None, "exact_key": "x", "strength": "strong"}
 
 
 def lines_of(rows):

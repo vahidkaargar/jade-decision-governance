@@ -853,7 +853,7 @@ def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, al
         say(f"{len(chosen)} answer(s) in {len({_confirm_group(r) for r in chosen})} group(s) will become standing.")
         say("At level low or medium, a matching call then runs without a question.")
         say(f"It lasts {memory.USE_DAYS} days after its last use, never more than {memory.CAP_DAYS} days.")
-        say("Undo with jade knows rm ID.")
+        say("Undo one with jade knows rm ID. jade knows list shows each ID.")
         if ask("Type yes to confirm: ").strip() != "yes":
             say("cancelled; nothing changed")
             return 0
@@ -925,15 +925,17 @@ def knows_template(rows) -> str:
     out = ["# What JADE may decide for you. Write plain sentences; a later release reads this file when it decides in your place.",
            "# Lines that start with # are ignored.", "#", *_KNOWS_MODELS, "#"]
     seen: dict[tuple, str] = {}
+    denied: set[tuple] = set()   # (rule, first two words of the call) of every deny met so far; rows come newest first, so these denies are newer than the rows after them
     for r in rows:   # newest first, so the first row of a group names it
-        text = one_line(r["scope_label"] or r["label"])
-        if not text:
+        family = (r["rule_id"], " ".join(one_line(r["label"]).split(" ")[:2]))
+        if r["answer"] == "deny":
+            denied.add(family)
             continue
+        text = one_line(r["scope_label"] or r["label"])
+        if r["answer"] != "allow" or r["strength"] != "strong" or not text or family in denied:
+            continue   # only a standing allow is printed, and a newer deny of the same kind of call hides it
         key = (r["rule_id"], r["scope_key"]) if r["scope_key"] else (r["rule_id"], None, one_line(r["label"]).split(" ", 1)[0])
         if key in seen:
-            continue
-        if r["answer"] != "allow":
-            seen[key] = ""   # the newest row of a group decides: a deny hides every older allow of the group
             continue
         if len(text) > KNOWS_LABEL_CHARS:
             text = text[:KNOWS_LABEL_CHARS - 3] + "..."
@@ -952,7 +954,7 @@ def knows_edit(stdin_isatty: bool | None = None, editor: str | None = None) -> P
     if not p.exists():
         db = ledger.open(timeout=5)
         try:
-            text = knows_template(db.human_answers(strength="strong", limit=1000))
+            text = knows_template(db.human_answers(limit=1000))   # strong allows and every deny: a newer deny hides an older allow
         finally:
             db.close()
         p.parent.mkdir(parents=True, exist_ok=True)
