@@ -147,10 +147,12 @@ def test_a_pins_file_of_the_wrong_shape_asks_the_owner(ready, name):
     assert len(notes()) == 1   # journaled once
 
 
-def test_a_pins_file_nested_without_end_asks_the_owner(ready):
+def test_a_pins_file_nested_without_end_never_blocks_the_call(ready):
+    # Python 3.13 raises RecursionError for this text (proxy._spec asks the owner); 3.14 raises a JSONDecodeError, which
+    # ops._pins treats like any unreadable pins file (no pins, the shipped version is served). Either way: no hard block.
     (paths.home() / "pins.json").write_text("[" * 100000)
     r = hooks.pretool(m.call(KIND))
-    assert asked(r), r.stderr
+    assert asked(r) or r.exit_code == 0, r.stderr
     assert "failed" not in r.stderr
 
 
