@@ -8,10 +8,12 @@ Three kinds, at most two offered per call:
 - `kind_project`: the same kind of call (`memory.class_key` family) in one named project. Only for a call `memory.eligibility` calls `class`, and only when the
   project is known.
 - `kind_any`: the same kind of call in any project. Its key is `memory.class_key`, so it is the key memory already matches.
-- `merge_project`: `gh pr merge N` with the flags in MERGE_FLAGS_ALLOWED, in one named project. `memory.eligibility` calls every merge exact-only; this scope narrows
-  that on purpose, and it is computed here from the segment text, never from `eligibility`. Any PR number, any allowed flag and any flag value is the same scope;
-  a flag outside the list (delete, admin, auto, another repo, force, a body file) gives no scope at all. The key also holds the repository the folder points to:
-  the `remote` and `url` sections of its git config file (`_repo_identity`), so `gh repo set-default` or `git remote set-url` gives another key.
+- `merge_project`: `gh pr merge N --repo HOST/OWNER/NAME` with the other flags in MERGE_FLAGS_ALLOWED, in one named project. `memory.eligibility` calls every merge
+  exact-only; this scope narrows that on purpose, and it is computed here from the segment text, never from `eligibility`. Any PR number, any allowed flag and any flag
+  value is the same scope; a flag outside the list (delete, admin, auto, force, a body file) gives no scope at all. HOST/OWNER/NAME must equal a GitHub-style `url` of a
+  `remote` in the project's git config (`_remote_urls`), read as plain text. With `--repo` gh talks to the API of HOST, so no environment variable, shell startup file
+  or git config (an `insteadOf` included) can change the target; the key holds the project and `host/owner/name` and nothing else about the machine. A call without
+  `--repo`, or with a bare `OWNER/NAME` (gh would take the host from GH_HOST), gets no merge scope.
 
 Never offered: a human-only class, a blocked call, the never rules, a call the gate could not read, an inline program, and two or more risky commands in one call.
 No scope covers delete, force, tag or release.
@@ -22,7 +24,6 @@ entry (a folder or a worktree file). No subprocess runs.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import stat
@@ -34,12 +35,12 @@ from . import memory, policy, redact, shellnorm
 MERGE_FLAGS_ALLOWED = frozenset({"--squash", "-s", "--merge", "-m", "--rebase", "-r", "--subject", "-t", "--body", "-b", "--match-head-commit"})
 MERGE_FLAGS_WITH_VALUE = frozenset({"--subject", "-t", "--body", "-b", "--match-head-commit"})
 LABEL_MAX = 120
-CONFIG_MAX = 1 << 20   # a git config file larger than this is not read: no merge scope
+CONFIG_MAX = 1 << 20   # the project's git config file larger than this is not read: no merge scope
 # What each scope allows, in simple English. The chat question and `jade review confirm` (jade/ops.py) both show this text, so they say the same thing.
 COVERS: dict[str, str] = {
     "kind_project": "The same kind of command in this project. The same exact call is also remembered.",
     "kind_any": "The same kind of command in any project. Delete, force, tag and release still ask.",
-    "merge_project": "Merging any pull request in this project, with the listed options only. The same exact call is also remembered.",
+    "merge_project": "Merging any pull request of this repository, named with --repo, with the listed options only. The same exact call is also remembered.",
 }
 # A section header of a git config file: `[name]`, `[name "sub"]` or `[name.sub]`.
 _SECTION = re.compile(r'^\[\s*([A-Za-z0-9.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]')
@@ -119,36 +120,6 @@ def _git_dir(project: str) -> str | None:
     return gitdir if os.path.isabs(gitdir) else os.path.join(project, gitdir)
 
 
-def GLOBAL_CONFIGS() -> list[str]:
-    """The user-level git config files, read at each call so a changed HOME or XDG_CONFIG_HOME is seen: `~/.gitconfig` and `$XDG_CONFIG_HOME/git/config`
-    (default `~/.config/git/config`). `$GIT_CONFIG_GLOBAL` is not read: when it is set, `_repo_identity` gives no merge scope."""
-    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
-    return [os.path.join(os.path.expanduser("~"), ".gitconfig"), os.path.join(xdg, "git", "config")]
-
-
-# System-level files git may read on this Mac (Apple, Homebrew, Xcode). A module-level tuple so a test can replace it.
-SYSTEM_CONFIGS: tuple[str, ...] = (
-    "/etc/gitconfig", "/opt/homebrew/etc/gitconfig", "/usr/local/etc/gitconfig", "/opt/local/etc/gitconfig",
-    "/Library/Developer/CommandLineTools/usr/share/git-core/gitconfig",
-    "/Applications/Xcode.app/Contents/Developer/usr/share/git-core/gitconfig",
-)
-# Any of these changes which config or repository git or gh uses, in a way a file read cannot see: no merge scope.
-GIT_ENV_OVERRIDES = ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG", "GIT_CONFIG_NOSYSTEM", "GIT_DIR",
-                     "GIT_COMMON_DIR", "GIT_WORK_TREE", "GH_REPO", "GH_HOST", "GH_CONFIG_DIR")
-
-
-def SHELL_STARTUP_FILES() -> list[str]:
-    """The shell startup files the Bash tool's shell may read (zsh and bash), computed at each call. A line in one of them (`export GH_REPO=...`) changes what `gh`
-    does without a trace in this process's environment, so `_repo_identity` hashes them: an edit changes the merge key. `$ZDOTDIR` (default `~`) for zsh, plus
-    `$BASH_ENV` and `$ENV` when set."""
-    home = os.path.expanduser("~")
-    zdot = os.environ.get("ZDOTDIR") or home
-    files = [os.path.join(zdot, n) for n in (".zshenv", ".zprofile", ".zshrc", ".zlogin")] + ["/etc/zshenv", "/etc/zprofile", "/etc/zshrc"]
-    files += [os.path.join(home, n) for n in (".bashrc", ".bash_profile", ".bash_login", ".profile")] + ["/etc/profile", "/etc/bashrc"]
-    files += [v for v in (os.environ.get("BASH_ENV"), os.environ.get("ENV")) if v]
-    return files
-
-
 _MISSING = object()
 
 
@@ -173,19 +144,6 @@ def _read_regular(path: str) -> bytes | object | None:
     finally:
         os.close(fd)
     return None if len(data) > CONFIG_MAX else data
-
-
-def _shell_identity() -> list[str] | None:
-    """One line `shell<TAB>PATH<TAB>SHA256` per existing startup file; None when one exists but is not a readable regular file of at most CONFIG_MAX bytes."""
-    out: list[str] = []
-    for path in SHELL_STARTUP_FILES():
-        data = _read_regular(path)
-        if data is _MISSING:
-            continue
-        if data is None:
-            return None
-        out.append(f"shell\t{path}\t{hashlib.sha256(data).hexdigest()}")
-    return out
 
 
 def _config_lines(path: str, keep_sections: tuple[str, ...]) -> list[str] | None:
@@ -225,15 +183,18 @@ def _config_lines(path: str, keep_sections: tuple[str, ...]) -> list[str] | None
     return out
 
 
-def _repo_identity(project: str) -> list[str] | None:
-    """Which repository a merge in `project` acts on: every line of the `remote` and `url` sections of its git config file (remote URLs, `gh-resolved` from
-    `gh repo set-default`, an `insteadOf` rewrite), plus the same lines of the global and system git config files (prefixed `global` / `system`: an `insteadOf` there
-    rewrites the remote too), sorted. Files are read as plain text; no subprocess runs. A worktree's git folder names the shared folder in `commondir`, and the config
-    is there. The shell startup files (SHELL_STARTUP_FILES: where `export GH_REPO=...` would hide) add one `shell` line each with the SHA-256 of the file, so any edit
-    changes the key. None (so no merge scope) when an env override is set (GIT_ENV_OVERRIDES), or any file cannot be read, is not a regular file, is not UTF-8
-    (config files), is too large, has a header this reader does not know, or includes another file. Other sections (a branch, core, user) do not change the result."""
-    if any(os.environ.get(name) for name in GIT_ENV_OVERRIDES):
-        return None
+_REMOTE_URL = re.compile(
+    r"^(?:https://(?P<h1>[A-Za-z0-9._-]+)/(?P<o1>[A-Za-z0-9._-]+)/(?P<n1>[A-Za-z0-9._-]+?)"
+    r"|ssh://git@(?P<h2>[A-Za-z0-9._-]+)(?::[0-9]+)?/(?P<o2>[A-Za-z0-9._-]+)/(?P<n2>[A-Za-z0-9._-]+?)"
+    r"|git@(?P<h3>[A-Za-z0-9._-]+):(?P<o3>[A-Za-z0-9._-]+)/(?P<n3>[A-Za-z0-9._-]+?))(?:\.git)?$", re.IGNORECASE)
+_REPO_VALUE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+
+
+def _remote_urls(project: str) -> list[str] | None:
+    """The `url` values of the `remote` sections of the project's git config file, in file order. The file is read as plain text; no subprocess runs. A worktree's git
+    folder names the shared folder in `commondir`, and the config is there. None (so no merge scope) when the config cannot be read, is not a regular file, is not
+    UTF-8, is too large, has a header this reader does not know, or includes another file. A per-worktree config (`config.worktree`) also gives None: it can change a
+    remote and this reader does not merge it."""
     try:
         gitdir = _git_dir(project)
         if gitdir is None:
@@ -247,46 +208,77 @@ def _repo_identity(project: str) -> list[str] | None:
                 return None
             common = rel if os.path.isabs(rel) else os.path.join(gitdir, rel)
         config = os.path.join(common, "config")
-        if not os.path.isfile(config):
-            return None
-        # A per-worktree config (`extensions.worktreeConfig`) can add or change a remote, and this reader does not merge it: no merge scope (fail closed).
         if os.path.lexists(os.path.join(gitdir, "config.worktree")) or os.path.lexists(os.path.join(common, "config.worktree")):
             return None
     except (OSError, ValueError):
         return None
-    out = _config_lines(config, ("remote", "url"))
-    if out is None:
+    if _read_regular(config) is _MISSING:
         return None
-    for label, paths in (("global", GLOBAL_CONFIGS()), ("system", SYSTEM_CONFIGS)):
-        for path in paths:
-            lines = _config_lines(path, ("remote", "url"))
-            if lines is None:
-                return None
-            out.extend(f"{label}\t{line}" for line in lines)
-    shell = _shell_identity()
-    if shell is None:
+    lines = _config_lines(config, ("remote",))
+    if lines is None:
         return None
-    return sorted(out + shell)
+    urls = []
+    for line in lines:
+        _, _, text = line.partition("\t")
+        key, eq, value = text.partition("=")
+        if eq and key.strip().lower() == "url":
+            urls.append(value.strip())
+    return urls
 
 
-def _merge_segment(tokens: list[str]) -> bool:
-    """`gh pr merge <digits> [allowed flags]`: a flag that takes a value consumes the next token, so a number there is a value and not the PR number."""
+def _remote_repo(url: str) -> str | None:
+    """`host/owner/name` (lowercase) of a GitHub-style remote URL (`https://HOST/OWNER/NAME`, `ssh://git@HOST[:port]/OWNER/NAME`, `git@HOST:OWNER/NAME`, each with an
+    optional `.git`), or None for any other form."""
+    m = _REMOTE_URL.match(url)
+    if not m:
+        return None
+    for n in "123":
+        if m.group("h" + n):
+            return "/".join(m.group(c + n) for c in "hon").lower()
+    return None
+
+
+def _repo_value(value: str) -> str | None:
+    """`host/owner/name` in lowercase when VALUE is exactly that, with no part made only of dots; else None. A bare `owner/name` (gh would use GH_HOST) is None."""
+    if not _REPO_VALUE.match(value) or any(set(part) == {"."} for part in value.split("/")):
+        return None
+    return value.lower()
+
+
+def _merge_segment(tokens: list[str]) -> str | None:
+    """`gh pr merge <digits> --repo HOST/OWNER/NAME [allowed flags]` in any order; returns `host/owner/name` (lowercase) or None. The repo flag is `--repo V`, `--repo=V`,
+    `-R V`, `-RV` or `-R=V`, exactly once. A flag that takes a value consumes the next token, so a number there is a value and not the PR number."""
     if len(tokens) < 4 or tokens[:3] != ["gh", "pr", "merge"] or not _DIGITS.match(tokens[3]):
-        return False
+        return None
+    repo: str | None = None
     i = 4
     while i < len(tokens):
         t = tokens[i]
         if not t.startswith("-"):
-            return False
+            return None
+        value = None
+        if t in ("--repo", "-R"):
+            if i + 1 >= len(tokens):
+                return None
+            value, i = tokens[i + 1], i + 1
+        elif t.startswith("--repo="):
+            value = t[len("--repo="):]
+        elif t.startswith("-R") and not t.startswith("--"):
+            value = t[2:][1:] if t[2:3] == "=" else t[2:]
+        if value is not None:
+            if repo is not None or (repo := _repo_value(value)) is None:
+                return None
+            i += 1
+            continue
         name, eq, _ = t.partition("=")
         if name not in MERGE_FLAGS_ALLOWED or (eq and name not in MERGE_FLAGS_WITH_VALUE):
-            return False
+            return None
         if name in MERGE_FLAGS_WITH_VALUE and not eq:
             if i + 1 >= len(tokens) or tokens[i + 1].startswith("-"):
-                return False   # no value, or a value that reads as another flag: not worth guessing
+                return None   # no value, or a value that reads as another flag: not worth guessing
             i += 1
         i += 1
-    return True
+    return repo
 
 
 def _is_plain_shell_call(a, tool: str, tool_input: dict | None) -> bool:
@@ -309,19 +301,21 @@ def _simple_command_words(subject: str) -> list[str] | None:
     return None if not words or any(_EXPANDS.search(w) for w in words) else words
 
 
-def _merge_project(a, tool: str, tool_input: dict | None, project: str | None) -> str | None:
-    """The key of the merge scope, or None. The segment key is not enough: it drops `NAME=value` prefixes, `env`, `sudo` and the directory of the program, so the
-    words are read from the call itself. The program must be exactly `gh`, with no prefix, and no word may be one the shell expands or splits."""
+def _merge_project(a, tool: str, tool_input: dict | None, project: str | None) -> tuple[str, str] | None:
+    """(key, `host/owner/name`) of the merge scope, or None. The segment key is not enough: it drops `NAME=value` prefixes, `env`, `sudo` and the directory of the
+    program, so the words are read from the call itself. The program must be exactly `gh`, with no prefix, and no word may be one the shell expands or splits. The call
+    must name the repository (`--repo HOST/OWNER/NAME`) and the project must have a remote with that host, owner and name: with `--repo` gh talks to the API of HOST, so
+    no environment variable, shell file or git config can change the target. The key holds the project and that repository only."""
     if project is None or not _is_plain_shell_call(a, tool, tool_input):
         return None
     keys = list(getattr(a, "seg_keys", None) or [])
     words = _simple_command_words(a.subject or "")
-    if len(keys) != 1 or words is None or not _merge_segment(words):
+    if len(keys) != 1 or words is None or (repo := _merge_segment(words)) is None:
         return None
-    remotes = _repo_identity(project)
-    if remotes is None:
-        return None   # the repository cannot be told: fail closed
-    return memory.sha256(memory.canonical({"kind": "merge_project", "family": "gh pr merge N", "project": project, "remotes": remotes}))
+    urls = _remote_urls(project)   # None: the repository cannot be told, fail closed
+    if not urls or repo not in {_remote_repo(u) for u in urls}:
+        return None
+    return memory.sha256(memory.canonical({"kind": "merge_project", "family": "gh pr merge N --repo", "project": project, "repo": repo})), repo
 
 
 def _kind_project_key(a, project: str) -> str:
@@ -360,8 +354,8 @@ def offered(a, tool: str, tool_input: dict | None, fp: dict | None, cwd: str) ->
         if project:
             out.append(Scope("kind_project", _kind_project_key(a, project), _label(family, project), COVERS["kind_project"], "Same command, this project"))
         out.append(Scope("kind_any", memory.class_key(a), _label(family, "any project"), COVERS["kind_any"], "Same command, any project"))
-    if (key := _merge_project(a, tool, tool_input, project)) is not None:
-        out.append(Scope("merge_project", key, _label("gh pr merge *", project), COVERS["merge_project"], "Merge in this project"))
+    if (merge := _merge_project(a, tool, tool_input, project)) is not None:
+        out.append(Scope("merge_project", merge[0], _label(f"gh pr merge * --repo {merge[1]}", project), COVERS["merge_project"], "Merge in this repository"))
     return out
 
 

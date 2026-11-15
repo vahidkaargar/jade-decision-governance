@@ -15,7 +15,7 @@ import pytest
 
 from jade import memory, policy, scopes
 
-MERGE = "gh pr merge 940 --squash"
+MERGE = "gh pr merge 940 --repo github.com/owner/repoA --squash"
 CLASS_CMD = "git reset --hard HEAD~1"   # `gh issue comment` is not gated at all (R-99), so it has no class key; this is the nearest real `class` call
 
 
@@ -80,69 +80,69 @@ def test_merge_scope_for_a_plain_squash_merge(repo):
 @pytest.mark.parametrize("flags", ["--delete-branch", "-d", "--admin", "--auto", "-R other/repo", "--repo other/repo", "--force",
                                    "--squash --delete-branch", "--repo=other/repo", "-R=other/repo", "-sd", "--unknown=1", "--squash extra"])
 def test_merge_scope_refused_for_each_excluded_flag(repo, flags):
-    assert offered(f"gh pr merge 940 {flags}", repo) == []
-    assert scopes.keys_for(assessed(f"gh pr merge 940 {flags}", repo), "Bash", {"command": f"gh pr merge 940 {flags}"}, {}, repo) == []
+    assert offered(f"gh pr merge 940 --repo github.com/owner/repoA {flags}", repo) == []
+    assert scopes.keys_for(assessed(f"gh pr merge 940 --repo github.com/owner/repoA {flags}", repo), "Bash", {"command": f"gh pr merge 940 --repo github.com/owner/repoA {flags}"}, {}, repo) == []
 
 
 @pytest.mark.parametrize("flags", ["", "--squash", "-s", "--merge", "-m", "--rebase", "-r", "--subject Title --body Words", "-t Title -b Words",
                                    "--match-head-commit abc123", "--subject=Title --squash", "--squash --match-head-commit abc123"])
 def test_merge_scope_given_for_each_allowed_flag(repo, flags):
-    assert kinds(f"gh pr merge 940 {flags}".strip(), repo) == ["merge_project"]
+    assert kinds(f"gh pr merge 940 --repo github.com/owner/repoA {flags}".strip(), repo) == ["merge_project"]
 
 
 def test_a_quoted_value_with_spaces_still_gets_the_scope(repo):
-    assert kinds('gh pr merge 940 --squash --subject "Fix the thing" --body "More words here"', repo) == ["merge_project"]
-    assert kinds("gh pr merge 940 --squash --subject 'Fix the thing' --body 'More words here'", repo) == ["merge_project"]
-    assert kinds(f'cd "{repo}" && gh pr merge 940 --squash --body "a b"', "/") == ["merge_project"]
+    assert kinds('gh pr merge 940 --repo github.com/owner/repoA --squash --subject "Fix the thing" --body "More words here"', repo) == ["merge_project"]
+    assert kinds("gh pr merge 940 --repo github.com/owner/repoA --squash --subject 'Fix the thing' --body 'More words here'", repo) == ["merge_project"]
+    assert kinds(f'cd "{repo}" && gh pr merge 940 --repo github.com/owner/repoA --squash --body "a b"', "/") == ["merge_project"]
 
 
-# Fix round 1, finding 1: the segment key drops `NAME=value` prefixes, `env`, `sudo` and the directory of the program, so these all have the key `gh pr merge 940 ...`.
-@pytest.mark.parametrize("cmd", ["GH_REPO=other/repo gh pr merge 940 --squash", "env GH_REPO=other/repo gh pr merge 940", "GH_HOST=evil.example gh pr merge 940",
-                                 "/tmp/evil/gh pr merge 940", "./gh pr merge 940", "~/bin/gh pr merge 940", "sudo gh pr merge 940", "command gh pr merge 940", "nohup gh pr merge 940",
-                                 "time gh pr merge 940", "env -i gh pr merge 940", "FOO=1 BAR=2 gh pr merge 940 --squash"])
+# Fix round 1, finding 1: the segment key drops `NAME=value` prefixes, `env`, `sudo` and the directory of the program, so these all have the key `gh pr merge 940 --repo github.com/owner/repoA ...`.
+@pytest.mark.parametrize("cmd", ["GH_REPO=other/repo gh pr merge 940 --repo github.com/owner/repoA --squash", "env GH_REPO=other/repo gh pr merge 940 --repo github.com/owner/repoA", "GH_HOST=evil.example gh pr merge 940 --repo github.com/owner/repoA",
+                                 "/tmp/evil/gh pr merge 940 --repo github.com/owner/repoA", "./gh pr merge 940 --repo github.com/owner/repoA", "~/bin/gh pr merge 940 --repo github.com/owner/repoA", "sudo gh pr merge 940 --repo github.com/owner/repoA", "command gh pr merge 940 --repo github.com/owner/repoA", "nohup gh pr merge 940 --repo github.com/owner/repoA",
+                                 "time gh pr merge 940 --repo github.com/owner/repoA", "env -i gh pr merge 940 --repo github.com/owner/repoA", "FOO=1 BAR=2 gh pr merge 940 --repo github.com/owner/repoA --squash"])
 def test_merge_scope_refused_for_a_prefix_a_launcher_or_a_program_path(repo, cmd):
     a = assessed(cmd, repo)
-    assert a.seg_keys and a.seg_keys[0].startswith("gh pr merge 940"), (cmd, a.seg_keys)   # the gate itself sees a plain merge: only the scope can tell
+    assert a.seg_keys and a.seg_keys[0].startswith("gh pr merge 940 --repo github.com/owner/repoA"), (cmd, a.seg_keys)   # the gate itself sees a plain merge: only the scope can tell
     assert offered(cmd, repo) == [], cmd
     assert scopes.keys_for(a, "Bash", {"command": cmd}, {}, repo) == []
 
 
 # Fix round 1, finding 2: only gated segments reach `seg_keys`, so an earlier command that is not gated (an export, a function, a remote change) is invisible there.
-@pytest.mark.parametrize("cmd", ["export GH_REPO=other/repo && gh pr merge 940 --squash", "GH_REPO=other/repo; gh pr merge 940 --squash",
-                                 "gh repo set-default other/repo && gh pr merge 940", "git remote set-url origin https://example.com/o/r.git && gh pr merge 940",
-                                 "gh() { command gh -R other/repo \"$@\"; }; gh pr merge 940", "alias gh='gh -R other/repo'; gh pr merge 940",
-                                 "F='x -d'; gh pr merge 940 --body $F", "gh pr merge 940 --squash && echo done", "gh pr merge 940 --squash | tail -1",
-                                 "gh pr merge 940 --squash; ls", "ls && gh pr merge 940 --squash", "gh pr merge 940 --squash &"])
+@pytest.mark.parametrize("cmd", ["export GH_REPO=other/repo && gh pr merge 940 --repo github.com/owner/repoA --squash", "GH_REPO=other/repo; gh pr merge 940 --repo github.com/owner/repoA --squash",
+                                 "gh repo set-default other/repo && gh pr merge 940 --repo github.com/owner/repoA", "git remote set-url origin https://example.com/o/r.git && gh pr merge 940 --repo github.com/owner/repoA",
+                                 "gh() { command gh -R other/repo \"$@\"; }; gh pr merge 940 --repo github.com/owner/repoA", "alias gh='gh -R other/repo'; gh pr merge 940 --repo github.com/owner/repoA",
+                                 "F='x -d'; gh pr merge 940 --repo github.com/owner/repoA --body $F", "gh pr merge 940 --repo github.com/owner/repoA --squash && echo done", "gh pr merge 940 --repo github.com/owner/repoA --squash | tail -1",
+                                 "gh pr merge 940 --repo github.com/owner/repoA --squash; ls", "ls && gh pr merge 940 --repo github.com/owner/repoA --squash", "gh pr merge 940 --repo github.com/owner/repoA --squash &"])
 def test_merge_scope_refused_unless_the_call_is_one_simple_command(repo, cmd):
     a = assessed(cmd, repo)
-    assert a.seg_keys and a.seg_keys[-1].startswith("gh pr merge 940") and len(a.seg_keys) == 1, (cmd, a.seg_keys)   # one gated segment, as the reviewer showed
+    assert a.seg_keys and a.seg_keys[-1].startswith("gh pr merge 940 --repo github.com/owner/repoA") and len(a.seg_keys) == 1, (cmd, a.seg_keys)   # one gated segment, as the reviewer showed
     assert offered(cmd, repo) == [], cmd
     assert offered(f"cd {repo} && {cmd}", "/") == [], cmd                                                          # also behind a leading cd
 
 
-@pytest.mark.parametrize("cmd", ["F='x -d'; gh pr merge 940 --body $F", "gh pr merge 940 --body $F", "gh pr merge 940 --body=$F", "gh pr merge 940 --subject $F",
-                                 'gh pr merge 940 --body "$F"', "gh pr merge 940 --body ${F}", "gh pr merge 940 --body `echo -d`", "gh pr merge 940 --body $(echo -d)",
-                                 "gh pr merge 940 --body *", "gh pr merge 940 --body ?", "gh pr merge 940 --body [a]", "gh pr merge 940 --body ~", "gh pr merge 940 --body-file ~/n.txt",
-                                 "gh pr merge 940 --body {-d,x}", "gh pr merge 940 --body {a..c}"])   # a literal brace list is expanded by the skeleton, so `-d` shows as a flag
+@pytest.mark.parametrize("cmd", ["F='x -d'; gh pr merge 940 --repo github.com/owner/repoA --body $F", "gh pr merge 940 --repo github.com/owner/repoA --body $F", "gh pr merge 940 --repo github.com/owner/repoA --body=$F", "gh pr merge 940 --repo github.com/owner/repoA --subject $F",
+                                 'gh pr merge 940 --repo github.com/owner/repoA --body "$F"', "gh pr merge 940 --repo github.com/owner/repoA --body ${F}", "gh pr merge 940 --repo github.com/owner/repoA --body `echo -d`", "gh pr merge 940 --repo github.com/owner/repoA --body $(echo -d)",
+                                 "gh pr merge 940 --repo github.com/owner/repoA --body *", "gh pr merge 940 --repo github.com/owner/repoA --body ?", "gh pr merge 940 --repo github.com/owner/repoA --body [a]", "gh pr merge 940 --repo github.com/owner/repoA --body ~", "gh pr merge 940 --repo github.com/owner/repoA --body-file ~/n.txt",
+                                 "gh pr merge 940 --repo github.com/owner/repoA --body {-d,x}", "gh pr merge 940 --repo github.com/owner/repoA --body {a..c}"])   # a literal brace list is expanded by the skeleton, so `-d` shows as a flag
 def test_merge_scope_refused_for_a_word_the_shell_may_expand_or_split(repo, cmd):
     assert offered(cmd, repo) == [], cmd
 
 
 def test_a_merge_with_one_simple_command_after_a_leading_cd_still_gets_the_scope(repo, repo_b):
-    assert kinds(f"cd {repo_b} && gh pr merge 940 --squash", repo) == ["merge_project"]
-    assert kinds(f"cd {repo_b}   &&   gh pr merge 940   --squash", repo) == ["merge_project"]
+    assert kinds(f"cd {repo_b} && gh pr merge 940 --repo github.com/owner/repoB --squash", repo) == ["merge_project"]
+    assert kinds(f"cd {repo_b}   &&   gh pr merge 940 --repo github.com/owner/repoB   --squash", repo) == ["merge_project"]
 
 
 def test_a_number_after_a_value_flag_is_that_flags_value_not_the_pr_number(repo):
-    assert kinds("gh pr merge 940 --subject 123 --body hi", repo) == ["merge_project"]
+    assert kinds("gh pr merge 940 --repo github.com/owner/repoA --subject 123 --body hi", repo) == ["merge_project"]
     assert kinds("gh pr merge --subject 123 --squash", repo) == []   # no PR number after merge
     assert kinds("gh pr merge --squash 940", repo) == []              # the number must come first
-    assert kinds("gh pr merge 940 --subject", repo) == []             # a value flag with no value
+    assert kinds("gh pr merge 940 --repo github.com/owner/repoA --subject", repo) == []             # a value flag with no value
 
 
 def test_a_value_that_looks_like_a_flag_gets_no_scope(repo):
-    assert kinds("gh pr merge 940 --body -d", repo) == []
-    assert kinds("gh pr merge 940 --subject --delete-branch", repo) == []
+    assert kinds("gh pr merge 940 --repo github.com/owner/repoA --body -d", repo) == []
+    assert kinds("gh pr merge 940 --repo github.com/owner/repoA --subject --delete-branch", repo) == []
 
 
 def test_pr_number_must_be_digits(repo):
@@ -151,13 +151,13 @@ def test_pr_number_must_be_digits(repo):
 
 
 def test_merge_scope_unknown_project(repo, tmp_path):
-    for cmd in ("cd $REPO && gh pr merge 940", f"(cd {repo} && gh pr merge 940)", f"pushd {repo} && gh pr merge 940",
-                "cd `pwd` && gh pr merge 940", "cd $(pwd) && gh pr merge 940", f"cd {repo} && cd {repo} && gh pr merge 940",
-                "cd /nonexistent-folder-for-jade-test && gh pr merge 940"):
+    for cmd in ("cd $REPO && gh pr merge 940 --repo github.com/owner/repoA", f"(cd {repo} && gh pr merge 940)", f"pushd {repo} && gh pr merge 940 --repo github.com/owner/repoA",
+                "cd `pwd` && gh pr merge 940 --repo github.com/owner/repoA", "cd $(pwd) && gh pr merge 940 --repo github.com/owner/repoA", f"cd {repo} && cd {repo} && gh pr merge 940 --repo github.com/owner/repoA",
+                "cd /nonexistent-folder-for-jade-test && gh pr merge 940 --repo github.com/owner/repoA"):
         assert kinds(cmd, repo) == [], cmd
     bare = tmp_path / "plain"
     bare.mkdir()
-    assert kinds("gh pr merge 940", str(bare.resolve())) == []   # no `.git` anywhere up the path (tmp_path is not inside a repository)
+    assert kinds("gh pr merge 940 --repo github.com/owner/repoA", str(bare.resolve())) == []   # no `.git` anywhere up the path (tmp_path is not inside a repository)
 
 
 def test_cd_to_another_project_changes_the_key(repo, repo_b):
@@ -166,17 +166,17 @@ def test_cd_to_another_project_changes_the_key(repo, repo_b):
         assert len(got) == 1, cmd
         return got[0].key
 
-    in_a = key(f"cd {repo} && gh pr merge 1", repo_b)
-    in_b = key(f"cd {repo_b} && gh pr merge 1", repo_b)
+    in_a = key(f"cd {repo} && gh pr merge 1 --repo github.com/owner/repoA", repo_b)
+    in_b = key(f"cd {repo_b} && gh pr merge 1 --repo github.com/owner/repoB", repo_b)
     assert in_a != in_b
-    assert in_b == key("gh pr merge 1", repo_b)           # same project by cwd or by cd
-    assert in_a == key("gh pr merge 2", repo)             # another PR number, same project, same key
-    assert key("gh pr merge 1 --squash", repo) == key("gh pr merge 2 --rebase --subject x", repo)
+    assert in_b == key("gh pr merge 1 --repo github.com/owner/repoB", repo_b)           # same project by cwd or by cd
+    assert in_a == key("gh pr merge 2 --repo github.com/owner/repoA", repo)             # another PR number, same project, same key
+    assert key("gh pr merge 1 --repo github.com/owner/repoA --squash", repo) == key("gh pr merge 2 --repo github.com/owner/repoA --rebase --subject x", repo)
 
 
 def test_a_cd_to_a_folder_inside_the_project_is_that_project(repo):
-    assert kinds(f"cd {repo}/sub/deep && gh pr merge 940", "/") == ["merge_project"]
-    assert offered(f"cd {repo}/sub/deep && gh pr merge 940", "/")[0].key == offered(MERGE, repo)[0].key
+    assert kinds(f"cd {repo}/sub/deep && gh pr merge 940 --repo github.com/owner/repoA", "/") == ["merge_project"]
+    assert offered(f"cd {repo}/sub/deep && gh pr merge 940 --repo github.com/owner/repoA", "/")[0].key == offered(MERGE, repo)[0].key
 
 
 def test_scope_keys_for_matches_what_is_offered(repo):
@@ -196,11 +196,11 @@ def test_no_scope_for_human_only_blind_inline_and_joined(repo):
     assert kinds(CLASS_CMD, repo, blind=["eval-var"]) == []
     assert kinds(MERGE, repo, unread=["script-file"]) == []
     assert kinds(MERGE, repo, blocked=["SI-09"]) == []
-    assert kinds("bash -c 'gh pr merge 940 --squash'", repo) == []          # an inline program
-    assert kinds("gh pr merge 940 --body-file - <<EOF\nhi\nEOF", repo) == []
-    assert kinds("gh pr merge 940 --squash; python3 -c 'print(1)'", repo) == []
-    assert kinds("gh pr merge 940 && gh pr merge 941", repo) == []          # two risky commands joined
-    assert kinds("gh pr merge 940 --squash && git reset --hard HEAD~1", repo) == []
+    assert kinds("bash -c 'gh pr merge 940 --repo github.com/owner/repoA --squash'", repo) == []          # an inline program
+    assert kinds("gh pr merge 940 --repo github.com/owner/repoA --body-file - <<EOF\nhi\nEOF", repo) == []
+    assert kinds("gh pr merge 940 --repo github.com/owner/repoA --squash; python3 -c 'print(1)'", repo) == []
+    assert kinds("gh pr merge 940 --repo github.com/owner/repoA && gh pr merge 941 --repo github.com/owner/repoA", repo) == []          # two risky commands joined
+    assert kinds("gh pr merge 940 --repo github.com/owner/repoA --squash && git reset --hard HEAD~1", repo) == []
     assert kinds("git reset --hard HEAD~1 && git clean -fd", repo) == []
 
 
@@ -256,11 +256,11 @@ def test_kind_scope_without_a_known_project_offers_only_kind_any(repo, tmp_path)
 def test_project_of_reads_cwd_and_a_leading_cd(repo, repo_b, short):
     assert scopes.project_of("anything", repo) == repo
     assert scopes.project_of("anything", f"{repo}/sub/deep") == repo               # walks up to the `.git` entry
-    assert scopes.project_of(f"cd {repo_b} && gh pr merge 1", repo) == repo_b
-    assert scopes.project_of(f"cd '{repo_b}' && gh pr merge 1", repo) == repo_b
-    assert scopes.project_of(f'cd "{repo_b}" &&   gh pr merge 1', repo) == repo_b
-    assert scopes.project_of(f"cd {repo_b}&&gh pr merge 1", repo) == repo_b
-    assert scopes.project_of("cd sub && gh pr merge 1", repo) == repo              # relative to cwd
+    assert scopes.project_of(f"cd {repo_b} && gh pr merge 1 --repo github.com/owner/repoA", repo) == repo_b
+    assert scopes.project_of(f"cd '{repo_b}' && gh pr merge 1 --repo github.com/owner/repoA", repo) == repo_b
+    assert scopes.project_of(f'cd "{repo_b}" &&   gh pr merge 1 --repo github.com/owner/repoA', repo) == repo_b
+    assert scopes.project_of(f"cd {repo_b}&&gh pr merge 1 --repo github.com/owner/repoA", repo) == repo_b
+    assert scopes.project_of("cd sub && gh pr merge 1 --repo github.com/owner/repoA", repo) == repo              # relative to cwd
     (short / "repoA" / "sub" / "deep" / ".git").write_text("gitdir: /elsewhere")  # a linked worktree has a `.git` file
     assert scopes.project_of("anything", f"{repo}/sub/deep") == f"{repo}/sub/deep"
 
@@ -274,8 +274,8 @@ def test_project_of_follows_a_symlink_to_the_real_folder(repo, tmp_path):
 def test_project_of_expands_a_tilde_only_through_home(repo_b, monkeypatch):
     home = os.path.dirname(repo_b)
     monkeypatch.setenv("HOME", home)
-    assert scopes.project_of("cd ~/repoB && gh pr merge 1", "/") == repo_b
-    assert scopes.project_of("cd ~root && gh pr merge 1", "/") is None          # `~user` is not read
+    assert scopes.project_of("cd ~/repoB && gh pr merge 1 --repo github.com/owner/repoA", "/") == repo_b
+    assert scopes.project_of("cd ~root && gh pr merge 1 --repo github.com/owner/repoA", "/") is None          # `~user` is not read
 
 
 @pytest.mark.parametrize("cmd", ["cd $REPO && x", "cd ${REPO} && x", "cd `pwd` && x", "cd $(pwd) && x", "cd \"$REPO\" && x", "(cd %(r)s && x)", "pushd %(r)s && x",
@@ -340,9 +340,9 @@ def test_the_allowed_merge_flags_are_exactly_the_agreed_set():
 # ------------------------------------------------------------------ final whole-branch review
 
 # Finding 1: a confirmed scope would let the agent upload any local file to GitHub as the merge commit body, unasked.
-@pytest.mark.parametrize("cmd", ["gh pr merge 940 --squash --body-file=/Users/x/.aws/credentials", "gh pr merge 940 --squash --body-file /Users/x/.aws/credentials",
-                                 "gh pr merge 940 -F /Users/x/.ssh/id_rsa", "gh pr merge 940 -F/Users/x/.ssh/id_rsa", "gh pr merge 940 --body-file notes.txt",
-                                 "gh pr merge 940 -F notes.txt", "gh pr merge 940 --squash --body-file=notes.txt"])
+@pytest.mark.parametrize("cmd", ["gh pr merge 940 --repo github.com/owner/repoA --squash --body-file=/Users/x/.aws/credentials", "gh pr merge 940 --repo github.com/owner/repoA --squash --body-file /Users/x/.aws/credentials",
+                                 "gh pr merge 940 --repo github.com/owner/repoA -F /Users/x/.ssh/id_rsa", "gh pr merge 940 --repo github.com/owner/repoA -F/Users/x/.ssh/id_rsa", "gh pr merge 940 --repo github.com/owner/repoA --body-file notes.txt",
+                                 "gh pr merge 940 --repo github.com/owner/repoA -F notes.txt", "gh pr merge 940 --repo github.com/owner/repoA --squash --body-file=notes.txt"])
 def test_merge_scope_refused_for_a_body_file(repo, cmd):
     assert offered(cmd, repo) == [], cmd
     assert scopes.keys_for(assessed(cmd, repo), "Bash", {"command": cmd}, {}, repo) == []
@@ -355,28 +355,17 @@ def merge_key(cmd, cwd):
 
 
 # Finding 2: `gh repo set-default` and `git remote set-url` are low and not gated, and they change the repository a merge acts on in the same folder.
-def test_merge_key_changes_when_the_remote_url_changes(repo):
+def test_merge_scope_disappears_when_the_remote_no_longer_names_the_repository(repo):
     before = merge_key(MERGE, repo)
-    assert merge_key("gh pr merge 941 --rebase", repo) == before
+    assert merge_key("gh pr merge 941 --repo github.com/owner/repoA --rebase", repo) == before
     (Path(repo) / ".git" / "config").write_text(git_config("git@github.com:other/repo.git"))
-    assert merge_key(MERGE, repo) != before
+    assert offered(MERGE, repo) == []
 
 
-def test_merge_key_changes_when_gh_resolved_changes(repo):
-    two = '[remote "upstream"]\n\turl = https://github.com/other/repo.git\n'
-    (Path(repo) / ".git" / "config").write_text(git_config(extra=two))
-    before = merge_key(MERGE, repo)
-    (Path(repo) / ".git" / "config").write_text(git_config(extra=two + "\tgh-resolved = base\n"))
-    after = merge_key(MERGE, repo)
-    assert after != before
-    (Path(repo) / ".git" / "config").write_text(git_config(extra=two + "\tgh-resolved = other/repo\n"))
-    assert merge_key(MERGE, repo) not in (before, after)
-
-
-def test_merge_key_changes_with_an_url_rewrite(repo):
+def test_an_url_rewrite_does_not_change_the_key(repo):
     before = merge_key(MERGE, repo)
     (Path(repo) / ".git" / "config").write_text(git_config(extra='[url "https://github.com/other/"]\n\tinsteadOf = https://github.com/owner/\n'))
-    assert merge_key(MERGE, repo) != before
+    assert merge_key(MERGE, repo) == before   # with --repo gh talks to the host API, not to the git remote
 
 
 def test_merge_key_ignores_config_that_does_not_name_a_repository(repo):
@@ -395,9 +384,9 @@ def test_merge_scope_in_a_linked_worktree_reads_the_shared_config(short, relativ
     wt = short / "wt"
     wt.mkdir()
     (wt / ".git").write_text(f"gitdir: {'../main/.git/worktrees/wt' if relative else wt_git}\n")
-    before = merge_key(MERGE, str(wt))
+    assert merge_key(MERGE, str(wt))
     (main / ".git" / "config").write_text(git_config("git@github.com:other/repo.git"))
-    assert merge_key(MERGE, str(wt)) != before
+    assert offered(MERGE, str(wt)) == []
 
 
 @pytest.mark.parametrize("how", ["missing", "a folder", "an include", "an includeIf", "not utf-8", "a .git file without gitdir", "a worktree without a config"])

@@ -17,7 +17,7 @@ from jade import ledger, memory, paths, policy, scopes
 from jade.util import now, ts
 
 SESSION = "sess-newer-deny-0001"
-MERGE = "gh pr merge 940 --squash"
+MERGE = "gh pr merge 940 --repo github.com/owner/repoA --squash"
 CLASS_CMD = "git reset --hard HEAD~1"
 
 
@@ -127,7 +127,7 @@ def test_a_deny_in_another_project_does_not_block_the_project_scope(repo, repo_b
 
 def test_a_deny_of_another_pr_does_not_block_the_merge_scope(repo):
     aid = record(MERGE, repo, "allow", kind="merge_project", age_days=2, strong=True)
-    record("gh pr merge 941 --squash", repo, "deny", age_days=1)
+    record("gh pr merge 941 --repo github.com/owner/repoA --squash", repo, "deny", age_days=1)
     assert lookup(MERGE, repo)["answer_id"] == aid   # the deny row has only the exact key of PR 941: no scope key to compare
 
 
