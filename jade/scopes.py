@@ -11,8 +11,8 @@ Three kinds, at most two offered per call:
 - `merge_project`: `gh pr merge N --repo HOST/OWNER/NAME` with the other flags in MERGE_FLAGS_ALLOWED, in one named project. `memory.eligibility` calls every merge
   exact-only; this scope narrows that on purpose, and it is computed here from the segment text, never from `eligibility`. Any PR number, any allowed flag and any flag
   value is the same scope; a flag outside the list (delete, admin, auto, force, a body file) gives no scope at all. HOST/OWNER/NAME must equal a GitHub-style `url` of a
-  `remote` in the project's git config (`_remote_urls`), read as plain text. With `--repo` gh talks to the API of HOST, so no environment variable, shell startup file
-  or git config (an `insteadOf` included) can change the target; the key holds the project and `host/owner/name` and nothing else about the machine. A call without
+  `remote` in the project's git config (`_remote_urls`), read as plain text. With `--repo` gh talks to the API of HOST, so an environment variable (`GH_REPO`) or a git config (an `insteadOf` included)
+  does not change which repository gh resolves; the key holds the project and `host/owner/name` and nothing else about the machine. A call without
   `--repo`, or with a bare `OWNER/NAME` (gh would take the host from GH_HOST), gets no merge scope.
 
 Never offered: a human-only class, a blocked call, the never rules, a call the gate could not read, an inline program, and two or more risky commands in one call.
@@ -48,11 +48,14 @@ _ELLIPSIS = "…"
 
 # `cd PATH &&` at the very start. PATH is a literal: double quotes without an expansion, single quotes, or a bare word without a shell character.
 _LEADING_CD = re.compile(
-    r"""^\s*cd\s+(?:"(?P<dq>[^"$`\\]*)"|'(?P<sq>[^']*)'|(?P<bare>[^\s"'$`\\;&|()<>*?\[\]{}!#]+))\s*&&\s*""")
+    r"""^[ \t]*cd[ \t]+(?:"(?P<dq>[^"$`\\]*)"|'(?P<sq>[^']*)'|(?P<bare>[^\s"'$`\\;&|()<>*?\[\]{}!#]+))[ \t]*&&[ \t]*""")
 _OTHER_CD = re.compile(r"(?:^|[\s;&|(`{])(?:cd|pushd|popd)(?=[\s;&|)`}]|$)")
 # Options that move a git command to another repository. The segment key drops them, so the working folder says nothing about where the call acts.
 _ELSEWHERE = re.compile(r"(?:^|\s)(?:-C|--git-dir|--work-tree)(?=[\s=]|$)|(?:^|[\s;&|(])(?:GIT_DIR|GIT_WORK_TREE)=")
 _DIGITS = re.compile(r"^[0-9]+$")
+# Non-ASCII text, or whitespace other than space, tab and newline. Python splits words on all of it; zsh and bash split only on space and tab, so a call written with
+# one of these would show JADE a `--repo` that gh never gets.
+_ODD_SPACE = re.compile(r"[^\x00-\x7f]|[\x0b\x0c\r\x1c-\x1f]")
 _EXPANDS = re.compile(r"[$`*?\[~{]")   # a word the shell may expand or split: a variable can hold `-d`, a glob or a brace can add words
 
 
@@ -160,8 +163,10 @@ def _config_lines(path: str, keep_sections: tuple[str, ...]) -> list[str] | None
         return None
     out: list[str] = []
     section, keep = "", False
-    for raw in text.splitlines():
-        line = raw.strip()
+    for raw in text.split("\n"):   # git splits on LF only (a CR before it is part of the line ending), not on Python's other line breaks
+        line = raw.rstrip("\r").strip(" \t")
+        if line.endswith("\\"):
+            return None   # a line continuation: this reader does not join lines
         if not line or line[0] in "#;":
             continue
         if line.startswith("["):
@@ -294,10 +299,11 @@ def _simple_command_words(subject: str) -> list[str] | None:
     """The words of the call when, after a leading `cd PATH &&`, it is exactly one simple command: no separator, pipe, background `&`, group or second command of any
     kind (a gated segment is not the only one that can change what a merge does: an export, a function, a remote change is not gated). None otherwise."""
     m = _LEADING_CD.match(subject)
-    skeleton = shellnorm.skeleton(subject[m.end():] if m else subject)
-    if shellnorm.SPLIT.search(skeleton):
+    raw = subject[m.end():] if m else subject
+    skeleton = shellnorm.skeleton(raw)
+    if _ODD_SPACE.search(raw) or _ODD_SPACE.search(skeleton) or shellnorm.SPLIT.search(skeleton):
         return None
-    words = skeleton.split()
+    words = [w for w in re.split(r"[ \t]+", skeleton) if w]
     return None if not words or any(_EXPANDS.search(w) for w in words) else words
 
 
@@ -305,7 +311,8 @@ def _merge_project(a, tool: str, tool_input: dict | None, project: str | None) -
     """(key, `host/owner/name`) of the merge scope, or None. The segment key is not enough: it drops `NAME=value` prefixes, `env`, `sudo` and the directory of the
     program, so the words are read from the call itself. The program must be exactly `gh`, with no prefix, and no word may be one the shell expands or splits. The call
     must name the repository (`--repo HOST/OWNER/NAME`) and the project must have a remote with that host, owner and name: with `--repo` gh talks to the API of HOST, so
-    no environment variable, shell file or git config can change the target. The key holds the project and that repository only."""
+    no environment variable or git config changes which repository gh resolves. This does not cover the program: a `gh` function,
+    alias or PATH entry in a shell startup file can still replace gh, and writes to those files are not gated yet (backlog). The key holds the project and that repository only."""
     if project is None or not _is_plain_shell_call(a, tool, tool_input):
         return None
     keys = list(getattr(a, "seg_keys", None) or [])

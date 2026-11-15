@@ -211,3 +211,63 @@ def test_the_public_memory_names():
     assert memory.INLINE.search("sh -c x") and memory.MERGE.match("gh pr merge 1")
     assert callable(memory.valid_since)
     assert not any(hasattr(memory, n) for n in ("_INLINE", "_MERGE", "_valid_since"))
+
+
+# ------------------------------------------------------------------ wave 4: RR2-1 (fake separators) and RR2-3 (config line rules)
+
+FAKE_SEPARATORS = [" ", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x1f", "\x85", " ", "　", " "]
+
+
+@pytest.mark.parametrize("sep", FAKE_SEPARATORS, ids=[hex(ord(s)) for s in FAKE_SEPARATORS])
+def test_a_fake_separator_before_repo_gives_no_merge_scope(repo, sep):
+    # zsh and bash do not split on these, so gh would get `--body` with one long value and no --repo at all.
+    assert merge_keys(f"gh pr merge 5 --squash --body x{sep}--repo{sep}{REPO}", repo) == []
+    assert merge_keys(f"gh pr merge 5 --repo{sep}{REPO} --squash", repo) == []
+    assert merge_keys(f"gh pr merge 5 --squash{sep}--repo {REPO}", repo) == []
+    assert merge_keys(f"gh pr merge 5 --repo {REPO}{sep}--squash", repo) == []
+
+
+def test_a_fake_separator_after_a_leading_cd_gives_no_merge_scope(repo):
+    assert merge_keys(f"cd {repo} && gh pr merge 5 --squash --body x --repo {REPO}", "/") == []
+    assert len(merge_keys(f"cd {repo} && gh pr merge 5 --squash --repo {REPO}", "/")) == 1
+
+
+def test_a_non_ascii_character_anywhere_gives_no_merge_scope(repo):
+    assert merge_keys(f"gh pr merge 5 --repo {REPO} --subject 'café'", repo) == []
+
+
+def test_normal_space_and_tab_still_give_the_scope(repo):
+    assert len(merge_keys(f"gh pr merge 5 --squash --repo {REPO}", repo)) == 1
+    assert len(merge_keys(f"gh pr merge\t5\t--squash \t--repo {REPO}", repo)) == 1
+
+
+def test_a_fake_separator_after_cd_does_not_name_the_project(repo, short):
+    other = make_repo(short / "other", "https://github.com/owner/repoA.git")
+    # `cd PATH<NBSP>&&`: the shell cd goes to a folder named with the NBSP, which does not exist; the project is never the one named
+    assert scopes.project_of(f"cd {repo}\u00a0&& gh pr merge 5 --repo {REPO}", other) in (None, other)
+    assert scopes.project_of(f"cd\u00a0{repo} && gh pr merge 5 --repo {REPO}", other) in (None, other)
+    assert scopes.project_of(f"cd {repo} && gh pr merge 5 --repo {REPO}", other) == repo
+
+
+def test_a_line_ending_with_a_backslash_gives_no_scope(short):
+    body = 'x = y \\\n[remote "z"]\n'
+    assert merge_keys(MERGE, make_repo(short / "r", "https://github.com/owner/repoA.git", extra="[core]\n\t" + body)) == []
+    assert merge_keys(MERGE, make_repo(short / "r2", "https://github.com/owner/repoA.git", extra="[core]\n\tx = y\\\n")) == []
+
+
+@pytest.mark.parametrize("ctl", ["\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " "])
+def test_the_repo_config_is_split_on_newline_only(short, ctl):
+    # git sees one line `fetch = y<ctl>url = ...`; Python splitlines() would see a second line.
+    root = short / "r"
+    (root / ".git").mkdir(parents=True)
+    (root / ".git" / "config").write_text(f'[remote "o"]\n\tfetch = y{ctl}url = https://github.com/owner/repoA.git\n')
+    assert scopes._remote_urls(str(root)) == []
+    assert merge_keys(MERGE, str(root)) == []
+
+
+def test_a_crlf_config_still_reads(short):
+    root = short / "r"
+    (root / ".git").mkdir(parents=True)
+    (root / ".git" / "config").write_bytes(b'[remote "o"]\r\n\turl = https://github.com/owner/repoA.git\r\n')
+    assert scopes._remote_urls(str(root)) == ["https://github.com/owner/repoA.git"]
+    assert len(merge_keys(MERGE, str(root))) == 1
