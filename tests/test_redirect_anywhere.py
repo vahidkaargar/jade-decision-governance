@@ -60,7 +60,7 @@ def sig(command: str) -> tuple:
         words = k.split(" ")
         cut = next((i for i, w in enumerate(words) if _REDIRECT_WORD.match(w)), len(words))
         keys.append(" ".join(words[:cut]))
-    return a.level, a.rule_id, tuple(a.blocked), tuple(a.ho_ids), tuple(sorted(keys))
+    return a.level, a.rule_id, tuple(a.blocked), tuple(a.ho_ids), tuple(sorted(set(keys)))   # a command read in two readings keys the same segment twice
 
 
 def si08(command: str) -> bool:
@@ -207,8 +207,10 @@ def ran_git(command: str, shell: str, where: Path) -> list[list[str]]:
         fake.parent.mkdir(exist_ok=True)
         fake.write_text(FAKE_GIT)
         fake.chmod(0o755)
+    script = where / "command.sh"
+    script.write_text(PRELUDE + command + "\n")   # a file, as the review ran it: `zsh -c` and `zsh file` do not always agree
     try:
-        subprocess.run([shell, "-c", PRELUDE + command], cwd=where, env={"PATH": f"{fake.parent}:/usr/bin:/bin", "ARGV_OUT": str(out), "HOME": str(where)},
+        subprocess.run([shell, *(["-f"] if shell == "zsh" else []), str(script)], cwd=where, env={"PATH": f"{fake.parent}:/usr/bin:/bin", "ARGV_OUT": str(out), "HOME": str(where)},
                        stdin=subprocess.DEVNULL, capture_output=True, timeout=10, check=False)
     except subprocess.TimeoutExpired:
         pass   # a command that waits for input ran what it ran; the arguments recorded so far are what counts

@@ -69,9 +69,10 @@ def test_zsh_redirect_never_hides_a_push_to_main_from_the_shell(base, redirect, 
 
 def test_zsh_redirects_are_spelled_one_way():
     for r in (">>&log", ">>|log", "&>>|log", ">>&|log", ">>&!log", ">>!log"):
-        assert shellnorm.segments(f"git push origin feature {r} :main") == ["git push origin feature :main >> log"], r
+        assert shellnorm.segments(f"git push origin feature {r} :main")[0] == "git push origin feature :main >> log", r
     for r in ("&>|log", ">!log", ">&|log", ">&!log", "&>!log"):
-        assert shellnorm.segments(f"git push origin feature {r} :main") == ["git push origin feature :main > log"], r
+        assert shellnorm.segments(f"git push origin feature {r} :main")[0] == "git push origin feature :main > log", r
+    assert shellnorm.segments("git push origin feature >>|log :main") == ["git push origin feature :main >> log"]   # no `!`: one reading
 
 
 def test_a_zsh_redirect_is_still_a_write():
@@ -170,14 +171,16 @@ def test_a_command_group_is_still_a_group(command, tmp_path):
     agrees_with_the_shell(command, tmp_path)
 
 
-def test_group_braces_split_and_literal_braces_do_not():
-    assert shellnorm.segments("{ git push origin main; }") == ["git push origin main"]
-    assert shellnorm.segments("function f { git push origin main; }") == ["function f", "git push origin main"]
-    assert shellnorm.segments("git push origin feature a{ :main") == ["git push origin feature a\x06 :main"]
-    assert shellnorm.segments("git push origin feature a} :main") == ["git push origin feature a\x06 :main"]
-    assert shellnorm.segments("git push origin feature a\\{b,c} :main") == ["git push origin feature a\x06b,c\x06 :main"]
-    assert shellnorm.segments("git push origin feature { :main") == ["git push origin feature \x06 :main"]
-    assert shellnorm.segments("git push origin {feature,hotfix} :main") == ["git push origin feature hotfix :main"]   # a brace expansion is expanded, as before
+def test_a_brace_is_read_as_a_group_and_as_a_word():
+    """Every reading is in the skeleton: the one in which a brace cuts the command (a group) and the ones in which it is a word."""
+    got = shellnorm.segments("{ git push origin main; }")
+    assert "git push origin main" in got
+    got = shellnorm.segments("git push origin feature a{ :main")
+    assert "git push origin feature a\x06 :main" in got and ":main" in got
+    got = shellnorm.segments("git push origin feature a\\{b,c} :main")
+    assert "git push origin feature a\x06b,c\x06 :main" in got
+    assert shellnorm.segments("git push origin {feature,hotfix} :main") == ["git push origin feature hotfix :main"]   # a brace expansion is expanded, one reading
+    assert shellnorm.segments("echo ${HOME}") == ["echo $HOME"]
 
 
 @pytest.mark.parametrize("command", [
@@ -238,3 +241,163 @@ def test_halved_backslashes_before_a_redirect_never_hide_a_push_to_main(base, ta
 def test_a_heredoc_and_echo_hand_the_program_the_halved_text():
     assert "git push origin feature a\\\\ :main > log" in shellnorm.segments("sh <<EOF\ngit push origin feature a\\\\\\>&log :main\nEOF")
     assert "git push origin feature a\\\\ :main > log" in shellnorm.segments("echo 'git push origin feature a\\\\\\>&log :main' | zsh")
+
+
+# ---------------------------------------------------------------- round 2 of the review of d10abf9 (W-111): the fix must not lose what 3c7d2e9 and main blocked
+#
+# Every command below is run in the real bash and zsh (a script file, a recording `git`); `really_pushes` says that at least one of them pushes to the default
+# branch, so a test cannot pass because the shell never ran the push, and the gate must stop it. The design is "fail closed": where the gate cannot tell whether a
+# brace, an escape or a `!` is data or syntax in the shell that will run the text, it reads the command both ways and either reading can block.
+
+def really_pushes(command: str, tmp_path: Path) -> bool:
+    return any(shutil.which(sh) and pushes_to_default(ran_git(command, sh, tmp_path)) for sh in ("bash", "zsh"))
+
+
+ZSH_GROUPS = [
+    "if { true } { git push origin feature :main }",                                       # F1: the `}` that closes a brace condition
+    "while { true } { git push origin HEAD:main; break }",
+    "until { false } { git push origin HEAD:main; break }",
+    "if { false } { true } elif { true } { git push origin +main }",
+    "if ! { false } { git push origin main }",
+    "if { { true } } { git push origin main }",
+    "if { true } {git push origin HEAD:main}",
+    "if [[ -z x ]] { echo } elif [[ 1 ]] { git push origin main }",                         # SEG-1
+    "if [[ -z x ]] { echo } elif [[ 1 ]] { git push origin HEAD:main }",
+    "if [[ -z x ]] { echo } elif [[ -z y ]] { echo } elif [[ 1 ]] { git push origin main }",
+    "if [[ -z x ]] { echo } elif [[ 1 ]] { git push origin main } else { echo }",
+    "{git push origin HEAD:main}",                                                          # F2: no blank after `{`
+    "{git push origin feature :main}",
+    "{git push --delete origin main}",
+    "{ git push origin :main }",
+    "{ git push --force origin main }",
+    "{ command git push origin main; }",
+    "{ env git push origin main; }",
+    "{ eval 'git push origin main'; }",
+    "{ ls } ; git push origin main",
+    "{ pwd }\ngit push origin main",
+    "for i (1) { git push origin main }",
+    "repeat 1 { git push origin main }",
+]
+
+
+@pytest.mark.parametrize("command", ZSH_GROUPS)
+def test_zsh_brace_groups_still_stop_a_push_to_main(command, tmp_path):
+    assert really_pushes(command, tmp_path), f"zsh does not push with {command!r}: the test is wrong"
+    assert si08(command), command
+
+
+@pytest.mark.parametrize("wrapper", ["if {{ true }} {{ {c} }}", "if [[ -z x ]] {{ echo }} elif [[ 1 ]] {{ {c} }}", "{{{c}}}", "while {{ true }} {{ {c}; break }}"])
+@pytest.mark.parametrize("plain", ["rm -rf /Users/x/proj", "git reset --hard", "git push --force origin feature", "git clean -fd"])
+def test_zsh_brace_groups_do_not_lower_the_rating(wrapper, plain):
+    command = wrapper.format(c=plain)
+    want = policy.assess("Bash", {"command": plain}, cwd="/tmp").level
+    got = policy.assess("Bash", {"command": command}, cwd="/tmp").level
+    assert policy.LEVELS[got] >= policy.LEVELS[want], command
+
+
+BRACE_PUSHES = [
+    "git push origin feature a\\{b,c} :main", "git push origin feature a\\{lg,x} :main", "git push origin feature a\\{,} :main", "git push origin feature a{lg,x\\} :main",
+    "git push origin feature a{ :main", "git push origin feature a} :main", "git push origin feature } :main", "git push origin feature { :main",
+    "if { true } { git push origin feature a{ :main }",                                     # a group and a literal brace in one command
+    "{ git push origin feature a} :main; }",
+    "{git push origin feature { :main}",
+]
+
+
+@pytest.mark.parametrize("command", BRACE_PUSHES)
+def test_brace_readings_never_hide_a_push_to_main(command, tmp_path):
+    assert si08(command), command
+    agrees_with_the_shell(command, tmp_path)
+
+
+# ---------------------------------------------------------------- what zsh `print` and `echo` print, and what runs it
+
+PRINTED = [
+    "print 'git push origin feature \\>&x :main' | bash -s",                                # F3: print drops the backslash of any unknown escape
+    "print 'git push origin feature \\>&-x :main' | zsh",
+    "print 'git push origin \\>&- main' | zsh",                                             # DIFF-2
+    "print 'git push origin feature \\$x :main' | bash -s",
+    "print 'git push origin feature a\\{ :main' | bash -s",
+    "print 'git push origin feature a\\} :main' | bash -s",
+    "echo 'git push origin feature a\\\\\\>&log :main' | bash -s",
+    "time echo 'git push origin main' | sh",                                                # DIFF-1: the echo has a prefix
+    "FOO=1 printf 'git push origin main' | zsh",
+    "env echo 'git push origin main' | sh",
+    "command echo 'git push origin main' | sh",
+    "command printf 'git push origin main' | sh",
+    "builtin echo 'git push origin main' | sh",
+    "exec echo 'git push origin main' | sh",
+    "noglob echo 'git push origin main' | zsh",
+    "! echo 'git push origin \\>!log main' | sh",
+    "time print 'git push origin \\>&x main' | bash -s",
+    "echo git push \\\\<&- origin main | sh",                                               # DIFF-3
+]
+
+
+@pytest.mark.parametrize("command", PRINTED)
+def test_text_printed_for_a_shell_is_read_as_that_shell_reads_it(command, tmp_path):
+    assert really_pushes(command, tmp_path), f"no shell pushes with {command!r}: the test is wrong"
+    assert si08(command), command
+
+
+@pytest.mark.parametrize("producer", ["echo", "print", "printf", "time echo", "env printf", "! echo", "command print"])
+@pytest.mark.parametrize("escape", ["\\>", "\\<", "\\|", "\\;", "\\&", "\\$", "\\{", "\\}", "\\\\\\>", "\\ "])
+@pytest.mark.parametrize("consumer", ["sh", "bash -s", "zsh"])
+def test_any_escape_in_printed_text_never_hides_a_push_to_main(producer, escape, consumer, tmp_path):
+    for text in (f"git push origin feature a{escape}&log :main", f"git push origin feature a{escape}>log :main", f"git push origin feature a{escape}&-x :main"):
+        command = f"{producer} '{text}' | {consumer}"
+        if really_pushes(command, tmp_path):
+            assert si08(command), command
+
+
+# ---------------------------------------------------------------- F4: bash reads `>!`, `>>!` and `>&!` as `>` and a file named `!`
+
+BASH_BANG = [
+    "1>! git push origin main",
+    "echo hi; >>! git push origin HEAD:main",
+    "env bash -c \"1>! git push origin feature HEAD:refs/heads/main\"",
+    "git >! push origin HEAD:main",
+    "git >>! push --delete origin main",
+    "git push >! origin main",
+    "git push origin >&! main",
+    "git push origin feature >&! :main",
+    "git push origin feature &>! :main",
+    ">! git push origin :main",
+]
+
+
+@pytest.mark.parametrize("command", BASH_BANG)
+def test_bash_bang_redirects_keep_the_word_after_them(command, tmp_path):
+    assert really_pushes(command, tmp_path), f"no shell pushes with {command!r}: the test is wrong"
+    assert si08(command), command
+
+
+@pytest.mark.parametrize("op", [">!", ">>!", ">&!", "&>!", "&>>!"])
+@pytest.mark.parametrize("base", ["git push origin " + p for p in PUSH_TO_MAIN])
+def test_bang_redirect_at_any_position_never_hides_a_push_to_main(base, op, tmp_path):
+    for command in inserted(base, op) + inserted(base, op + "log"):
+        agrees_with_the_shell(command, tmp_path)
+
+
+# ---------------------------------------------------------------- DIFF-7: a closed stdout does not read a file less
+
+def test_a_closed_stdout_does_not_hide_a_credential_read():
+    plain = policy.assess("Bash", {"command": "cat /Users/x/.ssh/id_rsa"}, cwd="/tmp")
+    closed = policy.assess("Bash", {"command": "cat >&- /Users/x/.ssh/id_rsa"}, cwd="/tmp")
+    assert policy.LEVELS[closed.level] >= policy.LEVELS[plain.level]
+
+
+# ---------------------------------------------------------------- DIFF-5: a brace is cheap
+
+@pytest.mark.timing
+@pytest.mark.parametrize("word", ["{ ", "} ", "a{ "])
+def test_many_braces_cost_about_as_much_as_many_words(word):
+    import time
+
+    def cost(chunk: str) -> float:
+        policy.assess("Bash", {"command": "echo warm"}, cwd="/tmp")
+        t = time.perf_counter()
+        policy.assess("Bash", {"command": "git push origin feature " + chunk * 50000}, cwd="/tmp")
+        return time.perf_counter() - t
+
+    assert cost(word) < 4 * cost("x ") + 1.0

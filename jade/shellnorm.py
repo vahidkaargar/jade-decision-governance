@@ -41,7 +41,7 @@ _RUN_OPT = r"(?:(?:-w|-p|--with|--with-requirements|--with-editable|--python|--p
 _RUNNER = (r"(?:uv(?:\s+tool)?\s+run|uvx|poetry\s+run|pdm\s+run|pipenv\s+run|rye\s+run|hatch\s+run|pipx\s+run|conda\s+run|npx|bunx|pnpm\s+(?:exec|dlx)"
            rf"|yarn\s+(?:exec|dlx)|npm\s+exec)(?:\s+(?:{_RUN_OPT}|--))*")
 PREFIX = re.compile(
-    r"^(?:(?:" + _RUNNER + r"|[A-Za-z_]\w*=\S*|sudo(?:\s+(?:-[ugphCDrtUT]\s+\S+|-[A-Za-z-]+))*|command(?!\s+-[A-Za-z]*[vV]\b)|builtin|nohup|time|exec|noglob|do|then|else|if|while|until|!"
+    r"^(?:(?:" + _RUNNER + r"|[A-Za-z_]\w*=\S*|sudo(?:\s+(?:-[ugphCDrtUT]\s+\S+|-[A-Za-z-]+))*|command(?!\s+-[A-Za-z]*[vV]\b)|builtin|nohup|time|exec|noglob|nocorrect|do|then|else|if|while|until|!"
     r"|env(?:\s+-[A-Za-z-]+)*|g?timeout(?:\s+-\S+)*\s+\d+[smhd]?|nice(?:\s+-n?\s*\d+)?|caffeinate(?:\s+-\w+)*"
     r"|xargs(?:\s+-(?:I\s*\S+|n\s*\d+|P\s*\d+|[0a-zA-Z]+))*)\s+)+")
 
@@ -62,6 +62,7 @@ NEXT_STAGE = re.compile(
     r"[ \t]*(?:\w+=\S*[ \t]+)*(?:(?:sudo|env|command|exec|nohup|time|xargs)(?:[ \t]+-[ugphCDrtUT][ \t]+\S+|[ \t]+-\S+(?:[ \t]+\d+)?)*[ \t]+)*[\\'\"]?(?P<w>[\w./+-]+)['\"]?(?P<a>(?:[ \t]+[^\s;&|()<>`$]+)*)[ \t]*(?=$|[;&|()\n<>])")
 PIPE_REST = re.compile(r"\|(?!\|)")
 PRODUCER = re.compile(r"^\s*(?:echo|printf|print|cat|yes)\b(?:\s+-[a-zA-Z]+)*")
+PRINTER = re.compile(r"^\s*\\?(?:\S*/)?(?P<name>echo|printf|print|cat|yes)\b(?:\s+-[a-zA-Z]+)*")   # the program that prints, after `time`, `env`, `command`, `!`, `\echo`, `/bin/echo`
 ORDINARY_ESCAPE = set("_./-:=@%+,^")
 
 
@@ -72,18 +73,21 @@ def _unescape_dq(body: str) -> str:
     return re.sub(r'\\([$`"\\])|\\\r?\n', lambda m: m.group(1) or "", body)
 
 
-_ECHO_ESCAPE = re.compile(r"\\(c.*|0[0-7]{1,3}|x[0-9A-Fa-f]{1,2}|[\\abefnrtv])", re.S)
+_ECHO_ESCAPE = re.compile(r"\\(c.*|0[0-7]{1,3}|x[0-9A-Fa-f]{1,2}|[\\abefnrtv]|.)", re.S)
 
 
-def _echo_escapes(text: str) -> str:
-    """What `echo` of zsh and sh (and `printf`, `print`) prints for `text`: `\\\\` is a backslash, `\\n` a newline, `\\c` ends the output."""
+def _echo_escapes(text: str, drop_unknown: bool = False) -> str:
+    """What `echo` of zsh and sh (and `printf`, `print`) prints for `text`: `\\\\` is a backslash, `\\n` a newline, `\\c` ends the output; any other escape stays as it is,
+    or (`drop_unknown`, zsh `print`) loses its backslash."""
     def one(m: re.Match) -> str:
         e = m.group(1)
-        if e[0] == "c":
-            return ""
-        if e[0] in "0x":
-            return chr(int(e[1:] or "0", 16 if e[0] == "x" else 8))
-        return {"\\": "\\", "n": "\n", "t": " ", "v": " ", "f": " ", "r": " "}.get(e, "")
+        if m.group(0)[1] == "c":
+            return ""   # `\c` ends the output
+        if len(e) > 1:
+            return chr(int(e[1:], 16 if e[0] == "x" else 8))   # `\0nnn`, `\xhh`
+        if e in "abefnrtv\\":
+            return {"\\": "\\", "n": "\n"}.get(e, " " if e in "tvfr" else "")
+        return e if drop_unknown else "\\" + e
     return _ECHO_ESCAPE.sub(one, text)
 
 
@@ -833,13 +837,19 @@ class _Scan:
         (`python3 -c 'print("...")' | sh`) hands over every string it holds."""
         if kind == "shell" and (prog := self._producer_program(raw)):
             return self._interp(prog[0], prog[1], emit_all=True)
-        text = " ".join(_dec(w) for w in words_of(PRODUCER.sub("", raw, count=1)))
-        if kind == "shell":
-            out = self._sub(text)
-            if "\\" in text and re.match(r"\s*(?:echo|printf|print)\b", raw):   # zsh, sh and printf read `\\` and `\n` in what they print; bash's echo does not: both readings run
-                out += " ; " + self._sub(_echo_escapes(text))
-            return out
-        return self._interp(kind, text)
+        printer = PRINTER.match(PREFIX.sub("", raw.lstrip(), count=1))
+        if printer is None:
+            text = " ".join(_dec(w) for w in words_of(PRODUCER.sub("", raw, count=1)))
+            return self._sub(text) if kind == "shell" else self._interp(kind, text)
+        text = " ".join(_dec(w) for w in words_of(PREFIX.sub("", raw.lstrip(), count=1)[printer.end():]))
+        if kind != "shell":
+            return self._interp(kind, text)
+        readings = [text]
+        if "\\" in text and printer.group("name") in ("echo", "printf", "print"):
+            # what the program prints is not what it is given: zsh and sh `echo` and `printf` read `\\` and `\n`, zsh `print` also drops the backslash of any
+            # other escape (`\>` prints `>`), bash `echo` prints the text as it is. The shell that reads the output may be any of them: every reading is read.
+            readings += [_echo_escapes(text), _echo_escapes(text, drop_unknown=True)]
+        return " ; ".join(self._sub(t) for t in dict.fromkeys(readings))
 
     def _interp(self, lang: str, body: str, emit_all: bool = False) -> str:
         """What a program in `lang` does (interp.py): its literal commands as nested shell text, its literal write targets as the destination of a
@@ -995,6 +1005,9 @@ class _Scan:
             return " ; " + _code(s[i:]) + " ; ", n
         self.nest += 1
         out: list[str] = []
+        braced = False   # a `{` or `}` was met: the text has several readings
+        c_blank = True   # reading C: nothing but blanks since the last separator of that reading
+        c_open = 0       # reading C: the groups it has opened and not closed
         deferred: list[str] = []
         pending: list[tuple[str, bool, bool, str | None, bool]] = []
         cur = ""  # the current stage so far: its first and last characters are all the checks below look at
@@ -1005,14 +1018,17 @@ class _Scan:
         paren = 0
 
         def emit(x: str) -> None:
-            nonlocal cur
+            nonlocal cur, c_blank
             out.append(x)
+            if c_blank and not x.isspace():
+                c_blank = False
             cur += x
             if len(cur) > 700:
                 cur = cur[:300] + cur[-300:]
 
-        def end_stage(sep_at: int, resume: int, pipe: bool) -> None:
-            nonlocal cur, raw_at, hs_kind
+        def end_stage(sep_at: int, resume: int, pipe: bool, brace: bool = False) -> None:
+            nonlocal cur, raw_at, hs_kind, c_blank
+            c_blank = c_blank or not brace
             raw = s[raw_at:sep_at]
             if raw.strip():
                 self._stage(raw, deferred)
@@ -1148,10 +1164,20 @@ class _Scan:
             elif c == "{" and (j := _brace_span(s, i)) > 0:  # brace expansion word, not a command group
                 emit(s[i:j])
                 i = j
-            elif c in "{}" and not _group_brace(c, s[i + 1:i + 2], cur):   # `a{`, `a}`, `{a`, `}` among the arguments: a literal in bash and zsh, not a group
-                emit("\x06")
+            elif c in "{}":
+                # A group brace in one shell and a plain word in the other (`{git push origin main}`, `git push origin a{ :main`): there is no telling which one the shell
+                # that runs the text will take, so a mark stands for the brace and `_brace_readings` writes the text in every reading. The mark says whether the brace
+                # is a word of its own and whether reading C cuts there: a `{` where a command starts, and the `}` that closes it.
+                alone = (i == 0 or s[i - 1] in " \t\n;&|()") and (i + 1 >= n or s[i + 1] in " \t\n;&|()")
+                closes = c_open > 0 and (i + 1 >= n or s[i + 1] in " \t\n;&|()<>") and s[i - 1] != "{"
+                cut = c_blank or (c == "}" and closes)
+                c_open += cut if c == "{" else -(c_open > 0 and cut)
+                out.append(BRACE_MARK[c == "}", alone, cut])
+                braced = True
+                cur += c
+                end_stage(i, i + 1, False, brace=True)
                 i += 1
-            elif c in ";(){}":
+            elif c in ";()":
                 if c == "(":
                     paren += 1
                 elif c == ")" and paren:
@@ -1188,7 +1214,8 @@ class _Scan:
         if raw.strip():
             self._stage(raw, deferred)
         self.nest -= 1
-        return "".join(out) + "".join(f" ; {d} ; " for d in deferred), i
+        text = _brace_readings("".join(out)) if braced else "".join(out)
+        return text + "".join(f" ; {d} ; " for d in deferred), i
 
     def _heredoc_bodies(self, i: int, pending: list, deferred: list[str]) -> int:
         s, n = self.s, self.n
@@ -1205,11 +1232,14 @@ class _Scan:
             body = "\n".join(lines)
             if not quoted:
                 deferred.extend(_Scan(body, self.depth + 1, self.budget).walk(0, None)[2])
-                body = re.sub(r"\\([$`\\])|\\\r?\n", lambda m: m.group(1) or "", body)   # the program reads what the shell wrote: `\\` is `\`, `\$` is `$`
-            if kind == "shell":
-                deferred.append(self._sub(body))
-            elif kind:
-                deferred.append(self._interp(kind, body, emit_all=prints_to_shell))
+                halved = re.sub(r"\\([$`\\])|\\\r?\n", lambda m: m.group(1) or "", body)   # the program reads what the shell wrote: `\\` is `\`, `\$` is `$`
+            else:
+                halved = body
+            for text in dict.fromkeys([body, halved]):   # an expansion in the body is replaced before the program reads it (`\\$(true) x`): both texts are read
+                if kind == "shell":
+                    deferred.append(self._sub(text))
+                elif kind:
+                    deferred.append(self._interp(kind, text, emit_all=prints_to_shell))
         return i
 
 
@@ -1231,27 +1261,33 @@ def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None) ->
 def _skeleton(command: str, _depth: int, _budget: list[int] | None) -> str:
     budget = _budget if _budget is not None else [BUDGET]
     budget[0] -= len(command)
+    command = _MARK_CHARS.sub("\x06", command)   # a byte that is one of the brace marks stays a word
     if _depth > MAX_DEPTH or budget[0] < 0:
         return " ; " + _code(command) + " ; "
     text, _ = _Scan(command, _depth, budget).run(0, None)
     return _hoist_redirects(expand_braces(NULL_REDIRECT.sub(" ", text)))
 
 
-_GROUP_OPENER = re.compile(r"(?:^|\s)(?:then|do|else|elif|if|while|until|time|always|coproc(?:\s+\S+)?|function\s+\S+|!)\s*$")
-_SHORT_FORM = re.compile(r"\s*(?:if|elif|for|foreach|while|until|repeat|select)\b")   # zsh: `if cond { ... }`, `for x in a b { ... }`, `repeat 3 { ... }`
+# A brace is a command group in one shell and a plain word in the other, and where a command starts or a word is alone the same text reads differently in zsh and bash.
+# The scanner writes a mark for each brace (its kind, whether it is a word of its own, whether reading C cuts there) and the skeleton holds every reading:
+#   A every brace cuts the command (groups), L every brace is a word, C a `{` cuts where a command starts and its `}` cuts too, D a brace that is a word of its own cuts and one inside a
+#   word does not, E the other way round. Whichever shell runs the text, one of the readings is the one it takes, and a reading that cuts a push short is not the only one.
+BRACE_MARK = {(close, alone, cut_c): chr(0x0E + 4 * close + 2 * alone + cut_c) for close in (False, True) for alone in (False, True) for cut_c in (False, True)}
+_MARKS = {m: k for k, m in BRACE_MARK.items()}
+_MARK_CHARS = re.compile("[\x0e-\x15]")
 
 
-def _group_brace(c: str, nxt: str, cur: str) -> bool:
-    """Is this `{` or `}` the brace of a command group, and so a separator: a word of its own that opens or closes a command, not a part of an argument.
+def _brace_readings(text: str) -> str:
+    readings = {name: {} for name in "ALCDE"}
+    for m, (close, alone, cut_c) in _MARKS.items():
+        brace = "}" if close else "{"
+        for name, cut in (("A", True), ("L", False), ("C", cut_c), ("D", alone), ("E", not alone)):
+            readings[name][ord(m)] = brace if cut else "\x06"
+    out = list(dict.fromkeys(text.translate(table) for table in readings.values()))
+    return " ; ".join([out[0], *(RUN_OF_BRACES.sub(r"\1", t) for t in out[1:])])
 
-    `{ ls; }` and `then { ls; }` are groups; `a{`, `a}`, `{a`, `}a` and a `{` or `}` among the arguments (`git push origin feature { :main`) are words, so they
-    must not cut the command: the words after them are still its arguments. `cur` is what the scanner has read of the current command."""
-    start = not cur.strip()
-    if c == "}":
-        return start and (nxt == "" or nxt in " \t\n;&|()<>")
-    if nxt not in ("", " ", "\t", "\n"):
-        return False
-    return start or bool(_GROUP_OPENER.search(cur)) or bool(_SHORT_FORM.match(cur))
+
+RUN_OF_BRACES = re.compile(r"((?:\x06[ \t]+){4})(?:\x06[ \t]+)+")   # a long run of brace words in a literal reading: four of them say all that the rest do
 
 
 def _redirect_word(m: re.Match) -> str:
@@ -1286,12 +1322,26 @@ def _hoist_redirects(text: str) -> str:
             out.append(piece)
             continue
         out.append(_hoist_piece(piece))
-        if GLUED_CLOSE.search(piece):
-            out.append(" ; " + _hoist_piece(GLUED_CLOSE.sub(lambda m: (m.group("fd") or "") + m.group("c") + " -", piece)))   # the other shell's reading
+        for other in _other_readings(piece):
+            out.append(" ; " + _hoist_piece(other))
     return "".join(out)
 
 
 GLUED_CLOSE = re.compile(r"(?P<fd>(?<!\S)\d+)?(?P<c>[<>])&-(?=[^\s<>&|])")
+BANG_REDIRECT = re.compile(r"(?P<op>&>>?|>>?&?)!")
+
+
+def _other_readings(piece: str) -> list[str]:
+    """The pieces in which the shell that is not the one the first reading follows reads a redirect differently.
+
+    `>&-lg`: bash closes the descriptor and `lg` is an argument, zsh writes a file `-lg`. `>! lg`, `>>! lg`, `>&! lg`: zsh writes the file `lg`, bash writes a file
+    named `!` and `lg` is an argument. A gate that kept one reading would lose a word of the command, so every reading that differs is read."""
+    out: list[str] = []
+    if GLUED_CLOSE.search(piece):
+        out.append(GLUED_CLOSE.sub(lambda m: (m.group("fd") or "") + m.group("c") + " -", piece))
+    if BANG_REDIRECT.search(piece):
+        out.extend(BANG_REDIRECT.sub(lambda m: m.group("op") + " !", x) for x in [piece, *out])
+    return out
 
 
 def _hoist_piece(piece: str) -> str:
