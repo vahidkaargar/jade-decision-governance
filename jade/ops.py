@@ -664,12 +664,16 @@ def blocking_summary(mode: str | None = None, level: str | None | bool = False) 
     soft = [i for i in ids if i not in gov]
     if mode == "off":
         return (None, "gate mode off: nothing blocks; every safety invariant (" + ", ".join(ids) + ") and every risk rule is skipped, not even logged")
+    unset = "; SI-12 is active only once a level is set (until then R-13 rates those writes)"   # policy.py: SI-12 checks run only when paths.level() is set
+    active = [i for i in ids if i != "SI-12"]
     if mode == "advisory" and level is None:
-        return (None, "advisory gate mode, no level set: nothing blocks; every safety invariant (" + ", ".join(ids) + ") and every risk rule only log")
+        return (None, "advisory gate mode, no level set: nothing blocks; every safety invariant (" + ", ".join(active) + ") and every risk rule only log" + unset)
     if mode == "advisory":
         return (None, "advisory gate mode: " + ", ".join(gov) + " block; " + ", ".join(soft) + " and every risk rule only log")
     if level == "off":
         return (None, "advisory: " + ", ".join(soft) + ", R-13, R-16 and all risk rules only log; " + ", ".join(gov) + " block (level off, docs/12)")
+    if level is None:
+        return (True, "every active safety invariant (" + ", ".join(active) + ") blocks; a high or critical risk call is held for a human approval (docs/12)" + unset)
     return (True, "every safety invariant (" + ", ".join(ids) + ") blocks; a high or critical risk call is held for a human approval (docs/12)")
 
 

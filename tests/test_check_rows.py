@@ -54,12 +54,15 @@ def test_what_blocks_row_matches_the_hook_for_every_pair(mode, level):
     setup_pair(mode, level)
     ok, detail = rows()["what blocks"]
     ids = invariant_ids()
+    if level is None and mode != "off":   # policy.py runs the SI-12 checks only once a level is set: the row must say so, not list it as active
+        assert "SI-12 is active only once a level is set" in detail, detail
+        ids = [s for s in ids if s != "SI-12"]
     firm = [s for s in ids if blocks(mode, s)]
     soft = [s for s in ids if not blocks(mode, s)]
     gated = risk_gated(mode, level)
     if not soft and gated:
         assert ok is True, detail
-        assert "every safety invariant" in detail and "risk" in detail
+        assert ", ".join(ids) + ") blocks" in detail and "risk" in detail
     else:
         assert ok is None, detail   # never "ok" when anything only logs, never FAIL (the exit code does not move)
         for s in soft:
