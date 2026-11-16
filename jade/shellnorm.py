@@ -61,7 +61,7 @@ _INERT = re.compile(r"[;&|<>(){}`]")   # characters a quoted word may hold that 
 HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|(\\?)([^\s;&|<>()'\"\\`$]+))")
 HEREDOC_AT = re.compile(r"(?<!<)" + HEREDOC_OP.pattern + r"(?!<)")   # a heredoc operator, not the end of `<<<`
 NEXT_STAGE = re.compile(
-    r"[ \t]*(?:\w+=\S*[ \t]+)*(?:(?:sudo|env|command|exec|nohup|time|xargs)(?:[ \t]+-[ugphCDrtUT][ \t]+\S+|[ \t]+-\S+(?:[ \t]+\d+)?)*[ \t]+)*[\\'\"]?(?P<w>[\w./+-]+)['\"]?(?P<a>(?:[ \t]+[^\s;&|()<>`$]+)*)[ \t]*(?=$|[;&|()\n<>])")
+    r"[ \t]*(?:\w+=\S*[ \t]+)*(?:(?:sudo|env|command|exec|nohup|time|xargs)(?:[ \t]+-[ugphCDrtUT][ \t]+\S+|[ \t]+-\S+(?:[ \t]+\d+)?)*[ \t]+)*[\\'\"]?(?P<w>[\w./+-]+)['\"]?(?P<a>(?:[ \t]+(?!\d+[<>])[^\s;&|()<>`$]+)*)(?:[ \t]+\d+(?=[<>]))*[ \t]*(?=$|[;&|()\n<>])")
 PIPE_REST = re.compile(r"\|(?!\|)")
 PRODUCER = re.compile(r"^\s*(?:echo|printf|print|cat|yes)\b(?:\s+-[a-zA-Z]+)*")
 PRINTER = re.compile(r"^\s*\\?(?:\S*/)?(?P<name>echo|printf|print|cat|yes)\b(?:\s+-[a-zA-Z]+)*")   # the program that prints, after `time`, `env`, `command`, `!`, `\echo`, `/bin/echo`
@@ -192,13 +192,19 @@ def _peel_launchers(words: list[str]) -> list[str]:
     return words
 
 
+def _leaves_stdin(s: str, at: int) -> bool:
+    """The `<` at s[at] redirects another descriptor (`sh 2<&1`) or copies stdin onto itself (`sh 0<&0`): the stage still reads the pipe."""
+    m = re.search(r"(?<![^\s])(\d+)$", s[max(0, at - 6):at])
+    return bool((m and m.group(1) != "0") or re.match(r"<&0(?!\d)", s[at:at + 4]))
+
+
 def _next_stage_kind(s: str, j: int) -> str | None:
     """What the stage that starts at s[j] does with its stdin: the language it reads as code, or None. A stage whose stdin is redirected from a heredoc, a
     here-string or a file does not read the pipe at all (`curl .. | python3 - <<'PY'`)."""
     m = NEXT_STAGE.match(s, j)
     if not m:
         return None
-    if s[m.end():m.end() + 1] == "<" and s[m.end() + 1:m.end() + 2] != "(":
+    if s[m.end():m.end() + 1] == "<" and s[m.end() + 1:m.end() + 2] != "(" and not _leaves_stdin(s, m.end()):
         return None
     kind = _stdin_kind(m.group("w"), m.group("a").split())
     if kind:
@@ -897,11 +903,16 @@ class _Scan:
             return interp.language_of(cmd) or "", prog
         return None
 
-    def _produced(self, raw: str, kind: str) -> str:
+    def _produced(self, raw: str, kind: str, stdin_only: bool = False) -> str:
         """What `echo ... | sh` hands to the reader: the echoed words, parsed as shell for a shell, searched as text otherwise. A program that prints
-        (`python3 -c 'print("...")' | sh`) hands over every string it holds."""
+        (`python3 -c 'print("...")' | sh`) hands over every string it holds.
+
+        `stdin_only`: the reader is not known (`| (sh)`, `| sh </dev/stdin`, `| xargs -I% sh -c %`, `| 2>&1 sh`): only what the stage reads on its stdin is read, as shell, and
+        only for a stage that is not a printer (`sed p<<<'git push origin main'` passes the text on as it is; `echo ... | wc` is words)."""
         raw, here = _here_strings(raw)
-        if kind == "shell" and (prog := self._producer_program(raw)):
+        if stdin_only:
+            kind = "shell"
+        if kind == "shell" and not stdin_only and (prog := self._producer_program(raw)):
             return self._interp(prog[0], prog[1], emit_all=True)
         read = (lambda t: self._sub(t)) if kind == "shell" else (lambda t: self._interp(kind, t))
         # what a stage reads on its own stdin, a here-string or a heredoc body, is what it prints (`cat <<< 'git push origin :main' | sh`); the redirect hoist takes the
@@ -924,6 +935,8 @@ class _Scan:
         if printer is None:   # `\env echo ...`, `'command' echo ...`: the prefix words with their quotes taken off
             bare = PREFIX.sub("", " ".join(words_of(raw.lstrip())), count=1)
             printer = PRINTER.match(bare)
+        if stdin_only:
+            return "" if printer else stdin
         if printer is None:
             text = " ".join(_dec(w) for w in words_of(PRODUCER.sub("", raw, count=1)))
             return " ; ".join(p for p in (read(text), stdin) if p)
@@ -1156,6 +1169,8 @@ class _Scan:
                     # the stages as the shell that takes a brace for a word reads them: `echo git push origin main {x | sh` pipes the push to the shell
                     deferred.extend(self._produced(r, kind) for r in dict.fromkeys(whole) if r not in chain)
                     deferred.extend(self._pipe_marks(chain))
+                else:   # the reader is not one the splitter knows: what the stages read on their stdin is read as shell all the same
+                    deferred.extend(self._produced(r, "shell", True) for r in chain if "<<" in r)
             else:
                 chain.clear()
                 if not word:
@@ -1459,11 +1474,27 @@ def _chunk_readings(text: str, braced: bool, escaped: bool) -> str:
     if len(out) == 1:
         return first + tail
     extra = list(map(_collapse_runs, out[1:]))
-    if MOVES_DIRECTORY.search(text) and all(t.count("(") == t.count(")") for t in out):
+    if MOVES_DIRECTORY.search(text):
         # a reading that moves the directory must not move it again for the lines that follow, and each reading must start where the chunk starts: the other
         # readings are subshells, written first, and the first reading is the one that stays (`cd sub && echo a{b` then `git push` runs in sub)
-        return " ; ".join([*(f"( {t} )" for t in extra), first]) + tail
+        return " ; ".join([*map(_subshell, extra), first]) + tail
     return " ; ".join([first, *extra]) + tail
+
+
+_QUOTED = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
+
+
+def _subshell(text: str) -> str:
+    """The text as a subshell that holds it whole, whatever its parentheses do: a reading with a `)` that closes nothing (`echo a\\)b`, `case x in y)`) or a `(` that
+    stays open gets the opens or closes it lacks, so the directory it moves is restored for the lines that follow, as for a balanced one."""
+    depth = low = 0
+    for ch in _QUOTED.sub("", text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            low = min(low, depth)
+    return "( " * (1 - low) + text + " )" * (1 + depth - low)
 
 
 DENSE = 600   # a chunk longer than this has the runs of one word in its first reading cut too

@@ -8,6 +8,9 @@ The merge bar: fix the redirect that hid the rest of a push, never be weaker tha
 * CR4-2: only the first heredoc of a process substitution was read.
 * DIFF-W1: a closed descriptor (`2>&-`) lowered a secret-file read from critical to medium.
 * DIFF-W2: a chain of here-strings 10 deep was read twice per level.
+* R5-L4-1: a shell with a descriptor redirect after it (`sed p<<<'x'|sh 2>&1`) took the `2` for a script name, so the stage was not read as code.
+* CODE5-1: a reading with a `)` that closes nothing (`echo a\\)b`) was not written as a subshell, so `cd sub` ran twice for the lines after it.
+* R5-DIFF-1: an unquoted here-string (`cat <<< git push origin :main | sh`) is the word `git` only, so no shell pushes: origin/main stops it, this branch need not.
 * DIFF-P2, R4-O4, CR4-3: ordinary words with a brace (`stash@{0}`, `find -exec {} \\;`, `xargs -I{}`) and escaped operators cost several times what they cost on origin/main.
 """
 
@@ -364,3 +367,115 @@ def test_heredoc_bodies_with_backslashes_are_not_squared_by_a_nest():
     start = time.process_time()
     assert si08(command)
     assert time.process_time() - start < 5
+
+
+# ---------------------------------------------------------------- round 5: a descriptor redirect after the shell, a `)` that closes nothing, an unquoted here-string
+
+@pytest.mark.parametrize("producer", ["sed p", "uniq", "sort -u", "sed -n p", "sed 1p", "cat", "tee f"])
+@pytest.mark.parametrize("sink", ["sh 2>&1", "sh 2>/dev/null", "sh -x 2>&1", "bash 2>&1", "zsh 2>&1", "dash 2>&1", "env sh 2>&1", "nohup sh 2>&1", "sh 1>&2", "sh 3>&1",
+                                  "sh 2<&1", "sh 2>>log", "sh 2>err", "sh 2>&1 >/dev/null", "sh 0<&0 2>&1", "sh -e 2>&1", "sh -s 2>&1", "sh >/dev/null", "sh"])
+def test_a_descriptor_redirect_after_the_shell_does_not_hide_the_text(producer, sink, tmp_path):
+    command = f"{producer}<<<'{PUSH}'|{sink}"
+    assert si08(command), command
+    if sink in ("sh 2>&1", "bash 2>&1", "zsh 2>&1", "sh 2>/dev/null"):
+        confirm_real_push(command, tmp_path)
+
+
+@pytest.mark.parametrize("payload", ["git push origin :main", "git push origin HEAD:main", "git push --delete origin main", "git push -f origin main", "git reset --hard"])
+def test_the_payload_of_a_here_string_into_a_shell_with_a_redirect_is_read(payload):
+    assert policy.assess("Bash", {"command": f"sed p<<<'{payload}'|sh 2>&1"}, cwd="/tmp").level == "high"
+
+
+@pytest.mark.parametrize("command", [
+    "sh 2>&1", "bash 2>/dev/null", "env sh 3>&1", "sh -x 2>&1",
+])
+def test_the_stage_after_a_pipe_is_code_with_a_descriptor_redirect(command):
+    assert shellnorm._next_stage_kind(command, 0) == "shell", command
+
+
+def test_a_digit_that_is_a_script_name_is_not_a_descriptor():
+    assert shellnorm._next_stage_kind("sh 2 >x", 0) is None   # `2` is a file name here: the redirect is `>x`
+    assert shellnorm._next_stage_kind("sh 2", 0) is None
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+@pytest.mark.parametrize("command", [
+    "cd sub && echo a\\)b\nPUSH",
+    "cd sub; case $x in y) echo a{b;; esac\nPUSH",
+    "cd sub && echo :\\)\nPUSH",
+    "cd sub && echo a\\(b\nPUSH",
+    "cd sub && echo a\\)b && PUSH",
+    "cd sub\necho a\\)b\nPUSH",
+    "cd sub && echo \")\" && echo a{b\nPUSH",
+    "cd sub; case $x in y) nocorrect echo PUSH {x | sh;; esac",
+    "cd sub && echo a\\\\)b && nocorrect echo PUSH {x | sh",
+    "cd sub && echo it\\\\'s \\\\( don\\\\'t a{b\nPUSH",
+    "cd sub && echo 'a)' a{b\nPUSH",
+    "cd sub; echo \\\\) {x ; PUSH",
+])
+def test_a_reading_with_an_unbalanced_parenthesis_does_not_move_the_directory_twice(command, tmp_path):
+    outer = _two_repos(tmp_path / "outer")
+    command = command.replace("PUSH", "git " + "push")
+    assert hooks._on_default_branch(outer, command), command
+    assert not hooks._on_default_branch(outer, command.replace(" sub", " .")), command
+
+
+@pytest.mark.parametrize("text", ["a b", "a ) b", "a ( b", "a )( b", "a ))) b ((", "echo \")\"", "echo ')' ( x"])
+def test_a_subshell_wrapper_holds_what_it_wraps_whole(text):
+    """The depth is 1 or more from the first character to the one before the last, and 0 at the end: nothing in the text closes the wrapper early or leaves it open."""
+    depth, profile = 0, []
+    for ch in shellnorm._QUOTED.sub("", shellnorm._subshell(text)):
+        depth += (ch == "(") - (ch == ")")
+        profile.append(depth)
+    assert profile[-1] == 0 and min(profile[:-1]) >= 1, (text, shellnorm._subshell(text))
+
+
+@pytest.mark.parametrize("command", [
+    "cat 0<<< git push origin :main | sh", "cat <<< git push origin :main | sh", "cat<<<git push origin :main|sh",
+    "tee f<<<git push origin main|sh", "sed p<<<git push origin main|sh", "uniq <<<git push origin main|sh",
+])
+def test_an_unquoted_here_string_is_one_word_and_pushes_nothing(command, tmp_path):
+    """The here-string is the word `git`; `push origin :main` are arguments of the first program. No shell pushes, so a lower rating than main's is not a miss."""
+    assert not really_pushes(command, tmp_path), command
+
+
+def test_a_key_read_after_a_leading_input_redirect_is_rated_as_the_trailing_one():
+    """Main rated `<&- cat key` critical only because the command starts with a redirect; `cat key <&-` was medium. Both are medium here."""
+    key = "/Users/x/.ssh/id_rsa"
+    assert policy.assess("Bash", {"command": f"<&- cat {key}"}, cwd="/tmp").level == policy.assess("Bash", {"command": f"cat {key} <&-"}, cwd="/tmp").level
+
+
+SINKS = [
+    "2>&1 sh", "   >/dev/null sh", "2>/dev/null env sh", "sh </dev/stdin", "sh 0</dev/stdin", "sh < /dev/fd/0", "(sh)", "{ sh; }", "tee >(sh)",
+    "while read l; do eval \"$l\"; done", "xargs -I% sh -c %", "sh -c 'sh'", "sh /dev/stdin", ". /dev/stdin", "wc -l",
+]
+
+
+@pytest.mark.parametrize("producer", ["sed p<<<'git push origin main'", "uniq <<< 'git push origin :main'", "sort -u<<<'git push origin HEAD:main'"])
+@pytest.mark.parametrize("sink", SINKS)
+def test_the_text_a_stage_passes_on_is_read_whatever_the_reader_is(producer, sink):
+    """The reader after the pipe may be a spelling the splitter does not know. The text a non-printer stage reads on its stdin is read as shell for any pipe, as origin/main
+    does (it keeps the here-string whole in the text of the stage)."""
+    command = f"{producer} | {sink}"
+    assert si08(command), command
+
+
+@pytest.mark.parametrize("producer", ["sed p", "uniq", "sort -u", "cat", "tee f"])
+@pytest.mark.parametrize("quote", ["E", "'E'"])
+def test_a_heredoc_into_a_shell_with_a_descriptor_redirect_is_read(producer, quote, tmp_path):
+    """The heredoc of such a stage came in the text of the command after its line; origin/main did not stop `sed p <<E | sh 2>&1` at all."""
+    command = f"{producer} <<{quote} | sh 2>&1\n{PUSH}\nE\n"
+    assert si08(command), command
+
+
+def test_a_printer_with_a_reader_that_is_not_known_is_words():
+    assert not si08("echo git push origin main | wc -l")
+    assert not si08("cat <<< 'git push origin main' | wc -l")
+
+
+@pytest.mark.parametrize("sink", ["2>&1 sh", "sh </dev/stdin", "sh /dev/stdin", "(sh)", "{ sh; }", "sh 2>/dev/null", ". /dev/stdin"])
+def test_these_readers_run_the_text_in_the_real_shells(sink, tmp_path):
+    command = f"sed p<<<'{PUSH}' | {sink}"
+    if shutil.which("bash") and shutil.which("zsh") and sink not in ("sh /dev/stdin", ". /dev/stdin"):   # `/dev/stdin` as a file is not a pipe on every system
+        confirm_real_push(command, tmp_path)
+    assert si08(command), command
