@@ -1,6 +1,6 @@
 # 13. Real-shell payload tests run only in a sandbox
 
-Status: rule, in force from 2026-11-16. Tooling: `evals/realshell.py`. Tests: `tests/test_realshell_sandbox.py`.
+Status: rule, in force from 2026-11-16. Tooling: `evals/realshell.py`, gate invariant SI-13 (`jade/harness_audit.py`). Tests: `tests/test_realshell_sandbox.py`, `tests/acceptance/test_si13_realshell_gate_w115.py`.
 
 ## The rule
 
@@ -50,7 +50,22 @@ with realshell.Sandbox() as sb:                 # builds the sandbox and runs th
 - macOS only. On Linux (CI included) `Sandbox()` raises `SandboxUnavailable` and the CLI exits 2 without running anything. The sandbox tests are skipped there with a reason that says so; the refusal and audit tests run everywhere. A Linux backend (bubblewrap, or a container with no network and a read-only bind of the host) is not built yet.
 - `sandbox-exec` is deprecated by Apple but present and working on current macOS. If a future macOS removes it, the helper refuses instead of running unconfined.
 - The audit is a static check of Python files. It finds a file that starts a process and names a shell path, an argv list that starts with a shell name, `shell=True`, `os.system` or `os.popen`, and that does not import or name `realshell`. It does not read shell scripts, and code built to hide from it will pass. Inside this repository `tests/test_realshell_sandbox.py` keeps an exact list of files that may start a shell without the helper, each with a reason; a new one fails the test.
-- Scratch harnesses outside the repository are covered by this rule and the audit command only. A gate rule that refuses a real-shell corpus run outside the helper would need a change to protected policy files; it is tracked as a work item for the owner.
+- The audit is shared with the gate: both use `jade/harness_audit.py`, and `evals/realshell.py` loads that file by path.
+- Linux has no backend yet (W-115).
+
+## The gate rule (SI-13)
+
+`policies/safety.yaml` SI-13, approved by the owner on 2026-11-16. The gate blocks a Bash call that runs a Python script (`python3 run.py`, `python3 -u`, `uv run python`, `nohup ... &`, after `cd`, `./run.py`, or a shell script that starts one, read one level deep) when the script, read statically and never run:
+
+- starts processes and names a real shell (as the audit above), and does not use `evals/realshell.py`;
+- reads a corpus file (`json.load`, csv, `readlines`, a random sample, `exec` of a file) that the script names, or that the command line gives it (`run.py corpus.json out.json`) when the script reads its arguments;
+- starts those processes many times (a pool, an executor, a map, a loop).
+
+All three are needed. A build script with `shell=True`, or a test that runs one script and parses its output, is not blocked. Measured on the owner's machine on 2026-11-16: all 4 runners left from the incident review match; 3 of 883 other local Python files match, and only when run with a data file argument. No permit authorizes an invariant; the owner changes the script to use the helper. At level `off` and in advisory gate mode the gate reports SI-13 and does not block, like SI-01 to SI-08.
+
+The rule is in the repository. It is active on a machine only after that machine installs the new build.
+
+Not covered (docs/05 T30): a runner written and run in the same command, a runner in another language, a run through pytest, code that hides its shell or its corpus, and a file that only names `realshell.py` without using it.
 
 ## Review checklist for a harness
 

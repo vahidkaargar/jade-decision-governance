@@ -28,7 +28,6 @@ CORPUS is a JSON list of strings or of objects with "cmd", or JSON Lines with "c
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import os
 import pwd
@@ -245,49 +244,19 @@ def load_corpus(path: str | os.PathLike) -> list[str]:
 
 
 # ---- audit: find harnesses that start a shell without this module ---------------------------------------------------------------------------
-SPAWN = {"run", "Popen", "call", "check_call", "check_output", "getoutput", "getstatusoutput", "system", "popen", "spawn",
-         "create_subprocess_exec", "create_subprocess_shell", "posix_spawn", "posix_spawnp"}
-SPAWN_PREFIXES = ("execv", "execl", "spawnv", "spawnl")
-SHELL_NAMES = {"bash", "zsh", "sh", "dash", "ksh", "fish", "csh", "tcsh"}
+# One implementation, shared with the gate (SI-13): jade/harness_audit.py, loaded by path so this file still runs from any interpreter.
+def _load_audit():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_jade_harness_audit", Path(__file__).resolve().parents[1] / "jade" / "harness_audit.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
-def _call_name(func: ast.AST) -> str:
-    if isinstance(func, ast.Attribute):
-        return func.attr
-    if isinstance(func, ast.Name):
-        return func.id
-    return ""
-
-
-def audit_source(src: str) -> list[tuple[int, str]]:
-    """Findings for one Python source: (line, reason) for a file that starts a shell and does not use evals/realshell.py."""
-    tree = ast.parse(src)
-    uses_helper = False
-    spawns, shellish = [], []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import) and any(a.name.split(".")[-1] == "realshell" for a in node.names):
-            uses_helper = True
-        elif isinstance(node, ast.ImportFrom) and ((node.module or "").split(".")[-1] == "realshell" or any(a.name == "realshell" for a in node.names)):
-            uses_helper = True
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.endswith("realshell.py"):
-            uses_helper = True
-        if isinstance(node, ast.Call):
-            name = _call_name(node.func)
-            if name in SPAWN or name.startswith(SPAWN_PREFIXES):
-                spawns.append(node.lineno)
-                if name in ("system", "popen", "getoutput", "getstatusoutput", "create_subprocess_shell"):
-                    shellish.append((node.lineno, f"{name}() runs a shell"))
-            for kw in node.keywords:
-                if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
-                    shellish.append((node.lineno, "shell=True"))
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and "/" in node.value and os.path.basename(node.value) in SHELL_NAMES:
-            shellish.append((node.lineno, f"names the shell {node.value!r}"))
-        elif (isinstance(node, ast.List) and len(node.elts) >= 2 and isinstance(node.elts[0], ast.Constant) and isinstance(node.elts[0].value, str)
-              and node.elts[0].value in SHELL_NAMES):
-            shellish.append((node.lineno, f"argv list starts with {node.elts[0].value!r}"))
-    if not spawns or not shellish or uses_helper:
-        return []
-    return sorted(set(shellish))
+_audit = _load_audit()
+audit_source = _audit.audit_source
+gate_findings = _audit.gate_findings
 
 
 def audit_paths(paths) -> list[tuple[str, int, str]]:
