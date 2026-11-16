@@ -46,11 +46,26 @@ def risk_gated(mode: str, level: str | None) -> bool:
     return mode != "off" and ("advisory" if level == "off" else mode) == "enforce"
 
 
+def no_human_paths(mode: str, level: str | None) -> list[str]:
+    """Who may let a gated high or critical call run in `_gate` without a human, before askchat: memory.step (a confirmed answer) at enforce and level
+    low or medium; proxy.step (Jev) at enforce and level low, medium or high, but at level high it is shadow only (it records and decides nothing)."""
+    if mode != "enforce":
+        return []
+    return ["memory", "Jev"] if level in ("low", "medium") else []
+
+
+@pytest.fixture
+def wired(monkeypatch):
+    """The hooks are installed and wired: the `what blocks` row then reads only the gate mode and the level."""
+    monkeypatch.setattr(ops, "hooks_status", lambda: dict.fromkeys(ops.HOOKS, True))
+    monkeypatch.setattr(ops, "wiring_problems", lambda probe=True: [])
+
+
 # ------------------------------------------------------------------ the table over every gate mode and level pair
 
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("level", LEVELS)
-def test_what_blocks_row_matches_the_hook_for_every_pair(mode, level):
+def test_what_blocks_row_matches_the_hook_for_every_pair(mode, level, wired):
     setup_pair(mode, level)
     ok, detail = rows()["what blocks"]
     ids = invariant_ids()
@@ -60,9 +75,16 @@ def test_what_blocks_row_matches_the_hook_for_every_pair(mode, level):
     firm = [s for s in ids if blocks(mode, s)]
     soft = [s for s in ids if not blocks(mode, s)]
     gated = risk_gated(mode, level)
-    if not soft and gated:
+    bypass = no_human_paths(mode, level)
+    if not soft and gated and bypass:   # the invariants block, but a high call may run with no human: never "ok" (V6-10 F1)
+        assert ok is None, detail
+        assert ", ".join(ids) + ") blocks" in detail
+        assert "held for a human approval" not in detail
+        assert "confirmed answer" in detail and "Jev" in detail and "without a human" in detail, detail
+    elif not soft and gated:
         assert ok is True, detail
-        assert ", ".join(ids) + ") blocks" in detail and "risk" in detail
+        assert ", ".join(ids) + ") blocks" in detail and "held for a human approval" in detail
+        assert "Jev" not in detail or "decides nothing" in detail
     else:
         assert ok is None, detail   # never "ok" when anything only logs, never FAIL (the exit code does not move)
         for s in soft:
@@ -105,7 +127,7 @@ def test_the_unknown_rows_say_unknown_in_every_pair(mode, level):
 
 # ------------------------------------------------------------------ one test per row, both states
 
-def test_level_off_row_is_a_warning_with_the_advisory_text():
+def test_level_off_row_is_a_warning_with_the_advisory_text(wired):
     setup_pair("enforce", "off")
     ok, detail = rows()["what blocks"]
     assert ok is None
@@ -116,11 +138,73 @@ def test_level_off_row_is_a_warning_with_the_advisory_text():
     assert ok is None and detail.startswith("off: JADE only watches")
 
 
-def test_level_high_row_is_ok():
+def test_level_high_row_is_ok(wired):
     setup_pair("enforce", "high")
     assert rows()["level"] == (True, "high")
     ok, detail = rows()["what blocks"]
     assert ok is True and ", ".join(invariant_ids()) in detail
+
+
+@pytest.mark.parametrize("level", ["low", "medium"])
+def test_what_blocks_at_low_and_medium_names_memory_and_jev(level, wired):
+    """memory.step and proxy.step let a call run with no human at these levels (docs/12): the row says so and is not ok."""
+    setup_pair("enforce", level)
+    ok, detail = rows()["what blocks"]
+    assert ok is None, detail
+    assert "held for a human approval" not in detail
+    assert "confirmed answer" in detail and "`jade knows list`" in detail
+    assert "Jev" in detail and "plain high" in detail
+    assert "critical" in detail
+
+
+def test_what_blocks_at_high_says_jev_decides_nothing(wired):
+    setup_pair("enforce", "high")
+    ok, detail = rows()["what blocks"]
+    assert ok is True and "held for a human approval" in detail and "confirmed answer" not in detail
+
+
+def test_what_blocks_says_nothing_blocks_when_the_pretool_hook_is_missing():
+    """A fresh HOME: no hook is installed, so nothing blocks whatever the gate mode and level say (V6-10 F1)."""
+    setup_pair("enforce", "high")
+    assert rows()["hooks installed"][0] is False
+    ok, detail = rows()["what blocks"]
+    assert ok is None, detail
+    assert detail.startswith("nothing blocks: the PreToolUse hook is not installed"), detail
+    assert "blocks;" not in detail and "jade hooks install" in detail
+
+
+def test_what_blocks_is_unknown_when_the_hook_wiring_has_problems(monkeypatch):
+    monkeypatch.setattr(ops, "hooks_status", lambda: dict.fromkeys(ops.HOOKS, True))
+    monkeypatch.setattr(ops, "wiring_problems", lambda probe=True: ["disableAllHooks is true in x: the host runs no hook at all"])
+    setup_pair("enforce", "high")
+    ok, detail = rows()["what blocks"]
+    assert ok is None and detail.startswith("unknown: the hook wiring has problems"), detail
+
+
+def test_what_blocks_is_unknown_when_the_policy_does_not_load(monkeypatch, wired):
+    setup_pair("enforce", "high")
+
+    def boom():
+        raise ValueError("bad policy")
+
+    monkeypatch.setattr(policy, "safety", boom)
+    ok, detail = ops.blocking_summary()
+    assert ok is None, detail
+    assert detail.startswith("unknown: the safety policy does not load"), detail
+    assert "every safety invariant" not in detail and "fails closed" in detail
+    assert ops.blocking_summary("off", "high")[1].startswith("gate mode off: nothing blocks")   # still true with no policy
+
+
+def test_maintain_does_not_count_warn_rows_as_failures(monkeypatch, capsys):
+    """V6-10 F3: a WARN row (None) never makes the daily job exit 1 or appear in check_failed."""
+    got = [("ledger writable", True, "x"), ("what blocks", None, "advisory: ..."), ("level", None, "off: ..."), ("version vs main", None, "unknown: ...")]
+    monkeypatch.setattr(ops, "check", lambda live=True, provider=None: got)
+    assert cli.main(["maintain", "--offline"]) == 0
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["check_failed"] == []
+    got.append(("hooks installed", False, "missing"))
+    assert cli.main(["maintain", "--offline"]) == 1
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["check_failed"] == ["hooks installed"]
 
 
 def test_level_unset_row_stays_ok():
@@ -186,13 +270,57 @@ def test_version_vs_main_is_unknown_without_a_checkout():
     assert ok is None and detail.startswith("unknown") and jade.__version__ in detail
 
 
-@pytest.mark.parametrize("main,ok,word", [("999.0.0", None, "older than origin/main 999.0.0"), (jade.__version__, True, "same as origin/main"),
-                                          ("0.0.1", True, "newer than origin/main 0.0.1")])
+@pytest.mark.parametrize("main,ok,word", [("999.0.0", None, "older than origin/main 999.0.0"), ("0.0.1", True, "newer than origin/main 0.0.1")])
 def test_version_vs_main_compares_with_origin_main(monkeypatch, tmp_path, main, ok, word):
     monkeypatch.setenv("JADE_CHECKOUT", str(tmp_path))
     monkeypatch.setattr(ops, "main_version", lambda co: main)
     got_ok, detail = rows()["version vs main"]
     assert got_ok is ok and word in detail, detail
+
+
+SHA_A, SHA_B = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
+
+
+@pytest.mark.parametrize("running,main_sha,behind,ok,word", [
+    (SHA_A, SHA_A, None, True, "same as origin/main"),
+    (SHA_A, SHA_B, 3, None, "same version string, 3 commit(s) behind origin/main"),
+    (SHA_A, SHA_B, 0, None, "same version string, but a different commit"),
+    (SHA_A, SHA_B, None, None, "same version string, but a different commit"),
+    (None, SHA_B, None, None, "unknown: installed package"),
+    (SHA_A, None, None, None, "unknown"),
+])
+def test_version_vs_main_with_the_same_version_compares_commits(monkeypatch, tmp_path, running, main_sha, behind, ok, word):
+    """V6-10 F2: 0.6.1 is both the tag and main three commits later; an equal version string is not proof the same code runs."""
+    monkeypatch.setenv("JADE_CHECKOUT", str(tmp_path))
+    monkeypatch.setattr(ops, "main_version", lambda co: jade.__version__)
+    monkeypatch.setattr(paths, "code_commit", lambda: running)
+    monkeypatch.setattr(ops, "main_commit", lambda co: main_sha)
+    monkeypatch.setattr(ops, "commits_behind_main", lambda co, sha: behind)
+    got_ok, detail = rows()["version vs main"]
+    assert got_ok is ok and word in detail, detail
+    if ok is not True:
+        assert "same as origin/main" not in detail
+
+
+def test_main_commit_and_commits_behind_from_a_real_checkout(tmp_path):
+    co = tmp_path / "co"
+    co.mkdir()
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", "-C", str(co)]
+    subprocess.run([*git, "init", "-q"], check=True)
+    (co / "pyproject.toml").write_text('[project]\nname = "x"\nversion = "4.5.6"\n')
+    subprocess.run([*git, "add", "pyproject.toml"], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "x"], check=True)
+    first = paths.git_commit(co)
+    assert ops.main_commit(co) is None
+    for i in range(2):
+        (co / "f").write_text(str(i))
+        subprocess.run([*git, "add", "f"], check=True)
+        subprocess.run([*git, "commit", "-q", "-m", f"c{i}"], check=True)
+    subprocess.run([*git, "update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
+    assert ops.main_commit(co) == paths.git_commit(co)
+    assert ops.commits_behind_main(co, first) == 2
+    assert ops.commits_behind_main(co, ops.main_commit(co)) == 0
+    assert ops.commits_behind_main(co, "0123456789ab") is None   # not in this repository
 
 
 def test_version_vs_main_is_unknown_when_origin_main_is_not_there(monkeypatch, tmp_path):
@@ -254,6 +382,16 @@ def test_approval_backend_row(monkeypatch):
 
 
 # ------------------------------------------------------------------ jade hooks install
+
+def test_setup_hooks_text_counts_from_hooks(monkeypatch):
+    from jade import setup
+
+    monkeypatch.setattr(ops, "hooks_status", lambda: dict.fromkeys(ops.HOOKS, True))
+    monkeypatch.setattr(ops, "pretool_matcher_gaps", lambda: [])
+    st = setup._hooks_state()
+    assert st.detail == f"all {len(ops.HOOKS)} JADE hooks installed", st
+    assert "four" not in setup._hooks_change() and f"add {len(ops.HOOKS)} JADE hook entries" in setup._hooks_change()
+
 
 def test_install_summary_names_gate_mode_what_blocks_and_backend_and_writes_nothing():
     setup_pair("enforce", "off")

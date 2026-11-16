@@ -178,7 +178,7 @@ def _hooks_state() -> State:
     gaps = ops.pretool_matcher_gaps()
     if gaps:
         return State("todo", f"the PreToolUse matcher is out of date and does not cover {', '.join(gaps)}")
-    return State("done", "four JADE hooks installed")
+    return State("done", f"all {len(ops.HOOKS)} JADE hooks installed")
 
 
 def _claude_md_state() -> State:
@@ -256,7 +256,7 @@ def _load_state() -> State:
 
 # ---- the changes (each reuses the function that already does it) ---------------------------------------------------------------------
 def _hooks_change() -> str:
-    lines = [f"add four JADE hook entries to {_tilde(ops.settings_path())}, keeping every other setting and hook:"]
+    lines = [f"add {len(ops.HOOKS)} JADE hook entries to {_tilde(ops.settings_path())}, keeping every other setting and hook:"]
     lines += [f"  + {event}{f' [{m}]' if m and len(m) < 40 else ' [file edits, MCP tools, shell]' if m and event == 'PreToolUse' else ''}: {ops.hook_command(sub)}"
               for event, (m, sub, _t) in ops.HOOKS.items()]
     lines.append("a backup settings.json.bak-jade-<time> is written next to the file first; the write is atomic")

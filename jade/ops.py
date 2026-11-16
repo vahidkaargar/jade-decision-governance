@@ -649,9 +649,11 @@ def _level_row() -> tuple[str, bool, str]:
 
 def blocking_summary(mode: str | None = None, level: str | None | bool = False) -> tuple[bool | None, str]:
     """What the PreToolUse hook blocks for a gate mode and level pair (default: the ones in force), as rule ids only, never a command (V6-10).
-    True when every safety invariant blocks and the risk gate holds high-risk calls; None (a warning, never a failure) otherwise. It mirrors
-    `hooks.pretool` and `hooks._verdict`: gate off returns before any verdict; the governance invariants block once a level is set; level off and
-    advisory gate mode make the other invariants and the risk gate log only."""
+    True when every safety invariant blocks and every high or critical risk call waits for a human; None (a warning, never a failure) otherwise. It mirrors
+    `hooks.pretool`, `hooks._verdict` and `hooks._gate`: gate off returns before any verdict; the governance invariants block once a level is set; level off
+    and advisory gate mode make the other invariants and the risk gate log only; at level low and medium `memory.step` (a confirmed answer) and `proxy.step`
+    (Jev, plain high calls only, once its band has enough owner answers) may let a call run with no human; at level high Jev is shadow only. It does not
+    look at the hooks: `_what_blocks_row` does."""
     from . import hooks
 
     mode = paths.gate_mode() if mode is None else mode
@@ -659,11 +661,13 @@ def blocking_summary(mode: str | None = None, level: str | None | bool = False) 
     gov = sorted(hooks.GOVERNANCE_INVARIANTS)
     try:
         ids = sorted({str(i["id"]) for i in policy.safety()["invariants"]} | set(gov))
-    except Exception:  # noqa: BLE001 - the `policies load` row reports the failure; the governance ids are still known
-        ids = gov
-    soft = [i for i in ids if i not in gov]
+    except Exception:  # noqa: BLE001 - the `policies load` row reports the failure
+        ids = None
     if mode == "off":
-        return (None, "gate mode off: nothing blocks; every safety invariant (" + ", ".join(ids) + ") and every risk rule is skipped, not even logged")
+        return (None, "gate mode off: nothing blocks; every safety invariant" + (f" ({', '.join(ids)})" if ids else "") + " and every risk rule is skipped, not even logged")
+    if ids is None:   # pretool goes to _policy_failure: the invariant set is not known
+        return (None, "unknown: the safety policy does not load (see the `policies load` row); the hook fails closed on calls that are not clearly harmless")
+    soft = [i for i in ids if i not in gov]
     unset = "; SI-12 is active only once a level is set (until then R-13 rates those writes)"   # policy.py: SI-12 checks run only when paths.level() is set
     active = [i for i in ids if i != "SI-12"]
     if mode == "advisory" and level is None:
@@ -674,11 +678,26 @@ def blocking_summary(mode: str | None = None, level: str | None | bool = False) 
         return (None, "advisory: " + ", ".join(soft) + ", R-13, R-16 and all risk rules only log; " + ", ".join(gov) + " block (level off, docs/12)")
     if level is None:
         return (True, "every active safety invariant (" + ", ".join(active) + ") blocks; a high or critical risk call is held for a human approval (docs/12)" + unset)
-    return (True, "every safety invariant (" + ", ".join(ids) + ") blocks; a high or critical risk call is held for a human approval (docs/12)")
+    if level in ("low", "medium"):   # hooks._gate: memory.step, then proxy.step, run before the human is asked
+        return (None, "every safety invariant (" + ", ".join(ids) + f") blocks; at level {level} a high or critical risk call runs without a human when a "
+                      "confirmed answer covers it (`jade knows list`), and a plain high call runs without a human when Jev accepts it inside its band "
+                      "(once enough owner answers exist); any other high or critical call is held for a human (docs/12)")
+    return (True, "every safety invariant (" + ", ".join(ids) + ") blocks; a high or critical risk call is held for a human approval (Jev decides nothing at "
+                  "this level, docs/12)")
 
 
-def _what_blocks_row() -> tuple[str, bool | None, str]:
+def _what_blocks_row(pretool_ok: bool | None = None, wiring: list[str] | None = None) -> tuple[str, bool | None, str]:
+    """`blocking_summary` for the mode and level in force, unless the PreToolUse hook is missing or out of date (then nothing blocks) or the wiring has
+    problems (then it is not known). `check` passes what it already found, so the live wiring probe is not run twice."""
+    if pretool_ok is None:
+        pretool_ok = hooks_status().get("PreToolUse", False)
+    if not pretool_ok:
+        return ("what blocks", None, "nothing blocks: the PreToolUse hook is not installed or is out of date; run `jade hooks install` in a terminal")
+    if wiring is None:
+        wiring = wiring_problems()
     ok, text = blocking_summary()
+    if wiring:
+        return ("what blocks", None, "unknown: the hook wiring has problems (see the `hook wiring` row), so the hook may not run; when it runs: " + text)
     return ("what blocks", ok, text)
 
 
@@ -1432,22 +1451,43 @@ def _code_row() -> tuple[str, bool, str]:
 MAIN_REF = "origin/main"
 
 
-def main_version(checkout: Path) -> str | None:
-    """The `project.version` of pyproject.toml at origin/main in `checkout`, as of its last fetch (local only: nothing is fetched). None when the ref or the
-    file is not there, git fails, or the text is not a version. Never raises."""
+def _git_out(checkout: Path, *args: str) -> str | None:
+    """stdout of `git -C checkout <args>` (local only, 5 s), or None when `checkout` is not a git checkout, git fails or is slow. Never raises."""
     if not (Path(checkout) / ".git").exists():
         return None
     env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY")}
     try:
-        r = subprocess.run(["git", "-C", str(checkout), "show", f"{MAIN_REF}:pyproject.toml"], capture_output=True, text=True, timeout=5, check=False, env=env)
+        r = subprocess.run(["git", "-C", str(checkout), *args], capture_output=True, text=True, timeout=5, check=False, env=env)
     except (OSError, subprocess.SubprocessError):
         return None
-    if r.returncode != 0:
+    return r.stdout if r.returncode == 0 else None
+
+
+def main_commit(checkout: Path) -> str | None:
+    """The short (12) commit of origin/main in `checkout`, as of its last fetch, or None. Never raises."""
+    out = _git_out(checkout, "rev-parse", "--verify", "--quiet", "--short=12", f"{MAIN_REF}^{{commit}}")
+    sha = (out or "").strip()
+    return sha if re.fullmatch(r"[0-9a-f]{12}", sha) else None
+
+
+def commits_behind_main(checkout: Path, commit: str) -> int | None:
+    """How many commits origin/main has that `commit` does not (`git rev-list --count commit..origin/main`), or None when either is unknown there."""
+    if not re.fullmatch(r"[0-9a-f]{7,40}", commit or ""):
+        return None
+    out = _git_out(checkout, "rev-list", "--count", f"{commit}..{MAIN_REF}")
+    return int(out.strip()) if out and out.strip().isdigit() else None
+
+
+def main_version(checkout: Path) -> str | None:
+    """The `project.version` of pyproject.toml at origin/main in `checkout`, as of its last fetch (local only: nothing is fetched). None when the ref or the
+    file is not there, git fails, or the text is not a version. Never raises."""
+    out = _git_out(checkout, "show", f"{MAIN_REF}:pyproject.toml")
+    if out is None:
         return None
     try:
         import tomllib
 
-        v = str(tomllib.loads(r.stdout)["project"]["version"])
+        v = str(tomllib.loads(out)["project"]["version"])
     except (ValueError, KeyError, TypeError):
         return None
     return v if re.fullmatch(r"[0-9][0-9A-Za-z.+-]{0,40}", v) else None
@@ -1469,7 +1509,22 @@ def _main_version_row() -> tuple[str, bool | None, str]:
     when = f"(in {co}, as of its last fetch)"
     if a < b:
         return ("version vs main", None, f"jade {jade.__version__} runs, older than {MAIN_REF} {theirs} {when}: fixes merged since are not running")
-    return ("version vs main", True, f"jade {jade.__version__} runs, " + (f"same as {MAIN_REF}" if a == b else f"newer than {MAIN_REF} {theirs}") + f" {when}")
+    if a > b:
+        return ("version vs main", True, f"jade {jade.__version__} runs, newer than {MAIN_REF} {theirs} {when}")
+    # the same version string: main can carry merged fixes after a release tag without a version bump, so compare commits (V6-10 F2)
+    running, head = paths.code_commit(), main_commit(co)
+    if running is None:
+        return ("version vs main", None, f"unknown: installed package, commit not known; jade {jade.__version__} runs, the same version string as {MAIN_REF} {when}, "
+                                         "which may carry fixes merged after the release")
+    if head is None:
+        return ("version vs main", None, f"unknown: jade {jade.__version__} runs at commit {running}; the commit of {MAIN_REF} in {co} is not readable")
+    if running == head:
+        return ("version vs main", True, f"jade {jade.__version__} runs at commit {running}, same as {MAIN_REF} {when}")
+    behind = commits_behind_main(co, running)
+    if behind:
+        return ("version vs main", None, f"jade {jade.__version__} runs at commit {running}: same version string, {behind} commit(s) behind {MAIN_REF} {head} {when}; "
+                                         "fixes merged since are not running")
+    return ("version vs main", None, f"jade {jade.__version__} runs at commit {running}: same version string, but a different commit than {MAIN_REF} {head} {when}")
 
 
 # ---- ledger integrity ------------------------------------------------------------------------------
@@ -1553,6 +1608,7 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
     st = hooks_status()
     missing = [k for k, v in st.items() if not v]
     rows.append(("hooks installed", not missing, f"all {len(HOOKS)}: {', '.join(HOOKS)}" if not missing else f"missing or out of date: {', '.join(missing)}: run `jade hooks install` in a terminal"))
+    problems = None
     if not missing:
         problems = wiring_problems()
         rows.append(("hook wiring", not problems, "binary runs, hooks enabled, a synthetic event is decided" if not problems else "; ".join(problems)))
@@ -1568,7 +1624,7 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
         rows.append(("pretool matcher", not gaps, "covers every gated tool" if not gaps else f"does not cover {', '.join(gaps)}: re-run `jade hooks install` in a terminal"))
     rows.append(_gate_mode_row())
     rows.append(_level_row())
-    rows.append(_what_blocks_row())
+    rows.append(_what_blocks_row(st.get("PreToolUse", False), problems))
     rows.append(pending_row())
     rows.append(_overrides_row())
     rows.append(_ack_audit_row())
