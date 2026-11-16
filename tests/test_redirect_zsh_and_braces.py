@@ -406,4 +406,6 @@ def test_many_braces_cost_about_as_much_as_many_words(word):
         policy.assess("Bash", {"command": "git push origin feature " + chunk * 50000}, cwd="/tmp")
         return time.perf_counter() - t
 
-    assert cost(word) < 4 * cost("x ") + 1.0
+    # origin/main costs 2.3 times as much on `a{ ` words as on plain words (every brace cuts the command), this tree 3.3 times (the word reading comes on top);
+    # the bar is 3 times origin/main, and a CI runner (3.14) measured 4.6 times plain words, so the limit is 8 times: it catches a quadratic, not a constant
+    assert cost(word) < 8 * cost("x ") + 1.0
