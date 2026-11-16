@@ -4,18 +4,24 @@ isolated home, no network). Exit non-zero on any mismatch. Reports the pass rate
     uv run python evals/run_cases.py [evals/regression/cases.jsonl evals/adversarial/cases.jsonl ...]
 
 `known_gap` marks a case whose label is right and whose current behaviour is wrong (W-49): it passes while the behaviour is still the
-recorded one, and fails when the behaviour changes, so a fix has to remove the marker.
+recorded one, and fails when the behaviour changes, so a fix has to remove the marker. Every `known_gap` row also carries `work_item` (the
+item that closes it, `W-n` or a roadmap `V6-n`) and `gap_date` (YYYY-MM-DD, when it was recorded); a row without them fails (V6-03): a gap
+is a visible ceiling with an owner, never an anonymous pass. `evals/known_gaps/cases.jsonl` is the list of open bypass vectors.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT = [ROOT / "evals" / d / "cases.jsonl" for d in ("regression", "adversarial", "routing", "judgment", "calibration")]
+DEFAULT = [ROOT / "evals" / d / "cases.jsonl" for d in ("regression", "adversarial", "routing", "judgment", "calibration", "known_gaps")]
+WORK_ITEM = re.compile(r"(W|V6)-\d+[a-z]?")
+GAP_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def run_case(c: dict) -> list[str]:
@@ -91,9 +97,51 @@ def run_case(c: dict) -> list[str]:
             problems.append(f"non-secret text was changed: {redact.redact(c['text'])[0]!r}")
     elif kind in ("permit_variant", "permit_forged", "decide_walk"):
         problems += _run_lifecycle(c)
+    elif kind == "classify_time":
+        problems += _run_classify_time(c)
     else:
         problems.append(f"unknown case kind {kind}")
     return problems
+
+
+def _run_classify_time(c: dict) -> list[str]:
+    """V6-03 timing kind: `command_prefix` + `digit_run` digits + `command_suffix` (the long input is built here, so no case file holds it) is
+    classified by `policy.assess` at n and at 2n digits. The 2n run must fit `budget_s`, and doubling the input must not take more than
+    `max_ratio` times as long: a ratio near 4 is quadratic (WT W-104, the NULL_REDIRECT case), whatever the speed of the machine."""
+    from jade import policy
+
+    def took(n: int) -> float:   # the best of two runs, so a cold cache or a busy moment does not decide the ratio
+        cmd = c.get("command_prefix", "") + "1" * n + c.get("command_suffix", "")
+        best = float("inf")
+        for _ in range(2):
+            for mod in (policy, policy.shellnorm):   # the classifier memoises per command text: time the work, not a cache hit
+                for fn in vars(mod).values():
+                    if callable(getattr(fn, "cache_clear", None)):
+                        fn.cache_clear()
+            policy.assess("Bash", {"command": "echo warm"}, cwd="/tmp/case")   # reload the policy files outside the timed call
+            t = time.perf_counter()
+            policy.assess("Bash", {"command": cmd}, cwd="/tmp/case")
+            best = min(best, time.perf_counter() - t)
+        return best
+
+    n = int(c["digit_run"])
+    small, large = took(n), took(2 * n)
+    problems = []
+    if large > c["budget_s"]:
+        problems.append(f"classified {2 * n} digits in {large:.2f} s, budget {c['budget_s']} s")
+    if large > c["max_ratio"] * max(small, 1e-3):
+        problems.append(f"time ratio {large / max(small, 1e-3):.1f} for twice the input, at most {c['max_ratio']} allowed")
+    return problems
+
+
+def _gap_owner(c: dict) -> list[str]:
+    """A `known_gap` row names the work item that closes it and the date it was recorded (V6-03)."""
+    out = []
+    if not WORK_ITEM.fullmatch(str(c.get("work_item", ""))):
+        out.append("known_gap row needs a work_item (W-n or V6-n) that closes it")
+    if not GAP_DATE.fullmatch(str(c.get("gap_date", ""))):
+        out.append("known_gap row needs a gap_date (YYYY-MM-DD)")
+    return out
 
 
 def _run_route(c: dict) -> list[str]:
@@ -295,7 +343,9 @@ def main(files: list[str]) -> int:
                     fn()
                 problems = run_case(seeded(c, os.path.realpath(d)))
             status = "ok  "
-            if c.get("known_gap"):
+            if c.get("known_gap") and _gap_owner(c):
+                status, problems = "FAIL", _gap_owner(c)
+            elif c.get("known_gap"):
                 status, problems = _gap_status(c, problems)
             elif problems:
                 status = "FAIL"
