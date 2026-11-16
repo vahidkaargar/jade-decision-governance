@@ -1592,7 +1592,7 @@ def _hoist_piece(piece: str) -> str:
 # `skeleton_both` is what every caller that classifies a command reads. The current reading is joined to the reading origin/main (8100ea1) gave the same text,
 # kept as it was in `shellnorm_base`: each part is a command line of its own (a `cd` of one does not move the other), so no command is read as less than main read it,
 # whatever the current reading drops, and the rating and the push check are the stricter of the two by construction (PR 47 review, round 6).
-FLOOR_BUDGET = 100_000   # characters beyond 8 times the command that the reading of origin/main may scan across nested levels
+FLOOR_BUDGET = 100_000   # characters, and twice the command, that the reading of origin/main may scan across nested levels
 JOIN = "\x17"
 _JOIN_CHAR = re.compile(JOIN)
 
@@ -1618,9 +1618,8 @@ _NOCORRECT = re.compile(r"(?<![\w./$-])nocorrect(?![\w./-])")
 def _base_skeleton(command: str) -> str:
     from . import shellnorm_base
 
-    # main's scanner re-reads a nested text once per pipe and level (a chain of pipelines cost 24 s for 1.7 kB there): it reads at most `FLOOR_BUDGET` characters more than 8
-    # times the command, and what is left is searched as plain text (`_code`), which still shows a push to the rules; the current reading has its own, linear, bound.
-    text = shellnorm_base._skeleton(command, 0, [FLOOR_BUDGET + 8 * len(command)])
+    # main's scanner re-reads a nested text once per pipe and level (a chain of pipelines cost 24 s for 1.7 kB there): it reads at most `FLOOR_BUDGET` characters and twice the command, and what is left is searched as plain text (`_code`), which still shows a push to the rules; the current reading has its own, linear, bound.
+    text = shellnorm_base._skeleton(command, 0, [FLOOR_BUDGET + 2 * len(command)])
     return _NOCORRECT.sub("nocorrect\x06", text)
 
 
