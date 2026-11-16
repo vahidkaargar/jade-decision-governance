@@ -171,7 +171,7 @@ def test_a_redirect_is_still_a_write():
 
 def test_quoted_and_escaped_operators_are_data():
     assert shellnorm.segments("echo 'a>b' c") == ["echo a\x06b c"]
-    assert shellnorm.segments("git log --format=%h\\>x") == ["git log --format=%h\x06x"]   # an escaped operator is data the way a quoted one is (W-96)
+    assert "git log --format=%h\x06x" in shellnorm.segments("git log --format=%h\\>x")   # an escaped operator is data the way a quoted one is (W-96); the reading as syntax is kept too (W-113)
 
 
 def test_skeleton_puts_the_redirect_last_and_spells_it_one_way():
@@ -328,7 +328,9 @@ def test_backslashes_before_a_redirect_do_not_lower_the_rating(base, tail, escap
 
 def test_a_real_operator_after_an_escaped_backslash_is_still_hoisted():
     assert shellnorm.segments("git push origin feature a\\\\&>log :main") == ["git push origin feature a\\\\ :main > log"]
-    assert shellnorm.segments("git push origin feature a\\&>log :main") == ["git push origin feature a\x06 :main > log"]
-    assert shellnorm.segments("git push origin feature a\\\\\\&>log :main") == ["git push origin feature a\\\\\x06 :main > log"]
+    segs = shellnorm.segments("git push origin feature a\\&>log :main")
+    assert segs[0] == "git push origin feature a\x06 :main > log"   # data first; the reading as syntax follows (W-113)
+    assert "git push origin feature a\\ :main > log" in segs
+    assert shellnorm.segments("git push origin feature a\\\\\\&>log :main")[0] == "git push origin feature a\\\\\x06 :main > log"
     assert shellnorm.segments('git push origin feature "a\\&" :main') == ["git push origin feature a\\\x06 :main"]
     assert shellnorm.segments("git push origin feature a\\\n&>log :main") == ["git push origin feature a :main > log"]

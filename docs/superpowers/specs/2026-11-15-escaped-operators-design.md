@@ -64,3 +64,14 @@ Fixed in the same PR, with `tests/test_redirect_zsh_and_braces.py` (real bash an
 - An unquoted heredoc and `echo`/`printf`/`print` halve `\\` before the next shell reads the text; both texts are read.
 
 Not in this PR (W-110, spec B): `git -C my\ repo push`, `a\ #c`, an odd redirect target word, `>! lg`, escape-halving wrappers, `>& -main`, a quoted `-C` value with an operator.
+
+## Follow-up (W-111, W-113): the merge bar and what it left out
+
+Review of the brace fix (e1a76a3) found regressions against `origin/main`. The merge bar that came out of it: the PR fixes the redirect that hid the rest of a push, it is never weaker than `origin/main` on any command, and it costs at most about 3 times as much on realistic input. A gap that `origin/main` has too goes to spec B (W-114). Fixed here, with `tests/test_redirect_round3.py`:
+
+- E3-3: the redirect hoist took the first word of a here-string for its file, so `cat <<< 'git push origin :main' | sh` lost `git`. A stage's own stdin text (the words after `<<<`, the body of a heredoc inside `<(...)`) is now read as text, as well as the printed words.
+- E3-4, E3-9: a prefix word with a backslash or a quote (`\env echo '...' | sh`) hid the echo (the plain-text form of that hole is closed too); an escaped operator has two readings (a word, and a backslash with a live operator), as on `origin/main`.
+- DF-6: a decoded `$'\x0f'` could make a brace mark after the sanitiser had run. `_ansi_c` neutralises every mark byte.
+- B3-5: a `{` that stands alone where a command starts, and a `}` that closes it, are written as they are: bash and zsh read them the same way, so a script of groups is read once. Ambiguous braces (after `if`, glued to a word, no blank before `}`) keep the five readings.
+
+Not changed (spec B, W-114): zsh short forms such as `if { true } { echo a }` repeated thousands of times cost about 5 times `origin/main` (the word reading adds a segment each); a classification cache for repeated identical segments would cut it.

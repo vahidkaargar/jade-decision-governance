@@ -131,7 +131,7 @@ def _ansi_c(s: str, j: int) -> tuple[int, str]:
             continue
         out.append({"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "f": "\f", "v": "\v", "e": "\x1b", "E": "\x1b"}.get(d, d))
         j += 2
-    return j + 1, "".join(out)
+    return j + 1, _MARK_CHARS.sub("\x06", "".join(out))   # `$'\x0f'` is a word, not the mark of a brace (DF-6)
 
 
 def _command_word(stage_text: str) -> tuple[str, list[str]]:
@@ -837,19 +837,53 @@ class _Scan:
         (`python3 -c 'print("...")' | sh`) hands over every string it holds."""
         if kind == "shell" and (prog := self._producer_program(raw)):
             return self._interp(prog[0], prog[1], emit_all=True)
+        read = (lambda t: self._sub(t)) if kind == "shell" else (lambda t: self._interp(kind, t))
+        # what a stage reads on its own stdin, a here-string or a heredoc body, is what it prints (`cat <<< 'git push origin :main' | sh`); the redirect hoist takes the
+        # first word of the here-string for a file, so the text is read here as it is
+        stdin = " ; ".join(read(t) for t in self._stdin_texts(raw))
         printer = PRINTER.match(PREFIX.sub("", raw.lstrip(), count=1))
+        bare = ""
+        if printer is None:   # `\env echo ...`, `'command' echo ...`: the prefix words with their quotes taken off
+            bare = PREFIX.sub("", " ".join(words_of(raw.lstrip())), count=1)
+            printer = PRINTER.match(bare)
         if printer is None:
             text = " ".join(_dec(w) for w in words_of(PRODUCER.sub("", raw, count=1)))
-            return self._sub(text) if kind == "shell" else self._interp(kind, text)
-        text = " ".join(_dec(w) for w in words_of(PREFIX.sub("", raw.lstrip(), count=1)[printer.end():]))
+            return " ; ".join(p for p in (read(text), stdin) if p)
+        if bare:
+            text = " ".join(_dec(w) for w in bare[printer.end():].split())
+        else:
+            text = " ".join(_dec(w) for w in words_of(PREFIX.sub("", raw.lstrip(), count=1)[printer.end():]))
         if kind != "shell":
-            return self._interp(kind, text)
+            return " ; ".join(p for p in (self._interp(kind, text), stdin) if p)
         readings = [text]
         if "\\" in text and printer.group("name") in ("echo", "printf", "print"):
             # what the program prints is not what it is given: zsh and sh `echo` and `printf` read `\\` and `\n`, zsh `print` also drops the backslash of any
             # other escape (`\>` prints `>`), bash `echo` prints the text as it is. The shell that reads the output may be any of them: every reading is read.
             readings += [_echo_escapes(text), _echo_escapes(text, drop_unknown=True)]
-        return " ; ".join(self._sub(t) for t in dict.fromkeys(readings))
+        return " ; ".join([*(self._sub(t) for t in dict.fromkeys(readings)), *([stdin] if stdin else [])])
+
+    @staticmethod
+    def _stdin_texts(raw: str) -> list[str]:
+        """The texts a stage is given on its stdin by the shell: the words after each `<<<`, and the body of a heredoc that the text of a substitution carries
+        (`<(cat <<EOF ... EOF)`), as written and with the backslashes halved."""
+        out = []
+        words = words_of(raw)
+        for k, w in enumerate(words):
+            if w == "<<<" and k + 1 < len(words):
+                out.append(_dec(words[k + 1]))
+            elif w.startswith("<<<"):
+                out.append(_dec(w[3:]))
+        if "\n" in raw and (m := HEREDOC_OP.search(raw)):
+            delim = m.group(2) if m.group(2) is not None else m.group(3) if m.group(3) is not None else m.group(5)
+            lines = raw[m.end():].split("\n")[1:]
+            body = []
+            for line in lines:
+                if (line.lstrip("\t") if m.group(1) else line).rstrip("\r") == delim:
+                    break
+                body.append(line)
+            text = "\n".join(body)
+            out += [text, re.sub(r"\\([$`\\])|\\\r?\n", lambda x: x.group(1) or "", text)]
+        return list(dict.fromkeys(t for t in out if t.strip()))
 
     def _interp(self, lang: str, body: str, emit_all: bool = False) -> str:
         """What a program in `lang` does (interp.py): its literal commands as nested shell text, its literal write targets as the destination of a
@@ -1006,6 +1040,7 @@ class _Scan:
         self.nest += 1
         out: list[str] = []
         braced = False   # a `{` or `}` was met: the text has several readings
+        escaped = False  # an escaped operator was met: the text has two more
         c_blank = True   # reading C: nothing but blanks since the last separator of that reading
         c_open = 0       # reading C: the groups it has opened and not closed
         deferred: list[str] = []
@@ -1080,7 +1115,13 @@ class _Scan:
                 elif d == "\r" and s[i + 2:i + 3] == "\n":
                     i += 3
                 else:
-                    emit(d if d.isalnum() or d in ORDINARY_ESCAPE else "\x06" if _INERT.fullmatch(d) else "\\" + d)   # `a\&>log` is the word `a&` and a `>`: an escaped operator is data, as a quoted one is
+                    if d.isalnum() or d in ORDINARY_ESCAPE:
+                        emit(d)
+                    elif _INERT.fullmatch(d):
+                        emit(ESCAPED + d)   # `a\&>log`: a word `a&` and a `>` in one reading, a backslash and an operator in the other (`_readings`)
+                        escaped = True
+                    else:
+                        emit("\\" + d)
                     i += 2
             elif c == "'":
                 j = s.find("'", i + 1)
@@ -1171,9 +1212,16 @@ class _Scan:
                 alone = (i == 0 or s[i - 1] in " \t\n;&|()") and (i + 1 >= n or s[i + 1] in " \t\n;&|()")
                 closes = c_open > 0 and (i + 1 >= n or s[i + 1] in " \t\n;&|()<>") and s[i - 1] != "{"
                 cut = c_blank or (c == "}" and closes)
+                # A `{` that stands alone where a command starts, and the `}` that stands alone where a command starts and closes one, are the group in bash and in zsh:
+                # the text after them is another command, no reading puts a word of a command on the other side of them. They are written as they are, and a script of
+                # such groups is read once, not five times (B3-5).
+                clear = alone and c_blank and (c == "{" or c_open > 0)
                 c_open += cut if c == "{" else -(c_open > 0 and cut)
-                out.append(BRACE_MARK[c == "}", alone, cut])
-                braced = True
+                if clear:
+                    out.append(c)
+                else:
+                    out.append(BRACE_MARK[c == "}", alone, cut])
+                    braced = True
                 cur += c
                 end_stage(i, i + 1, False, brace=True)
                 i += 1
@@ -1214,7 +1262,7 @@ class _Scan:
         if raw.strip():
             self._stage(raw, deferred)
         self.nest -= 1
-        text = _brace_readings("".join(out)) if braced else "".join(out)
+        text = _readings("".join(out), braced, escaped)
         return text + "".join(f" ; {d} ; " for d in deferred), i
 
     def _heredoc_bodies(self, i: int, pending: list, deferred: list[str]) -> int:
@@ -1261,7 +1309,7 @@ def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None) ->
 def _skeleton(command: str, _depth: int, _budget: list[int] | None) -> str:
     budget = _budget if _budget is not None else [BUDGET]
     budget[0] -= len(command)
-    command = _MARK_CHARS.sub("\x06", command)   # a byte that is one of the brace marks stays a word
+    command = _MARK_CHARS.sub("\x06", command)   # a byte that is one of the marks stays a word
     if _depth > MAX_DEPTH or budget[0] < 0:
         return " ; " + _code(command) + " ; "
     text, _ = _Scan(command, _depth, budget).run(0, None)
@@ -1274,16 +1322,37 @@ def _skeleton(command: str, _depth: int, _budget: list[int] | None) -> str:
 #   word does not, E the other way round. Whichever shell runs the text, one of the readings is the one it takes, and a reading that cuts a push short is not the only one.
 BRACE_MARK = {(close, alone, cut_c): chr(0x0E + 4 * close + 2 * alone + cut_c) for close in (False, True) for alone in (False, True) for cut_c in (False, True)}
 _MARKS = {m: k for k, m in BRACE_MARK.items()}
-_MARK_CHARS = re.compile("[\x0e-\x15]")
+ESCAPED = "\x16"   # in front of an operator the command escaped with a backslash
+_MARK_CHARS = re.compile("[\x0e-\x16]")
 
 
-def _brace_readings(text: str) -> str:
-    readings = {name: {} for name in "ALCDE"}
-    for m, (close, alone, cut_c) in _MARKS.items():
-        brace = "}" if close else "{"
-        for name, cut in (("A", True), ("L", False), ("C", cut_c), ("D", alone), ("E", not alone)):
-            readings[name][ord(m)] = brace if cut else "\x06"
-    out = list(dict.fromkeys(text.translate(table) for table in readings.values()))
+def _reading_tables() -> list[dict[int, str]]:
+    tables = []
+    for name in "ALCDE":
+        table = {}
+        for m, (close, alone, cut_c) in _MARKS.items():
+            cut = {"A": True, "L": False, "C": cut_c, "D": alone, "E": not alone}[name]
+            table[ord(m)] = ("}" if close else "{") if cut else "\x06"
+        tables.append(table)
+    return tables
+
+
+_READING_TABLES = _reading_tables()
+ESCAPED_OPERATOR = re.compile(ESCAPED + ".")
+
+
+def _readings(text: str, braced: bool, escaped: bool) -> str:
+    """The text in every reading the shells allow: the braces (`_brace_readings`), and an operator the command escaped as a word and as syntax.
+
+    `a\\>&x :main` is the word `a>` and the command `x :main` in a shell that reads the backslash as an escape, and `a\\`, a redirect and `:main` in one that reads
+    a `\\` and the operator after it (the text a program prints and another shell reads, `echo 'a\\>x' | zsh -f`, is `a>x`). Main kept the backslash; one reading is data."""
+    out = [text]
+    if braced:
+        out = list(dict.fromkeys(text.translate(table) for table in _READING_TABLES))
+    if escaped:
+        out = list(dict.fromkeys(r for t in out for r in (ESCAPED_OPERATOR.sub("\x06", t), t.replace(ESCAPED, "\\"))))
+    if len(out) == 1:
+        return out[0]
     return " ; ".join([out[0], *(RUN_OF_BRACES.sub(r"\1", t) for t in out[1:])])
 
 
