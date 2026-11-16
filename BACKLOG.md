@@ -21,6 +21,7 @@ No design decision is open. Status: IMPLEMENTED. Next are the human wiring steps
 | Id | P | Status | Owner | Phase | Title | Depends on | Trigger | Next action |
 |----|---|--------|-------|-------|-------|------------|---------|-------------|
 | W-04 | P1 | open | runtime | 1 | Re-measure baseline from ledger after 14 days; replace heuristic numbers in docs/04 §4 | W-02 | 2026-11-23 | jade ledger stats --days 14 (and `jade eval run`), then update docs/04 section 4 with the ledger facts |
+| W-115 | P1 | open | human | 2 | Enforce the real-shell sandbox outside the repository: gate rule and a Linux backend | — | before the next review round that runs real shells | Owner decides: (a) a gate rule that refuses Bash calls running /bin/bash, /bin/zsh or /bin/sh over a corpus file unless the command goes through evals/realshell.py or sandbox-exec, with an issue and a threat-model row; (b) whether to add a bubblewrap or container backend for Linux. Then an agent implements. |
 | W-23 | P1 | open | human | 2 | Switch the gate to enforce after a week of advisory data | W-22 | 2026-11-23 | Read jade ledger stats (events.would_block), then jade gate enforce |
 | W-27 | P1 | open | human | 3 | Adjudicate the weekly label queue | W-22 | 2026-11-23 | jade label queue, then jade label set <id> yes\|no |
 | W-88 | P1 | open | human | 5 | Cut 0.4.0 enforce-ready release (no tag until human review) | W-48, W-38 | 2026-11-16 | Plan: docs/11-release-0.4.0-plan.md. 1) Human decides W-62/63/64/66/W-46 by 2026-11-16. 2) Agent: W-37, W-31, W-93, W-87. 3) Agent: version bump (R-24 needs human terminal or permit). 4) Human: W-90 install, then jade gate enforce. 5) Tag from merged main with CI green; 14-day soak. |
@@ -116,4 +117,4 @@ No design decision is open. Status: IMPLEMENTED. Next are the human wiring steps
 | W-87 | P3 | done | agent | 2 | R-24 gates version bumps in this checkout: release flow needs the human's terminal or a permit | W-37 | 2026-11-23 | Document in docs/08 release section; optionally add a release helper the human runs. |
 | W-93 | P3 | done | agent | 2 | Isolate subprocess-based tests from a real installed approver anchor | W-90 | before W-90 is run | Monkeypatch signing.DEFAULT_ANCHOR in tests/conftest.py; find the subprocess tests that approve at high (tests/acceptance/test_permits_lifecycle.py and a few more) and run them with a stub anchor path or skip them when the real anchor exists |
 
-Aging: P2 → P1 after 14 idle days; P3 → P2 after 30. Rendered by `jade work render` on 2026-11-13.
+Aging: P2 → P1 after 14 idle days; P3 → P2 after 30. Rendered by `jade work render` on 2026-11-16.
