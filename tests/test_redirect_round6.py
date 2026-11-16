@@ -90,6 +90,14 @@ def test_a_redirect_anywhere_in_a_bare_push_on_main_still_stops_it(redirect, tpl
     assert hooks._on_default_branch(str(repo_on_main), command), command
 
 
+@pytest.mark.parametrize("redirect", [">&|log", ">>&|log"])
+@pytest.mark.parametrize("tail", ["origin feature --delete", "origin feature --force", "origin feature --tags", "origin feature -o x"])
+def test_a_zsh_redirect_with_a_pipe_in_it_does_not_hide_the_current_branch(redirect, tail, repo_on_main):
+    """CR6-ADD-1: origin/main cuts `git push >&|log origin feature` at the `|`, so its push has no destination and goes to the current branch. The reading of origin/main
+    is cut as origin/main cut it."""
+    assert hooks._on_default_branch(str(repo_on_main), f"git push {redirect} {tail}"), redirect
+
+
 # ---------------------------------------------------------------- the criticals of round 6 are blocked
 
 CRITICAL = [

@@ -1624,8 +1624,20 @@ def _base_skeleton(command: str) -> str:
     return _NOCORRECT.sub("nocorrect\x06", text)
 
 
+def _parts(command: str) -> list[tuple[str, re.Pattern, re.Pattern]]:
+    """The readings of a command with the separators each is cut by: the second is cut as origin/main cut it (`git push >&|log origin feature` is `git push >&` piped to `log` there)."""
+    parts = skeleton_both(command).split(JOIN)
+    return [(parts[0], SPLIT, SEG_TOKEN), *((p, _base().SPLIT, _base().SEG_TOKEN) for p in parts[1:])]
+
+
+def _base():
+    from . import shellnorm_base
+
+    return shellnorm_base
+
+
 def segments(command: str) -> list[str]:
-    return [re.sub(r"\s+", " ", seg).strip() for seg in SPLIT.split(skeleton_both(command).replace(JOIN, "\n")) if seg.strip()]
+    return [re.sub(r"\s+", " ", seg).strip() for text, split, _ in _parts(command) for seg in split.split(text) if seg.strip()]
 
 
 SEG_TOKEN = re.compile(r"(\n|;|&&|\|\||(?<!>)(?<!>&)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\})")
@@ -1637,10 +1649,10 @@ def segments_cwd(command: str, cwd: str = "") -> list[tuple[str, tuple[str, ...]
     A command that carries substitutions is ordered by the canonical text, not by execution, so every directory the
     command passes through counts for every segment then.
     """
-    return [row for part in skeleton_both(command).split(JOIN) for row in _segments_cwd_of(part, cwd)]
+    return [row for text, _, token in _parts(command) for row in _segments_cwd_of(text, cwd, token)]
 
 
-def _segments_cwd_of(text: str, cwd: str) -> list[tuple[str, tuple[str, ...]]]:
+def _segments_cwd_of(text: str, cwd: str, token: re.Pattern) -> list[tuple[str, tuple[str, ...]]]:
     import os
 
     cur, prev = cwd, None
@@ -1651,7 +1663,7 @@ def _segments_cwd_of(text: str, cwd: str) -> list[tuple[str, tuple[str, ...]]]:
     ticks = False
     seen = [cwd]
     found: list[str] = []
-    for k, piece in enumerate(SEG_TOKEN.split(text)):
+    for k, piece in enumerate(token.split(text)):
         if k % 2:
             if piece in ("(", "$("):
                 stack.append(cur)
