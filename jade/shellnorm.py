@@ -1592,7 +1592,6 @@ def _hoist_piece(piece: str) -> str:
 # `skeleton_both` is what every caller that classifies a command reads. The current reading is joined to the reading origin/main (8100ea1) gave the same text,
 # kept as it was in `shellnorm_base`: each part is a command line of its own (a `cd` of one does not move the other), so no command is read as less than main read it,
 # whatever the current reading drops, and the rating and the push check are the stricter of the two by construction (PR 47 review, round 6).
-FLOOR_BUDGET = 100_000   # characters, and twice the command, that the reading of origin/main may scan across nested levels
 BIG_SEGMENT = 20_000   # characters
 JOIN = "\x17"
 _JOIN_CHAR = re.compile(JOIN)
@@ -1619,9 +1618,9 @@ _NOCORRECT = re.compile(r"(?<![\w./$-])nocorrect(?![\w./-])")
 def _base_skeleton(command: str) -> str:
     from . import shellnorm_base
 
-    # main's scanner re-reads a nested text once per pipe and level (a chain of pipelines cost 24 s for 1.7 kB there): it reads at most `FLOOR_BUDGET` characters and twice the command, and what is left is searched as plain text (`_code`), which still shows a push to the rules; the current reading has its own, linear, bound.
-    text = shellnorm_base._skeleton(command, 0, [FLOOR_BUDGET + 2 * len(command)])
-    return _NOCORRECT.sub("nocorrect\x06", text)
+    # origin/main's own reading with its own budget (`BUDGET`, 4 000 000 characters): never cut earlier than it cut itself, so no command is read as less than main read it.
+    # Its cost is main's cost too (a chain of pipelines nested six deep took 24 s there).
+    return _NOCORRECT.sub("nocorrect\x06", shellnorm_base.skeleton(command))
 
 
 def _parts(command: str) -> list[tuple[str, re.Pattern, re.Pattern]]:
@@ -1771,6 +1770,26 @@ class GitCall:
     danger: list[str] = field(default_factory=list)
 
 
+_REDIRECT_ARG = re.compile(r"\d*(?:>>?|<)")   # the operator of a moved redirect, with its descriptor
+
+
+def _without_redirects(args: list[str]) -> list[str]:
+    """The arguments of a command without the redirects the skeleton moved to its end (`> log`, `>> log`, `< in`): the shell takes a redirect and its target out of the
+    words, so `git push > log` is a push with no destination, not a push to the remote `>`. A quoted `>` is data (the skeleton marks it), so a bare one is an operator."""
+    if not any(_REDIRECT_ARG.fullmatch(a) for a in args):
+        return args
+    out: list[str] = []
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+        elif _REDIRECT_ARG.fullmatch(a):
+            skip = True
+        else:
+            out.append(a)
+    return out
+
+
 def git_calls(text: str) -> tuple[str, list[GitCall]]:
     """Rewrite every `git <global options> sub` to `git sub` and describe each invocation. Pure text, no process."""
     toks = text.split(" ")
@@ -1822,7 +1841,7 @@ def git_calls(text: str) -> tuple[str, list[GitCall]]:
             else:
                 break
         call.sub = toks[j] if j < len(toks) else ""
-        call.args = [a for a in toks[j + 1:] if a]
+        call.args = _without_redirects([a for a in toks[j + 1:] if a])
         if call.sub == "config" and (key := config_write_key(call.args)) is not None and ("$" in key or DANGEROUS_KEY.search(key.lower())):
             call.danger.append(f"config {key}")   # the persistent form of `git -c key=value` (W-31): an alias, pager, sshCommand ... that runs a program
         calls.append(call)

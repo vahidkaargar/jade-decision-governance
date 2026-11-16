@@ -1,4 +1,4 @@
-# FROZEN COPY of jade/shellnorm.py at origin/main 8100ea1, used only through `shellnorm.skeleton_both()`. Do not edit: tests/test_shellnorm_floor.py pins its hash.
+# FROZEN COPY of jade/shellnorm.py at origin/main 8100ea1, used only through `shellnorm.skeleton_both()`. Do not edit: tests/test_redirect_round6.py pins its hash.
 # `shellnorm.skeleton_both()` joins this reading to the current one, so no command is read as less than main read it (PR 47 review, round 6).
 """Canonicalise a shell command before any risk rule or safety invariant looks at it (threat T18, cluster A1).
 
