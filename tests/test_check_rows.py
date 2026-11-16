@@ -69,7 +69,7 @@ def test_what_blocks_row_matches_the_hook_for_every_pair(mode, level):
         else:
             assert ", ".join(firm) + " block" in detail
         if not gated:
-            assert "risk rule" in detail and "only log" in detail
+            assert "risk rule" in detail and ("not even logged" if mode == "off" else "only log") in detail
 
 
 @pytest.mark.parametrize("mode", MODES)
