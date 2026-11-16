@@ -20,7 +20,7 @@ from functools import lru_cache
 
 from policies import loader
 
-from . import blind, egress, gitalias, humanonly, inert, paths, samecmd, shellnorm
+from . import blind, egress, gitalias, harness_audit, humanonly, inert, paths, samecmd, shellnorm
 from .util import LEVELS, canonical, fold, sha256
 
 NULL_REDIRECT = shellnorm.NULL_REDIRECT
@@ -948,6 +948,37 @@ def _script_ho(f: str, dirs: tuple[str, ...], cwd: str) -> set[str]:
     return out
 
 
+def _si13_words(words: list[str], f: str, dirs: tuple[str, ...], cwd: str) -> bool:
+    """SI-13 for one simple command that runs the script file `f`: is it a Python payload runner that starts real shells without evals/realshell.py
+    (jade/harness_audit.py `gate_findings`)? A shell script is read one level deep for the Python runners it starts (`batch.sh` looping over `run.py`)."""
+    data_arg = any(w.lower().endswith(harness_audit.DATA_EXT) for w in words[1:] if w != f)
+    python = blind._base(words[0]).startswith("python") or (words[0] in ("uv", "uvx"))
+    for d in (dirs or ("",)):
+        p = os.path.realpath(os.path.join(d or cwd or os.getcwd(), os.path.expanduser(f)))
+        if (python or p.endswith(".py")) and harness_audit.gate_file(p, any_name=python, data_arg=data_arg):
+            return True
+        if python or p.endswith(".py"):
+            continue
+        try:
+            if not (os.path.isfile(p) and os.path.getsize(p) <= _SCRIPT_READ_MAX):
+                continue
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                text = fh.read(_SCRIPT_READ_MAX)
+        except OSError:
+            continue
+        here = os.path.dirname(p)
+        for seg, sdirs in shellnorm.segments_cwd(text, here):
+            inner = _bare(seg).split(" ")
+            sf = blind.script_file(inner)
+            if sf and (sf.endswith(".py") or blind._base(inner[0]).startswith("python")):
+                inner_data = any(w.lower().endswith(harness_audit.DATA_EXT) or "$" in w for w in inner[1:] if w != sf)
+                for sd in (sdirs or (here,)):
+                    q = os.path.realpath(os.path.join(sd or here, os.path.expanduser(sf)))
+                    if harness_audit.gate_file(q, any_name=True, data_arg=inner_data):
+                        return True
+    return False
+
+
 def _ho_add(a: Assessment, ident: str) -> None:
     if ident not in a.ho_ids:
         a.ho_ids.append(ident)
@@ -1248,6 +1279,7 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     labels: list[str] = []
     si12_roots = _config_roots() if paths.level() is not None else None   # docs/12: SI-12 is active once a level is set
     si12 = False
+    si13 = False   # a Python payload runner that starts real shells without the sandbox (docs/13)
     ho = Assessment(level="low", rule_id="", rationale="")   # collects the human-only classes of the segments
     sql_client = False   # a segment runs a database client: its statement is quoted text, so the raw command is read for it below
     wroots, mroots = _wiring_roots(), _mod_roots()
@@ -1283,6 +1315,8 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         _ho_segment(ho, seg, dirs, cwd, wroots, mroots)
         sql_client = sql_client or humanonly.is_sql_client(_bare(seg))
         if sf := blind.script_file(words):
+            if not si13 and _si13_words(words, sf, dirs, cwd):
+                si13 = True
             if HO_STATE not in ho.ho_ids and _script_names_state(sf, dirs, cwd):
                 _ho_add(ho, HO_STATE)
             for ident in sorted(_script_ho(sf, dirs, cwd)):
@@ -1325,6 +1359,8 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
             a.blocked.append(inv["id"])
     if si12 and "SI-12" not in a.blocked:
         a.blocked.append("SI-12")
+    if si13 and "SI-13" not in a.blocked:
+        a.blocked.append("SI-13")
     if sql_client and humanonly.sql_destroys(text_in):
         _ho_add(ho, HO_DELETE)
     a.ho_ids = list(ho.ho_ids)

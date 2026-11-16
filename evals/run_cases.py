@@ -254,14 +254,16 @@ def _run_lifecycle(c: dict) -> list[str]:
 
 def seeded(c: dict, home: str) -> dict:
     """A case with `seed` (paths under `{tmp}`) gets those files created in its throwaway directory, and `{tmp}` in the case replaced by it: the
-    gate decides on whether a file already exists (R-18), so a case about editing one needs the file to be there."""
+    gate decides on whether a file already exists (R-18), so a case about editing one needs the file to be there. `seed` is a list of paths, or an
+    object mapping each path to its text when the gate reads the file (SI-13 reads the script a command runs; the file is never executed)."""
     if not c.get("seed"):
         return c
     out = json.loads(json.dumps(c).replace("{tmp}", json.dumps(home)[1:-1]))
-    for rel in out["seed"]:
+    seed = out["seed"] if isinstance(out["seed"], dict) else dict.fromkeys(out["seed"], "# existing file\n")
+    for rel, text in seed.items():
         f = Path(rel)
         f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text("# existing file\n")
+        f.write_text(text)
     return out
 
 
