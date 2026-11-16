@@ -16,12 +16,13 @@ from pathlib import Path
 
 import pytest
 
-from jade import policy, shellnorm
+from jade import policy
 from tests.test_redirect_anywhere import (
     OTHERS,
     PUSH_TO_MAIN,
     PUSHES,
     agrees_with_the_shell,
+    cur_segments,
     glued,
     inserted,
     pushes_to_default,
@@ -69,10 +70,10 @@ def test_zsh_redirect_never_hides_a_push_to_main_from_the_shell(base, redirect, 
 
 def test_zsh_redirects_are_spelled_one_way():
     for r in (">>&log", ">>|log", "&>>|log", ">>&|log", ">>&!log", ">>!log"):
-        assert shellnorm.segments(f"git push origin feature {r} :main")[0] == "git push origin feature :main >> log", r
+        assert cur_segments(f"git push origin feature {r} :main")[0] == "git push origin feature :main >> log", r
     for r in ("&>|log", ">!log", ">&|log", ">&!log", "&>!log"):
-        assert shellnorm.segments(f"git push origin feature {r} :main")[0] == "git push origin feature :main > log", r
-    assert shellnorm.segments("git push origin feature >>|log :main") == ["git push origin feature :main >> log"]   # no `!`: one reading
+        assert cur_segments(f"git push origin feature {r} :main")[0] == "git push origin feature :main > log", r
+    assert cur_segments("git push origin feature >>|log :main") == ["git push origin feature :main >> log"]   # no `!`: one reading
 
 
 def test_a_zsh_redirect_is_still_a_write():
@@ -111,12 +112,12 @@ def test_descriptor_close_glued_to_any_word_never_hides_a_push_to_main(base, op,
 
 
 def test_a_closed_descriptor_alone_names_no_file():
-    assert shellnorm.segments("git push >&- origin 2>&- feature") == ["git push origin feature >&- 2>&-"]   # it moves as written, as on main (W-115)
-    assert shellnorm.segments("git push origin feature <&0 :main") == ["git push origin feature :main"]
+    assert cur_segments("git push >&- origin 2>&- feature") == ["git push origin feature >&- 2>&-"]   # it moves as written, as on main (W-115)
+    assert cur_segments("git push origin feature <&0 :main") == ["git push origin feature :main"]
 
 
 def test_both_readings_of_a_close_with_a_glued_word_are_in_the_skeleton():
-    got = shellnorm.segments("git >&-lg push origin :main")
+    got = cur_segments("git >&-lg push origin :main")
     assert "git push origin :main > -lg" in got      # zsh: the word is a file
     assert "git lg push origin :main >&-" in got     # bash: the descriptor closes and the word is an argument
 
@@ -173,14 +174,14 @@ def test_a_command_group_is_still_a_group(command, tmp_path):
 
 def test_a_brace_is_read_as_a_group_and_as_a_word():
     """Every reading is in the skeleton: the one in which a brace cuts the command (a group) and the ones in which it is a word."""
-    got = shellnorm.segments("{ git push origin main; }")
+    got = cur_segments("{ git push origin main; }")
     assert "git push origin main" in got
-    got = shellnorm.segments("git push origin feature a{ :main")
+    got = cur_segments("git push origin feature a{ :main")
     assert "git push origin feature a\x06 :main" in got and ":main" in got
-    got = shellnorm.segments("git push origin feature a\\{b,c} :main")
+    got = cur_segments("git push origin feature a\\{b,c} :main")
     assert "git push origin feature a\x06b,c\x06 :main" in got
-    assert shellnorm.segments("git push origin {feature,hotfix} :main") == ["git push origin feature hotfix :main"]   # a brace expansion is expanded, one reading
-    assert shellnorm.segments("echo ${HOME}") == ["echo $HOME"]
+    assert cur_segments("git push origin {feature,hotfix} :main") == ["git push origin feature hotfix :main"]   # a brace expansion is expanded, one reading
+    assert cur_segments("echo ${HOME}") == ["echo $HOME"]
 
 
 @pytest.mark.parametrize("command", [
@@ -239,8 +240,8 @@ def test_halved_backslashes_before_a_redirect_never_hide_a_push_to_main(base, ta
 
 
 def test_a_heredoc_and_echo_hand_the_program_the_halved_text():
-    assert "git push origin feature a\\\\ :main > log" in shellnorm.segments("sh <<EOF\ngit push origin feature a\\\\\\>&log :main\nEOF")
-    assert "git push origin feature a\\\\ :main > log" in shellnorm.segments("echo 'git push origin feature a\\\\\\>&log :main' | zsh")
+    assert "git push origin feature a\\\\ :main > log" in cur_segments("sh <<EOF\ngit push origin feature a\\\\\\>&log :main\nEOF")
+    assert "git push origin feature a\\\\ :main > log" in cur_segments("echo 'git push origin feature a\\\\\\>&log :main' | zsh")
 
 
 # ---------------------------------------------------------------- round 2 of the review of d10abf9 (W-111): the fix must not lose what 3c7d2e9 and main blocked

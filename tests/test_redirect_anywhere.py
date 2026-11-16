@@ -52,6 +52,28 @@ OTHERS = [
 _REDIRECT_WORD = re.compile(r"^(?:\d*|&)(?:>>?|<>|<<<|<)[|&!]*")
 
 
+def cur_segments(command: str) -> list[str]:
+    """The segments of the current reading alone (`shellnorm.skeleton`), without the reading origin/main gave that `shellnorm.segments` adds."""
+    return [re.sub(r"\s+", " ", seg).strip() for seg in shellnorm.SPLIT.split(shellnorm.skeleton(command)) if seg.strip()]
+
+
+class Verdict(tuple):
+    """What the gate decides: level, rule, blocked invariants, human-only classes, gated segment keys (a redirect cut off).
+
+    The gate reads a command in two readings (`shellnorm.skeleton_both`: the current one and the one origin/main gave), so a spelling with a redirect may carry the words of
+    the second reading as well. `a == b` therefore means: `a` is at least as gated as `b` (level, blocked and human-only classes), and every key of `b` is a key of `a`;
+    when the level is the same the rule is the same."""
+
+    def __eq__(self, other):
+        level, rule, blocked, ho, keys = self
+        o_level, o_rule, o_blocked, o_ho, o_keys = other
+        if policy.LEVELS[level] < policy.LEVELS[o_level] or not set(o_blocked) <= set(blocked) or not set(o_ho) <= set(ho) or not set(o_keys) <= set(keys):
+            return False
+        return level != o_level or rule == o_rule or bool(set(blocked) - set(o_blocked))
+
+    __hash__ = None
+
+
 def sig(command: str) -> tuple:
     """What the gate decides for a command: level, rule, blocked invariants, human-only classes and the gated segment keys with any redirect cut off."""
     a = policy.assess("Bash", {"command": command}, cwd="/tmp")
@@ -59,8 +81,9 @@ def sig(command: str) -> tuple:
     for k in a.seg_keys:
         words = k.split(" ")
         cut = next((i for i, w in enumerate(words) if _REDIRECT_WORD.match(w)), len(words))
-        keys.append(" ".join(words[:cut]))
-    return a.level, a.rule_id, tuple(a.blocked), tuple(a.ho_ids), tuple(sorted(set(keys)))   # a command read in two readings keys the same segment twice
+        if cut:
+            keys.append(" ".join(words[:cut]))   # a key that is only a redirect is a reading of the other spelling
+    return Verdict((a.level, a.rule_id, tuple(a.blocked), tuple(a.ho_ids), tuple(sorted(set(keys)))))
 
 
 def si08(command: str) -> bool:
@@ -170,18 +193,18 @@ def test_a_redirect_is_still_a_write():
 
 
 def test_quoted_and_escaped_operators_are_data():
-    assert shellnorm.segments("echo 'a>b' c") == ["echo a\x06b c"]
-    assert "git log --format=%h\x06x" in shellnorm.segments("git log --format=%h\\>x")   # an escaped operator is data the way a quoted one is (W-96); the reading as syntax is kept too (W-113)
+    assert cur_segments("echo 'a>b' c") == ["echo a\x06b c"]
+    assert "git log --format=%h\x06x" in cur_segments("git log --format=%h\\>x")   # an escaped operator is data the way a quoted one is (W-96); the reading as syntax is kept too (W-113)
 
 
 def test_skeleton_puts_the_redirect_last_and_spells_it_one_way():
-    assert shellnorm.segments("git push origin feature &>log :main") == ["git push origin feature :main > log"]
-    assert shellnorm.segments("git push origin feature >&log :main") == ["git push origin feature :main > log"]
-    assert shellnorm.segments("git >|log push origin") == ["git push origin > log"]
-    assert shellnorm.segments("git push >&- origin 2>&- feature") == ["git push origin feature >&- 2>&-"]   # a close names no file: it moves, as written (W-115)
-    assert shellnorm.segments("git push origin feature&>>log :main") == ["git push origin feature :main >> log"]
-    assert shellnorm.segments("echo a2>log b") == ["echo a2 b > log"]   # the 2 belongs to the word `a2`, not to the redirect
-    assert shellnorm.segments("git push 2>log origin") == ["git push origin 2> log"]
+    assert cur_segments("git push origin feature &>log :main") == ["git push origin feature :main > log"]
+    assert cur_segments("git push origin feature >&log :main") == ["git push origin feature :main > log"]
+    assert cur_segments("git >|log push origin") == ["git push origin > log"]
+    assert cur_segments("git push >&- origin 2>&- feature") == ["git push origin feature >&- 2>&-"]   # a close names no file: it moves, as written (W-115)
+    assert cur_segments("git push origin feature&>>log :main") == ["git push origin feature :main >> log"]
+    assert cur_segments("echo a2>log b") == ["echo a2 b > log"]   # the 2 belongs to the word `a2`, not to the redirect
+    assert cur_segments("git push 2>log origin") == ["git push origin 2> log"]
 
 
 # ---------------------------------------------------------------- an escaped operator is data, a real one after an escaped backslash is not (W-96)
@@ -327,10 +350,10 @@ def test_backslashes_before_a_redirect_do_not_lower_the_rating(base, tail, escap
 
 
 def test_a_real_operator_after_an_escaped_backslash_is_still_hoisted():
-    assert shellnorm.segments("git push origin feature a\\\\&>log :main") == ["git push origin feature a\\\\ :main > log"]
-    segs = shellnorm.segments("git push origin feature a\\&>log :main")
+    assert cur_segments("git push origin feature a\\\\&>log :main") == ["git push origin feature a\\\\ :main > log"]
+    segs = cur_segments("git push origin feature a\\&>log :main")
     assert segs[0] == "git push origin feature a\x06 :main > log"   # data first; the reading as syntax follows (W-113)
     assert "git push origin feature a\\ :main > log" in segs
-    assert shellnorm.segments("git push origin feature a\\\\\\&>log :main")[0] == "git push origin feature a\\\\\x06 :main > log"
-    assert shellnorm.segments('git push origin feature "a\\&" :main') == ["git push origin feature a\\\x06 :main"]
-    assert shellnorm.segments("git push origin feature a\\\n&>log :main") == ["git push origin feature a :main > log"]
+    assert cur_segments("git push origin feature a\\\\\\&>log :main")[0] == "git push origin feature a\\\\\x06 :main > log"
+    assert cur_segments('git push origin feature "a\\&" :main') == ["git push origin feature a\\\x06 :main"]
+    assert cur_segments("git push origin feature a\\\n&>log :main") == ["git push origin feature a :main > log"]

@@ -903,16 +903,11 @@ class _Scan:
             return interp.language_of(cmd) or "", prog
         return None
 
-    def _produced(self, raw: str, kind: str, stdin_only: bool = False) -> str:
+    def _produced(self, raw: str, kind: str) -> str:
         """What `echo ... | sh` hands to the reader: the echoed words, parsed as shell for a shell, searched as text otherwise. A program that prints
-        (`python3 -c 'print("...")' | sh`) hands over every string it holds.
-
-        `stdin_only`: the reader is not known (`| (sh)`, `| sh </dev/stdin`, `| xargs -I% sh -c %`, `| 2>&1 sh`): only what the stage reads on its stdin is read, as shell, and
-        only for a stage that is not a printer (`sed p<<<'git push origin main'` passes the text on as it is; `echo ... | wc` is words)."""
+        (`python3 -c 'print("...")' | sh`) hands over every string it holds."""
         raw, here = _here_strings(raw)
-        if stdin_only:
-            kind = "shell"
-        if kind == "shell" and not stdin_only and (prog := self._producer_program(raw)):
+        if kind == "shell" and (prog := self._producer_program(raw)):
             return self._interp(prog[0], prog[1], emit_all=True)
         read = (lambda t: self._sub(t)) if kind == "shell" else (lambda t: self._interp(kind, t))
         # what a stage reads on its own stdin, a here-string or a heredoc body, is what it prints (`cat <<< 'git push origin :main' | sh`); the redirect hoist takes the
@@ -935,8 +930,6 @@ class _Scan:
         if printer is None:   # `\env echo ...`, `'command' echo ...`: the prefix words with their quotes taken off
             bare = PREFIX.sub("", " ".join(words_of(raw.lstrip())), count=1)
             printer = PRINTER.match(bare)
-        if stdin_only:
-            return "" if printer else stdin
         if printer is None:
             text = " ".join(_dec(w) for w in words_of(PRODUCER.sub("", raw, count=1)))
             return " ; ".join(p for p in (read(text), stdin) if p)
@@ -1139,6 +1132,7 @@ class _Scan:
         pending: list[tuple[str, bool, bool, str | None, bool]] = []
         cur = ""  # the current stage so far: its first and last characters are all the checks below look at
         chain: list[str] = []  # the earlier stages of the pipeline being read: any of them may feed text to a shell at its end
+        fed: dict[str, tuple[int, int]] = {}   # per reader kind, how many stages of `chain` (and of `whole`) were handed to such a reader already: a reader further down reads no text that one before it did not
         raw_at = i
         whole_at = i                 # where the stage starts when a brace inside a word does not cut it (a word in every shell: `echo git push {x | sh`)
         whole: list[str] = []        # the earlier stages of the pipeline in that reading
@@ -1165,14 +1159,15 @@ class _Scan:
                 chain.append(raw)
                 whole.append(s[whole_at:sep_at])
                 if kind := _next_stage_kind(s, resume):
-                    deferred.extend(self._produced(r, kind) for r in chain)
+                    done, done_whole = fed.get(kind, (0, 0))   # `a | sh | sh | ...` hands each stage to a shell once, not once per shell
+                    fed[kind] = (len(chain), len(whole))
+                    deferred.extend(self._produced(r, kind) for r in chain[done:])
                     # the stages as the shell that takes a brace for a word reads them: `echo git push origin main {x | sh` pipes the push to the shell
-                    deferred.extend(self._produced(r, kind) for r in dict.fromkeys(whole) if r not in chain)
-                    deferred.extend(self._pipe_marks(chain))
-                else:   # the reader is not one the splitter knows: what the stages read on their stdin is read as shell all the same
-                    deferred.extend(self._produced(r, "shell", True) for r in chain if "<<" in r)
+                    deferred.extend(self._produced(r, kind) for r in dict.fromkeys(whole[done_whole:]) if r not in chain)
+                    deferred.extend(self._pipe_marks(chain[done:]))
             else:
                 chain.clear()
+                fed.clear()
                 if not word:
                     whole.clear()
             if not word:
@@ -1594,8 +1589,43 @@ def _hoist_piece(piece: str) -> str:
     return piece[:len(piece) - len(piece.lstrip())] + " ".join([words, *moved]).strip() + piece[len(piece.rstrip()):] if words or moved else piece
 
 
+# `skeleton_both` is what every caller that classifies a command reads. The current reading is joined to the reading origin/main (8100ea1) gave the same text,
+# kept as it was in `shellnorm_base`: each part is a command line of its own (a `cd` of one does not move the other), so no command is read as less than main read it,
+# whatever the current reading drops, and the rating and the push check are the stricter of the two by construction (PR 47 review, round 6).
+FLOOR_BUDGET = 100_000   # characters beyond 8 times the command that the reading of origin/main may scan across nested levels
+JOIN = "\x17"
+_JOIN_CHAR = re.compile(JOIN)
+
+
+@functools.lru_cache(maxsize=16)
+def _skeleton_both_top(command: str) -> str:
+    command = _JOIN_CHAR.sub("\x06", command)   # a byte that is the join stays a word
+    current = _skeleton_top(command)
+    floor = _base_skeleton(command)
+    return current if floor == current else current + JOIN + floor
+
+
+def skeleton_both(command: str) -> str:
+    """The text of `skeleton` and, after `JOIN`, the text origin/main gave, when the two differ. `segments`, `segments_cwd` and `text_views` read it."""
+    return _skeleton_both_top(command)
+
+
+# The one word the current `PREFIX` strips and origin/main's did not: main read `nocorrect echo git push origin main | sh <<< x` as a command named `nocorrect` and rated its
+# words, and the classifier that reads the joined text strips it. The floor keeps main's reading of it (an unknown first word), so the rating is main's too.
+_NOCORRECT = re.compile(r"(?<![\w./$-])nocorrect(?![\w./-])")
+
+
+def _base_skeleton(command: str) -> str:
+    from . import shellnorm_base
+
+    # main's scanner re-reads a nested text once per pipe and level (a chain of pipelines cost 24 s for 1.7 kB there): it reads at most `FLOOR_BUDGET` characters more than 8
+    # times the command, and what is left is searched as plain text (`_code`), which still shows a push to the rules; the current reading has its own, linear, bound.
+    text = shellnorm_base._skeleton(command, 0, [FLOOR_BUDGET + 8 * len(command)])
+    return _NOCORRECT.sub("nocorrect\x06", text)
+
+
 def segments(command: str) -> list[str]:
-    return [re.sub(r"\s+", " ", seg).strip() for seg in SPLIT.split(skeleton(command)) if seg.strip()]
+    return [re.sub(r"\s+", " ", seg).strip() for seg in SPLIT.split(skeleton_both(command).replace(JOIN, "\n")) if seg.strip()]
 
 
 SEG_TOKEN = re.compile(r"(\n|;|&&|\|\||(?<!>)(?<!>&)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\})")
@@ -1607,10 +1637,15 @@ def segments_cwd(command: str, cwd: str = "") -> list[tuple[str, tuple[str, ...]
     A command that carries substitutions is ordered by the canonical text, not by execution, so every directory the
     command passes through counts for every segment then.
     """
+    return [row for part in skeleton_both(command).split(JOIN) for row in _segments_cwd_of(part, cwd)]
+
+
+def _segments_cwd_of(text: str, cwd: str) -> list[tuple[str, tuple[str, ...]]]:
     import os
 
-    text = skeleton(command)
     cur, prev = cwd, None
+    real: dict[str, str] = {}
+    resolved: set[str] = set()
     stack: list[str] = []
     dirs: list[str] = []
     ticks = False
@@ -1646,7 +1681,14 @@ def segments_cwd(command: str, cwd: str = "") -> list[tuple[str, tuple[str, ...]
                 new = prev or cur
             elif not re.search(r"[*?\[`]", os.path.expandvars(target)) and "$" not in os.path.expandvars(target):
                 t = os.path.expanduser(os.path.expandvars(_dec(target)))
-                new = os.path.realpath((t if os.path.isabs(t) else os.path.join(cur or os.getcwd(), t)).replace("\x00", ""))
+                where = (t if os.path.isabs(t) else os.path.join(cur or os.getcwd(), t)).replace("\x00", "")
+                if where in real:
+                    new = real[where]   # the same `cd` line repeated is resolved once
+                elif cur in resolved and "/" not in t and t not in (".", "..") and not os.path.islink(where):
+                    new = real[where] = where   # one more plain component under a directory that is resolved already: no link to follow (the realpath of a deep path is quadratic)
+                else:
+                    new = real[where] = os.path.realpath(where)
+                resolved.add(new)
             if new != cur:
                 prev, cur = cur, new
                 seen.append(cur)

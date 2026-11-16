@@ -328,18 +328,24 @@ def _on_default_branch(cwd: str, command: str) -> bool:
     """
     extra, _ = policy.hidden(command, cwd)   # a git alias that expands to a push, a script the command writes and runs (W-31)
     segs = policy.segments_cwd(command + "".join("\n" + e for e in extra), cwd)
-    pushes = [(call, dirs) for seg, dirs in segs if not policy.is_read_only(seg) for call in policy.git_calls(seg) if call.sub == "push"]
+    # the two readings of the command (`shellnorm.skeleton_both`) and the readings of a brace repeat a push: each distinct segment in each directory is asked of git once
+    pushes = [(call, dirs) for seg, dirs in dict.fromkeys(segs) if not policy.is_read_only(seg) for call in policy.git_calls(seg) if call.sub == "push"]
     if not pushes:
         return False
     steered = bool(_GIT_ENV_ASSIGN.search(command)) or any(_CD_VARIABLE.search(seg) for seg, _ in segs)
     creates = any(c.sub in _REPO_CREATORS for seg, _ in segs if not policy.is_read_only(seg) for c in policy.git_calls(seg))
+    unresolved: GitUnresolved | None = None
     for call, dirs in pushes:
         if steered or _unfindable(call):
-            raise GitUnresolved("the repository of this push is named by a variable or the environment")
+            unresolved = unresolved or GitUnresolved("the repository of this push is named by a variable or the environment")
+            continue
         if creates and any(_git(call, d, "rev-parse", "--git-dir") is None for d in dirs):
-            raise GitUnresolved("the repository of this push does not exist yet: the same command creates it")
+            unresolved = unresolved or GitUnresolved("the repository of this push does not exist yet: the same command creates it")
+            continue
         if any(_push_hits_default(call, d) for d in dirs):
-            return True
+            return True   # a push that is found on main answers, whatever a push before it left open (the command is read in two readings, `shellnorm.skeleton_both`)
+    if unresolved:
+        raise unresolved
     return False
 
 

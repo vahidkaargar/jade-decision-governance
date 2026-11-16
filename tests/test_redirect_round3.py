@@ -15,7 +15,7 @@ import time
 import pytest
 
 from jade import policy, shellnorm
-from tests.test_redirect_anywhere import si08
+from tests.test_redirect_anywhere import cur_segments, si08
 from tests.test_redirect_zsh_and_braces import confirm_real_push, really_pushes
 
 # ---------------------------------------------------------------- E3-3: the text a stage reads on its stdin
@@ -218,7 +218,7 @@ def test_an_ambiguous_brace_still_has_every_reading(command):
 
 
 def test_a_clear_group_still_cuts_the_command():
-    assert "git push origin feature" in shellnorm.segments("{ echo a; } ; { git push origin feature; }")
+    assert "git push origin feature" in cur_segments("{ echo a; } ; { git push origin feature; }")
     assert si08("{ echo a; }; { git push origin main; }")
 
 

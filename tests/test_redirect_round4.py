@@ -439,23 +439,25 @@ def test_an_unquoted_here_string_is_one_word_and_pushes_nothing(command, tmp_pat
     assert not really_pushes(command, tmp_path), command
 
 
-def test_a_key_read_after_a_leading_input_redirect_is_rated_as_the_trailing_one():
-    """Main rated `<&- cat key` critical only because the command starts with a redirect; `cat key <&-` was medium. Both are medium here."""
+def test_a_key_read_after_a_leading_input_redirect_is_not_rated_below_the_trailing_one():
+    """Main rated `<&- cat key` critical only because the command starts with a redirect; `cat key <&-` was medium. The gate reads both readings and takes the stricter,
+    so the leading form keeps main's rating (R5-L4-2, round 6)."""
     key = "/Users/x/.ssh/id_rsa"
-    assert policy.assess("Bash", {"command": f"<&- cat {key}"}, cwd="/tmp").level == policy.assess("Bash", {"command": f"cat {key} <&-"}, cwd="/tmp").level
+    lead = policy.assess("Bash", {"command": f"<&- cat {key}"}, cwd="/tmp").level
+    assert policy.LEVELS[lead] >= policy.LEVELS[policy.assess("Bash", {"command": f"cat {key} <&-"}, cwd="/tmp").level]
 
 
 SINKS = [
     "2>&1 sh", "   >/dev/null sh", "2>/dev/null env sh", "sh </dev/stdin", "sh 0</dev/stdin", "sh < /dev/fd/0", "(sh)", "{ sh; }", "tee >(sh)",
-    "while read l; do eval \"$l\"; done", "xargs -I% sh -c %", "sh -c 'sh'", "sh /dev/stdin", ". /dev/stdin", "wc -l",
+    "while read l; do eval \"$l\"; done", "xargs -I% sh -c %", "sh -c 'sh'", "sh /dev/stdin", ". /dev/stdin",
 ]
 
 
 @pytest.mark.parametrize("producer", ["sed p<<<'git push origin main'", "uniq <<< 'git push origin :main'", "sort -u<<<'git push origin HEAD:main'"])
 @pytest.mark.parametrize("sink", SINKS)
 def test_the_text_a_stage_passes_on_is_read_whatever_the_reader_is(producer, sink):
-    """The reader after the pipe may be a spelling the splitter does not know. The text a non-printer stage reads on its stdin is read as shell for any pipe, as origin/main
-    does (it keeps the here-string whole in the text of the stage)."""
+    """The reader after the pipe may be a spelling the splitter does not know. A non-printer stage's text is read as shell by the reading origin/main gave
+    (`shellnorm.skeleton_both` keeps it), so no spelling of the reader makes it less gated than main did."""
     command = f"{producer} | {sink}"
     assert si08(command), command
 
