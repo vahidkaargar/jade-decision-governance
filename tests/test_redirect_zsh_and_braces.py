@@ -111,14 +111,14 @@ def test_descriptor_close_glued_to_any_word_never_hides_a_push_to_main(base, op,
 
 
 def test_a_closed_descriptor_alone_names_no_file():
-    assert shellnorm.segments("git push >&- origin 2>&- feature") == ["git push origin feature"]
+    assert shellnorm.segments("git push >&- origin 2>&- feature") == ["git push origin feature >&- 2>&-"]   # it moves as written, as on main (W-115)
     assert shellnorm.segments("git push origin feature <&0 :main") == ["git push origin feature :main"]
 
 
 def test_both_readings_of_a_close_with_a_glued_word_are_in_the_skeleton():
     got = shellnorm.segments("git >&-lg push origin :main")
     assert "git push origin :main > -lg" in got      # zsh: the word is a file
-    assert "git lg push origin :main" in got         # bash: the descriptor closes and the word is an argument
+    assert "git lg push origin :main >&-" in got     # bash: the descriptor closes and the word is an argument
 
 
 # ---------------------------------------------------------------- W-109b: a brace inside a word is a literal

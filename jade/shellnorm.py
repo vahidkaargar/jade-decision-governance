@@ -27,6 +27,7 @@ from . import blind, interp
 MAX_DEPTH = 8
 MAX_NEST = 60
 BUDGET = 4_000_000     # characters the scanner may read across all nested levels; past it the rest is searched as plain text
+HERE_ALLOWANCE = 6_000_000   # characters more that the here-strings of a chain may be read for: a text that the budget charged already comes back once per level
 UNSAFE_MARK = "@unsafe!"   # prefix of the copy of a stage whose verb can write or run something, so rules see its resolved operands
 UNSAFE_GIT = "git:unsafe-config "
 TEXT_MARK = "@text!"   # prefix of a line the scanner extracted from a program (`import jade.cli`): words for the invariants to read, no operands to resolve
@@ -58,6 +59,7 @@ PLAIN = re.compile(r"[^\\'\"$`<\n;(){}&|#]+")
 _INERT = re.compile(r"[;&|<>(){}`]")   # characters a quoted word may hold that the splitter and the redirect check would read as syntax
 
 HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|(\\?)([^\s;&|<>()'\"\\`$]+))")
+HEREDOC_AT = re.compile(r"(?<!<)" + HEREDOC_OP.pattern + r"(?!<)")   # a heredoc operator, not the end of `<<<`
 NEXT_STAGE = re.compile(
     r"[ \t]*(?:\w+=\S*[ \t]+)*(?:(?:sudo|env|command|exec|nohup|time|xargs)(?:[ \t]+-[ugphCDrtUT][ \t]+\S+|[ \t]+-\S+(?:[ \t]+\d+)?)*[ \t]+)*[\\'\"]?(?P<w>[\w./+-]+)['\"]?(?P<a>(?:[ \t]+[^\s;&|()<>`$]+)*)[ \t]*(?=$|[;&|()\n<>])")
 PIPE_REST = re.compile(r"\|(?!\|)")
@@ -270,6 +272,60 @@ def _dq_end(s: str, j: int) -> int:
         else:
             j += 1
     return n
+
+
+def _here_strings(raw: str) -> tuple[str, list[str]]:
+    """`raw` without its here-strings, and their texts. A here-string is the word after an unquoted `<<<`, glued to it or not, and `<<<` may be glued to the program or
+    to a descriptor before it: `cat <<< 'x'`, `cat<<<'x'`, `cat 0<<< 'x'`, `tee f<<<'x'`. A `<<<` inside quotes is text, and stays."""
+    if "<<<" not in raw:
+        return raw, []
+    out: list[str] = []
+    texts: list[str] = []
+    i, n = 0, len(raw)
+    while i < n:
+        c = raw[i]
+        if c == "\\":
+            out.append(raw[i:i + 2])
+            i += 2
+        elif c == "'":
+            j = raw.find("'", i + 1)
+            j = n - 1 if j < 0 else j
+            out.append(raw[i:j + 1])
+            i = j + 1
+        elif c == '"':
+            j = min(_dq_end(raw, i + 1), n - 1)
+            out.append(raw[i:j + 1])
+            i = j + 1
+        elif raw.startswith("<<<", i):
+            k = i + 3
+            while k < n and raw[k] in " \t":
+                k += 1
+            e = k
+            while e < n and raw[e] not in " \t\r\n;&|()<>":
+                if raw[e] == "\\":
+                    e += 2
+                elif raw[e] == "'":
+                    e = raw.find("'", e + 1) + 1 or n
+                elif raw[e] == '"':
+                    e = _dq_end(raw, e + 1) + 1
+                elif raw[e] == "$" and raw.startswith("$(", e):
+                    e = _skip_span(raw, e + 1)
+                else:
+                    e += 1
+            e = min(e, n)
+            if words := words_of(raw[k:e]):
+                texts.append(_dec(words[0]))
+            d = len(out)
+            while d and out[d - 1].isdigit():
+                d -= 1
+            if d < len(out) and (d == 0 or out[d - 1].isspace()):   # the descriptor of `0<<<`, not the digit that ends a word
+                del out[d:]
+            out.append(" ")
+            i = e
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out), texts
 
 
 def words_of(raw: str) -> list[str]:
@@ -816,8 +872,17 @@ class _Scan:
         self.s, self.n, self.depth, self.budget = s, len(s), depth, budget
         self.nest = 0
 
-    def _sub(self, text: str) -> str:
-        return skeleton(text, self.depth + 1, self.budget)
+    def _sub(self, text: str, step: float = 1) -> str:
+        """The skeleton of a nested text. A text that is read again at the same depth (the stages of a pipeline are produced once per `|`, a text is read for every
+        reading of its caller) is read once: a chain of pipelines would otherwise read it as many times as it has pipes, per level."""
+        seen = self.budget[2] if len(self.budget) > 2 else None
+        key = (text, self.depth + step)
+        if seen is not None and key in seen:
+            return seen[key]
+        out = skeleton(text, self.depth + step, self.budget)
+        if seen is not None:
+            seen[key] = out
+        return out
 
     def _producer_program(self, raw: str) -> tuple[str, str] | None:
         """(language, program text) when a pipeline stage or substitution is `python3 -c '...'`, `perl -e`, `node -e`, `awk '...'`: a program whose
@@ -835,12 +900,25 @@ class _Scan:
     def _produced(self, raw: str, kind: str) -> str:
         """What `echo ... | sh` hands to the reader: the echoed words, parsed as shell for a shell, searched as text otherwise. A program that prints
         (`python3 -c 'print("...")' | sh`) hands over every string it holds."""
+        raw, here = _here_strings(raw)
         if kind == "shell" and (prog := self._producer_program(raw)):
             return self._interp(prog[0], prog[1], emit_all=True)
         read = (lambda t: self._sub(t)) if kind == "shell" else (lambda t: self._interp(kind, t))
         # what a stage reads on its own stdin, a here-string or a heredoc body, is what it prints (`cat <<< 'git push origin :main' | sh`); the redirect hoist takes the
         # first word of the here-string for a file, so the text is read here as it is
-        stdin = " ; ".join(read(t) for t in self._stdin_texts(raw))
+        # a here-string chain (`cat <<< 'cat <<< ... | sh' | sh`) reads one text per level, a part of the text that was read already, and it shrinks at each level:
+        # a level costs a quarter of a nesting level, and its text is paid for from an allowance of its own (`HERE_ALLOWANCE`) when the budget is short. A heredoc body
+        # is read as any text is (it comes twice when halving changes it, which a chain would square).
+        def stdin_read(t: str) -> str:
+            if kind != "shell":
+                return read(t)
+            if (short := 2 * len(t) - self.budget[0]) > 0 and len(self.budget) > 1:   # the text is charged twice below (the text, and the stage that holds it)
+                grant = min(short, self.budget[1])
+                self.budget[0] += grant
+                self.budget[1] -= grant
+            return self._sub(t, 0.25)
+
+        stdin = " ; ".join([*(stdin_read(t) for t in dict.fromkeys(here) if t.strip()), *(read(t) for t in self._stdin_texts(raw))])
         printer = PRINTER.match(PREFIX.sub("", raw.lstrip(), count=1))
         bare = ""
         if printer is None:   # `\env echo ...`, `'command' echo ...`: the prefix words with their quotes taken off
@@ -864,25 +942,26 @@ class _Scan:
 
     @staticmethod
     def _stdin_texts(raw: str) -> list[str]:
-        """The texts a stage is given on its stdin by the shell: the words after each `<<<`, and the body of a heredoc that the text of a substitution carries
-        (`<(cat <<EOF ... EOF)`), as written and with the backslashes halved."""
-        out = []
-        words = words_of(raw)
-        for k, w in enumerate(words):
-            if w == "<<<" and k + 1 < len(words):
-                out.append(_dec(words[k + 1]))
-            elif w.startswith("<<<"):
-                out.append(_dec(w[3:]))
-        if "\n" in raw and (m := HEREDOC_OP.search(raw)):
-            delim = m.group(2) if m.group(2) is not None else m.group(3) if m.group(3) is not None else m.group(5)
-            lines = raw[m.end():].split("\n")[1:]
-            body = []
-            for line in lines:
-                if (line.lstrip("\t") if m.group(1) else line).rstrip("\r") == delim:
-                    break
-                body.append(line)
-            text = "\n".join(body)
-            out += [text, re.sub(r"\\([$`\\])|\\\r?\n", lambda x: x.group(1) or "", text)]
+        """The texts a stage is given on its stdin by a heredoc that the text of a substitution carries (`<(cat <<EOF ... EOF)`), as written and with the
+        backslashes halved. (The here-strings come from `_here_strings`.)"""
+        out: list[str] = []
+        if "\n" in raw:
+            pending: list[tuple[str, bool, list[str]]] = []
+            for line in raw.split("\n"):
+                if pending:
+                    delim, dash, acc = pending[0]
+                    if (line.lstrip("\t") if dash else line).rstrip("\r") == delim:
+                        pending.pop(0)
+                        text = "\n".join(acc)
+                        out += [text, re.sub(r"\\([$`\\])|\\\r?\n", lambda x: x.group(1) or "", text)]
+                    else:
+                        acc.append(line)
+                    continue
+                for m in HEREDOC_AT.finditer(line):
+                    delim = m.group(2) if m.group(2) is not None else m.group(3) if m.group(3) is not None else m.group(5)
+                    pending.append((delim, bool(m.group(1)), []))
+            for _, _, acc in pending:   # a heredoc that is not closed runs to the end of the text
+                out.append("\n".join(acc))
         return list(dict.fromkeys(t for t in out if t.strip()))
 
     def _interp(self, lang: str, body: str, emit_all: bool = False) -> str:
@@ -1048,6 +1127,8 @@ class _Scan:
         cur = ""  # the current stage so far: its first and last characters are all the checks below look at
         chain: list[str] = []  # the earlier stages of the pipeline being read: any of them may feed text to a shell at its end
         raw_at = i
+        whole_at = i                 # where the stage starts when a brace inside a word does not cut it (a word in every shell: `echo git push {x | sh`)
+        whole: list[str] = []        # the earlier stages of the pipeline in that reading
         stop = n
         hs_kind: str | None = None
         paren = 0
@@ -1061,19 +1142,26 @@ class _Scan:
             if len(cur) > 700:
                 cur = cur[:300] + cur[-300:]
 
-        def end_stage(sep_at: int, resume: int, pipe: bool, brace: bool = False) -> None:
-            nonlocal cur, raw_at, hs_kind, c_blank
+        def end_stage(sep_at: int, resume: int, pipe: bool, brace: bool = False, word: bool = False) -> None:
+            nonlocal cur, raw_at, hs_kind, c_blank, whole_at
             c_blank = c_blank or not brace
             raw = s[raw_at:sep_at]
             if raw.strip():
                 self._stage(raw, deferred)
             if pipe:
                 chain.append(raw)
+                whole.append(s[whole_at:sep_at])
                 if kind := _next_stage_kind(s, resume):
                     deferred.extend(self._produced(r, kind) for r in chain)
+                    # the stages as the shell that takes a brace for a word reads them: `echo git push origin main {x | sh` pipes the push to the shell
+                    deferred.extend(self._produced(r, kind) for r in dict.fromkeys(whole) if r not in chain)
                     deferred.extend(self._pipe_marks(chain))
             else:
                 chain.clear()
+                if not word:
+                    whole.clear()
+            if not word:
+                whole_at = resume
             cur, raw_at, hs_kind = "", resume, None
 
         def literal(plain: str, raw: str, quote: str) -> None:
@@ -1223,7 +1311,7 @@ class _Scan:
                     out.append(BRACE_MARK[c == "}", alone, cut])
                     braced = True
                 cur += c
-                end_stage(i, i + 1, False, brace=True)
+                end_stage(i, i + 1, False, brace=True, word=not clear)
                 i += 1
             elif c in ";()":
                 if c == "(":
@@ -1263,7 +1351,7 @@ class _Scan:
             self._stage(raw, deferred)
         self.nest -= 1
         text = _readings("".join(out), braced, escaped)
-        return text + "".join(f" ; {d} ; " for d in deferred), i
+        return text + "".join(f" ; {d} ; " for d in dict.fromkeys(deferred)), i   # a text produced for several pipes is written once
 
     def _heredoc_bodies(self, i: int, pending: list, deferred: list[str]) -> int:
         s, n = self.s, self.n
@@ -1307,7 +1395,7 @@ def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None) ->
 
 
 def _skeleton(command: str, _depth: int, _budget: list[int] | None) -> str:
-    budget = _budget if _budget is not None else [BUDGET]
+    budget = _budget if _budget is not None else [BUDGET, HERE_ALLOWANCE, {}]
     budget[0] -= len(command)
     command = _MARK_CHARS.sub("\x06", command)   # a byte that is one of the marks stays a word
     if _depth > MAX_DEPTH or budget[0] < 0:
@@ -1345,27 +1433,82 @@ def _readings(text: str, braced: bool, escaped: bool) -> str:
     """The text in every reading the shells allow: the braces (`_brace_readings`), and an operator the command escaped as a word and as syntax.
 
     `a\\>&x :main` is the word `a>` and the command `x :main` in a shell that reads the backslash as an escape, and `a\\`, a redirect and `:main` in one that reads
-    a `\\` and the operator after it (the text a program prints and another shell reads, `echo 'a\\>x' | zsh -f`, is `a>x`). Main kept the backslash; one reading is data."""
+    a `\\` and the operator after it (the text a program prints and another shell reads, `echo 'a\\>x' | zsh -f`, is `a>x`). Main kept the backslash; one reading is data.
+
+    A brace or an escape is read in its own chunk of the text (`_chunks`): the other lines of a script do not come in the readings of a line, so a long script
+    with a few brace words costs a few more lines, not a few more scripts."""
+    if not (braced or escaped):
+        return text
+    return "".join(_chunk_readings(c, braced, escaped) for c in _chunks(text))
+
+
+def _chunk_readings(text: str, braced: bool, escaped: bool) -> str:
+    if not _MARK_CHARS.search(text):
+        return text
+    tail = text[len(text.rstrip("\n")):]
+    text = text[:len(text) - len(tail)]
     out = [text]
     if braced:
         out = list(dict.fromkeys(text.translate(table) for table in _READING_TABLES))
     if escaped:
-        out = list(dict.fromkeys(r for t in out for r in (ESCAPED_OPERATOR.sub("\x06", t), t.replace(ESCAPED, "\\"))))
+        # the reading that is the one of main (every brace cuts, the backslash stays) is kept with every other reading of the braces; the escaped operators are read as data
+        # in each of them, and as syntax in the first: a brace and an escaped operator in one command do not square the readings
+        live = [out[0].replace(ESCAPED, "\\")]
+        out = list(dict.fromkeys([*(ESCAPED_OPERATOR.sub("\x06", t) for t in out), *live]))
+    first = _collapse_runs(out[0]) if len(out[0]) > DENSE else out[0]
     if len(out) == 1:
-        return out[0]
-    return " ; ".join([out[0], *(RUN_OF_BRACES.sub(r"\1", t) for t in out[1:])])
+        return first + tail
+    extra = list(map(_collapse_runs, out[1:]))
+    if MOVES_DIRECTORY.search(text) and all(t.count("(") == t.count(")") for t in out):
+        # a reading that moves the directory must not move it again for the lines that follow, and each reading must start where the chunk starts: the other
+        # readings are subshells, written first, and the first reading is the one that stays (`cd sub && echo a{b` then `git push` runs in sub)
+        return " ; ".join([*(f"( {t} )" for t in extra), first]) + tail
+    return " ; ".join([first, *extra]) + tail
 
 
-RUN_OF_BRACES = re.compile(r"((?:\x06[ \t]+){4})(?:\x06[ \t]+)+")   # a long run of brace words in a literal reading: four of them say all that the rest do
+DENSE = 600   # a chunk longer than this has the runs of one word in its first reading cut too
+
+
+def _collapse_runs(text: str) -> str:
+    """Four repeats of a word (or of up to eight words) say all that a long run of them does: the same segments are read again and again. A run that moves the
+    directory, or counts (`cd`, `pushd`, `popd`, `-C ..`, `--git-dir`, `--work-tree`, `..`: each repeat goes one more level), is kept."""
+    return RUN_OF_WORDS.sub(lambda m: m.group(0) if COUNTED.search(m.group(1)) else m.group(1) * 4, text)
+
+
+MOVES_DIRECTORY = re.compile(r"(?<![^\s;&|(){}])(?:cd|pushd|popd)(?![^\s;&|(){}])")
+COUNTED = re.compile(MOVES_DIRECTORY.pattern + r"|(?<![^\s;&|(){}])(?:-C|--git-dir(?:=\S*)?|--work-tree(?:=\S*)?)(?![^\s;&|(){}])|\.\.")
+
+
+def _chunks(text: str) -> list[str]:
+    """The lines of the text, cut where no group is open (a `(` or a backtick that is not closed) and the line is not continued (`|`, `&&`, `||` at its end):
+    a reading of a chunk is written in place, so a chunk is a run of whole commands."""
+    if "\n" not in text:
+        return [text]
+    out, cur, depth = [], [], 0
+    for line in text.split("\n"):
+        cur.append(line)
+        depth += line.count("(") - line.count(")") + line.count("`")
+        if depth <= 0 and not line.rstrip().endswith(("|", "&&", "||", "\\")):
+            out.append("\n".join(cur) + "\n")
+            cur, depth = [], 0
+    if cur:
+        out.append("\n".join(cur))
+    else:
+        out[-1] = out[-1][:-1]
+    return out
+
+
+RUN_OF_WORDS = re.compile(r"(?<!\S)((?:\S{1,40}[ \t]+){1,8}?)\1{4,}")   # a long run of one word, or of up to eight words, in a reading (`\x06 \x06 ...`, `{ a\> { a\> ...`): four of them say all that the rest do
 
 
 def _redirect_word(m: re.Match) -> str:
-    """One redirect in its one spelling, or "" when it names no file (`>&-` closes a descriptor, `<&0` copies one): `&>f`, `>&f` and `>|f` are `> f`, `2>f` is `2> f`."""
+    """One redirect in its one spelling: `&>f`, `>&f` and `>|f` are `> f`, `2>f` is `2> f`; a descriptor close or move (`>&-`, `2>&1-`) names no file and stays as written, a copy (`<&0`) goes."""
     fd, op, tgt = m.group("fd") or "", m.group("op"), m.group("tgt") or ""
     if op == "<<HEREDOC":
         return op
     if op in (">&", "<&") and re.fullmatch(r"\d+-?|-", tgt):
-        return ""
+        # a descriptor move or close names no file. A close stays as written, as on main: `cat key 2>&-` is rated as it was, not as a plain read. A copy goes (`<&0`)
+        return fd + op + tgt if tgt.endswith("-") else ""
     both = op.startswith("&")
     if op[0] in "&>":
         op = ">>" if ">>" in op else ">"   # `&>`, `>&`, `>|`, `>!`, `>>&|`, `&>>!` ...: a write, or an append, of a file
@@ -1382,7 +1525,7 @@ def _hoist_redirects(text: str) -> str:
     The shell reads `git push origin feature &>log :main` as the push `git push origin feature :main` with its output sent to `log`: a redirect and its target
     are not arguments, and they may stand anywhere, even in front of the program (`>log git push`). The rules look for words up to the next `&`, `|` or `;`, and
     `&>`, `>&`, `>|` hold such a character, so left in place the redirect cut every rule short. A redirect keeps its target (a write is still a write;
-    `cd /etc && echo x >pf.conf` writes `/etc/pf.conf`) and moves to the end of its command, spelled `> file`; a descriptor copy or close (`2>&1`, `>&-`) names no file and goes."""
+    `cd /etc && echo x >pf.conf` writes `/etc/pf.conf`) and moves to the end of its command, spelled `> file`; a descriptor close (`>&-`) names no file and moves as written."""
     if not REDIRECT.search(text):
         return text
     out: list[str] = []
@@ -1416,7 +1559,8 @@ def _other_readings(piece: str) -> list[str]:
 def _hoist_piece(piece: str) -> str:
     moved = [w for m in REDIRECT.finditer(piece) if (w := _redirect_word(m))]
     words = REDIRECT.sub(" ", piece).strip()
-    return " ".join([words, *moved]).strip() + piece[len(piece.rstrip()):] if words or moved else piece
+    # the blank in front of the piece stays: `main& >log` must not become `main&> log`, which is another operator
+    return piece[:len(piece) - len(piece.lstrip())] + " ".join([words, *moved]).strip() + piece[len(piece.rstrip()):] if words or moved else piece
 
 
 def segments(command: str) -> list[str]:

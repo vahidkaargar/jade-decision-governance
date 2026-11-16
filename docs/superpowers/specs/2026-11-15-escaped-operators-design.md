@@ -75,3 +75,18 @@ Review of the brace fix (e1a76a3) found regressions against `origin/main`. The m
 - B3-5: a `{` that stands alone where a command starts, and a `}` that closes it, are written as they are: bash and zsh read them the same way, so a script of groups is read once. Ambiguous braces (after `if`, glued to a word, no blank before `}`) keep the five readings.
 
 Not changed (spec B, W-114): zsh short forms such as `if { true } { echo a }` repeated thousands of times cost about 5 times `origin/main` (the word reading adds a segment each); a classification cache for repeated identical segments would cut it.
+
+## Follow-up (W-115): the fourth review
+
+Merge bar as above. Fixed, with `tests/test_redirect_round4.py` (real bash and zsh where a push is claimed):
+
+- R4-O1, CR4-1, DIFF-W2: `_here_strings` takes the here-strings of a stage out of its raw text, quote aware, with the descriptor before a `<<<` and the program before it glued or not. The texts are read as the stdin of the stage; they are no longer part of the printed text, so a chain of here-strings is read once per level, at a quarter of a nesting level each (a chain 13 deep passes, as on `origin/main`; 14 and more pass there too).
+- CR4-2: `_stdin_texts` reads every heredoc of a text (a queue of delimiters), not the first; `HEREDOC_AT` does not match the last two `<` of `<<<`.
+- R4-O2: `_hoist_piece` keeps the blank in front of a piece.
+- R4-O3: `end_stage` keeps a second chain of stages for the reading in which a brace inside a word does not cut (`whole`), and reads the text a producer of that chain hands to the next stage.
+- DIFF-W1: `_redirect_word` returns a descriptor close or move as written. Not restored: a leading input redirect before a read of a key is rated like the trailing form (0.6.1 rated it critical because the command starts with a redirect; it is not a write).
+- R4-O4, CR4-3, DIFF-P2: `_readings` works on chunks (`_chunks`: lines, joined while a group is open or the line is continued); the live reading of an escaped operator is added to the first brace reading only; `_collapse_runs` cuts a run of one word (or up to eight) to four in every reading of a chunk longer than `DENSE`, unless the run moves the directory or counts (`cd`, `-C ..`, `..`). When a chunk moves the directory its other readings are subshells written first, so the tracker moves once (checked against two nested repositories; the verdicts equal those of `origin/main`).
+- Review of this fix: a here-string is found by a quote-aware scanner (`_here_strings`), not by the words (a `<<<` in quotes is text); the refill of the budget is an allowance (`HERE_ALLOWANCE`), and heredoc bodies are read at full depth; `_sub` memoises a text per depth and a deferred text is written once (the pipes of a chain read the same text once, not once per pipe).
+
+Not changed: W-114 (`&>log` rating, zsh short forms). Not covered by the readings any more: a brace reading other than the first combined with the live reading of an escaped operator in one command (0.6.1 reads neither combination).
+

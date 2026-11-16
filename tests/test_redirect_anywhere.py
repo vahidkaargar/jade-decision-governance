@@ -178,7 +178,7 @@ def test_skeleton_puts_the_redirect_last_and_spells_it_one_way():
     assert shellnorm.segments("git push origin feature &>log :main") == ["git push origin feature :main > log"]
     assert shellnorm.segments("git push origin feature >&log :main") == ["git push origin feature :main > log"]
     assert shellnorm.segments("git >|log push origin") == ["git push origin > log"]
-    assert shellnorm.segments("git push >&- origin 2>&- feature") == ["git push origin feature"]
+    assert shellnorm.segments("git push >&- origin 2>&- feature") == ["git push origin feature >&- 2>&-"]   # a close names no file: it moves, as written (W-115)
     assert shellnorm.segments("git push origin feature&>>log :main") == ["git push origin feature :main >> log"]
     assert shellnorm.segments("echo a2>log b") == ["echo a2 b > log"]   # the 2 belongs to the word `a2`, not to the redirect
     assert shellnorm.segments("git push 2>log origin") == ["git push origin 2> log"]
