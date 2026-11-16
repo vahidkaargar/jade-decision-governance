@@ -124,6 +124,15 @@ def test_the_checkout_against_itself_prints_nothing_and_exits_zero(capsys):
     assert capsys.readouterr().out == ""
 
 
+def test_a_ref_that_does_not_exist_exits_2_not_1(capsys):
+    """1 means "ref-b is looser"; a check that could not run must not read as either answer."""
+    import pytest
+
+    with pytest.raises(SystemExit) as e:
+        _nl().main(["no-such-ref-v6-03", str(ROOT)])
+    assert e.value.code == 2 and capsys.readouterr().out == ""
+
+
 def test_a_child_refuses_to_run_another_trees_jade(tmp_path):
     """A tree with no `jade` package must not silently fall back to the installed one: that would compare the checkout with itself."""
     import subprocess

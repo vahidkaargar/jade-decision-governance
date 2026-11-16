@@ -3,7 +3,8 @@
     uv run python evals/never_looser.py <ref-a> <ref-b> [--stats]
 
 Prints every command that ref-a stops and ref-b lets through, one JSON line each, and exits 1 if there is any; it prints nothing and exits 0
-when ref-b is at least as strict as ref-a on the whole payload set. A ref is a git commit-ish of this repository (extracted with
+when ref-b is at least as strict as ref-a on the whole payload set. It exits 2 when the check itself cannot run (an unknown ref, a child that
+fails, a tree whose `jade` or policy files cannot be loaded from that tree). A ref is a git commit-ish of this repository (extracted with
 `git archive` into a temporary directory) or a directory that holds a jade tree (`.` for the working tree, uncommitted changes included).
 
 "Stops" is decided in process, the way the PreToolUse hook decides a Bash call: `policy.assess("Bash", {"command": c}, cwd)` plus
@@ -232,6 +233,12 @@ def _child(argv: list[str]) -> int:
     if tree not in Path(jade.__file__).resolve().parents:
         print(f"never_looser: jade was imported from {jade.__file__}, not from {tree}; refusing to compare another tree", file=sys.stderr)
         return 3
+    from jade import paths
+
+    pol = Path(paths.policy_dir()).resolve()
+    if tree not in pol.parents:
+        print(f"never_looser: the policy files come from {pol}, not from {tree}; refusing to compare another tree's rules", file=sys.stderr)
+        return 3
     if mode == "harvest":
         json.dump(harvest_tree(tree), sys.stdout)
     else:
@@ -259,12 +266,18 @@ def render(rows: list[dict]) -> str:
 
 
 # ---- driver -------------------------------------------------------------------------------------------------------------------------------
+def _fail(msg: str):
+    """The check could not run: exit 2, never 1 (1 means "ref-b is looser")."""
+    print(f"never_looser: {msg}", file=sys.stderr)
+    raise SystemExit(2)
+
+
 def _tree(ref: str, scratch: Path) -> Path:
     if Path(ref).is_dir():
         return Path(ref).resolve()
     sha = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=ROOT, capture_output=True, text=True, timeout=60)
     if sha.returncode:
-        raise SystemExit(f"never_looser: {ref!r} is neither a directory nor a commit of {ROOT}")
+        _fail(f"{ref!r} is neither a directory nor a commit of {ROOT}")
     blob = subprocess.run(["git", "archive", "--format=tar", sha.stdout.strip()], cwd=ROOT, capture_output=True, timeout=300, check=True).stdout
     dest = scratch / sha.stdout.strip()[:12]
     if not dest.exists():
@@ -284,7 +297,7 @@ def _run_child(args: list[str], env: dict, stdin: str = "") -> dict:
     r = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--child", *args], input=stdin, capture_output=True, text=True,
                        env=env, timeout=CHILD_S)
     if r.returncode:
-        raise SystemExit(f"never_looser: child {args[0]} on {args[1]} failed (exit {r.returncode}): {r.stderr.strip()[-2000:]}")
+        _fail(f"child {args[0]} on {args[1]} failed (exit {r.returncode}): {r.stderr.strip()[-2000:]}")
     return json.loads(r.stdout)
 
 
@@ -320,11 +333,16 @@ def main(argv: list[str] | None = None) -> int:
         vb = {k: v for p in parts[jobs:] for k, v in p.items()}
         rows = compare(commands, va, vb)
         sys.stdout.write(render(rows))
+        a_errs = [c for c in commands if "error" in va[c]]
+        if a_errs:   # always shown: a command ref-a cannot classify is not compared, so it must not vanish silently
+            print(f"never_looser: {len(a_errs)} commands raised or timed out in ref-a and were not compared, e.g. "
+                  f"{json.dumps(a_errs[:5], ensure_ascii=False)[:1000]}", file=sys.stderr)
         if args.stats:
             for src, h in zip(sources, harvested, strict=True):
                 print(f"payloads from {src}: {h['counts']}", file=sys.stderr)
-            errs = sum("error" in v for v in vb.values())
-            print(f"{len(commands)} commands, {len(rows)} looser in ref-b, {errs} errors in ref-b, {time.perf_counter() - t0:.1f} s", file=sys.stderr)
+            b_errs = sum("error" in v for v in vb.values())
+            print(f"{len(commands)} commands, {len(rows)} looser in ref-b, {len(a_errs)} errors in ref-a, {b_errs} errors in ref-b, "
+                  f"{time.perf_counter() - t0:.1f} s", file=sys.stderr)
         return 1 if rows else 0
     finally:
         shutil.rmtree(scratch, ignore_errors=True)

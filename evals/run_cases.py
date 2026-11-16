@@ -106,8 +106,9 @@ def run_case(c: dict) -> list[str]:
 
 def _run_classify_time(c: dict) -> list[str]:
     """V6-03 timing kind: `command_prefix` + `digit_run` digits + `command_suffix` (the long input is built here, so no case file holds it) is
-    classified by `policy.assess` at n and at 2n digits. The 2n run must fit `budget_s`, and doubling the input must not take more than
-    `max_ratio` times as long: a ratio near 4 is quadratic (WT W-104, the NULL_REDIRECT case), whatever the speed of the machine."""
+    classified by `policy.assess` at n and at 4n digits. The 4n run must fit `budget_s`, and four times the input must not take more than
+    `max_ratio` times as long: linear work gives about 4, quadratic about 16 (WT W-104, the NULL_REDIRECT case), whatever the speed of the
+    machine; the wide gap keeps a busy test runner from flipping the verdict."""
     from jade import policy
 
     def took(n: int) -> float:   # the best of two runs, so a cold cache or a busy moment does not decide the ratio
@@ -125,12 +126,12 @@ def _run_classify_time(c: dict) -> list[str]:
         return best
 
     n = int(c["digit_run"])
-    small, large = took(n), took(2 * n)
+    small, large = took(n), took(4 * n)
     problems = []
     if large > c["budget_s"]:
-        problems.append(f"classified {2 * n} digits in {large:.2f} s, budget {c['budget_s']} s")
+        problems.append(f"classified {4 * n} digits in {large:.2f} s, budget {c['budget_s']} s")
     if large > c["max_ratio"] * max(small, 1e-3):
-        problems.append(f"time ratio {large / max(small, 1e-3):.1f} for twice the input, at most {c['max_ratio']} allowed")
+        problems.append(f"time ratio {large / max(small, 1e-3):.1f} for four times the input, at most {c['max_ratio']} allowed")
     return problems
 
 

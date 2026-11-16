@@ -83,9 +83,9 @@ def test_the_known_gap_list_names_every_open_vector_of_the_v6_03_card():
 
 
 def test_a_classify_time_gap_is_a_gap_while_the_classifier_scales_badly(tmp_path, capsys):
-    """The timing kind: a doubling of the input must not more than about double the classify time, and the larger input must fit the budget."""
-    row = {"id": "KGX2", "class": "null_redirect_quadratic_time", "kind": "classify_time", "command_prefix": "echo ", "digit_run": 10000,
-           "command_suffix": "x", "budget_s": 1.0, "max_ratio": 2.5}
+    """The timing kind: four times the input must take well under 16 times as long (8 allowed), and the larger input must fit the budget."""
+    row = {"id": "KGX2", "class": "null_redirect_quadratic_time", "kind": "classify_time", "command_prefix": "echo ", "digit_run": 5000,
+           "command_suffix": "x", "budget_s": 1.0, "max_ratio": 8}
     f = tmp_path / "t.jsonl"
     f.write_text(json.dumps(row) + "\n")
     rc = _runner().main([str(f)])
