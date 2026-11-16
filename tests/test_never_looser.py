@@ -232,6 +232,19 @@ def test_the_current_branch_half_of_si08_is_compared_in_a_repository_on_main(tmp
     assert not any(r["cwd"] == "empty" and r["command"] == "git push" for r in rows)
 
 
+@pytest.mark.parametrize("name", ["config", "remote-head"])
+def test_the_repository_config_and_remote_default_halves_of_si08_are_compared(name, tmp_path, capsys):
+    """NL-1: the feature-branch repository sends a bare push to main through its config (push.default=upstream, branch.feature.merge, a
+    remote.mirror.push refspec) and has a remote whose default branch is `trunk`. A ref-b that ignores either is reported there."""
+    edit = {"config": {"jade/hooks.py": ("", "\n\ndef _config_sends_to_default(*a, **k):\n    return False\n")},
+            "remote-head": {"jade/hooks.py": ('    if remote and re.fullmatch(r"[\\w.-]+", remote):\n        head = _git(',
+                                              '    if False:\n        head = _git(')}}[name]
+    assert _nl().main([str(ROOT), str(_mutant(tmp_path, text=edit))]) == 1
+    lost = {r["command"] for r in _rows(capsys.readouterr().out) if r["cwd"] == "repo-feature" and "SI-08" in r["lost"]}
+    want = {"config": {"git push", "git push mirror"}, "remote-head": {"git push fork trunk", "git push fork feature:trunk"}}[name]
+    assert want <= lost, lost
+
+
 def _r02(data):
     rule = next(r for r in data["rules"] if r["id"] == "R-02")
     rule["match"] = "(?!x)x" + rule["match"]

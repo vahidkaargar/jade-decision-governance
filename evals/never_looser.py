@@ -12,12 +12,14 @@ directory) or a directory that holds a jade tree (`.` for the working tree, unco
 
 "Stops" is decided in process, the way the PreToolUse hook decides a Bash call: `policy.assess("Bash", {"command": c}, cwd)` plus
 `hooks._on_default_branch(cwd, c)` (SI-08), each in a child Python that imports that ref's own `jade` and policy files (it refuses to run on
-any other) with its own empty HOME and no JADE_* or GIT_* variable. Every command is classified in three prepared cwds, and compared per
+any other) with its own empty HOME, no JADE_* variable and no GIT_* variable but GIT_CEILING_DIRECTORIES (the scratch dir). Every command is classified in three prepared cwds, and compared per
 (cwd, command):
   - `empty`: an empty directory outside any repository;
   - `repo-main`: a git repository on branch `main` whose `origin/HEAD` is `origin/main` (the current-branch half of SI-08: `git push`,
     `git push origin HEAD`, `@`), which also holds `jade/__init__.py` and `jade/hooks.py`, so it is a JADE checkout for R-24;
-  - `repo-feature`: the same repository on branch `feature`.
+  - `repo-feature`: the same repository on branch `feature`, whose config sends a bare push to main (`push.default=upstream`,
+    `branch.feature.merge=refs/heads/main`), with a remote `mirror` whose `remote.mirror.push` maps feature to main and a remote `fork`
+    whose default branch is `trunk` (the config and remote-default halves of SI-08).
 A command is reported when ref-b
   - loses a safety invariant ref-a has (`lost`: SI-08 from either source, any other SI-nn, or `fail-closed`: the push destination could
     not be resolved for a call at or above the permit floor, which the hook blocks), or
@@ -77,6 +79,7 @@ PUSH_SHAPES = [   # pushes that reach main only through the current branch, the 
     "git push --all origin", "git push origin ma*", "git push origin HEAD:ma[i]n", "git push origin 'm?ster'", "git push origin feature",
     "git push origin refs/heads/main", "cd . && git push",
     "git push upstream HEAD", "git push upstream @",   # a remote with no recorded default: only the current branch says main
+    "git push mirror", "git push fork trunk", "git push fork feature:trunk",   # the repository config and a remote default (repo-feature)
 ]
 SEED_PARTS = [   # one payload or more for each rule and invariant the case files leave without one (NL-2); joined at run time
     ["sudo diskutil ", "eraseDisk APFS x disk2"], ["sudo launchctl ", "bootout system/com.example.x"], ["sudo dd ", "if=/dev/zero of=/dev/disk2"],
@@ -445,8 +448,16 @@ def _prepare_cwds(scratch: Path, home: Path) -> dict[str, Path]:
                  ["-C", str(d), "remote", "add", "origin", str(scratch / "origin.git")],
                  ["-C", str(d), "update-ref", "refs/remotes/origin/main", "HEAD"],
                  ["-C", str(d), "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]]
-        if branch != "main":
-            steps.append(["-C", str(d), "checkout", "-q", "-b", branch])
+        if branch != "main":   # a bare push follows the config to main; `mirror` pushes feature to main; `fork` defaults to trunk
+            steps += [["-C", str(d), "checkout", "-q", "-b", branch],
+                      ["-C", str(d), "config", "push.default", "upstream"],
+                      ["-C", str(d), "config", "branch.feature.remote", "origin"],
+                      ["-C", str(d), "config", "branch.feature.merge", "refs/heads/main"],
+                      ["-C", str(d), "remote", "add", "mirror", str(scratch / "origin.git")],
+                      ["-C", str(d), "config", "--add", "remote.mirror.push", "refs/heads/feature:refs/heads/main"],
+                      ["-C", str(d), "remote", "add", "fork", str(scratch / "fork.git")],
+                      ["-C", str(d), "update-ref", "refs/remotes/fork/trunk", "HEAD"],
+                      ["-C", str(d), "symbolic-ref", "refs/remotes/fork/HEAD", "refs/remotes/fork/trunk"]]
         for step in steps:
             r = subprocess.run(["git", *step], env=env, capture_output=True, text=True, timeout=60)
             if r.returncode:
