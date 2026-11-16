@@ -19,6 +19,10 @@ uv run python evals/run_cases.py
 
 Every test gets its own JADE home, config and settings directory (`tests/conftest.py`), so tests can run in any order and in parallel. A test that asserts a time budget carries `@pytest.mark.timing`; CI runs those in their own serial step.
 
+## Real-shell payload tests: sandbox only
+
+A test, eval, probe or review harness (scratch ones included) that runs a guard-test command in a real shell runs it through `evals/realshell.py` and nothing else: macOS `sandbox-exec`, writes only inside a fresh work root, a canary check before every run, the whole process group killed after every case. PATH stubs alone are never enough; a missing stub once let `chmod -R 777 /` run for real. Destructive payloads target only canaries the test created. Before a review round, `python3 evals/realshell.py audit <harness folder>` must print nothing. The gate enforces the common case: SI-13 blocks a command that runs a Python payload runner without the helper. Details: `docs/13-real-shell-payload-tests.md`.
+
 Pull requests target `main`, pass CI (pytest, ruff and the case replay), and keep `additionalProperties: false` on every contract. Bump `schema_version` in the affected schema and its example when fields change (additive: minor; removal: major, with a migration note in `CHANGELOG.md`).
 
 ## Design rules that are not up for a quick PR
