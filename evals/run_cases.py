@@ -6,10 +6,14 @@ isolated home, no network). Exit non-zero on any mismatch. Reports the pass rate
 `known_gap` marks a case whose label is right and whose current behaviour is wrong (W-49): it passes while the behaviour is still the
 recorded one, and fails when the behaviour changes, so a fix has to remove the marker. Every `known_gap` row also carries `work_item` (the
 item that closes it, `W-n` or a roadmap `V6-n`) and `gap_date` (YYYY-MM-DD, when it was recorded); a row without them fails (V6-03): a gap
-is a visible ceiling with an owner, never an anonymous pass. `evals/known_gaps/cases.jsonl` is the list of open bypass vectors.
+is a visible ceiling with an owner, never an anonymous pass; the item must exist and the date must be real (see `_gap_owner`).
+`evals/known_gaps/cases.jsonl` is the list of open bypass vectors; `evals/known_gaps/timing.jsonl` holds the wall-clock gap, outside the
+default run (only the serial `timing` test job replays it).
 """
 from __future__ import annotations
 
+import datetime
+import functools
 import json
 import os
 import re
@@ -22,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT = [ROOT / "evals" / d / "cases.jsonl" for d in ("regression", "adversarial", "routing", "judgment", "calibration", "known_gaps")]
 WORK_ITEM = re.compile(r"(W|V6)-\d+[a-z]?")
 GAP_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+V6_CARDS = frozenset(f"V6-{i:02d}" for i in range(1, 35))   # the cards of docs/14-v6/12-roadmap.md (plan-v7)
 
 
 def run_case(c: dict) -> list[str]:
@@ -106,9 +111,10 @@ def run_case(c: dict) -> list[str]:
 
 def _run_classify_time(c: dict) -> list[str]:
     """V6-03 timing kind: `command_prefix` + `digit_run` digits + `command_suffix` (the long input is built here, so no case file holds it) is
-    classified by `policy.assess` at n and at 4n digits. The 4n run must fit `budget_s`, and four times the input must not take more than
-    `max_ratio` times as long: linear work gives about 4, quadratic about 16 (WT W-104, the NULL_REDIRECT case), whatever the speed of the
-    machine; the wide gap keeps a busy test runner from flipping the verdict."""
+    classified by `policy.assess` at n and at `scale` * n digits (default 4). The larger run must fit `budget_s`, and `scale` times the input must
+    not take more than `max_ratio` times as long: at scale 8, linear work gives about 8 and quadratic about 64 (WT W-104, the NULL_REDIRECT case),
+    whatever the speed of the machine. Wall-clock cases live in evals/known_gaps/timing.jsonl, outside the default run: only the serial `timing`
+    test job replays them, so load from parallel workers cannot flip the verdict."""
     from jade import policy
 
     def took(n: int) -> float:   # the best of two runs, so a cold cache or a busy moment does not decide the ratio
@@ -125,23 +131,41 @@ def _run_classify_time(c: dict) -> list[str]:
             best = min(best, time.perf_counter() - t)
         return best
 
-    n = int(c["digit_run"])
-    small, large = took(n), took(4 * n)
+    n, k = int(c["digit_run"]), int(c.get("scale", 4))
+    small, large = took(n), took(k * n)
     problems = []
     if large > c["budget_s"]:
-        problems.append(f"classified {4 * n} digits in {large:.2f} s, budget {c['budget_s']} s")
+        problems.append(f"classified {k * n} digits in {large:.2f} s, budget {c['budget_s']} s")
     if large > c["max_ratio"] * max(small, 1e-3):
-        problems.append(f"time ratio {large / max(small, 1e-3):.1f} for four times the input, at most {c['max_ratio']} allowed")
+        problems.append(f"time ratio {large / max(small, 1e-3):.1f} for {k} times the input, at most {c['max_ratio']} allowed")
     return problems
 
 
+@functools.cache
+def _work_item_ids() -> frozenset[str]:
+    rows = (json.loads(line) for line in (ROOT / "work-items.jsonl").read_text(encoding="utf-8").splitlines() if line.strip())
+    return frozenset(str(r.get("id", "")) for r in rows)
+
+
 def _gap_owner(c: dict) -> list[str]:
-    """A `known_gap` row names the work item that closes it and the date it was recorded (V6-03)."""
+    """A `known_gap` row names the work item that closes it and the date it was recorded (V6-03). The item must exist: a `W-n` id is a row of
+    work-items.jsonl, a `V6-n` id a card of the v6 roadmap (V6-01 to V6-34). The date must be a real calendar date, not in the future (one day of
+    slack: a local date can be ahead of a UTC test runner)."""
     out = []
-    if not WORK_ITEM.fullmatch(str(c.get("work_item", ""))):
+    item = str(c.get("work_item", ""))
+    if not WORK_ITEM.fullmatch(item):
         out.append("known_gap row needs a work_item (W-n or V6-n) that closes it")
-    if not GAP_DATE.fullmatch(str(c.get("gap_date", ""))):
-        out.append("known_gap row needs a gap_date (YYYY-MM-DD)")
+    elif item not in (V6_CARDS if item.startswith("V6-") else _work_item_ids()):
+        out.append(f"known_gap row names work_item {item}, which does not exist (work-items.jsonl, or the v6 roadmap cards V6-01 to V6-34)")
+    day = str(c.get("gap_date", ""))
+    try:
+        when = datetime.date.fromisoformat(day) if GAP_DATE.fullmatch(day) else None
+    except ValueError:
+        when = None
+    if when is None:
+        out.append(f"known_gap row needs a gap_date (YYYY-MM-DD), got {day!r}")
+    elif when > datetime.date.today() + datetime.timedelta(days=1):
+        out.append(f"known_gap row has a gap_date in the future: {day}")
     return out
 
 

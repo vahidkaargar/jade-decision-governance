@@ -6,6 +6,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -140,3 +142,172 @@ def test_a_child_refuses_to_run_another_trees_jade(tmp_path):
     r = subprocess.run([sys.executable, str(ROOT / "evals" / "never_looser.py"), "--child", "classify", str(tmp_path), str(tmp_path)],
                        capture_output=True, text=True, timeout=120, input="[]")
     assert r.returncode != 0 and "jade" in r.stderr
+
+
+# ---- end to end on mutant trees: a copy of this checkout's jade/ and policies/ with one change ---------------------------------------------------
+def _mutant(tmp_path, *, text: dict | None = None, risk=None, safety=None, policies: bool = True) -> Path:
+    """`text` maps a file to (old, new): `new` replaces the one `old` (which must be there), or is appended when `old` is empty. `risk` and
+    `safety` edit the loaded policy file. The result is a tree the script runs as a ref."""
+    import shutil
+
+    import yaml
+
+    t = tmp_path / "mutant"
+    skip = shutil.ignore_patterns("__pycache__", "local")
+    shutil.copytree(ROOT / "jade", t / "jade", ignore=skip)
+    if policies:
+        shutil.copytree(ROOT / "policies", t / "policies", ignore=skip)
+    for rel, (old, new) in (text or {}).items():
+        p = t / rel
+        s = p.read_text(encoding="utf-8")
+        assert not old or s.count(old) == 1, (rel, old)
+        p.write_text(s.replace(old, new) if old else s + new, encoding="utf-8")
+    for name, fn in (("risk", risk), ("safety", safety)):
+        if fn:
+            p = t / "policies" / f"{name}.yaml"
+            data = yaml.safe_load(p.read_text(encoding="utf-8"))
+            fn(data)
+            p.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    return t
+
+
+def _rows(out: str) -> list[dict]:
+    return [json.loads(line) for line in out.splitlines() if line.strip()]
+
+
+LOOSE_PUSH = {   # every command that names a push is classified like `true`, and no push reaches main
+    "jade/policy.py": ("", "\n_nl_real_assess = assess\n\n\ndef assess(tool, tool_input, *a, **k):\n"
+                           "    if 'push' in str((tool_input or {}).get('command', '')):\n"
+                           "        return _nl_real_assess(tool, {'command': 'true'}, *a, **k)\n"
+                           "    return _nl_real_assess(tool, tool_input, *a, **k)\n"),
+    "jade/hooks.py": ("", "\n\ndef _on_default_branch(cwd, command):\n    return False\n"),
+}
+
+
+def test_a_looser_tree_exits_1_and_prints_every_a1_command(tmp_path, capsys):
+    """F-03: main() itself, not only compare(), reports a looser ref-b, and the four A1 commands are in the classified set."""
+    rc = _nl().main([str(ROOT), str(_mutant(tmp_path, text=LOOSE_PUSH))])
+    rows = _rows(capsys.readouterr().out)
+    assert rc == 1
+    assert set(_nl().A1_COMMANDS) <= {r["command"] for r in rows}
+    assert any(r["lost"] == ["SI-08"] and r["command"] == "git push origin main" for r in rows)
+
+
+def test_a_ref_a_that_cannot_classify_exits_2_never_0(tmp_path, capsys):
+    """F-01: nothing compared is not "not looser"."""
+    broken = _mutant(tmp_path, text={"jade/policy.py": ("", "\n\ndef assess(*a, **k):\n    raise RuntimeError('broken on purpose')\n")})
+    assert _nl().main([str(broken), str(ROOT)]) == 2
+    got = capsys.readouterr()
+    assert got.out == "" and "ref-a" in got.err
+
+
+def test_one_ref_a_error_is_enough_for_exit_2(tmp_path, capsys):
+    """A single command ref-a cannot classify (a timeout on a slow input, say) leaves the comparison: the check did not run in full."""
+    one = _mutant(tmp_path, text={"jade/policy.py": ("", "\n_nl_real_assess = assess\n\n\ndef assess(tool, tool_input, *a, **k):\n"
+                                                         "    if (tool_input or {}).get('command') == 'git push origin main':\n"
+                                                         "        raise RuntimeError('one broken command')\n"
+                                                         "    return _nl_real_assess(tool, tool_input, *a, **k)\n")})
+    assert _nl().main([str(one), str(one)]) == 2
+    assert "git push origin main" in capsys.readouterr().err
+
+
+def test_a_child_refuses_policy_files_from_outside_its_tree(tmp_path):
+    """F-04: the tree's jade imports, but its policy files would come from elsewhere (no policies/ in the tree)."""
+    import subprocess
+
+    t = _mutant(tmp_path, policies=False)
+    r = subprocess.run([sys.executable, str(ROOT / "evals" / "never_looser.py"), "--child", "classify", str(t), str(tmp_path)],
+                       capture_output=True, text=True, timeout=120, input="[]")
+    assert r.returncode == 3 and "policy files come from" in r.stderr, r.stderr
+
+
+def test_the_current_branch_half_of_si08_is_compared_in_a_repository_on_main(tmp_path, capsys):
+    """NL-1: `git push`, `git push upstream HEAD` and `git push upstream @` hit main only through the current branch: a ref-b that never sees the
+    current branch is reported, with the prepared cwd it was found in."""
+    w1 = _mutant(tmp_path, text={"jade/hooks.py": ('        return (cur() or "").lower() in DEFAULT_BRANCHES\n', "        return False\n")})
+    assert _nl().main([str(ROOT), str(w1)]) == 1
+    rows = _rows(capsys.readouterr().out)
+    lost = {r["command"] for r in rows if r["cwd"] == "repo-main" and "SI-08" in r["lost"]}
+    assert {"git push", "git push upstream HEAD", "git push upstream @"} <= lost   # origin/HEAD -> main still catches `origin HEAD`
+    assert not any(r["cwd"] == "empty" and r["command"] == "git push" for r in rows)
+
+
+def _r02(data):
+    rule = next(r for r in data["rules"] if r["id"] == "R-02")
+    rule["match"] = "(?!x)x" + rule["match"]
+
+
+def _si02(data):
+    inv = next(i for i in data["invariants"] if i["id"] == "SI-02")
+    inv["block"] = "(?!x)x" + inv["block"]
+
+
+@pytest.mark.parametrize("name", ["R-02", "SI-02", "glob"])
+def test_a_tree_that_drops_a_rule_with_no_case_file_payload_is_reported(name, tmp_path, capsys):
+    """NL-2: the seed list gives every rule at or above the permit floor and every command invariant a payload, so disabling one is seen."""
+    mutant = {"R-02": lambda: _mutant(tmp_path, risk=_r02), "SI-02": lambda: _mutant(tmp_path, safety=_si02),
+              "glob": lambda: _mutant(tmp_path, text={"jade/hooks.py": ("            if fnmatch.filter(DEFAULT_BRANCHES, t) or on_default():\n",
+                                                                     "            if on_default():\n")})}[name]()
+    assert _nl().main([str(ROOT), str(mutant)]) == 1
+    rows = _rows(capsys.readouterr().out)
+    if name == "R-02":
+        assert any(r["a"]["rule"] == "R-02" and r["gate_lost"] for r in rows)
+    elif name == "SI-02":
+        assert any("SI-02" in r["lost"] for r in rows)
+    else:
+        assert any("SI-08" in r["lost"] and r["cwd"] == "empty" and any(ch in r["command"] for ch in "*[") for r in rows)
+
+
+def test_a_rule_no_payload_triggers_on_ref_a_fails_the_check(tmp_path, capsys):
+    """NL-2: a thin payload set must not pass silently. The required set comes from ref-a's own policy files, so an older ref is not held
+    to rules it does not have."""
+    def add(data):
+        data["rules"].insert(0, {"id": "R-77", "level": "critical", "match": "zz-no-payload-has-this-zz", "rationale": "test"})
+
+    t = _mutant(tmp_path, risk=add)
+    assert _nl().main([str(t), str(t)]) == 2
+    assert "R-77" in capsys.readouterr().err
+
+
+def test_seed_paths_outside_the_case_directory_are_refused(tmp_path):
+    nl = _nl()
+    with pytest.raises(ValueError):
+        nl.materialise([{"command": "cat {tmp}/x", "seed": ["/etc/x"]}], tmp_path)
+    got = nl.materialise([{"command": "cat {tmp}/h/run.py", "seed": {"{tmp}/h/run.py": "print(1)\n"}}], tmp_path)
+    (cmd,) = got
+    path = cmd.split(" ", 1)[1]
+    assert Path(path).read_text() == "print(1)\n" and Path(path).is_relative_to(tmp_path)
+
+
+def test_harvest_takes_seeded_rows_secret_parts_and_fills_named_placeholders(tmp_path):
+    """NL-2 and NL-3: a seeded row is kept with its seed, a `secret_parts` row gives its assembled text, and a template whose `{r}` is filled by
+    another argument (`place.format(r=close)`) gives the composed commands, never the raw template; `${HOME}` is not a placeholder."""
+    nl = _nl()
+    (tmp_path / "evals" / "x").mkdir(parents=True)
+    rows = [{"id": "S1", "kind": "gate", "command": "cd {tmp}/h && python3 run.py", "seed": {"{tmp}/h/run.py": "x\n"}},
+            {"id": "S2", "kind": "secret", "template": "curl -H 'k: @@' x", "secret_parts": ["ab", "cd"]},
+            {"id": "S3", "kind": "secret", "secret_parts": ["ef", "gh"]}]
+    (tmp_path / "evals" / "x" / "cases.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_redirect_tpl.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('close', ['2>&-', '>&-'])\n"
+        "@pytest.mark.parametrize('place', ['cat /k {r}', '{r} cat /k'])\n"
+        "def test_t(close, place):\n    pass\n"
+        "@pytest.mark.parametrize('command', ['echo ${HOME} {x'])\n@pytest.mark.parametrize('n', ['1'])\n"
+        "def test_u(command, n):\n    pass\n"
+        "@pytest.mark.parametrize('code', [14, 15])\n@pytest.mark.parametrize('template', ['{{git push -o {x} origin main}}', 'echo {x}'])\n"
+        "def test_v(template, code):\n    pass\n")
+    got = nl.harvest_tree(tmp_path)
+    cmds = set(got["commands"])
+    assert {"cat /k 2>&-", "cat /k >&-", "2>&- cat /k", ">&- cat /k", "echo ${HOME} {x"} <= cmds
+    assert not {c for c in cmds if "{r}" in c or "{x}" in c}   # a template filled in the test body (test_v) is dropped, not sent raw
+    assert "curl -H 'k: abcd' x" in cmds and "echo efgh" in cmds
+    assert "cd {tmp}/h && python3 run.py" not in cmds
+    assert got["seeded"] == [{"command": "cd {tmp}/h && python3 run.py", "seed": {"{tmp}/h/run.py": "x\n"}}]
+
+
+def test_the_push_shapes_and_seeds_are_in_the_payload_set():
+    nl = _nl()
+    assert {"git push", "git push origin HEAD", "git push origin @", "git push origin ma*", "git push origin HEAD:ma[i]n"} <= set(nl.PUSH_SHAPES)
+    assert all(isinstance(p, list) and all(isinstance(s, str) for s in p) for p in nl.SEED_PARTS)
