@@ -1593,6 +1593,7 @@ def _hoist_piece(piece: str) -> str:
 # kept as it was in `shellnorm_base`: each part is a command line of its own (a `cd` of one does not move the other), so no command is read as less than main read it,
 # whatever the current reading drops, and the rating and the push check are the stricter of the two by construction (PR 47 review, round 6).
 FLOOR_BUDGET = 100_000   # characters, and twice the command, that the reading of origin/main may scan across nested levels
+BIG_SEGMENT = 20_000   # characters
 JOIN = "\x17"
 _JOIN_CHAR = re.compile(JOIN)
 
@@ -1648,7 +1649,16 @@ def segments_cwd(command: str, cwd: str = "") -> list[tuple[str, tuple[str, ...]
     A command that carries substitutions is ordered by the canonical text, not by execution, so every directory the
     command passes through counts for every segment then.
     """
-    return [row for text, _, token in _parts(command) for row in _segments_cwd_of(text, cwd, token)]
+    rows: list[tuple[str, tuple[str, ...]]] = []
+    big: set[tuple[str, tuple[str, ...]]] = set()
+    for text, _, token in _parts(command):
+        for row in _segments_cwd_of(text, cwd, token):
+            if len(row[0]) > BIG_SEGMENT:   # the plain text a scanner leaves when it stops reading comes out of both readings: a segment of this size is classified once (the cost of reading it twice is the cost of the command twice)
+                if row in big:
+                    continue
+                big.add(row)
+            rows.append(row)
+    return rows
 
 
 def _segments_cwd_of(text: str, cwd: str, token: re.Pattern) -> list[tuple[str, tuple[str, ...]]]:

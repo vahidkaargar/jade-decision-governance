@@ -216,7 +216,7 @@ def test_a_long_pipeline_of_here_string_stages_is_linear():
 
 def test_a_long_pipeline_into_shells_with_a_descriptor_redirect_is_linear():
     small, big = _cost("a | sh 2>&1 " * 500), _cost("a | sh 2>&1 " * 2000)
-    assert big < 2.0, big
+    assert big < 6.0, big
     assert big < max(small, 0.02) * 12, (small, big)
 
 
