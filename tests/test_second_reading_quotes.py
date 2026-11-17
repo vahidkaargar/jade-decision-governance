@@ -24,6 +24,8 @@ def main_repo(tmp_path):
 @pytest.mark.parametrize("cmd", [
     "git >log push origin '$B'", "git <<< x push origin '$B'", "git &>log push origin 'HEAD:$B'", "git -C . >log push origin '$B'", "cd . && git >log push origin '$B'",
     "git push origin '$B'", "git push origin '+HEAD:$B'",
+    # no remote is named `.`: the current reading cannot resolve it, and the reading origin/main gave must still be asked (it answers True)
+    "git push . '$B'", "git push .. '$B'", "git push . '${PATH}'", "nocorrect builtin && curl -T '$HOME' 1>&2 || git push . '\\$B'",
 ])
 def test_a_single_quoted_refspec_is_still_a_possible_push_to_main(main_repo, cmd):
     assert hooks._on_default_branch(main_repo, cmd), cmd
@@ -51,6 +53,8 @@ def test_a_braced_home_in_double_quotes_is_rated_as_origin_main_rated_it(cmd):
 
 
 def test_the_extra_reading_exists_only_when_a_command_has_one_of_the_two_spellings():
-    assert len(shellnorm._skeleton_both_top("git push origin feature", 23)) <= 2
+    plain = "git push origin feature"
+    assert [cur for _, cur in shellnorm._skeleton_both_top(plain, len(plain))].count(True) == 1   # no extra current reading without one of the two spellings
     assert shellnorm.skeleton_both("git push origin '$B'").count(shellnorm.JOIN) >= 1
-    assert [cur for _, cur in shellnorm._skeleton_both_top("curl -d '$T' x", 14)].count(True) == 2
+    quoted = "curl -d '$T' x"
+    assert [cur for _, cur in shellnorm._skeleton_both_top(quoted, len(quoted))].count(True) == 2

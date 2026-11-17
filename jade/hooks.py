@@ -364,8 +364,14 @@ def _on_default_branch_asked(cwd: str, command: str) -> bool:
         if creates and any(_git(call, d, "rev-parse", "--git-dir") is None for d in dirs):
             unresolved = unresolved or GitUnresolved("the repository of this push does not exist yet: the same command creates it")
             continue
-        if any(_push_hits_default(call, d) for d in dirs):
-            return True   # a push that is found on main answers, whatever a push before it left open (the command is read in two readings, `shellnorm.skeleton_both`)
+        for d in dirs:
+            try:
+                hit = _push_hits_default(call, d)
+            except GitUnresolved as e:   # one reading of the command cannot be resolved (`git push . '$B'`: no remote named `.`); another reading may still find it on main
+                unresolved = unresolved or e
+                continue
+            if hit:
+                return True   # a push that is found on main answers, whatever a push before it left open (the command is read in several readings, `shellnorm.skeleton_both`)
     if unresolved:
         raise unresolved
     return False

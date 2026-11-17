@@ -1063,7 +1063,7 @@ def _starts_command(lead: str) -> bool:
 def _shell_roots() -> tuple[str, ...]:
     """The real paths of what the agent's shell loads: the shell start-up files (zsh, bash, system-wide, $BASH_ENV, $ENV, and the zsh files of a
     `ZDOTDIR` that ~/.zshenv sets to a literal path), the Claude shell snapshot and session-env directories (also under $CLAUDE_CONFIG_DIR), and every
-    file those start-up files source by a literal path, one level deep (a variable or a glob is not followed: docs/05 T31). Computed per call."""
+    file those start-up files source by a literal path, one level deep (a variable or a glob is not followed: docs/05 T32). Computed per call."""
     zd = os.path.expanduser(os.environ.get("ZDOTDIR") or "~")
     startup = [os.path.join(zd, n) for n in _ZSH_FILES]
     startup += [os.path.expanduser("~/" + n) for n in (".bashrc", ".bash_profile", ".bash_login", ".profile", ".bash_logout")]
