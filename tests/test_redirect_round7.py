@@ -130,5 +130,6 @@ def test_a_long_prefix_costs_a_few_times_what_origin_main_cost():
     "git push > --mirror", "git push > --all", "git push 2> --mirror", "git push >>--mirror", "git push &>--all", "git push < --mirror", "git push 2>> --all",
 ])
 def test_a_redirect_target_that_looks_like_a_flag_is_read_as_origin_main_read_it(command, tmp_path):
-    """In a directory that is no repository the shell runs a bare `push`, but origin/main took `--mirror` for the flag that pushes every branch: the gate keeps both."""
+    """In a directory that is no repository the shell runs a bare `push`. For the spaced forms (`> --mirror`, `2> --all`, `< --mirror`) origin/main took `--mirror` for the
+    flag that pushes every branch and stopped the command; the glued forms (`>--mirror`, `>>--mirror`, `&>--all`) it did not stop. The gate stops all of them."""
     assert hooks._on_default_branch(str(tmp_path), command), command

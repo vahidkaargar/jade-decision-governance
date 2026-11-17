@@ -1774,23 +1774,44 @@ _REDIRECT_ARG = re.compile(r"\d*(?:>>?|<>|<)")   # the operator of a moved redir
 _REDIRECT_GLUED = re.compile(r"\d*(?:<>|>&|<&)\S+")   # an operator the skeleton moved with its target glued to it (`<>log`, `>&-`, `2>&-`)
 
 
-def _without_redirects(args: list[str]) -> list[str]:
+def _redirect_kind(word: str) -> int:
+    """0: an ordinary word. 1: the operator of a moved redirect (its target is the next word). 2: an operator with its target glued to it."""
+    if "<" not in word and ">" not in word:   # almost every word: no regex
+        return 0
+    if _REDIRECT_ARG.fullmatch(word):
+        return 1
+    return 2 if _REDIRECT_GLUED.fullmatch(word) else 0
+
+
+def _without_redirects(args: list[str], kinds: list[int] | None = None) -> list[str]:
     """The arguments of a command without the redirects the skeleton moved to its end (`> log`, `>> log`, `<> log`, `>&-`, `< in`): the shell takes a redirect and its
     target out of the words, so `git push > log` is a push with no destination, not a push to the remote `>`. A quoted `>` is data (the skeleton marks it), so a bare
-    one is an operator. A target that the skeleton split at an escaped space (`> log\\ x` becomes `> log\\` and `x`) is dropped whole. A target that the shell expands to
-    several words in zsh (`> {a,b}`) is not handled. `git_calls` keeps the arguments as they stood as well, so a reading that was stricter before is still read."""
-    if not any(_REDIRECT_ARG.fullmatch(a) or _REDIRECT_GLUED.fullmatch(a) for a in args):
+    one is an operator. A target that the skeleton split at an escaped space (`> log\\ x` becomes `> log\\` and `x`) is dropped whole after an operator that is a word of its
+    own (`>`, `>>`, `2>`, `<`, `<>`), when the backslashes at its end are odd in number (`> log\\\\` ends in an escaped backslash: the target is complete). That split is made
+    by the skeleton of origin/main only (the current skeleton moves the target to the end of the command and leaves `x` behind), so the words of the current reading keep `x`
+    as a word; the other reading drops it. A glued target (`>log\\ x`) is not dropped whole. A target that the shell expands to several words in zsh (`> {a,b}`) is not handled.
+    `git_calls` keeps the arguments as they stood as well, so a reading that was stricter before is still read. `kinds` is `_redirect_kind` of each word, when the
+    caller has it already."""
+    if kinds is None:
+        kinds = [_redirect_kind(a) for a in args]
+    if not any(kinds):
         return args
     out: list[str] = []
     skip = False
-    for a in args:
+    for a, k in zip(args, kinds, strict=True):
         if skip:
-            skip = a.endswith("\\")
-        elif _REDIRECT_ARG.fullmatch(a):
+            skip = (len(a) - len(a.rstrip("\\"))) % 2 == 1
+        elif k == 1:
             skip = True
-        elif not _REDIRECT_GLUED.fullmatch(a):
+        elif k == 0:
             out.append(a)
     return out
+
+
+def _config_danger(call: GitCall) -> None:
+    """`git config <key> <value>` that sets an alias, pager, sshCommand ... (a program) is a danger of the call: the persistent form of `git -c key=value` (W-31)."""
+    if call.sub == "config" and (key := config_write_key(call.args)) is not None and ("$" in key or DANGEROUS_KEY.search(key.lower())):
+        call.danger.append(f"config {key}")
 
 
 def git_calls(text: str) -> tuple[str, list[GitCall]]:
@@ -1798,6 +1819,8 @@ def git_calls(text: str) -> tuple[str, list[GitCall]]:
     toks = text.split(" ")
     out: list[str] = []
     calls: list[GitCall] = []
+    kinds: list[int] = []
+    next_redirect: list[int] | None = None
     i = 0
     while i < len(toks):
         t = toks[i]
@@ -1845,12 +1868,20 @@ def git_calls(text: str) -> tuple[str, list[GitCall]]:
                 break
         call.sub = toks[j] if j < len(toks) else ""
         raw = [a for a in toks[j + 1:] if a]
-        call.args = _without_redirects(raw)
-        if call.sub == "config" and (key := config_write_key(call.args)) is not None and ("$" in key or DANGEROUS_KEY.search(key.lower())):
-            call.danger.append(f"config {key}")   # the persistent form of `git -c key=value` (W-31): an alias, pager, sshCommand ... that runs a program
+        if next_redirect is None:   # once per text: where the next redirect word is, from each word on
+            kinds = [_redirect_kind(t) for t in toks]
+            next_redirect = [len(toks)] * (len(toks) + 2)   # j + 1 can stand past the end
+            for k in range(len(toks) - 1, -1, -1):
+                next_redirect[k] = k if kinds[k] else next_redirect[k + 1]
+        call.args = raw
+        if next_redirect[j + 1] < len(toks):   # a redirect word after this git: read the arguments without it
+            call.args = _without_redirects(raw, [k for t, k in zip(toks[j + 1:], kinds[j + 1:], strict=True) if t])
+        _config_danger(call)
         calls.append(call)
         if call.args != raw:   # the words as origin/main took them (a redirect target taken for a destination) are read as well: never less than origin/main read
-            calls.append(replace(call, args=raw, dirs=list(call.dirs), danger=list(call.danger)))
+            asis = replace(call, args=raw, dirs=list(call.dirs), danger=[d for d in call.danger if not d.startswith("config ")])
+            _config_danger(asis)   # its danger is worked out from its own words, not from the reduced ones
+            calls.append(asis)
         out.append("git")
         i = j
     return " ".join(out), calls
