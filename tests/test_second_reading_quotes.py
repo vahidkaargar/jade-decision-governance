@@ -1,7 +1,7 @@
 """A single-quoted `$X` and a double-quoted `${NAME}` are read the current way and the way origin/main read them, and the stricter reading wins (PR 46 merge review, ADV-1/ADV-2).
 
 The current reading keeps `'$B'` literal (the shell passes the two characters) and reads `"${HOME}"` as `$HOME`. origin/main read the first as a live variable and the second
-as an unknown one (`$X`). The frozen 8100ea1 reading is not enough to cover that: it lacks the redirect hoist and is switched off by `nocorrect`. So `shellnorm._readings_top`
+as an unknown one (`$X`). The frozen 8100ea1 reading is not enough to cover that: it lacks the redirect hoist and is switched off by `nocorrect`. So `shellnorm._skeleton_both_top`
 adds the current reading with origin/main's treatment of those two spellings, and the push check and the rating are the stricter of all of them.
 """
 
@@ -51,6 +51,6 @@ def test_a_braced_home_in_double_quotes_is_rated_as_origin_main_rated_it(cmd):
 
 
 def test_the_extra_reading_exists_only_when_a_command_has_one_of_the_two_spellings():
-    assert len(shellnorm._readings_top("git push origin feature", 23)) <= 2
+    assert len(shellnorm._skeleton_both_top("git push origin feature", 23)) <= 2
     assert shellnorm.skeleton_both("git push origin '$B'").count(shellnorm.JOIN) >= 1
-    assert [cur for _, cur in shellnorm._readings_top("curl -d '$T' x", 14)].count(True) == 2
+    assert [cur for _, cur in shellnorm._skeleton_both_top("curl -d '$T' x", 14)].count(True) == 2

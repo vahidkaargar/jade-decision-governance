@@ -881,7 +881,7 @@ class _Scan:
         # re-parsed (`bash -c "..."`, `eval`, `| sh`, a here-string, a heredoc, a script the command writes) may hold text the outer shell already
         # expanded, so `'$X'` there stays a live expansion (security review PRE2-1).
         self.literal_end = literal_end if depth == 0 else 0
-        self.legacy = len(budget) > 3 and budget[3]   # origin/main's reading of `"${NAME}"` (`$X`): the third reading of `_readings_top`
+        self.legacy = len(budget) > 3 and budget[3]   # origin/main's reading of `"${NAME}"` (`$X`): the third reading of `_skeleton_both_top`
 
     def _sub(self, text: str, step: float = 1) -> str:
         """The skeleton of a nested text. A text that is read again at the same depth (the stages of a pipeline are produced once per `|`, a text is read for every
@@ -1612,7 +1612,7 @@ _QUOTED_VAR = re.compile(r"'[^']*\$|\"[^\"]*\$\{")   # the two places the curren
 
 
 @functools.lru_cache(maxsize=16)
-def _readings_top(command: str, literal_end: int) -> tuple[tuple[str, bool], ...]:
+def _skeleton_both_top(command: str, literal_end: int) -> tuple[tuple[str, bool], ...]:
     """The readings of a command, each as (text, is_current): the current reading; the current reading with a single-quoted `$X` and a double-quoted `${NAME}` read as main read
     them (`literal_end` 0, `legacy`), when the command has one and the two differ; and origin/main's own reading (cut as main cut it). Every one is a command line of its own, so the rating and the push check are the stricter
     of all of them: a literal `'$B'` that is one reading's branch name stays the other readings' unknown branch (PR 46 merge review, ADV-1 and ADV-2)."""
@@ -1629,9 +1629,9 @@ def _readings_top(command: str, literal_end: int) -> tuple[tuple[str, bool], ...
 
 
 def skeleton_both(command: str, literal_end: int | None = None) -> str:
-    """The text of `skeleton` and, after `JOIN`, the other readings when they differ (see `_readings_top`). `segments`, `segments_cwd` and `text_views` read it.
+    """The text of `skeleton` and, after `JOIN`, the other readings when they differ (see `_skeleton_both_top`). `segments`, `segments_cwd` and `text_views` read it.
     `literal_end`: as in `skeleton` (the current reading; the second reading is main's, where a single-quoted `$X` is not literal)."""
-    return JOIN.join(text for text, _ in _readings_top(command, len(command) if literal_end is None else literal_end))
+    return JOIN.join(text for text, _ in _skeleton_both_top(command, len(command) if literal_end is None else literal_end))
 
 
 # The one word the current `PREFIX` strips and origin/main's did not: main read `nocorrect echo git push origin main | sh <<< x` as a command named `nocorrect` and rated its
@@ -1650,7 +1650,7 @@ def _base_skeleton(command: str) -> str:
 def _parts(command: str, literal_end: int | None = None) -> list[tuple[str, re.Pattern, re.Pattern]]:
     """The readings of a command with the separators each is cut by: origin/main's is cut as origin/main cut it (`git push >&|log origin feature` is `git push >&` piped to `log` there)."""
     return [(text, SPLIT, SEG_TOKEN) if current else (text, _base().SPLIT, _base().SEG_TOKEN)
-            for text, current in _readings_top(command, len(command) if literal_end is None else literal_end)]
+            for text, current in _skeleton_both_top(command, len(command) if literal_end is None else literal_end)]
 
 
 def _base():
