@@ -20,7 +20,7 @@ from __future__ import annotations
 import functools
 import re
 import shlex
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from . import blind, interp
 
@@ -1770,22 +1770,25 @@ class GitCall:
     danger: list[str] = field(default_factory=list)
 
 
-_REDIRECT_ARG = re.compile(r"\d*(?:>>?|<)")   # the operator of a moved redirect, with its descriptor
+_REDIRECT_ARG = re.compile(r"\d*(?:>>?|<>|<)")   # the operator of a moved redirect, with its descriptor; its target is the next word
+_REDIRECT_GLUED = re.compile(r"\d*(?:<>|>&|<&)\S+")   # an operator the skeleton moved with its target glued to it (`<>log`, `>&-`, `2>&-`)
 
 
 def _without_redirects(args: list[str]) -> list[str]:
-    """The arguments of a command without the redirects the skeleton moved to its end (`> log`, `>> log`, `< in`): the shell takes a redirect and its target out of the
-    words, so `git push > log` is a push with no destination, not a push to the remote `>`. A quoted `>` is data (the skeleton marks it), so a bare one is an operator."""
-    if not any(_REDIRECT_ARG.fullmatch(a) for a in args):
+    """The arguments of a command without the redirects the skeleton moved to its end (`> log`, `>> log`, `<> log`, `>&-`, `< in`): the shell takes a redirect and its
+    target out of the words, so `git push > log` is a push with no destination, not a push to the remote `>`. A quoted `>` is data (the skeleton marks it), so a bare
+    one is an operator. A target that the skeleton split at an escaped space (`> log\\ x` becomes `> log\\` and `x`) is dropped whole. A target that the shell expands to
+    several words in zsh (`> {a,b}`) is not handled. `git_calls` keeps the arguments as they stood as well, so a reading that was stricter before is still read."""
+    if not any(_REDIRECT_ARG.fullmatch(a) or _REDIRECT_GLUED.fullmatch(a) for a in args):
         return args
     out: list[str] = []
     skip = False
     for a in args:
         if skip:
-            skip = False
+            skip = a.endswith("\\")
         elif _REDIRECT_ARG.fullmatch(a):
             skip = True
-        else:
+        elif not _REDIRECT_GLUED.fullmatch(a):
             out.append(a)
     return out
 
@@ -1841,10 +1844,13 @@ def git_calls(text: str) -> tuple[str, list[GitCall]]:
             else:
                 break
         call.sub = toks[j] if j < len(toks) else ""
-        call.args = _without_redirects([a for a in toks[j + 1:] if a])
+        raw = [a for a in toks[j + 1:] if a]
+        call.args = _without_redirects(raw)
         if call.sub == "config" and (key := config_write_key(call.args)) is not None and ("$" in key or DANGEROUS_KEY.search(key.lower())):
             call.danger.append(f"config {key}")   # the persistent form of `git -c key=value` (W-31): an alias, pager, sshCommand ... that runs a program
         calls.append(call)
+        if call.args != raw:   # the words as origin/main took them (a redirect target taken for a destination) are read as well: never less than origin/main read
+            calls.append(replace(call, args=raw, dirs=list(call.dirs), danger=list(call.danger)))
         out.append("git")
         i = j
     return " ".join(out), calls
