@@ -12,6 +12,7 @@ This module is pure: it imports nothing from `policy`, so the caller passes the 
 
 from __future__ import annotations
 
+import functools
 import os
 import re
 import shlex
@@ -28,11 +29,17 @@ _SAFE_SUFFIXES = (".pyc", ".pyo", ".egg-info", ".log")
 _RECURSIVE = re.compile(r"^-[A-Za-z]*[rR][A-Za-z]*$")
 
 
-def _tokens(bare: str) -> list[str]:
+@functools.lru_cache(maxsize=16)
+def _split_cached(bare: str) -> tuple[str, ...]:
     try:
-        return shlex.split(bare)
+        return tuple(shlex.split(bare))
     except ValueError:
-        return bare.split()
+        return tuple(bare.split())
+
+
+def _tokens(bare: str) -> list[str]:
+    """The words of a segment. One assessment asks for the words of the same long segment from several checks, so the split is remembered."""
+    return list(_split_cached(bare))
 
 
 def _program(toks: list[str]) -> tuple[str, list[str]]:
