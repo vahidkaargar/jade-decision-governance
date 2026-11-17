@@ -1730,6 +1730,7 @@ DANGEROUS_KEY = re.compile(
 
 _CONFIG_READS = ("--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color", "--get-colorbool", "--list", "-l", "--show-origin", "--show-scope",
                  "--name-only", "--unset", "--unset-all", "--remove-section", "--rename-section", "--edit", "-e", "--help")
+_CONFIG_READ_SET = frozenset(_CONFIG_READS)
 _CONFIG_VALUED = {"--file", "-f", "--blob", "--type", "--default", "--comment"}
 
 
@@ -1748,7 +1749,7 @@ def config_write_key(args: list[str]) -> str | None:
         if x in _CONFIG_VALUED:
             i += 2
             continue
-        if any(x == r or x.startswith(r + "=") for r in _CONFIG_READS):
+        if x.partition("=")[0] in _CONFIG_READ_SET:   # `--get` and `--get=x`: no read flag holds an `=`, so this is `x == r or x.startswith(r + "=")` for each of them
             return None
         if x.startswith("-") and x != "-":
             i += 1
@@ -1814,13 +1815,43 @@ def _config_danger(call: GitCall) -> None:
         call.danger.append(f"config {key}")
 
 
+def _redirect_free_words(toks: list[str]):
+    """One pass over the words of a text for `git_calls`: the words that are not empty, the number of them before each position of `toks`, the words left when
+    the redirects are dropped (`_without_redirects` run once from the start), how many of those come before each word, and whether the pass is inside the target of
+    a redirect before each word. From a word that is not inside a target, the words that are left are the ones `_without_redirects` leaves of the words from there on."""
+    words = [t for t in toks if t]
+    before = [0] * (len(toks) + 2)
+    n = 0
+    for k, t in enumerate(toks):
+        before[k] = n
+        n += bool(t)
+    before[len(toks)] = before[len(toks) + 1] = n
+    kept: list[str] = []
+    kept_before = [0] * (len(words) + 1)
+    skip_before = [False] * (len(words) + 1)
+    skip = False
+    for q, w in enumerate(words):
+        kept_before[q] = len(kept)
+        skip_before[q] = skip
+        if skip:
+            skip = (len(w) - len(w.rstrip("\\"))) % 2 == 1
+        else:
+            kind = _redirect_kind(w)
+            if kind == 1:
+                skip = True
+            elif kind == 0:
+                kept.append(w)
+    kept_before[len(words)] = len(kept)
+    skip_before[len(words)] = skip
+    return words, before, kept, kept_before, skip_before
+
+
 def git_calls(text: str) -> tuple[str, list[GitCall]]:
     """Rewrite every `git <global options> sub` to `git sub` and describe each invocation. Pure text, no process."""
     toks = text.split(" ")
     out: list[str] = []
     calls: list[GitCall] = []
-    kinds: list[int] = []
-    next_redirect: list[int] | None = None
+    words: list[str] | None = None
     i = 0
     while i < len(toks):
         t = toks[i]
@@ -1867,15 +1898,15 @@ def git_calls(text: str) -> tuple[str, list[GitCall]]:
             else:
                 break
         call.sub = toks[j] if j < len(toks) else ""
-        raw = [a for a in toks[j + 1:] if a]
-        if next_redirect is None:   # once per text: where the next redirect word is, from each word on
-            kinds = [_redirect_kind(t) for t in toks]
-            next_redirect = [len(toks)] * (len(toks) + 2)   # j + 1 can stand past the end
-            for k in range(len(toks) - 1, -1, -1):
-                next_redirect[k] = k if kinds[k] else next_redirect[k + 1]
+        if words is None:   # once per text: the words, and the words without the redirects, so that no git word reads the rest of the text again
+            words, before, kept, kept_before, skip_before = _redirect_free_words(toks)
+        p = before[j + 1]   # the words from the one after the subcommand on are words[p:]
+        raw = words[p:]
         call.args = raw
-        if next_redirect[j + 1] < len(toks):   # a redirect word after this git: read the arguments without it
-            call.args = _without_redirects(raw, [k for t, k in zip(toks[j + 1:], kinds[j + 1:], strict=True) if t])
+        if skip_before[p]:   # the subcommand stands in the target of a redirect (`> git`): read this one from its own start
+            call.args = _without_redirects(raw)
+        elif len(kept) - kept_before[p] != len(raw):
+            call.args = kept[kept_before[p]:]
         _config_danger(call)
         calls.append(call)
         if call.args != raw:   # the words as origin/main took them (a redirect target taken for a destination) are read as well: never less than origin/main read
