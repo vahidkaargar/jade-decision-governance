@@ -20,25 +20,29 @@ from __future__ import annotations
 import functools
 import re
 import shlex
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from . import blind, interp
 
 MAX_DEPTH = 8
 MAX_NEST = 60
 BUDGET = 4_000_000     # characters the scanner may read across all nested levels; past it the rest is searched as plain text
+HERE_ALLOWANCE = 6_000_000   # characters more that the here-strings of a chain may be read for: a text that the budget charged already comes back once per level
 UNSAFE_MARK = "@unsafe!"   # prefix of the copy of a stage whose verb can write or run something, so rules see its resolved operands
 UNSAFE_GIT = "git:unsafe-config "
 TEXT_MARK = "@text!"   # prefix of a line the scanner extracted from a program (`import jade.cli`): words for the invariants to read, no operands to resolve
 
 NULL_REDIRECT = re.compile(r"(\d*>&\d+|&>>?\s*/dev/null|\d*>>?\s*/dev/null|\d*<\s*/dev/null)")
-SPLIT = re.compile(r"\n|;|&&|\|\||(?<!>)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\}")  # `>&`, `>|` and `&>` are redirections, not separators
+# A redirect as the shell reads it, wherever it stands in the command: an optional descriptor that starts a word (`2>log`; in `a2>log` the 2 is part of `a2`), the
+# operator (`&>`, `&>>`, `>>`, `>&`, `>|`, `>`, `<<<`, `<<HEREDOC` as the scanner spells a heredoc, `<&`, `<>`, `<`), and the target word, which may follow after blanks (`>&-main` closes a descriptor and then names the word `main`: a `-` right after `>&` or `<&` is the whole target).
+REDIRECT = re.compile(r"(?P<fd>(?<!\S)\d+)?(?P<op><<HEREDOC|(?:&>>?|>>?&?)[|!]?|<<<|<&|<>|<)(?:(?<!HEREDOC)[ \t]*(?P<tgt>(?<=[<>]&)-|[^\s<>&|]*))?")   # `[|!]`: zsh `>|`, `>!`, `>>|`, `>&!`, `&>>|` ...
+SPLIT = re.compile(r"\n|;|&&|\|\||(?<!>)(?<!>&)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\}")  # `>&`, `>|`, `>&|` and `&>` are redirections, not separators
 # Package runners that start the next word as a program: `uv run python -c ...` is `python -c ...` (its quoted code must be scanned, not read as prose).
 _RUN_OPT = r"(?:(?:-w|-p|--with|--with-requirements|--with-editable|--python|--project|--directory|--package|--group|--env-file|--extra|--from|--index|--index-url)\s+\S+|--?[A-Za-z][\w-]*(?:=\S+)?)"
 _RUNNER = (r"(?:uv(?:\s+tool)?\s+run|uvx|poetry\s+run|pdm\s+run|pipenv\s+run|rye\s+run|hatch\s+run|pipx\s+run|conda\s+run|npx|bunx|pnpm\s+(?:exec|dlx)"
            rf"|yarn\s+(?:exec|dlx)|npm\s+exec)(?:\s+(?:{_RUN_OPT}|--))*")
 PREFIX = re.compile(
-    r"^(?:(?:" + _RUNNER + r"|[A-Za-z_]\w*=\S*|sudo(?:\s+(?:-[ugphCDrtUT]\s+\S+|-[A-Za-z-]+))*|command(?!\s+-[A-Za-z]*[vV]\b)|builtin|nohup|time|exec|noglob|do|then|else|if|while|until|!"
+    r"^(?:(?:" + _RUNNER + r"|[A-Za-z_]\w*=\S*|sudo(?:\s+(?:-[ugphCDrtUT]\s+\S+|-[A-Za-z-]+))*|command(?!\s+-[A-Za-z]*[vV]\b)|builtin|nohup|time|exec|noglob|nocorrect|do|then|else|if|while|until|!"
     r"|env(?:\s+-[A-Za-z-]+)*|g?timeout(?:\s+-\S+)*\s+\d+[smhd]?|nice(?:\s+-n?\s*\d+)?|caffeinate(?:\s+-\w+)*"
     r"|xargs(?:\s+-(?:I\s*\S+|n\s*\d+|P\s*\d+|[0a-zA-Z]+))*)\s+)+")
 
@@ -55,10 +59,12 @@ PLAIN = re.compile(r"[^\\'\"$`<\n;(){}&|#]+")
 _INERT = re.compile(r"[;&|<>(){}`]")   # characters a quoted word may hold that the splitter and the redirect check would read as syntax
 
 HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|(\\?)([^\s;&|<>()'\"\\`$]+))")
+HEREDOC_AT = re.compile(r"(?<!<)" + HEREDOC_OP.pattern + r"(?!<)")   # a heredoc operator, not the end of `<<<`
 NEXT_STAGE = re.compile(
-    r"[ \t]*(?:\w+=\S*[ \t]+)*(?:(?:sudo|env|command|exec|nohup|time|xargs)(?:[ \t]+-[ugphCDrtUT][ \t]+\S+|[ \t]+-\S+(?:[ \t]+\d+)?)*[ \t]+)*[\\'\"]?(?P<w>[\w./+-]+)['\"]?(?P<a>(?:[ \t]+[^\s;&|()<>`$]+)*)[ \t]*(?=$|[;&|()\n<>])")
+    r"[ \t]*(?:\w+=\S*[ \t]+)*(?:(?:sudo|env|command|exec|nohup|time|xargs)(?:[ \t]+-[ugphCDrtUT][ \t]+\S+|[ \t]+-\S+(?:[ \t]+\d+)?)*[ \t]+)*[\\'\"]?(?P<w>[\w./+-]+)['\"]?(?P<a>(?:[ \t]+(?!\d+[<>])[^\s;&|()<>`$]+)*)(?:[ \t]+\d+(?=[<>]))*[ \t]*(?=$|[;&|()\n<>])")
 PIPE_REST = re.compile(r"\|(?!\|)")
 PRODUCER = re.compile(r"^\s*(?:echo|printf|print|cat|yes)\b(?:\s+-[a-zA-Z]+)*")
+PRINTER = re.compile(r"^\s*\\?(?:\S*/)?(?P<name>echo|printf|print|cat|yes)\b(?:\s+-[a-zA-Z]+)*")   # the program that prints, after `time`, `env`, `command`, `!`, `\echo`, `/bin/echo`
 ORDINARY_ESCAPE = set("_./-:=@%+,^")
 
 
@@ -67,6 +73,24 @@ ORDINARY_ESCAPE = set("_./-:=@%+,^")
 def _unescape_dq(body: str) -> str:
     """The text a shell hands to `sh -c "..."`: only \\$ \\` \\" \\\\ and backslash-newline are escapes inside double quotes."""
     return re.sub(r'\\([$`"\\])|\\\r?\n', lambda m: m.group(1) or "", body)
+
+
+_ECHO_ESCAPE = re.compile(r"\\(c.*|0[0-7]{1,3}|x[0-9A-Fa-f]{1,2}|[\\abefnrtv]|.)", re.S)
+
+
+def _echo_escapes(text: str, drop_unknown: bool = False) -> str:
+    """What `echo` of zsh and sh (and `printf`, `print`) prints for `text`: `\\\\` is a backslash, `\\n` a newline, `\\c` ends the output; any other escape stays as it is,
+    or (`drop_unknown`, zsh `print`) loses its backslash."""
+    def one(m: re.Match) -> str:
+        e = m.group(1)
+        if m.group(0)[1] == "c":
+            return ""   # `\c` ends the output
+        if len(e) > 1:
+            return chr(int(e[1:], 16 if e[0] == "x" else 8))   # `\0nnn`, `\xhh`
+        if e in "abefnrtv\\":
+            return {"\\": "\\", "n": "\n"}.get(e, " " if e in "tvfr" else "")
+        return e if drop_unknown else "\\" + e
+    return _ECHO_ESCAPE.sub(one, text)
 
 
 def _code(body: str) -> str:
@@ -109,7 +133,7 @@ def _ansi_c(s: str, j: int) -> tuple[int, str]:
             continue
         out.append({"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "f": "\f", "v": "\v", "e": "\x1b", "E": "\x1b"}.get(d, d))
         j += 2
-    return j + 1, "".join(out)
+    return j + 1, _MARK_CHARS.sub("\x06", "".join(out))   # `$'\x0f'` is a word, not the mark of a brace (DF-6)
 
 
 def _command_word(stage_text: str) -> tuple[str, list[str]]:
@@ -168,13 +192,19 @@ def _peel_launchers(words: list[str]) -> list[str]:
     return words
 
 
+def _leaves_stdin(s: str, at: int) -> bool:
+    """The `<` at s[at] redirects another descriptor (`sh 2<&1`) or copies stdin onto itself (`sh 0<&0`): the stage still reads the pipe."""
+    m = re.search(r"(?<![^\s])(\d+)$", s[max(0, at - 6):at])
+    return bool((m and m.group(1) != "0") or re.match(r"<&0(?!\d)", s[at:at + 4]))
+
+
 def _next_stage_kind(s: str, j: int) -> str | None:
     """What the stage that starts at s[j] does with its stdin: the language it reads as code, or None. A stage whose stdin is redirected from a heredoc, a
     here-string or a file does not read the pipe at all (`curl .. | python3 - <<'PY'`)."""
     m = NEXT_STAGE.match(s, j)
     if not m:
         return None
-    if s[m.end():m.end() + 1] == "<" and s[m.end() + 1:m.end() + 2] != "(":
+    if s[m.end():m.end() + 1] == "<" and s[m.end() + 1:m.end() + 2] != "(" and not _leaves_stdin(s, m.end()):
         return None
     kind = _stdin_kind(m.group("w"), m.group("a").split())
     if kind:
@@ -248,6 +278,60 @@ def _dq_end(s: str, j: int) -> int:
         else:
             j += 1
     return n
+
+
+def _here_strings(raw: str) -> tuple[str, list[str]]:
+    """`raw` without its here-strings, and their texts. A here-string is the word after an unquoted `<<<`, glued to it or not, and `<<<` may be glued to the program or
+    to a descriptor before it: `cat <<< 'x'`, `cat<<<'x'`, `cat 0<<< 'x'`, `tee f<<<'x'`. A `<<<` inside quotes is text, and stays."""
+    if "<<<" not in raw:
+        return raw, []
+    out: list[str] = []
+    texts: list[str] = []
+    i, n = 0, len(raw)
+    while i < n:
+        c = raw[i]
+        if c == "\\":
+            out.append(raw[i:i + 2])
+            i += 2
+        elif c == "'":
+            j = raw.find("'", i + 1)
+            j = n - 1 if j < 0 else j
+            out.append(raw[i:j + 1])
+            i = j + 1
+        elif c == '"':
+            j = min(_dq_end(raw, i + 1), n - 1)
+            out.append(raw[i:j + 1])
+            i = j + 1
+        elif raw.startswith("<<<", i):
+            k = i + 3
+            while k < n and raw[k] in " \t":
+                k += 1
+            e = k
+            while e < n and raw[e] not in " \t\r\n;&|()<>":
+                if raw[e] == "\\":
+                    e += 2
+                elif raw[e] == "'":
+                    e = raw.find("'", e + 1) + 1 or n
+                elif raw[e] == '"':
+                    e = _dq_end(raw, e + 1) + 1
+                elif raw[e] == "$" and raw.startswith("$(", e):
+                    e = _skip_span(raw, e + 1)
+                else:
+                    e += 1
+            e = min(e, n)
+            if words := words_of(raw[k:e]):
+                texts.append(_dec(words[0]))
+            d = len(out)
+            while d and out[d - 1].isdigit():
+                d -= 1
+            if d < len(out) and (d == 0 or out[d - 1].isspace()):   # the descriptor of `0<<<`, not the digit that ends a word
+                del out[d:]
+            out.append(" ")
+            i = e
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out), texts
 
 
 def words_of(raw: str) -> list[str]:
@@ -794,8 +878,17 @@ class _Scan:
         self.s, self.n, self.depth, self.budget = s, len(s), depth, budget
         self.nest = 0
 
-    def _sub(self, text: str) -> str:
-        return skeleton(text, self.depth + 1, self.budget)
+    def _sub(self, text: str, step: float = 1) -> str:
+        """The skeleton of a nested text. A text that is read again at the same depth (the stages of a pipeline are produced once per `|`, a text is read for every
+        reading of its caller) is read once: a chain of pipelines would otherwise read it as many times as it has pipes, per level."""
+        seen = self.budget[2] if len(self.budget) > 2 else None
+        key = (text, self.depth + step)
+        if seen is not None and key in seen:
+            return seen[key]
+        out = skeleton(text, self.depth + step, self.budget)
+        if seen is not None:
+            seen[key] = out
+        return out
 
     def _producer_program(self, raw: str) -> tuple[str, str] | None:
         """(language, program text) when a pipeline stage or substitution is `python3 -c '...'`, `perl -e`, `node -e`, `awk '...'`: a program whose
@@ -813,10 +906,69 @@ class _Scan:
     def _produced(self, raw: str, kind: str) -> str:
         """What `echo ... | sh` hands to the reader: the echoed words, parsed as shell for a shell, searched as text otherwise. A program that prints
         (`python3 -c 'print("...")' | sh`) hands over every string it holds."""
+        raw, here = _here_strings(raw)
         if kind == "shell" and (prog := self._producer_program(raw)):
             return self._interp(prog[0], prog[1], emit_all=True)
-        text = " ".join(_dec(w) for w in words_of(PRODUCER.sub("", raw, count=1)))
-        return self._sub(text) if kind == "shell" else self._interp(kind, text)
+        read = (lambda t: self._sub(t)) if kind == "shell" else (lambda t: self._interp(kind, t))
+        # what a stage reads on its own stdin, a here-string or a heredoc body, is what it prints (`cat <<< 'git push origin :main' | sh`); the redirect hoist takes the
+        # first word of the here-string for a file, so the text is read here as it is
+        # a here-string chain (`cat <<< 'cat <<< ... | sh' | sh`) reads one text per level, a part of the text that was read already, and it shrinks at each level:
+        # a level costs a quarter of a nesting level, and its text is paid for from an allowance of its own (`HERE_ALLOWANCE`) when the budget is short. A heredoc body
+        # is read as any text is (it comes twice when halving changes it, which a chain would square).
+        def stdin_read(t: str) -> str:
+            if kind != "shell":
+                return read(t)
+            if (short := 2 * len(t) - self.budget[0]) > 0 and len(self.budget) > 1:   # the text is charged twice below (the text, and the stage that holds it)
+                grant = min(short, self.budget[1])
+                self.budget[0] += grant
+                self.budget[1] -= grant
+            return self._sub(t, 0.25)
+
+        stdin = " ; ".join([*(stdin_read(t) for t in dict.fromkeys(here) if t.strip()), *(read(t) for t in self._stdin_texts(raw))])
+        printer = PRINTER.match(PREFIX.sub("", raw.lstrip(), count=1))
+        bare = ""
+        if printer is None:   # `\env echo ...`, `'command' echo ...`: the prefix words with their quotes taken off
+            bare = PREFIX.sub("", " ".join(words_of(raw.lstrip())), count=1)
+            printer = PRINTER.match(bare)
+        if printer is None:
+            text = " ".join(_dec(w) for w in words_of(PRODUCER.sub("", raw, count=1)))
+            return " ; ".join(p for p in (read(text), stdin) if p)
+        if bare:
+            text = " ".join(_dec(w) for w in bare[printer.end():].split())
+        else:
+            text = " ".join(_dec(w) for w in words_of(PREFIX.sub("", raw.lstrip(), count=1)[printer.end():]))
+        if kind != "shell":
+            return " ; ".join(p for p in (self._interp(kind, text), stdin) if p)
+        readings = [text]
+        if "\\" in text and printer.group("name") in ("echo", "printf", "print"):
+            # what the program prints is not what it is given: zsh and sh `echo` and `printf` read `\\` and `\n`, zsh `print` also drops the backslash of any
+            # other escape (`\>` prints `>`), bash `echo` prints the text as it is. The shell that reads the output may be any of them: every reading is read.
+            readings += [_echo_escapes(text), _echo_escapes(text, drop_unknown=True)]
+        return " ; ".join([*(self._sub(t) for t in dict.fromkeys(readings)), *([stdin] if stdin else [])])
+
+    @staticmethod
+    def _stdin_texts(raw: str) -> list[str]:
+        """The texts a stage is given on its stdin by a heredoc that the text of a substitution carries (`<(cat <<EOF ... EOF)`), as written and with the
+        backslashes halved. (The here-strings come from `_here_strings`.)"""
+        out: list[str] = []
+        if "\n" in raw:
+            pending: list[tuple[str, bool, list[str]]] = []
+            for line in raw.split("\n"):
+                if pending:
+                    delim, dash, acc = pending[0]
+                    if (line.lstrip("\t") if dash else line).rstrip("\r") == delim:
+                        pending.pop(0)
+                        text = "\n".join(acc)
+                        out += [text, re.sub(r"\\([$`\\])|\\\r?\n", lambda x: x.group(1) or "", text)]
+                    else:
+                        acc.append(line)
+                    continue
+                for m in HEREDOC_AT.finditer(line):
+                    delim = m.group(2) if m.group(2) is not None else m.group(3) if m.group(3) is not None else m.group(5)
+                    pending.append((delim, bool(m.group(1)), []))
+            for _, _, acc in pending:   # a heredoc that is not closed runs to the end of the text
+                out.append("\n".join(acc))
+        return list(dict.fromkeys(t for t in out if t.strip()))
 
     def _interp(self, lang: str, body: str, emit_all: bool = False) -> str:
         """What a program in `lang` does (interp.py): its literal commands as nested shell text, its literal write targets as the destination of a
@@ -972,34 +1124,54 @@ class _Scan:
             return " ; " + _code(s[i:]) + " ; ", n
         self.nest += 1
         out: list[str] = []
+        braced = False   # a `{` or `}` was met: the text has several readings
+        escaped = False  # an escaped operator was met: the text has two more
+        c_blank = True   # reading C: nothing but blanks since the last separator of that reading
+        c_open = 0       # reading C: the groups it has opened and not closed
         deferred: list[str] = []
         pending: list[tuple[str, bool, bool, str | None, bool]] = []
         cur = ""  # the current stage so far: its first and last characters are all the checks below look at
         chain: list[str] = []  # the earlier stages of the pipeline being read: any of them may feed text to a shell at its end
+        fed: dict[str, tuple[int, int]] = {}   # per reader kind, how many stages of `chain` (and of `whole`) were handed to such a reader already: a reader further down reads no text that one before it did not
         raw_at = i
+        whole_at = i                 # where the stage starts when a brace inside a word does not cut it (a word in every shell: `echo git push {x | sh`)
+        whole: list[str] = []        # the earlier stages of the pipeline in that reading
         stop = n
         hs_kind: str | None = None
         paren = 0
 
         def emit(x: str) -> None:
-            nonlocal cur
+            nonlocal cur, c_blank
             out.append(x)
+            if c_blank and not x.isspace():
+                c_blank = False
             cur += x
             if len(cur) > 700:
                 cur = cur[:300] + cur[-300:]
 
-        def end_stage(sep_at: int, resume: int, pipe: bool) -> None:
-            nonlocal cur, raw_at, hs_kind
+        def end_stage(sep_at: int, resume: int, pipe: bool, brace: bool = False, word: bool = False) -> None:
+            nonlocal cur, raw_at, hs_kind, c_blank, whole_at
+            c_blank = c_blank or not brace
             raw = s[raw_at:sep_at]
             if raw.strip():
                 self._stage(raw, deferred)
             if pipe:
                 chain.append(raw)
+                whole.append(s[whole_at:sep_at])
                 if kind := _next_stage_kind(s, resume):
-                    deferred.extend(self._produced(r, kind) for r in chain)
-                    deferred.extend(self._pipe_marks(chain))
+                    done, done_whole = fed.get(kind, (0, 0))   # `a | sh | sh | ...` hands each stage to a shell once, not once per shell
+                    fed[kind] = (len(chain), len(whole))
+                    deferred.extend(self._produced(r, kind) for r in chain[done:])
+                    # the stages as the shell that takes a brace for a word reads them: `echo git push origin main {x | sh` pipes the push to the shell
+                    deferred.extend(self._produced(r, kind) for r in dict.fromkeys(whole[done_whole:]) if r not in chain)
+                    deferred.extend(self._pipe_marks(chain[done:]))
             else:
                 chain.clear()
+                fed.clear()
+                if not word:
+                    whole.clear()
+            if not word:
+                whole_at = resume
             cur, raw_at, hs_kind = "", resume, None
 
         def literal(plain: str, raw: str, quote: str) -> None:
@@ -1041,7 +1213,13 @@ class _Scan:
                 elif d == "\r" and s[i + 2:i + 3] == "\n":
                     i += 3
                 else:
-                    emit(d if d.isalnum() or d in ORDINARY_ESCAPE else "\\" + d)
+                    if d.isalnum() or d in ORDINARY_ESCAPE:
+                        emit(d)
+                    elif _INERT.fullmatch(d):
+                        emit(ESCAPED + d)   # `a\&>log`: a word `a&` and a `>` in one reading, a backslash and an operator in the other (`_readings`)
+                        escaped = True
+                    else:
+                        emit("\\" + d)
                     i += 2
             elif c == "'":
                 j = s.find("'", i + 1)
@@ -1125,7 +1303,27 @@ class _Scan:
             elif c == "{" and (j := _brace_span(s, i)) > 0:  # brace expansion word, not a command group
                 emit(s[i:j])
                 i = j
-            elif c in ";(){}":
+            elif c in "{}":
+                # A group brace in one shell and a plain word in the other (`{git push origin main}`, `git push origin a{ :main`): there is no telling which one the shell
+                # that runs the text will take, so a mark stands for the brace and `_brace_readings` writes the text in every reading. The mark says whether the brace
+                # is a word of its own and whether reading C cuts there: a `{` where a command starts, and the `}` that closes it.
+                alone = (i == 0 or s[i - 1] in " \t\n;&|()") and (i + 1 >= n or s[i + 1] in " \t\n;&|()")
+                closes = c_open > 0 and (i + 1 >= n or s[i + 1] in " \t\n;&|()<>") and s[i - 1] != "{"
+                cut = c_blank or (c == "}" and closes)
+                # A `{` that stands alone where a command starts, and the `}` that stands alone where a command starts and closes one, are the group in bash and in zsh:
+                # the text after them is another command, no reading puts a word of a command on the other side of them. They are written as they are, and a script of
+                # such groups is read once, not five times (B3-5).
+                clear = alone and c_blank and (c == "{" or c_open > 0)
+                c_open += cut if c == "{" else -(c_open > 0 and cut)
+                if clear:
+                    out.append(c)
+                else:
+                    out.append(BRACE_MARK[c == "}", alone, cut])
+                    braced = True
+                cur += c
+                end_stage(i, i + 1, False, brace=True, word=not clear)
+                i += 1
+            elif c in ";()":
                 if c == "(":
                     paren += 1
                 elif c == ")" and paren:
@@ -1143,7 +1341,7 @@ class _Scan:
                     end_stage(i, i + step, False)
                     i += step
             elif c == "|":
-                if i and s[i - 1] == ">":
+                if i and (s[i - 1] == ">" or s[i - 2:i] == ">&"):   # `>|f`, and zsh `>&|f`, `>>&|f`
                     emit(c)
                     i += 1
                 elif s[i + 1:i + 2] == "|":
@@ -1162,7 +1360,8 @@ class _Scan:
         if raw.strip():
             self._stage(raw, deferred)
         self.nest -= 1
-        return "".join(out) + "".join(f" ; {d} ; " for d in deferred), i
+        text = _readings("".join(out), braced, escaped)
+        return text + "".join(f" ; {d} ; " for d in dict.fromkeys(deferred)), i   # a text produced for several pipes is written once
 
     def _heredoc_bodies(self, i: int, pending: list, deferred: list[str]) -> int:
         s, n = self.s, self.n
@@ -1179,10 +1378,14 @@ class _Scan:
             body = "\n".join(lines)
             if not quoted:
                 deferred.extend(_Scan(body, self.depth + 1, self.budget).walk(0, None)[2])
-            if kind == "shell":
-                deferred.append(self._sub(body))
-            elif kind:
-                deferred.append(self._interp(kind, body, emit_all=prints_to_shell))
+                halved = re.sub(r"\\([$`\\])|\\\r?\n", lambda m: m.group(1) or "", body)   # the program reads what the shell wrote: `\\` is `\`, `\$` is `$`
+            else:
+                halved = body
+            for text in dict.fromkeys([body, halved]):   # an expansion in the body is replaced before the program reads it (`\\$(true) x`): both texts are read
+                if kind == "shell":
+                    deferred.append(self._sub(text))
+                elif kind:
+                    deferred.append(self._interp(kind, text, emit_all=prints_to_shell))
         return i
 
 
@@ -1202,19 +1405,241 @@ def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None) ->
 
 
 def _skeleton(command: str, _depth: int, _budget: list[int] | None) -> str:
-    budget = _budget if _budget is not None else [BUDGET]
+    budget = _budget if _budget is not None else [BUDGET, HERE_ALLOWANCE, {}]
     budget[0] -= len(command)
+    command = _MARK_CHARS.sub("\x06", command)   # a byte that is one of the marks stays a word
     if _depth > MAX_DEPTH or budget[0] < 0:
         return " ; " + _code(command) + " ; "
     text, _ = _Scan(command, _depth, budget).run(0, None)
-    return expand_braces(NULL_REDIRECT.sub(" ", text))
+    return _hoist_redirects(expand_braces(NULL_REDIRECT.sub(" ", text)))
+
+
+# A brace is a command group in one shell and a plain word in the other, and where a command starts or a word is alone the same text reads differently in zsh and bash.
+# The scanner writes a mark for each brace (its kind, whether it is a word of its own, whether reading C cuts there) and the skeleton holds every reading:
+#   A every brace cuts the command (groups), L every brace is a word, C a `{` cuts where a command starts and its `}` cuts too, D a brace that is a word of its own cuts and one inside a
+#   word does not, E the other way round. Whichever shell runs the text, one of the readings is the one it takes, and a reading that cuts a push short is not the only one.
+BRACE_MARK = {(close, alone, cut_c): chr(0x0E + 4 * close + 2 * alone + cut_c) for close in (False, True) for alone in (False, True) for cut_c in (False, True)}
+_MARKS = {m: k for k, m in BRACE_MARK.items()}
+ESCAPED = "\x16"   # in front of an operator the command escaped with a backslash
+_MARK_CHARS = re.compile("[\x0e-\x16]")
+
+
+def _reading_tables() -> list[dict[int, str]]:
+    tables = []
+    for name in "ALCDE":
+        table = {}
+        for m, (close, alone, cut_c) in _MARKS.items():
+            cut = {"A": True, "L": False, "C": cut_c, "D": alone, "E": not alone}[name]
+            table[ord(m)] = ("}" if close else "{") if cut else "\x06"
+        tables.append(table)
+    return tables
+
+
+_READING_TABLES = _reading_tables()
+ESCAPED_OPERATOR = re.compile(ESCAPED + ".")
+
+
+def _readings(text: str, braced: bool, escaped: bool) -> str:
+    """The text in every reading the shells allow: the braces (`_brace_readings`), and an operator the command escaped as a word and as syntax.
+
+    `a\\>&x :main` is the word `a>` and the command `x :main` in a shell that reads the backslash as an escape, and `a\\`, a redirect and `:main` in one that reads
+    a `\\` and the operator after it (the text a program prints and another shell reads, `echo 'a\\>x' | zsh -f`, is `a>x`). Main kept the backslash; one reading is data.
+
+    A brace or an escape is read in its own chunk of the text (`_chunks`): the other lines of a script do not come in the readings of a line, so a long script
+    with a few brace words costs a few more lines, not a few more scripts."""
+    if not (braced or escaped):
+        return text
+    return "".join(_chunk_readings(c, braced, escaped) for c in _chunks(text))
+
+
+def _chunk_readings(text: str, braced: bool, escaped: bool) -> str:
+    if not _MARK_CHARS.search(text):
+        return text
+    tail = text[len(text.rstrip("\n")):]
+    text = text[:len(text) - len(tail)]
+    out = [text]
+    if braced:
+        out = list(dict.fromkeys(text.translate(table) for table in _READING_TABLES))
+    if escaped:
+        # the reading that is the one of main (every brace cuts, the backslash stays) is kept with every other reading of the braces; the escaped operators are read as data
+        # in each of them, and as syntax in the first: a brace and an escaped operator in one command do not square the readings
+        live = [out[0].replace(ESCAPED, "\\")]
+        out = list(dict.fromkeys([*(ESCAPED_OPERATOR.sub("\x06", t) for t in out), *live]))
+    first = _collapse_runs(out[0]) if len(out[0]) > DENSE else out[0]
+    if len(out) == 1:
+        return first + tail
+    extra = list(map(_collapse_runs, out[1:]))
+    if MOVES_DIRECTORY.search(text):
+        # a reading that moves the directory must not move it again for the lines that follow, and each reading must start where the chunk starts: the other
+        # readings are subshells, written first, and the first reading is the one that stays (`cd sub && echo a{b` then `git push` runs in sub)
+        return " ; ".join([*map(_subshell, extra), first]) + tail
+    return " ; ".join([first, *extra]) + tail
+
+
+_QUOTED = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
+
+
+def _subshell(text: str) -> str:
+    """The text as a subshell that holds it whole, whatever its parentheses do: a reading with a `)` that closes nothing (`echo a\\)b`, `case x in y)`) or a `(` that
+    stays open gets the opens or closes it lacks, so the directory it moves is restored for the lines that follow, as for a balanced one."""
+    depth = low = 0
+    for ch in _QUOTED.sub("", text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            low = min(low, depth)
+    return "( " * (1 - low) + text + " )" * (1 + depth - low)
+
+
+DENSE = 600   # a chunk longer than this has the runs of one word in its first reading cut too
+
+
+def _collapse_runs(text: str) -> str:
+    """Four repeats of a word (or of up to eight words) say all that a long run of them does: the same segments are read again and again. A run that moves the
+    directory, or counts (`cd`, `pushd`, `popd`, `-C ..`, `--git-dir`, `--work-tree`, `..`: each repeat goes one more level), is kept."""
+    return RUN_OF_WORDS.sub(lambda m: m.group(0) if COUNTED.search(m.group(1)) else m.group(1) * 4, text)
+
+
+MOVES_DIRECTORY = re.compile(r"(?<![^\s;&|(){}])(?:cd|pushd|popd)(?![^\s;&|(){}])")
+COUNTED = re.compile(MOVES_DIRECTORY.pattern + r"|(?<![^\s;&|(){}])(?:-C|--git-dir(?:=\S*)?|--work-tree(?:=\S*)?)(?![^\s;&|(){}])|\.\.")
+
+
+def _chunks(text: str) -> list[str]:
+    """The lines of the text, cut where no group is open (a `(` or a backtick that is not closed) and the line is not continued (`|`, `&&`, `||` at its end):
+    a reading of a chunk is written in place, so a chunk is a run of whole commands."""
+    if "\n" not in text:
+        return [text]
+    out, cur, depth = [], [], 0
+    for line in text.split("\n"):
+        cur.append(line)
+        depth += line.count("(") - line.count(")") + line.count("`")
+        if depth <= 0 and not line.rstrip().endswith(("|", "&&", "||", "\\")):
+            out.append("\n".join(cur) + "\n")
+            cur, depth = [], 0
+    if cur:
+        out.append("\n".join(cur))
+    else:
+        out[-1] = out[-1][:-1]
+    return out
+
+
+RUN_OF_WORDS = re.compile(r"(?<!\S)((?:\S{1,40}[ \t]+){1,8}?)\1{4,}")   # a long run of one word, or of up to eight words, in a reading (`\x06 \x06 ...`, `{ a\> { a\> ...`): four of them say all that the rest do
+
+
+def _redirect_word(m: re.Match) -> str:
+    """One redirect in its one spelling: `&>f`, `>&f` and `>|f` are `> f`, `2>f` is `2> f`; a descriptor close or move (`>&-`, `2>&1-`) names no file and stays as written, a copy (`<&0`) goes."""
+    fd, op, tgt = m.group("fd") or "", m.group("op"), m.group("tgt") or ""
+    if op == "<<HEREDOC":
+        return op
+    if op in (">&", "<&") and re.fullmatch(r"\d+-?|-", tgt):
+        # a descriptor move or close names no file. A close stays as written, as on main: `cat key 2>&-` is rated as it was, not as a plain read. A copy goes (`<&0`)
+        return fd + op + tgt if tgt.endswith("-") else ""
+    both = op.startswith("&")
+    if op[0] in "&>":
+        op = ">>" if ">>" in op else ">"   # `&>`, `>&`, `>|`, `>!`, `>>&|`, `&>>!` ...: a write, or an append, of a file
+    elif op == "<&":
+        op = "<"
+    if op in (">", ">>", "<") and tgt:
+        return f"{'' if both else fd}{op} {tgt}"   # the target is the word after the operator, as `operands` and `_absolute_operands` read it
+    return fd + op + tgt
+
+
+def _hoist_redirects(text: str) -> str:
+    """Each simple command with its redirects taken out of the words and written after them, so that the words are what a rule reads.
+
+    The shell reads `git push origin feature &>log :main` as the push `git push origin feature :main` with its output sent to `log`: a redirect and its target
+    are not arguments, and they may stand anywhere, even in front of the program (`>log git push`). The rules look for words up to the next `&`, `|` or `;`, and
+    `&>`, `>&`, `>|` hold such a character, so left in place the redirect cut every rule short. A redirect keeps its target (a write is still a write;
+    `cd /etc && echo x >pf.conf` writes `/etc/pf.conf`) and moves to the end of its command, spelled `> file`; a descriptor close (`>&-`) names no file and moves as written."""
+    if not REDIRECT.search(text):
+        return text
+    out: list[str] = []
+    for k, piece in enumerate(SEG_TOKEN.split(text)):
+        if k % 2 or not REDIRECT.search(piece) or piece.lstrip().startswith(TEXT_MARK):
+            out.append(piece)
+            continue
+        out.append(_hoist_piece(piece))
+        for other in _other_readings(piece):
+            out.append(" ; " + _hoist_piece(other))
+    return "".join(out)
+
+
+GLUED_CLOSE = re.compile(r"(?P<fd>(?<!\S)\d+)?(?P<c>[<>])&-(?=[^\s<>&|])")
+BANG_REDIRECT = re.compile(r"(?P<op>&>>?|>>?&?)!")
+
+
+def _other_readings(piece: str) -> list[str]:
+    """The pieces in which the shell that is not the one the first reading follows reads a redirect differently.
+
+    `>&-lg`: bash closes the descriptor and `lg` is an argument, zsh writes a file `-lg`. `>! lg`, `>>! lg`, `>&! lg`: zsh writes the file `lg`, bash writes a file
+    named `!` and `lg` is an argument. A gate that kept one reading would lose a word of the command, so every reading that differs is read."""
+    out: list[str] = []
+    if GLUED_CLOSE.search(piece):
+        out.append(GLUED_CLOSE.sub(lambda m: (m.group("fd") or "") + m.group("c") + " -", piece))
+    if BANG_REDIRECT.search(piece):
+        out.extend(BANG_REDIRECT.sub(lambda m: m.group("op") + " !", x) for x in [piece, *out])
+    return out
+
+
+def _hoist_piece(piece: str) -> str:
+    moved = [w for m in REDIRECT.finditer(piece) if (w := _redirect_word(m))]
+    words = REDIRECT.sub(" ", piece).strip()
+    # the blank in front of the piece stays: `main& >log` must not become `main&> log`, which is another operator
+    return piece[:len(piece) - len(piece.lstrip())] + " ".join([words, *moved]).strip() + piece[len(piece.rstrip()):] if words or moved else piece
+
+
+# `skeleton_both` is what every caller that classifies a command reads. The current reading is joined to the reading origin/main (8100ea1) gave the same text,
+# kept as it was in `shellnorm_base`: each part is a command line of its own (a `cd` of one does not move the other), so no command is read as less than main read it,
+# whatever the current reading drops, and the rating and the push check are the stricter of the two by construction (PR 47 review, round 6).
+BIG_SEGMENT = 20_000   # characters
+JOIN = "\x17"
+_JOIN_CHAR = re.compile(JOIN)
+
+
+@functools.lru_cache(maxsize=16)
+def _skeleton_both_top(command: str) -> str:
+    command = _JOIN_CHAR.sub("\x06", command)   # a byte that is the join stays a word
+    current = _skeleton_top(command)
+    floor = _base_skeleton(command)
+    return current if floor == current else current + JOIN + floor
+
+
+def skeleton_both(command: str) -> str:
+    """The text of `skeleton` and, after `JOIN`, the text origin/main gave, when the two differ. `segments`, `segments_cwd` and `text_views` read it."""
+    return _skeleton_both_top(command)
+
+
+# The one word the current `PREFIX` strips and origin/main's did not: main read `nocorrect echo git push origin main | sh <<< x` as a command named `nocorrect` and rated its
+# words, and the classifier that reads the joined text strips it. The floor keeps main's reading of it (an unknown first word), so the rating is main's too.
+_NOCORRECT = re.compile(r"(?<![\w./$-])nocorrect(?![\w./-])")
+
+
+def _base_skeleton(command: str) -> str:
+    from . import shellnorm_base
+
+    # origin/main's own reading with its own budget (`BUDGET`, 4 000 000 characters): never cut earlier than it cut itself, so no command is read as less than main read it.
+    # Its cost is main's cost too (a chain of pipelines nested six deep took 24 s there).
+    return _NOCORRECT.sub("nocorrect\x06", shellnorm_base.skeleton(command))
+
+
+def _parts(command: str) -> list[tuple[str, re.Pattern, re.Pattern]]:
+    """The readings of a command with the separators each is cut by: the second is cut as origin/main cut it (`git push >&|log origin feature` is `git push >&` piped to `log` there)."""
+    parts = skeleton_both(command).split(JOIN)
+    return [(parts[0], SPLIT, SEG_TOKEN), *((p, _base().SPLIT, _base().SEG_TOKEN) for p in parts[1:])]
+
+
+def _base():
+    from . import shellnorm_base
+
+    return shellnorm_base
 
 
 def segments(command: str) -> list[str]:
-    return [re.sub(r"\s+", " ", seg).strip() for seg in SPLIT.split(skeleton(command)) if seg.strip()]
+    return [re.sub(r"\s+", " ", seg).strip() for text, split, _ in _parts(command) for seg in split.split(text) if seg.strip()]
 
 
-SEG_TOKEN = re.compile(r"(\n|;|&&|\|\||(?<!>)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\})")
+SEG_TOKEN = re.compile(r"(\n|;|&&|\|\||(?<!>)(?<!>&)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\})")
 
 
 def segments_cwd(command: str, cwd: str = "") -> list[tuple[str, tuple[str, ...]]]:
@@ -1223,16 +1648,30 @@ def segments_cwd(command: str, cwd: str = "") -> list[tuple[str, tuple[str, ...]
     A command that carries substitutions is ordered by the canonical text, not by execution, so every directory the
     command passes through counts for every segment then.
     """
+    rows: list[tuple[str, tuple[str, ...]]] = []
+    big: set[tuple[str, tuple[str, ...]]] = set()
+    for text, _, token in _parts(command):
+        for row in _segments_cwd_of(text, cwd, token):
+            if len(row[0]) > BIG_SEGMENT:   # the plain text a scanner leaves when it stops reading comes out of both readings: a segment of this size is classified once (the cost of reading it twice is the cost of the command twice)
+                if row in big:
+                    continue
+                big.add(row)
+            rows.append(row)
+    return rows
+
+
+def _segments_cwd_of(text: str, cwd: str, token: re.Pattern) -> list[tuple[str, tuple[str, ...]]]:
     import os
 
-    text = skeleton(command)
     cur, prev = cwd, None
+    real: dict[str, str] = {}
+    resolved: set[str] = set()
     stack: list[str] = []
     dirs: list[str] = []
     ticks = False
     seen = [cwd]
     found: list[str] = []
-    for k, piece in enumerate(SEG_TOKEN.split(text)):
+    for k, piece in enumerate(token.split(text)):
         if k % 2:
             if piece in ("(", "$("):
                 stack.append(cur)
@@ -1262,7 +1701,14 @@ def segments_cwd(command: str, cwd: str = "") -> list[tuple[str, tuple[str, ...]
                 new = prev or cur
             elif not re.search(r"[*?\[`]", os.path.expandvars(target)) and "$" not in os.path.expandvars(target):
                 t = os.path.expanduser(os.path.expandvars(_dec(target)))
-                new = os.path.realpath((t if os.path.isabs(t) else os.path.join(cur or os.getcwd(), t)).replace("\x00", ""))
+                where = (t if os.path.isabs(t) else os.path.join(cur or os.getcwd(), t)).replace("\x00", "")
+                if where in real:
+                    new = real[where]   # the same `cd` line repeated is resolved once
+                elif cur in resolved and "/" not in t and t not in (".", "..") and not os.path.islink(where):
+                    new = real[where] = where   # one more plain component under a directory that is resolved already: no link to follow (the realpath of a deep path is quadratic)
+                else:
+                    new = real[where] = os.path.realpath(where)
+                resolved.add(new)
             if new != cur:
                 prev, cur = cur, new
                 seen.append(cur)
@@ -1284,6 +1730,7 @@ DANGEROUS_KEY = re.compile(
 
 _CONFIG_READS = ("--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color", "--get-colorbool", "--list", "-l", "--show-origin", "--show-scope",
                  "--name-only", "--unset", "--unset-all", "--remove-section", "--rename-section", "--edit", "-e", "--help")
+_CONFIG_READ_SET = frozenset(_CONFIG_READS)
 _CONFIG_VALUED = {"--file", "-f", "--blob", "--type", "--default", "--comment"}
 
 
@@ -1302,7 +1749,7 @@ def config_write_key(args: list[str]) -> str | None:
         if x in _CONFIG_VALUED:
             i += 2
             continue
-        if any(x == r or x.startswith(r + "=") for r in _CONFIG_READS):
+        if x.partition("=")[0] in _CONFIG_READ_SET:   # `--get` and `--get=x`: no read flag holds an `=`, so this is `x == r or x.startswith(r + "=")` for each of them
             return None
         if x.startswith("-") and x != "-":
             i += 1
@@ -1324,11 +1771,87 @@ class GitCall:
     danger: list[str] = field(default_factory=list)
 
 
+_REDIRECT_ARG = re.compile(r"\d*(?:>>?|<>|<)")   # the operator of a moved redirect, with its descriptor; its target is the next word
+_REDIRECT_GLUED = re.compile(r"\d*(?:<>|>&|<&)\S+")   # an operator the skeleton moved with its target glued to it (`<>log`, `>&-`, `2>&-`)
+
+
+def _redirect_kind(word: str) -> int:
+    """0: an ordinary word. 1: the operator of a moved redirect (its target is the next word). 2: an operator with its target glued to it."""
+    if "<" not in word and ">" not in word:   # almost every word: no regex
+        return 0
+    if _REDIRECT_ARG.fullmatch(word):
+        return 1
+    return 2 if _REDIRECT_GLUED.fullmatch(word) else 0
+
+
+def _without_redirects(args: list[str], kinds: list[int] | None = None) -> list[str]:
+    """The arguments of a command without the redirects the skeleton moved to its end (`> log`, `>> log`, `<> log`, `>&-`, `< in`): the shell takes a redirect and its
+    target out of the words, so `git push > log` is a push with no destination, not a push to the remote `>`. A quoted `>` is data (the skeleton marks it), so a bare
+    one is an operator. A target that the skeleton split at an escaped space (`> log\\ x` becomes `> log\\` and `x`) is dropped whole after an operator that is a word of its
+    own (`>`, `>>`, `2>`, `<`, `<>`), when the backslashes at its end are odd in number (`> log\\\\` ends in an escaped backslash: the target is complete). That split is made
+    by the skeleton of origin/main only (the current skeleton moves the target to the end of the command and leaves `x` behind), so the words of the current reading keep `x`
+    as a word; the other reading drops it. A glued target (`>log\\ x`) is not dropped whole. A target that the shell expands to several words in zsh (`> {a,b}`) is not handled.
+    `git_calls` keeps the arguments as they stood as well, so a reading that was stricter before is still read. `kinds` is `_redirect_kind` of each word, when the
+    caller has it already."""
+    if kinds is None:
+        kinds = [_redirect_kind(a) for a in args]
+    if not any(kinds):
+        return args
+    out: list[str] = []
+    skip = False
+    for a, k in zip(args, kinds, strict=True):
+        if skip:
+            skip = (len(a) - len(a.rstrip("\\"))) % 2 == 1
+        elif k == 1:
+            skip = True
+        elif k == 0:
+            out.append(a)
+    return out
+
+
+def _config_danger(call: GitCall) -> None:
+    """`git config <key> <value>` that sets an alias, pager, sshCommand ... (a program) is a danger of the call: the persistent form of `git -c key=value` (W-31)."""
+    if call.sub == "config" and (key := config_write_key(call.args)) is not None and ("$" in key or DANGEROUS_KEY.search(key.lower())):
+        call.danger.append(f"config {key}")
+
+
+def _redirect_free_words(toks: list[str]):
+    """One pass over the words of a text for `git_calls`: the words that are not empty, the number of them before each position of `toks`, the words left when
+    the redirects are dropped (`_without_redirects` run once from the start), how many of those come before each word, and whether the pass is inside the target of
+    a redirect before each word. From a word that is not inside a target, the words that are left are the ones `_without_redirects` leaves of the words from there on."""
+    words = [t for t in toks if t]
+    before = [0] * (len(toks) + 2)
+    n = 0
+    for k, t in enumerate(toks):
+        before[k] = n
+        n += bool(t)
+    before[len(toks)] = before[len(toks) + 1] = n
+    kept: list[str] = []
+    kept_before = [0] * (len(words) + 1)
+    skip_before = [False] * (len(words) + 1)
+    skip = False
+    for q, w in enumerate(words):
+        kept_before[q] = len(kept)
+        skip_before[q] = skip
+        if skip:
+            skip = (len(w) - len(w.rstrip("\\"))) % 2 == 1
+        else:
+            kind = _redirect_kind(w)
+            if kind == 1:
+                skip = True
+            elif kind == 0:
+                kept.append(w)
+    kept_before[len(words)] = len(kept)
+    skip_before[len(words)] = skip
+    return words, before, kept, kept_before, skip_before
+
+
 def git_calls(text: str) -> tuple[str, list[GitCall]]:
     """Rewrite every `git <global options> sub` to `git sub` and describe each invocation. Pure text, no process."""
     toks = text.split(" ")
     out: list[str] = []
     calls: list[GitCall] = []
+    words: list[str] | None = None
     i = 0
     while i < len(toks):
         t = toks[i]
@@ -1375,10 +1898,21 @@ def git_calls(text: str) -> tuple[str, list[GitCall]]:
             else:
                 break
         call.sub = toks[j] if j < len(toks) else ""
-        call.args = [a for a in toks[j + 1:] if a]
-        if call.sub == "config" and (key := config_write_key(call.args)) is not None and ("$" in key or DANGEROUS_KEY.search(key.lower())):
-            call.danger.append(f"config {key}")   # the persistent form of `git -c key=value` (W-31): an alias, pager, sshCommand ... that runs a program
+        if words is None:   # once per text: the words, and the words without the redirects, so that no git word reads the rest of the text again
+            words, before, kept, kept_before, skip_before = _redirect_free_words(toks)
+        p = before[j + 1]   # the words from the one after the subcommand on are words[p:]
+        raw = words[p:]
+        call.args = raw
+        if skip_before[p]:   # the subcommand stands in the target of a redirect (`> git`): read this one from its own start
+            call.args = _without_redirects(raw)
+        elif len(kept) - kept_before[p] != len(raw):
+            call.args = kept[kept_before[p]:]
+        _config_danger(call)
         calls.append(call)
+        if call.args != raw:   # the words as origin/main took them (a redirect target taken for a destination) are read as well: never less than origin/main read
+            asis = replace(call, args=raw, dirs=list(call.dirs), danger=[d for d in call.danger if not d.startswith("config ")])
+            _config_danger(asis)   # its danger is worked out from its own words, not from the reduced ones
+            calls.append(asis)
         out.append("git")
         i = j
     return " ".join(out), calls
