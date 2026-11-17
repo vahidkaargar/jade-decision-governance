@@ -1,0 +1,3 @@
+["git push origin feature &>log :main", "git push origin feature &>log --force", "git push origin feature &>log --mirror", "git push origin feature &>log +feature:main",
+ "git push origin feature &>log --delete", "git push origin feature &>log --tags", "git push origin feature &>log main", "git push origin feature &>>log --no-verify :main",
+ "git push origin feature &>log -o x", "cd x && git push origin feature &>log :main", "git push origin feature&>log :main", "git push origin feature &> log :main", "git push origin feature &>log feature:main"]
