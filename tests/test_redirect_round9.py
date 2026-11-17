@@ -116,12 +116,15 @@ def test_git_calls_does_not_run_past_the_end_when_the_options_are_the_last_words
 # ---------------------------------------------------------------- round 10: cost of the scan, and the key of `git config`
 
 def test_the_redirect_free_words_are_worked_out_once_per_text(monkeypatch):
-    seen = []
-    real = shellnorm._redirect_kind
-    monkeypatch.setattr(shellnorm, "_redirect_kind", lambda w: seen.append(w) or real(w))
+    """Round 9 ran `_without_redirects` over the rest of the text for each of the 400 git words (2 000 words in all); now no git word does."""
+    kinds, scans = [], []
+    real_kind, real_scan = shellnorm._redirect_kind, shellnorm._without_redirects
+    monkeypatch.setattr(shellnorm, "_redirect_kind", lambda w: kinds.append(w) or real_kind(w))
+    monkeypatch.setattr(shellnorm, "_without_redirects", lambda *a, **k: scans.append(len(a[0])) or real_scan(*a, **k))
     text = "git log --oneline > o.txt " * 400
     shellnorm.git_calls(text)
-    assert len(seen) <= len(text.split()) + 1, len(seen)   # once for each word, not once for each git word after it (400 times 1 200 words)
+    assert len(kinds) <= len(text.split()) + 1, len(kinds)
+    assert sum(scans) <= len(text.split()), sum(scans)   # round 9: 400 scans of up to 2 000 words, 400 200 in all
 
 
 def test_the_arguments_of_a_git_word_are_the_words_after_it_without_the_redirects():
