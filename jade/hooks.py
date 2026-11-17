@@ -196,6 +196,9 @@ def _git_env() -> dict[str, str]:
     return env
 
 
+_MEMO: dict | None = None   # the answers of `_git` while one `_on_default_branch` runs; None outside
+
+
 def _git(call: policy.shellnorm.GitCall, cwd: str, *args: str) -> str | None:
     """Run `git <args>` for a `git push` the agent wrote, in a directory the agent controls (W-60), and return its output.
 
@@ -216,6 +219,16 @@ def _git(call: policy.shellnorm.GitCall, cwd: str, *args: str) -> str | None:
     argv = [w.replace("\x00", "") for w in [*argv, *args]]  # a shell ignores a NUL byte; subprocess refuses one
     if cwd and not os.path.isdir(cwd):
         return None
+    key = (tuple(argv), cwd)
+    if _MEMO is not None and key in _MEMO:   # the same question of the same repository within one command (the two readings of a push ask it twice)
+        return _MEMO[key]
+    out = _git_run(argv, cwd)
+    if _MEMO is not None:
+        _MEMO[key] = out
+    return out
+
+
+def _git_run(argv: list[str], cwd: str) -> str | None:
     try:
         out = subprocess.run(argv, capture_output=True, text=True, timeout=GIT_TIMEOUT_S, cwd=cwd or None, env=_git_env(), stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError, ValueError) as e:  # TimeoutExpired is a SubprocessError
@@ -326,20 +339,35 @@ def _on_default_branch(cwd: str, command: str) -> bool:
     `cd "$R" && git push`), `GIT_DIR=` / `GIT_WORK_TREE=` in the command, or a repository the same command creates (`git clone u r && git -C r push`) is unresolved
     (GitUnresolved), never "not main".
     """
+    global _MEMO
+    outer, _MEMO = _MEMO, ({} if _MEMO is None else _MEMO)
+    try:
+        return _on_default_branch_asked(cwd, command)
+    finally:
+        _MEMO = outer
+
+
+def _on_default_branch_asked(cwd: str, command: str) -> bool:
     extra, _ = policy.hidden(command, cwd)   # a git alias that expands to a push, a script the command writes and runs (W-31)
     segs = policy.segments_cwd(command + "".join("\n" + e for e in extra), cwd, literal_end=len(command))
-    pushes = [(call, dirs) for seg, dirs in segs if not policy.is_read_only(seg) for call in policy.git_calls(seg) if call.sub == "push"]
+    # the two readings of the command (`shellnorm.skeleton_both`) and the readings of a brace repeat a push: each distinct segment in each directory is asked of git once
+    pushes = [(call, dirs) for seg, dirs in dict.fromkeys(segs) if not policy.is_read_only(seg) for call in policy.git_calls(seg) if call.sub == "push"]
     if not pushes:
         return False
     steered = bool(_GIT_ENV_ASSIGN.search(command)) or any(_CD_VARIABLE.search(seg) for seg, _ in segs)
     creates = any(c.sub in _REPO_CREATORS for seg, _ in segs if not policy.is_read_only(seg) for c in policy.git_calls(seg))
+    unresolved: GitUnresolved | None = None
     for call, dirs in pushes:
         if steered or _unfindable(call):
-            raise GitUnresolved("the repository of this push is named by a variable or the environment")
+            unresolved = unresolved or GitUnresolved("the repository of this push is named by a variable or the environment")
+            continue
         if creates and any(_git(call, d, "rev-parse", "--git-dir") is None for d in dirs):
-            raise GitUnresolved("the repository of this push does not exist yet: the same command creates it")
+            unresolved = unresolved or GitUnresolved("the repository of this push does not exist yet: the same command creates it")
+            continue
         if any(_push_hits_default(call, d) for d in dirs):
-            return True
+            return True   # a push that is found on main answers, whatever a push before it left open (the command is read in two readings, `shellnorm.skeleton_both`)
+    if unresolved:
+        raise unresolved
     return False
 
 

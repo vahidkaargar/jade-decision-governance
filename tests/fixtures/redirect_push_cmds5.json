@@ -1,0 +1,1 @@
+["git push origin feature &>log --no-verify +feature:main", "git push origin feature &>log --no-verify --mirror", "git push origin feature &>log :main", "git push origin feature &>log --force", "git push origin feature 2>&1 --no-verify :main", "git push origin feature 2>log :main"]

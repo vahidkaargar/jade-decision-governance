@@ -301,7 +301,7 @@ def _pathfold(text: str) -> str:
 def real(path: str) -> str:
     """`os.path.realpath` of a path as a shell reads it: a NUL byte is dropped (bash ignores it in a command), so the classifier never
     raises ValueError on one."""
-    return os.path.realpath(path.replace("\x00", ""))
+    return _realpath(path.replace("\x00", ""))
 
 
 def normalise_path(path: str, cwd: str = "") -> str:
@@ -693,7 +693,7 @@ def text_views(text: str) -> list[str]:
     stripped = _QUOTES.sub("", f)
     views = [f, stripped, _EXPANSION.sub("", stripped)]
     try:
-        views.append(shellnorm.skeleton(f))
+        views.extend(shellnorm.skeleton_both(f).split(shellnorm.JOIN))
     except Exception:  # noqa: BLE001, S110 - a text the decoder cannot read is still matched in its other readings
         pass
     return list(dict.fromkeys(views))
@@ -858,7 +858,7 @@ _DIR_REPLACING_VERBS = frozenset({"rm", "rmdir", "mv", "unlink", "shred", "srm"}
 
 def _config_roots() -> tuple[str, ...]:
     """The real paths of the config directory in force and of the default one (`~/.config/jade`): SI-12 guards both."""
-    return tuple(dict.fromkeys(os.path.realpath(str(p)) for p in (paths.config_dir(), os.path.expanduser("~/.config/jade"))))
+    return tuple(dict.fromkeys(_realpath(str(p)) for p in (paths.config_dir(), os.path.expanduser("~/.config/jade"))))
 
 
 def _expand_home(p: str) -> str:
@@ -879,7 +879,7 @@ def _case_insensitive() -> bool:
 def _path_key(path: str, base: str) -> str:
     """The form every root check compares: the real path of `path` (relative to `base`, with `~`, `$HOME` and `${HOME}` expanded), case-folded where
     the volume ignores case. The roots go through `_fold` too."""
-    return _fold(os.path.realpath(os.path.join(base or os.getcwd(), _expand_home(path))))
+    return _fold(_realpath(os.path.join(base or os.getcwd(), _expand_home(path))))
 
 
 _DATA_FIRMLINK_RE = re.compile(r"/system/volumes/data(?=/|$)", re.I)
@@ -925,7 +925,7 @@ TERMINAL_TOOLS = frozenset({"mcp__terminal__run_in_terminal"})
 
 
 def _real(p: str) -> str:
-    return os.path.realpath(os.path.expanduser(p))
+    return _realpath(os.path.expanduser(p))
 
 
 def _wiring_roots() -> tuple[str, ...]:
@@ -1097,7 +1097,7 @@ _SCRIPT_READ_MAX = 1 << 20
 def _script_names_state(f: str, dirs: tuple[str, ...], cwd: str) -> bool:
     """Does the script file a command runs (at most 1 MiB, a regular file, resolved in a directory the call may run in) name the JADE state paths?"""
     for d in (dirs or ("",)):
-        p = os.path.realpath(os.path.join(d or cwd or os.getcwd(), os.path.expanduser(f)))
+        p = _realpath(os.path.join(d or cwd or os.getcwd(), os.path.expanduser(f)))
         try:
             if os.path.isfile(p) and os.path.getsize(p) <= _SCRIPT_READ_MAX:
                 with open(p, encoding="utf-8", errors="replace") as fh:
@@ -1113,7 +1113,7 @@ def _script_ho(f: str, dirs: tuple[str, ...], cwd: str) -> set[str]:
     A script in a language the shell segmenter does not read is not understood here (docs/05)."""
     out: set[str] = set()
     for d in (dirs or ("",)):
-        p = os.path.realpath(os.path.join(d or cwd or os.getcwd(), os.path.expanduser(f)))
+        p = _realpath(os.path.join(d or cwd or os.getcwd(), os.path.expanduser(f)))
         try:
             if not (os.path.isfile(p) and os.path.getsize(p) <= _SCRIPT_READ_MAX):
                 continue
@@ -1214,7 +1214,7 @@ def _ho_segment(a: Assessment, seg: str, dirs: tuple[str, ...], cwd: str, wroots
                 _ho_add(a, HO_WIRING)
             if _si12_hit(tok, base, mroots, parent_too):
                 _ho_add(a, HO_MOD)
-            real = os.path.realpath(os.path.join(base or os.getcwd(), os.path.expanduser(tok))) if tok and "\x00" not in tok else ""
+            real = _realpath(os.path.join(base or os.getcwd(), os.path.expanduser(tok))) if tok and "\x00" not in tok else ""
             if real and _SETTINGS_FILE.search(_fold(real)):
                 _ho_add(a, HO_SETTINGS)   # a shell write of a settings file: the text is not the gate's to read
             if install and real and os.path.isdir(real) and _is_checkout(real):
@@ -1834,8 +1834,30 @@ def _scratch_prefix_stripped(text: str) -> str:
     return _SCRATCH_PREFIX.sub(drop, text)
 
 
+_REALPATHS: dict[str, str] | None = None   # set for the length of one `assess` only
+
+
+def _realpath(path: str) -> str:
+    """`os.path.realpath`, remembered for the length of one `assess`: a command with many `cd` segments asks for the same paths in every check (the cost of a deep path is quadratic)."""
+    if _REALPATHS is None:
+        return os.path.realpath(path)
+    got = _REALPATHS.get(path)
+    if got is None:
+        got = _REALPATHS[path] = os.path.realpath(path)
+    return got
+
+
 def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
     """Classify one tool call. Raises on malformed policy; callers decide how to fail."""
+    global _REALPATHS
+    outer, _REALPATHS = _REALPATHS, {} if _REALPATHS is None else _REALPATHS
+    try:
+        return _assess(tool, tool_input, cwd)
+    finally:
+        _REALPATHS = outer
+
+
+def _assess(tool: str, tool_input: dict, cwd: str) -> Assessment:
     if tool in WRITE_TOOLS:
         a = _assess_write(tool, tool_input, cwd)
     elif tool in READ_TOOLS:
