@@ -881,6 +881,7 @@ class _Scan:
         # re-parsed (`bash -c "..."`, `eval`, `| sh`, a here-string, a heredoc, a script the command writes) may hold text the outer shell already
         # expanded, so `'$X'` there stays a live expansion (security review PRE2-1).
         self.literal_end = literal_end if depth == 0 else 0
+        self.legacy = len(budget) > 3 and budget[3]   # origin/main's reading of `"${NAME}"` (`$X`): the third reading of `_readings_top`
 
     def _sub(self, text: str, step: float = 1) -> str:
         """The skeleton of a nested text. A text that is read again at the same depth (the stages of a pipeline are produced once per `|`, a text is read for every
@@ -1114,7 +1115,7 @@ class _Scan:
                 inner = s[i + 2:j - 1]
                 if "$(" in inner or "`" in inner:
                     subs.append(self._sub(inner))
-                plain.append("$" + inner if re.fullmatch(r"[A-Za-z_]\w*", inner) else "$X")  # `"${HOME}"` reads as $HOME, as it does unquoted
+                plain.append("$" + inner if not self.legacy and re.fullmatch(r"[A-Za-z_]\w*", inner) else "$X")  # `"${HOME}"` reads as $HOME, as it does unquoted
                 i = j
             else:
                 plain.append(c)
@@ -1396,8 +1397,8 @@ class _Scan:
 
 
 @functools.lru_cache(maxsize=16)
-def _skeleton_top(command: str, literal_end: int) -> str:
-    return _skeleton(command, 0, None, literal_end)
+def _skeleton_top(command: str, literal_end: int, legacy: bool = False) -> str:
+    return _skeleton(command, 0, None, literal_end, legacy)
 
 
 def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None, literal_end: int | None = None) -> str:
@@ -1413,8 +1414,9 @@ def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None, li
     return _skeleton(command, _depth, _budget)
 
 
-def _skeleton(command: str, _depth: int, _budget: list[int] | None, literal_end: int = 0) -> str:
-    budget = _budget if _budget is not None else [BUDGET, HERE_ALLOWANCE, {}]
+def _skeleton(command: str, _depth: int, _budget: list[int] | None, literal_end: int = 0, legacy: bool = False) -> str:
+    # `legacy` rides in the budget, which every nested scan shares: origin/main's reading of a quoted `${NAME}` (`$X`, see `_Scan`) at every depth
+    budget = _budget if _budget is not None else [BUDGET, HERE_ALLOWANCE, {}, legacy]
     budget[0] -= len(command)
     command = _MARK_CHARS.sub("\x06", command)   # a byte that is one of the marks stays a word
     if _depth > MAX_DEPTH or budget[0] < 0:
@@ -1606,18 +1608,30 @@ JOIN = "\x17"
 _JOIN_CHAR = re.compile(JOIN)
 
 
+_QUOTED_VAR = re.compile(r"'[^']*\$|\"[^\"]*\$\{")   # the two places the current reading differs from main's: a single-quoted `$X`, a double-quoted `${NAME}`
+
+
 @functools.lru_cache(maxsize=16)
-def _skeleton_both_top(command: str, literal_end: int) -> str:
+def _readings_top(command: str, literal_end: int) -> tuple[tuple[str, bool], ...]:
+    """The readings of a command, each as (text, is_current): the current reading; the current reading with a single-quoted `$X` and a double-quoted `${NAME}` read as main read
+    them (`literal_end` 0, `legacy`), when the command has one and the two differ; and origin/main's own reading (cut as main cut it). Every one is a command line of its own, so the rating and the push check are the stricter
+    of all of them: a literal `'$B'` that is one reading's branch name stays the other readings' unknown branch (PR 46 merge review, ADV-1 and ADV-2)."""
     command = _JOIN_CHAR.sub("\x06", command)   # a byte that is the join stays a word
-    current = _skeleton_top(command, literal_end)
+    out = [(_skeleton_top(command, literal_end), True)]
+    if _QUOTED_VAR.search(command):
+        loose = _skeleton_top(command, 0, True)
+        if loose != out[0][0]:
+            out.append((loose, True))
     floor = _base_skeleton(command)
-    return current if floor == current else current + JOIN + floor
+    if all(floor != text for text, _ in out):
+        out.append((floor, False))
+    return tuple(out)
 
 
 def skeleton_both(command: str, literal_end: int | None = None) -> str:
-    """The text of `skeleton` and, after `JOIN`, the text origin/main gave, when the two differ. `segments`, `segments_cwd` and `text_views` read it.
-    `literal_end`: as in `skeleton` (the current reading only; origin/main's reading has no such notion)."""
-    return _skeleton_both_top(command, len(command) if literal_end is None else literal_end)
+    """The text of `skeleton` and, after `JOIN`, the other readings when they differ (see `_readings_top`). `segments`, `segments_cwd` and `text_views` read it.
+    `literal_end`: as in `skeleton` (the current reading; the second reading is main's, where a single-quoted `$X` is not literal)."""
+    return JOIN.join(text for text, _ in _readings_top(command, len(command) if literal_end is None else literal_end))
 
 
 # The one word the current `PREFIX` strips and origin/main's did not: main read `nocorrect echo git push origin main | sh <<< x` as a command named `nocorrect` and rated its
@@ -1634,9 +1648,9 @@ def _base_skeleton(command: str) -> str:
 
 
 def _parts(command: str, literal_end: int | None = None) -> list[tuple[str, re.Pattern, re.Pattern]]:
-    """The readings of a command with the separators each is cut by: the second is cut as origin/main cut it (`git push >&|log origin feature` is `git push >&` piped to `log` there)."""
-    parts = skeleton_both(command, literal_end).split(JOIN)
-    return [(parts[0], SPLIT, SEG_TOKEN), *((p, _base().SPLIT, _base().SEG_TOKEN) for p in parts[1:])]
+    """The readings of a command with the separators each is cut by: origin/main's is cut as origin/main cut it (`git push >&|log origin feature` is `git push >&` piped to `log` there)."""
+    return [(text, SPLIT, SEG_TOKEN) if current else (text, _base().SPLIT, _base().SEG_TOKEN)
+            for text, current in _readings_top(command, len(command) if literal_end is None else literal_end)]
 
 
 def _base():

