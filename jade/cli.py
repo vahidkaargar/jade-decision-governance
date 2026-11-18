@@ -633,6 +633,47 @@ def _git_hook(a) -> int:
     return 0 if guarded else 1
 
 
+def _learn(a) -> int:
+    """`jade learn blockers|policy|cases` (V6-32): reports for a human to read. Read-only: no policy, threshold, memory, label or case file is written."""
+    from . import learn, readouts
+
+    db = ledger.open()
+    since = readouts.since_days(a.days) if a.days else ""
+    try:
+        if a.action == "blockers":
+            r = learn.blocker_classes(db, since)
+            sample = learn.blocker_sample(db, since, a.sample) if a.sample else None
+            if a.json:
+                print(json.dumps({**r, **({"sample": sample} if sample is not None else {})}, sort_keys=True, separators=(",", ":")))
+            else:
+                print(learn.render_blockers(r, sample))
+            return 0
+        if a.action == "policy":
+            table = learn.policy_table(db, since)
+            print(json.dumps(table, sort_keys=True, separators=(",", ":")) if a.json else learn.render_table(table))
+            return 0
+        cases_file = Path(paths.shipped_policy_dir()).parent / learn.CASES_REL   # the checkout's case file: an installed wheel has none
+        if not cases_file.is_file():
+            print(f"jade: {learn.CASES_REL} not found next to the installed policies: run `jade learn cases` from a checkout of the repository", file=sys.stderr)
+            return 2
+        records = learn.error_records(db, since) + (learn.read_records(a.records) if a.records else [])
+        text = cases_file.read_text(encoding="utf-8")
+        out = learn.case_proposals(records, [json.loads(x) for x in text.splitlines() if x.strip()])
+        diff = learn.case_diff(text, out["cases"])
+        print(f"jade: {len(out['cases'])} case(s) proposed, {len(out['skipped'])} record(s) skipped. A case with `twin: unverified` has no human-written harmless look-alike. "
+              f"Run `uv run python evals/case_ratchet.py check` on the proposal before you merge it: a case must fail on the version that erred.", file=sys.stderr)
+        for s in out["skipped"]:
+            print(f"jade: skipped {s['kind']} {s['decision_id'] or ''} (rule {s['rule_id']}): {s['why']}", file=sys.stderr)
+        if a.out and diff:
+            print(f"wrote {learn.write_out(a.out, diff)}")
+        elif diff:
+            print(diff, end="")
+        return 0
+    except (OSError, ValueError, learn.WriteRefused) as e:
+        print(f"jade: {e}", file=sys.stderr)
+        return 2
+
+
 def _maintain(a) -> int:
     """Daily job: expiries, retention, drift canary, miner. Prints one JSON line for the log."""
     from . import decide, improve, ops, permits
@@ -814,6 +855,19 @@ def build_parser() -> argparse.ArgumentParser:
     gh = sub.add_parser("git-hook", help="the standalone pre-push guard for the default branch (SI-08): `script` prints it, `check <repo>` says whether a repository runs it").add_subparsers(dest="action", required=True)
     gh.add_parser("script", help="print the self-contained POSIX sh pre-push hook (installs nothing; install it yourself, docs/08 section 2.7)")
     gh.add_parser("check", help="report whether the pre-push hook git runs for REPO is the JADE guard; exit 1 when it is not").add_argument("repo")
+    pl = sub.add_parser("learn", help="reports for you to read, never applied (V6-32): what stopped calls, a regression case for each call you marked wrong, a table of asks and errors per rule").add_subparsers(dest="action", required=True)
+    for name, text in (("blockers", "what stopped calls, by safety invariant id and rule id; --sample N lists a fixed sample for your precision check"),
+                       ("policy", "per rule: asks, answers and wrong marks side by side, with a word of advice; changes nothing"),
+                       ("cases", "a diff that adds a regression case for each call you marked wrong (and for each record of --records FILE); applies nothing")):
+        pn = pl.add_parser(name, help=text)
+        pn.add_argument("--days", type=int, default=30, help="the window in days (default 30; 0 is all time)")
+        if name != "cases":
+            pn.add_argument("--json", action="store_true", help="one line of JSON with sorted keys")
+        if name == "blockers":
+            pn.add_argument("--sample", type=int, default=0, help="also list N blocker rows, fixed by a seed, ids only")
+        if name == "cases":
+            pn.add_argument("--records", help="a JSONL file of audit false allows or counterfactual false rejects (kind, command, optional rule_id, tool, twin_command)")
+            pn.add_argument("--out", help="write the diff to this new file instead of printing it (never inside the checkout, the policies or the config)")
     sub.add_parser("maintain").add_argument("--offline", action="store_true")
     sub.add_parser("version", help="print the code version, commit, ledger schema version and policy_version").add_argument("--json", action="store_true")
     up = sub.add_parser("upgrade", help="human only: install a release of jade-decision-governance with uv, then run jade check from it; --check only looks")
@@ -879,7 +933,7 @@ def main(argv: list[str] | None = None) -> int:
         print(ops.launchd_plist(a.label), end="")
         return 0
     table = {"permit": _permit, "decide": _decide, "ack": _ack, "question": _question, "route": _route, "fast": _fast, "work": _work,
-             "label": _label, "eval": _eval, "improve": _improve, "hooks": _ops, "gate": _ops, "review": _ops, "knows": _ops, "level": _ops, "claude-md": _ops, "maintain": _maintain, "git-hook": _git_hook}
+             "label": _label, "eval": _eval, "improve": _improve, "hooks": _ops, "gate": _ops, "review": _ops, "knows": _ops, "level": _ops, "claude-md": _ops, "maintain": _maintain, "git-hook": _git_hook, "learn": _learn}
     return table[a.cmd](a)
 
 
