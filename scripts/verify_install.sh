@@ -138,9 +138,11 @@ set -e
 [ "$rc" = 1 ] || { cat "$WORK/check.out" "$WORK/check.err" >&2; fail "jade check exited $rc, expected 1 (the hooks are not installed in a fresh HOME)"; }
 sed -n 's/^FAIL  \([^:]*\): .*/\1/p' "$WORK/check.out" >"$WORK/check.failed"
 [ "$(cat "$WORK/check.failed")" = "hooks installed" ] || { cat "$WORK/check.out" >&2; fail "jade check failed rows: $(tr '\n' ',' <"$WORK/check.failed"), expected only 'hooks installed'"; }
-for row in "ledger writable" "policies load" "ledger integrity" "code version" "question registry" "jev shim" "maintain job"; do
+for row in "ledger writable" "policies load" "ledger integrity" "code version" "question registry" "jev shim"; do
     grep -q "^ok    $row: " "$WORK/check.out" || { cat "$WORK/check.out" >&2; fail "jade check has no ok row '$row'"; }
 done
+# a fresh HOME has no maintain job: a warning (not installed), never ok and never a failure (V6-10)
+grep -q "^WARN  maintain job: not installed" "$WORK/check.out" || { cat "$WORK/check.out" >&2; fail "jade check has no 'WARN  maintain job: not installed' row"; }
 grep -q 'installed package (no git checkout)' "$WORK/check.out" || fail "jade check did not recognise an installed package"
 step "jade check ok: the only failing row is 'hooks installed'"
 

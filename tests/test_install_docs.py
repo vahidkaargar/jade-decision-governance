@@ -51,7 +51,7 @@ def test_the_install_line_pins_a_release_tag_not_older_than_the_version():
 
 def test_every_check_row_has_a_troubleshooting_entry():
     rows = {name for name, _ok, _detail in ops.check(live=False)} | PROVIDER_AND_CONDITIONAL_ROWS
-    documented = set(re.findall(r"^\| `([a-z ]+)` \|", _section(6), re.M))
+    documented = set(re.findall(r"^\| `([a-z -]+)` \|", _section(6), re.M))   # `pre-push guard` has a hyphen
     assert rows <= documented, f"rows without a troubleshooting entry: {sorted(rows - documented)}"
     assert documented <= rows, f"troubleshooting entries for rows `jade check` does not print: {sorted(documented - rows)}"
 
