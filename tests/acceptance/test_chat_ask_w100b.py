@@ -495,10 +495,10 @@ def test_n14_a_risky_part_that_is_too_long_or_cannot_be_found_says_to_read_it_el
     from jade import askchat
     a = SimpleNamespace(seg_keys=["git reset --hard HEAD~1"])
     out = askchat.command_text(a, "echo " + "a" * 600 + " ; echo " + "b" * 600)   # no piece has the key: the gate read the call some other way
-    assert "cannot show which part" in out and "terminal" in out
+    assert "cannot show which part" in out and "JADE rated this:\ngit reset --hard HEAD~1" in out and "Deny it" in out
     key = " ".join(["git", "reset", "--hard", "HEAD~1"] + ["-x"] * 1000)
     out = askchat.command_text(SimpleNamespace(seg_keys=[key]), "echo " + "a" * 500 + " ; " + key + " ; echo " + "b" * 500)
-    assert "terminal" in out and "not shown above" in out
+    assert "Deny it" in out and "not shown above" in out
 
 
 def test_n14_a_command_too_big_to_search_says_to_read_it_elsewhere():
@@ -506,7 +506,7 @@ def test_n14_a_command_too_big_to_search_says_to_read_it_elsewhere():
 
     from jade import askchat
     out = askchat.command_text(SimpleNamespace(seg_keys=["git reset --hard HEAD~1"]), "echo " + "a" * 30000 + " ; git reset --hard HEAD~1")
-    assert "too long" in out and "terminal" in out and len(out) < 2000
+    assert "cannot show which part" in out and "JADE rated this:" in out and "Deny it" in out and len(out) < 2000
 
 
 def test_n14_a_visible_risky_part_adds_no_extra_block(level_high):
@@ -524,3 +524,51 @@ def test_n14_the_dialog_shows_the_hidden_risky_part_too():
 def test_a_short_command_is_shown_as_it_is(level_high):
     q = shown(token_of(hooks.pretool(call()).stderr))["question"]
     assert "Command:\n" + CMD + "\n" in q
+
+
+def _risky_part_is_not_lost(cmd, key_word):
+    """Through the real gate: the question for a long call never leaves a rated command out. Either the command is shown again in full, or the question says it cannot find it
+    and prints the gate's own reading of it."""
+    from jade import askchat
+    a = _assess(cmd)
+    assert a.seg_keys and len(cmd) > 1000, a.seg_keys
+    out = askchat.command_text(a, cmd)
+    assert "characters not shown" in out
+    tail = out.partition("characters not shown")[2]
+    assert ("not shown above" in tail and key_word in tail) or ("cannot show which part" in tail and key_word in tail), tail
+    return tail
+
+
+def test_n14_through_the_real_gate_a_quoted_separator_inside_the_risky_part():
+    cmd = "echo " + "a" * 500 + ' ; rm -rf "/tmp/x; y/z" ; echo ' + "b" * 500
+    _risky_part_is_not_lost(cmd, "rm -rf")
+
+
+def test_n14_through_the_real_gate_a_backslash_line_break_inside_the_risky_part():
+    cmd = "echo " + "a" * 500 + " ; git reset \\\n--hard HEAD~1 ; echo " + "b" * 500
+    _risky_part_is_not_lost(cmd, "git reset")
+
+
+def test_n14_through_the_real_gate_a_here_document_before_the_risky_part():
+    cmd = "cat <<'EOF' > /tmp/jade-note.txt\n" + ("line of text\n" * 80) + "EOF\ngit reset --hard HEAD~1\n" + "echo " + "b" * 500
+    _risky_part_is_not_lost(cmd, "git reset")
+
+
+def test_n14_through_the_real_gate_a_plain_risky_part_is_found_and_shown_once():
+    tail = _risky_part_is_not_lost("echo " + "a" * 500 + " ; git reset --hard HEAD~1 ; echo " + "b" * 500, "git reset --hard HEAD~1")
+    assert "not shown above" in tail and "cannot show which part" not in tail
+
+
+def test_the_scope_options_and_lines_have_no_raw_bidi_characters_when_the_folder_name_has_them(tmp_path):
+    from jade import askchat, scopes
+    root = tmp_path / "proj\u202ex\u2067y"
+    (root / ".git").mkdir(parents=True)
+    (root / ".git" / "config").write_text('[core]\n\tbare = false\n[remote "origin"]\n\turl = https://github.com/owner/repoA.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n')
+    merge = "gh pr merge 940 --repo github.com/owner/repoA --squash"
+    a = _assess(merge)
+    offered = scopes.offered(a, "Bash", {"command": merge}, {}, str(root))
+    assert offered, "the test folder should be offered a scope"
+    q = askchat.question_for("0123456789ab", a, "Bash", {"subject": merge, "cwd": str(root)}, offered)
+    _no_raw(q["question"])
+    for o in q["options"]:
+        _no_raw(o["label"] + o["description"])

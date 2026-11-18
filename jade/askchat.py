@@ -34,7 +34,7 @@ TOKEN = re.compile(r"\[jade:ask_([0-9a-f]{12})\]")
 HEAD_CHARS, TAIL_CHARS = 450, 150
 GATED_CAP = 600        # a rated command that the clip hides is shown again up to this many characters
 GATED_PARTS = 3        # ... and at most this many of them
-LOCATE_MAX = 20000     # a longer text is not searched for the rated part: the question says to read the call in the terminal
+LOCATE_MAX = 20000     # a longer text is not searched for the rated part: the question shows the gate's own reading instead
 DENY_CAP = 3            # the 3rd Deny of one call is a plain refusal: the human has answered, asking again is pressure
 EXPIRE_PAUSE = 30       # asks that expired unanswered, in the window below and since the last answer, pause asking for the session
 PAUSE_WINDOW_S = 3600
@@ -99,28 +99,40 @@ def _hidden_gated(keys: set[str], text: str) -> tuple[list[tuple[int, int]], boo
     return hidden, keys <= found
 
 
+READ_ELSEWHERE = "Deny it and ask the agent to run the risky command on its own, so that you can read all of it."
+KEY_CAP = 200
+
+
+def _gate_reading(keys: set[str]) -> str:
+    """The commands the gate rated, in its own words (the canonical key: the program without its folder, launcher prefixes gone, every argument kept)."""
+    shown = sorted(keys)[:GATED_PARTS]
+    out = "\n".join(show_safely(k[:KEY_CAP], one_line=True) + (" ..." if len(k) > KEY_CAP else "") for k in shown)
+    return out + (f"\n... and {len(keys) - len(shown)} more" if len(keys) > len(shown) else "")
+
+
 def command_text(a, text: str) -> str:
     """The command as the human sees it: clipped, with every control, bidi and zero-width character written out. When the clip hides a part that the gate rated, that part is
-    shown again in full (up to GATED_CAP characters); when it cannot be shown or found, the text says so and says where to read the call (V6-09)."""
+    shown again in full (up to GATED_CAP characters). When this cannot find the part in the text (a quote, a line break or a here-document changes where a command starts), or the
+    text is too long to search, the gate's own reading of what it rated is shown instead, and the question says that the whole text is not shown (V6-09)."""
     if _short(text):
         return show_safely(text)
     out = clip(text)
     keys = set(getattr(a, "seg_keys", None) or [])
-    if not keys:
-        return out + "\nJADE cannot show which part of this call is risky. Read the whole call in the terminal before you allow it, or Deny it."
     if len(text) > LOCATE_MAX:
-        return out + "\nThis call is too long for JADE to find the risky part. Read the whole call in the terminal before you allow it, or Deny it."
-    hidden, complete = _hidden_gated(keys, text)
+        hidden, complete = [], False
+    else:
+        hidden, complete = _hidden_gated(keys, text) if keys else ([], False)
     if not complete:
-        out += "\nJADE cannot show which part of this call is risky. Read the whole call in the terminal before you allow it, or Deny it."
+        out += "\nJADE cannot show which part of this call is risky, and the middle of it is not shown. "
+        out += (f"JADE rated this:\n{_gate_reading(keys)}\n" if keys else "") + READ_ELSEWHERE
     for s, e in hidden[:GATED_PARTS]:
         part = text[s:e].strip()
         cut = len(part) > GATED_CAP
         out += "\nA risky command in the part that is not shown above, " + ("its start" if cut else "in full") + f":\n{show_safely(part[:GATED_CAP])}"
         if cut:
-            out += f"\n... {len(part) - GATED_CAP} more characters of it are not shown. Read the whole call in the terminal before you allow it, or Deny it."
+            out += f"\n... {len(part) - GATED_CAP} more characters of it are not shown. {READ_ELSEWHERE}"
     if len(hidden) > GATED_PARTS:
-        out += f"\n{len(hidden) - GATED_PARTS} more risky commands are in the part that is not shown. Read the whole call in the terminal before you allow it, or Deny it."
+        out += f"\n{len(hidden) - GATED_PARTS} more risky commands are in the part that is not shown. {READ_ELSEWHERE}"
     return out
 
 
