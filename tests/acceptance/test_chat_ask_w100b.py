@@ -420,3 +420,107 @@ def test_an_install_without_the_matcher_is_reported_as_a_gap(tmp_path, monkeypat
     p.write_text(json.dumps(data))
     assert "AskUserQuestion" in (ops.pretool_matcher_gaps() or [])
     assert ts()
+
+
+# ------------------------------------------------------------------ V6-09: text is shown safely (N13, N14)
+
+HIDDEN = "‮⁧​⁦‪\x1b\x07"   # right-to-left override, isolate, zero-width space, more bidi, ESC, BEL
+
+
+def _assess(cmd):
+    from jade import policy
+    return policy.assess("Bash", {"command": cmd}, cwd="/tmp")
+
+
+def _no_raw(text):
+    from jade import util
+    bad = [c for c in text if c != "\n" and util.show_safely(c) != c]
+    assert not bad, [hex(ord(c)) for c in bad]
+
+
+def test_n13_bidi_control_and_zero_width_characters_are_written_out_in_the_chat_question(level_high):
+    q = shown(token_of(hooks.pretool(call("git reset --hard HEAD~1 # a" + HIDDEN + "b")).stderr))["question"]
+    _no_raw(q)
+    for esc in ("\\u202e", "\\u2067", "\\u200b", "\\x1b", "\\x07"):
+        assert esc in q, esc
+
+
+def test_n13_the_dialog_text_writes_them_out_too():
+    from jade import askdialog
+    cmd = "git reset --hard HEAD~1 # a" + HIDDEN + "b"
+    text = askdialog.text_for(_assess(cmd), "Bash", {"subject": cmd, "cwd": "/tmp"})
+    _no_raw(text)
+    assert "\\u202e" in text
+
+
+def test_n13_the_tool_name_and_the_folder_and_the_content_are_written_out():
+    from jade import askchat
+    q = askchat.question_for("0123456789ab", _assess(CMD), "Bash‮",
+                             {"subject": CMD, "cwd": "/tmp/a⁧b", "content": {"length": 9, "sha256": "ab" * 32, "text": "x​y"}})["question"]
+    _no_raw(q)
+    assert "\\u202e" in q and "\\u2067" in q and "\\u200b" in q
+
+
+def test_a_zero_width_non_joiner_is_kept_in_prose_and_written_out_elsewhere():
+    from jade import util
+    fa = "می‌خواهم"
+    assert util.show_safely(fa, prose=True) == fa
+    assert util.show_safely(fa) == "می\\u200cخواهم"
+    assert util.show_safely("a‮b", prose=True) == "a\\u202eb"   # prose keeps only the half-space, not the overrides
+
+
+def test_the_terminal_permit_screen_and_printable_use_the_same_function():
+    from jade import permits, util
+    s = "x‮y‌z\x1b\n\tw"
+    assert permits.printable(s) == util.show_safely(s) == "x\\u202ey\\u200cz\\x1b\n\\x09w"
+    assert util.show_safely("a\tb\n c", one_line=True) == "a b c"
+
+
+def _middle_command():
+    return "echo " + "a" * 500 + " ; git reset --hard HEAD~1 ; echo " + "b" * 500
+
+
+def test_n14_a_risky_part_in_the_clipped_middle_is_shown_in_full(level_high):
+    cmd = _middle_command()
+    assert len(cmd) > 1000
+    q = shown(token_of(hooks.pretool(call(cmd)).stderr))["question"]
+    head, sep, rest = q.partition("characters not shown")
+    assert sep and "git reset --hard HEAD~1" not in head   # it is in the hidden middle
+    assert "git reset --hard HEAD~1" in rest and "not shown above" in rest   # and it is shown again, in full, with a line that says why
+
+
+def test_n14_a_risky_part_that_is_too_long_or_cannot_be_found_says_to_read_it_elsewhere():
+    from types import SimpleNamespace
+
+    from jade import askchat
+    a = SimpleNamespace(seg_keys=["git reset --hard HEAD~1"])
+    out = askchat.command_text(a, "echo " + "a" * 600 + " ; echo " + "b" * 600)   # no piece has the key: the gate read the call some other way
+    assert "cannot show which part" in out and "terminal" in out
+    key = " ".join(["git", "reset", "--hard", "HEAD~1"] + ["-x"] * 1000)
+    out = askchat.command_text(SimpleNamespace(seg_keys=[key]), "echo " + "a" * 500 + " ; " + key + " ; echo " + "b" * 500)
+    assert "terminal" in out and "not shown above" in out
+
+
+def test_n14_a_command_too_big_to_search_says_to_read_it_elsewhere():
+    from types import SimpleNamespace
+
+    from jade import askchat
+    out = askchat.command_text(SimpleNamespace(seg_keys=["git reset --hard HEAD~1"]), "echo " + "a" * 30000 + " ; git reset --hard HEAD~1")
+    assert "too long" in out and "terminal" in out and len(out) < 2000
+
+
+def test_n14_a_visible_risky_part_adds_no_extra_block(level_high):
+    q = shown(token_of(hooks.pretool(call("git reset --hard HEAD~1 ; echo " + "b" * 1000)).stderr))["question"]
+    assert "characters not shown" in q and "not shown above" not in q and "cannot show which part" not in q
+
+
+def test_n14_the_dialog_shows_the_hidden_risky_part_too():
+    from jade import askdialog
+    cmd = _middle_command()
+    text = askdialog.text_for(_assess(cmd), "Bash", {"subject": cmd, "cwd": "/tmp"})
+    assert "not shown above" in text and text.count("git reset --hard HEAD~1") == 1
+
+
+def test_a_short_command_is_shown_as_it_is(level_high):
+    q = shown(token_of(hooks.pretool(call()).stderr))["question"]
+    assert "Command:\n" + CMD + "\n" in q

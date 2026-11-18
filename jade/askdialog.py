@@ -22,7 +22,7 @@ import sys
 from datetime import timedelta
 
 from . import askchat, askplain, memory, paths
-from .util import canonical, new_id, now, ts
+from .util import canonical, new_id, now, show_safely, ts
 
 DIALOG_WAIT_S = 120       # how long the dialog stays up before it gives up
 ALARM_MARGIN_S = 10       # the hook alarm and the host timeout sit this far above the wait
@@ -89,11 +89,11 @@ def text_for(a, tool: str, ctx: dict) -> str:
     lines = [*askplain.header(a, tool), f"JADE gate: {a.level} risk, rule {a.rule_id}. A subagent wants to run this call."]
     if a.ho_ids:
         lines.append("Classes: " + ", ".join(a.ho_ids) + " (only you can decide these)")
-    lines.append(f"Tool: {tool}")
-    lines.append("Command:\n" + askchat._clip(str(ctx.get("subject") or a.subject)))
+    lines.append(f"Tool: {show_safely(tool)}")
+    lines.append("Command:\n" + askchat.command_text(a, str(ctx.get("subject") or a.subject)))
     content = ctx.get("content")
     if isinstance(content, dict):
-        lines.append(f"It also writes {content.get('length')} characters of content (sha256 {str(content.get('sha256'))[:12]}). First part:\n{askchat._clip(str(content.get('text') or ''))}")
+        lines.append(f"It also writes {content.get('length')} characters of content (sha256 {str(content.get('sha256'))[:12]}). First part:\n{askchat.clip(str(content.get('text') or ''))}")
     lines.append("Allow this one call? Single use, this session only. Deny, or no answer, blocks it.")
     return "\n".join(lines)
 

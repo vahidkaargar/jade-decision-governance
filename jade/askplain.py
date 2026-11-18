@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 
 from . import policy, shellnorm
+from .util import show_safely
 
 # One plain sentence per rule id of policies/risk.yaml (tests check that none is missing and that none is longer than 20 words).
 RISK_TEXT: dict[str, str] = {
@@ -333,7 +334,7 @@ def _render(key: str) -> str:
         if m := rx.search(key):
             line = m.expand(text)
             return _merge_line(key, line) if _MERGE_KEY.match(key) else line
-    return "Run: " + key[:FALLBACK_CHARS]
+    return "Run: " + show_safely(key[:FALLBACK_CHARS], one_line=True)
 
 
 def _plain_push_call(subject: str) -> bool:
@@ -358,13 +359,13 @@ def what_line(a, tool: str) -> str:
         plain = _plain_push_call(getattr(a, "subject", "") or "")
         return " ".join(dict.fromkeys(_WORST_PUSH if not plain and (k == "git push" or k.startswith("git push ")) else _render(k) for k in keys))
     if tool.startswith("mcp__"):
-        parts = tool.split("__")
-        return f"Use {parts[1]}: {parts[-1].replace('_', ' ')}." if len(parts) > 2 else f"Use the tool {tool}."
+        parts = show_safely(tool, one_line=True).split("__")
+        return f"Use {parts[1]}: {parts[-1].replace('_', ' ')}." if len(parts) > 2 else f"Use the tool {show_safely(tool, one_line=True)}."
     if tool in ("Write", "MultiEdit", "NotebookEdit"):
         return "Write a file."
     if tool == "Edit":
         return "Edit a file."
-    return "Run a shell command." if tool in ("Bash", "PowerShell") else f"Use the tool {tool}."
+    return "Run a shell command." if tool in ("Bash", "PowerShell") else f"Use the tool {show_safely(tool, one_line=True)}."
 
 
 def other_count(a) -> int:

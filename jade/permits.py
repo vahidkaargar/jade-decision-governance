@@ -19,13 +19,12 @@ import os
 import re
 import secrets
 import sqlite3
-import unicodedata
 from pathlib import Path
 from types import SimpleNamespace
 
 from . import ledger, paths, policy, redact, schemas, signing
 from .state_machine import TERMINAL as TERMINAL_DECISION
-from .util import at_least, canonical, human_tty_refusal, new_id, parse_ts, sha256, ts, ts_in, user
+from .util import at_least, canonical, human_tty_refusal, new_id, parse_ts, sha256, show_safely, ts, ts_in, user
 
 DEFAULT_TTL_S = 1800
 MAX_SUBJECT = 20000        # the most command text a permit stores and the approval screen shows; a longer command is never approved
@@ -387,18 +386,9 @@ def get(path, permit_id: str):
 
 # ---- the approval screen -------------------------------------------------------------------------------
 def printable(text: str) -> str:
-    """The text with every character that could redraw the terminal or hide itself written out as an escape: control characters (ESC, CR,
-    backspace), format characters (bidirectional overrides, zero-width), unpaired surrogates, line and paragraph separators and every space
-    other than U+0020. A newline stays a newline so that a multi-line command reads as one."""
-    out = []
-    for ch in text:
-        cat = unicodedata.category(ch)
-        if ch == "\n" or (ch != "\t" and cat not in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp") and (cat != "Zs" or ch == " ")):
-            out.append(ch)
-        else:
-            n = ord(ch)
-            out.append(f"\\x{n:02x}" if n < 0x100 else f"\\u{n:04x}" if n < 0x10000 else f"\\U{n:08x}")
-    return "".join(out)
+    """The text with every character that could redraw the terminal or hide itself written out as an escape. It is `util.show_safely`, the one function that the
+    terminal screen, the chat question, the dialog, `jade review` and `jade knows` share (V6-09). Use it on a command, a path or content, not on prose (`prose=True`)."""
+    return show_safely(text)
 
 
 def verify_scope(p, raw: dict | None = None) -> dict:
@@ -498,7 +488,7 @@ def review_text(p, now_s: str | None = None, raw: dict | None = None) -> str:
     secrets = (f"Secrets  {ctx['revealed']} secret-shaped value(s) are shown below in full, for you only: the ledger stores them redacted, and the raw call is kept in a "
                "private file that is deleted when this permit is approved, revoked or expires\n") if ctx.get("revealed") else ""
     return (f"Permit   {p.permit_id}   risk {p.risk_level}   environment {p.environment}   {age}\n{secrets}"
-            f"Rule     {printable(str(ctx.get('rule', '?')))}: {printable(str(ctx.get('rationale', '')))}\n"
+            f"Rule     {printable(str(ctx.get('rule', '?')))}: {show_safely(str(ctx.get('rationale', '')), prose=True)}\n"
             f"Tool     {printable(ctx['tool'])}   cwd {printable(str(ctx.get('cwd', '')))}\n"
             f"Plan     sha256 {p.plan_hash[:12]}   {ctx.get('length', len(ctx['subject']))} characters, shown in full below\n"
             f"Command\n  | {body}\n{content}"

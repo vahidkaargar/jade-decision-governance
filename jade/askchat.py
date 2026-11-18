@@ -21,9 +21,9 @@ import json
 import re
 from datetime import timedelta
 
-from . import askplain, memory, paths, policy
+from . import askplain, memory, paths, policy, shellnorm
 from . import scopes as scopes_mod
-from .util import canonical, new_id, now, sha256, ts
+from .util import canonical, new_id, now, sha256, show_safely, ts
 
 CHAT_MODES = ("auto", "bypassPermissions")
 RUN_FIELDS_IGNORED = frozenset({"command", "cmd", "script", "description"})   # the text (the plan hash covers it) and the display line
@@ -32,6 +32,9 @@ GRANT_TTL_S = 600
 PERMIT_ONLY = frozenset({"HO-wiring", "HO-checkout-install", "HO-settings-shadow", "HO-state-path"})   # live JADE wiring: a human types `jade permit approve`
 TOKEN = re.compile(r"\[jade:ask_([0-9a-f]{12})\]")
 HEAD_CHARS, TAIL_CHARS = 450, 150
+GATED_CAP = 600        # a rated command that the clip hides is shown again up to this many characters
+GATED_PARTS = 3        # ... and at most this many of them
+LOCATE_MAX = 20000     # a longer text is not searched for the rated part: the question says to read the call in the terminal
 DENY_CAP = 3            # the 3rd Deny of one call is a plain refusal: the human has answered, asking again is pressure
 EXPIRE_PAUSE = 30       # asks that expired unanswered, in the window below and since the last answer, pause asking for the session
 PAUSE_WINDOW_S = 3600
@@ -53,10 +56,72 @@ def run_fields(tool: str, tool_input) -> dict:
             if k not in RUN_FIELDS_IGNORED and v not in (None, False, "", 0, [], {})}
 
 
-def _clip(text: str) -> str:
-    if len(text) <= HEAD_CHARS + TAIL_CHARS + 100:
-        return text
-    return f"{text[:HEAD_CHARS]}\n... {len(text) - HEAD_CHARS - TAIL_CHARS} characters not shown ...\n{text[-TAIL_CHARS:]}"
+def _short(text: str) -> bool:
+    return len(text) <= HEAD_CHARS + TAIL_CHARS + 100
+
+
+def clip(text: str) -> str:
+    """A path, a folder or a content text for the human: clipped, and every control, bidi and zero-width character written out (V6-09)."""
+    if _short(text):
+        return show_safely(text)
+    return (f"{show_safely(text[:HEAD_CHARS])}\n... {len(text) - HEAD_CHARS - TAIL_CHARS} characters not shown ...\n{show_safely(text[-TAIL_CHARS:])}")
+
+
+_clip = clip   # the old name, for any caller outside this package
+
+
+def _pieces(text: str):
+    """(start, end) of each simple command of a shell text, split where the gate splits."""
+    start = 0
+    for m in shellnorm.SPLIT.finditer(text):
+        yield start, m.start()
+        start = m.end()
+    yield start, len(text)
+
+
+def _hidden_gated(keys: set[str], text: str) -> tuple[list[tuple[int, int]], bool]:
+    """Which commands of `text` the gate rated, and are not wholly in the head or the tail that the question shows; and whether every rated key was found in the text at all.
+    Never raises: a text the gate read in a way that this cannot follow gives (no pieces, False), and the question then says to read the call elsewhere."""
+    hidden: list[tuple[int, int]] = []
+    found: set[str] = set()
+    try:
+        for s, e in _pieces(text):
+            seg = text[s:e].strip()
+            if not seg:
+                continue
+            key = policy._segment_key(policy._bare(seg))
+            if key in keys:
+                found.add(key)
+                if not (e <= HEAD_CHARS or s >= len(text) - TAIL_CHARS):
+                    hidden.append((s, e))
+    except Exception:   # noqa: BLE001 - a command the segmenter cannot read is never a reason to show less
+        return [], False
+    return hidden, keys <= found
+
+
+def command_text(a, text: str) -> str:
+    """The command as the human sees it: clipped, with every control, bidi and zero-width character written out. When the clip hides a part that the gate rated, that part is
+    shown again in full (up to GATED_CAP characters); when it cannot be shown or found, the text says so and says where to read the call (V6-09)."""
+    if _short(text):
+        return show_safely(text)
+    out = clip(text)
+    keys = set(getattr(a, "seg_keys", None) or [])
+    if not keys:
+        return out + "\nJADE cannot show which part of this call is risky. Read the whole call in the terminal before you allow it, or Deny it."
+    if len(text) > LOCATE_MAX:
+        return out + "\nThis call is too long for JADE to find the risky part. Read the whole call in the terminal before you allow it, or Deny it."
+    hidden, complete = _hidden_gated(keys, text)
+    if not complete:
+        out += "\nJADE cannot show which part of this call is risky. Read the whole call in the terminal before you allow it, or Deny it."
+    for s, e in hidden[:GATED_PARTS]:
+        part = text[s:e].strip()
+        cut = len(part) > GATED_CAP
+        out += "\nA risky command in the part that is not shown above, " + ("its start" if cut else "in full") + f":\n{show_safely(part[:GATED_CAP])}"
+        if cut:
+            out += f"\n... {len(part) - GATED_CAP} more characters of it are not shown. Read the whole call in the terminal before you allow it, or Deny it."
+    if len(hidden) > GATED_PARTS:
+        out += f"\n{len(hidden) - GATED_PARTS} more risky commands are in the part that is not shown. Read the whole call in the terminal before you allow it, or Deny it."
+    return out
 
 
 ALLOW, DENY = "Allow", "Deny"
@@ -72,13 +137,13 @@ def question_for(ask_id: str, a, tool: str, ctx: dict, scopes: list | None = Non
     lines = [f"[jade:ask_{ask_id}] JADE gate: {a.level} risk, rule {a.rule_id}.", *askplain.header(a, tool)]
     if a.ho_ids:
         lines.append("Classes: " + ", ".join(a.ho_ids) + " (only you can decide these)")
-    lines.append(f"Tool: {tool}")
-    lines.append("Command:\n" + _clip(str(ctx.get("subject") or a.subject)))
+    lines.append(f"Tool: {show_safely(tool)}")
+    lines.append("Command:\n" + command_text(a, str(ctx.get("subject") or a.subject)))
     content = ctx.get("content")
     if isinstance(content, dict):
-        lines.append(f"It also writes {content.get('length')} characters of content (sha256 {str(content.get('sha256'))[:12]}). First part:\n{_clip(str(content.get('text') or ''))}")
+        lines.append(f"It also writes {content.get('length')} characters of content (sha256 {str(content.get('sha256'))[:12]}). First part:\n{clip(str(content.get('text') or ''))}")
     if ctx.get("run_fields"):
-        lines.append("It also runs with: " + ", ".join(f"{k}={v}" for k, v in ctx["run_fields"].items()))
+        lines.append("It also runs with: " + ", ".join(f"{show_safely(str(k))}={show_safely(str(v))}" for k, v in ctx["run_fields"].items()))
     options = [{"label": ALLOW, "description": "Run this one call once. It is not remembered."},
                {"label": DENY, "description": "Do not run it. The agent is told you said no."}]
     seen: set[str] = set()
@@ -89,7 +154,7 @@ def question_for(ask_id: str, a, tool: str, ctx: dict, scopes: list | None = Non
         seen.add(label)
         lines.append(f"{label}: {sc.label}")
         options.append({"label": label, "description": f"{sc.covers} {SUGGEST_LATER}"})
-    lines.append(f"Folder: {_clip(str(ctx.get('cwd') or '(not given)'))}")
+    lines.append(f"Folder: {clip(str(ctx.get('cwd') or '(not given)'))}")
     lines.append("Allow this one call? It covers exactly this text, this tool, this folder and any run settings shown above. Single use, 10 minutes, this session only. "
                  "A changed text, prefix or folder asks again.")
     return {"question": "\n".join(lines), "header": "JADE gate", "multiSelect": False, "options": options}
@@ -193,7 +258,7 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
     keyed = memory.keyed_fp(a, fp)
     if extras:   # how the call runs is part of the call the human allows: the key, the open question and the question text all carry it
         keyed = {**keyed, "_run": sha256(canonical(extras))[:16]}
-        ctx["run_fields"] = {k: _clip(str(v))[:80] for k, v in extras.items()}
+        ctx["run_fields"] = {k: str(v)[:80] for k, v in extras.items()}
     session, hold, fpj = event["session_id"], a.hold_key or a.plan_hash, canonical(keyed)
     _expire(db)
     try:

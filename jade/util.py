@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import sys
+import unicodedata
 from datetime import UTC, datetime, timedelta
 from typing import NamedTuple
 
@@ -297,6 +298,31 @@ def language(text: str | None) -> str:
         return "unknown"
     share = sum(1 for c in letters if ord(c) in ARABIC) / len(letters)
     return "fa" if share >= 0.6 else "en" if share <= 0.05 else "mixed"
+
+
+_UNSAFE_CATEGORIES = frozenset(("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"))   # control, format (bidi, zero-width), surrogate, private use, unassigned, line and paragraph separator
+ZWNJ = "‌"   # the Persian half-space: the one format character that real prose needs
+
+
+def show_safely(text: str | None, *, prose: bool = False, one_line: bool = False) -> str:
+    """The text with every character that could redraw the screen or hide itself written out as an escape (`\\x1b`, `\\u202e`): control characters (ESC, CR, backspace),
+    format characters (bidirectional overrides and isolates, zero-width), unpaired surrogates, private use, unassigned, line and paragraph separators, and every space other
+    than U+0020. A newline stays, so a multi-line command reads as one. This is the one function for any command, path or content that a human reads before deciding (V6-09).
+    `prose=True` also keeps U+200C, so Persian words keep their half-space: use it for sentences, never for a command, a path or content. `one_line=True` then turns each
+    run of white space (a line break, a tab) into one space. None gives an empty string."""
+    out = []
+    for ch in text or "":
+        if ch == "\n" or (one_line and ch == "\t") or (prose and ch == ZWNJ):
+            out.append(ch)
+            continue
+        cat = unicodedata.category(ch)
+        if cat in _UNSAFE_CATEGORIES or (cat == "Zs" and ch != " "):
+            n = ord(ch)
+            out.append(f"\\x{n:02x}" if n < 0x100 else f"\\u{n:04x}" if n < 0x10000 else f"\\U{n:08x}")
+        else:
+            out.append(ch)
+    shown = "".join(out)
+    return re.sub(r"\s+", " ", shown).strip() if one_line else shown
 
 
 def one_line(text: str | None) -> str:

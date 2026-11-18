@@ -50,7 +50,7 @@ def test_review_confirm_prints_clean_lines():
         db.close()
     out: list[str] = []
     ops.review_confirm(stdin_isatty=True, ask=lambda _="": "no", say=out.append, all_=True)
-    assert any("a [2Kb c d" in x for x in out)
+    assert any("a\\x1b[2Kb\\x07c d" in x for x in out)
     clean(out)
 
 
@@ -64,7 +64,7 @@ def test_knows_list_and_template_print_clean_lines():
     finally:
         db.close()
     listing = ops.knows_list()
-    assert "a [2Kb c d" in listing
+    assert "a\\x1b[2Kb\\x07c d" in listing
     clean(listing)
     tpl = ops.knows_template(rows)
     clean(tpl)
@@ -80,7 +80,7 @@ def test_review_lines_print_clean_lines():
         lines = ops.review_lines(db, None)
     finally:
         db.close()
-    assert any("a [2Kb c d" in x for x in lines)
+    assert any("a\\x1b[2Kb\\x07c d" in x for x in lines)
     clean(lines)
 
 
@@ -229,3 +229,25 @@ def test_knows_edit_two_cd_allows_stay_two_lines():
 def test_knows_edit_a_cd_prefix_on_the_allow_still_prints_it():
     record_call("allow", "cd /p && gh pr merge 940 --squash", confirm=True)
     assert len(edit_and_read()) == 1
+
+
+BIDI = "git reset \u202e--hard\u2067 x\u200b"
+
+
+def test_review_and_knows_write_out_bidi_and_zero_width_characters():
+    """V6-09: a stored label with raw bidi or zero-width characters is shown with each one written out, on one line."""
+    db = ledger.open(timeout=5)
+    try:
+        with db.tx():
+            aid = add(db, label=BIDI)
+            db.confirm_answers([aid])
+            add(db, label=BIDI, scope=False, key="k9", rule="R-07")   # not yet confirmed: `review confirm` lists it
+            db.event(aid, "memory_allowed", detail={"decision_id": "dec_1", "channel": "memory"})
+        lines = ops.review_lines(db, None)
+    finally:
+        db.close()
+    out: list[str] = []
+    ops.review_confirm(stdin_isatty=True, ask=lambda _="": "no", say=out.append, all_=True)
+    for text in ("\n".join(lines), ops.knows_list(), "\n".join(out)):
+        assert "\\u202e" in text and "\\u2067" in text and "\\u200b" in text, text
+        assert not any(c in text for c in "\u202e\u2067\u200b")
