@@ -76,15 +76,20 @@ def _valid_since() -> tuple[str, str]:
     return ts(now() - timedelta(days=CAP_DAYS)), ts(now() - timedelta(days=USE_DAYS))
 
 
-def lookup(db, a, tool: str, tool_input: dict | None, fp: dict | None):
-    """The strong allow row that covers this call, or None."""
+def lookup(db, a, tool: str, tool_input: dict | None, fp: dict | None, cwd: str = ""):
+    """The strong allow row that covers this call, or None. A row matches by the exact key, the class key, or one of the scope keys of this call (jade/scopes.py:
+    computed from the call in front of the gate, so a new flag or another project gives another key). A scope key is matched for `strong` rows only, like the rest."""
+    from . import scopes
+
     exact, cls, el = keys(a, tool, tool_input, fp)
     if el == "never":
         return None
+    scope_keys = scopes.keys_for(a, tool, tool_input, fp, cwd)
     cap, use = _valid_since()
     sql = ("SELECT * FROM human_answers WHERE strength='strong' AND answer='allow' AND confirmed_ts>=? AND COALESCE(last_used_ts, confirmed_ts)>=? "
-           "AND COALESCE(source,'')<>'test' AND (exact_key=?" + (" OR class_key=?" if cls else "") + ") ORDER BY confirmed_ts DESC, rowid DESC LIMIT 1")
-    args = [cap, use, exact] + ([cls] if cls else [])
+           "AND COALESCE(source,'')<>'test' AND (exact_key=?" + (" OR class_key=?" if cls else "") + (f" OR scope_key IN ({','.join('?' * len(scope_keys))})" if scope_keys else "")
+           + ") ORDER BY confirmed_ts DESC, rowid DESC LIMIT 1")
+    args = [cap, use, exact] + ([cls] if cls else []) + scope_keys
     return db.con.execute(sql, args).fetchone()
 
 
@@ -104,7 +109,7 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
         return None
     try:
         with db.tx():
-            row = lookup(db, a, tool, tin if isinstance(tin, dict) else {}, fp)
+            row = lookup(db, a, tool, tin if isinstance(tin, dict) else {}, fp, cwd)
             if row is None:
                 return None
             did = askchat.run_decision(db, a, tool, cwd, event["session_id"], row["answer_id"][-12:], "memory")

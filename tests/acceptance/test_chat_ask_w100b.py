@@ -155,7 +155,7 @@ def test_the_hook_replaces_the_agents_question_with_its_own(level_high):
     q = shown(token)
     assert token in q["question"] and "R-11" in q["question"] and CMD in q["question"]
     assert "totally safe" not in q["question"]
-    assert [o["label"] for o in q["options"]] == ["Allow", "Deny"]
+    assert [o["label"] for o in q["options"]] == ["Allow", "Deny", "Allow, suggest for any project"]   # cwd /tmp is no project: only the any-project scope (Task 5)
     assert asks()[0]["status"] == "SHOWN"
 
 

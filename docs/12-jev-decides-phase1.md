@@ -184,3 +184,24 @@ These need your approval; `jade claude-md apply` and the skill are yours to chan
 
 **continuous-flow skill, rule 8.** Proposed: "When JADE lets a call run on the human's behalf (a confirmed answer or Jev), carry on: do not ask the human to confirm it again. When JADE asks, ask once in the chat with the question the hook shows, continue with other work while it waits, and never ask the same thing a second time in other words."
 
+## 12. Clear questions and bigger scopes (next release)
+
+**The question.** The chat question and the dialog now start with plain lines. Line one says what the call does, in simple words. Line two says the risk. A third line, "Also in this call", counts the other commands. The command itself comes after. The text comes only from the gate (`jade/askplain.py`), never from the agent.
+
+**One risky action per call.** If a call joins two risky commands, the question says so and asks the agent to send them one by one. No scope is offered for such a call. The agent rule "Send one risky action per call" is in the skill and in `docs/claude-md-jev-section.md`.
+
+**Scope choices in the chat.** For some calls the question has two more options, "Allow, suggest ...". A click records a hint with a scope. It decides nothing. Nothing runs from it until you run `jade review confirm` in a terminal. The options are:
+
+| Scope | Covers |
+|---|---|
+| `kind_project` | the same kind of command, in this project only |
+| `kind_any` | the same kind of command, in any project |
+| `merge_project` | `gh pr merge N` in one named project, any PR number |
+
+**The merge scope is narrow.** It exists only for one plain `gh pr merge` command in one named project. Only these flags are allowed: `--squash`, `-s`, `--merge`, `-m`, `--rebase`, `-r`, `--subject`, `-t`, `--body`, `-b`, `--match-head-commit`. Any other flag gives no scope: `-R`, `--delete-branch`, `--admin`, `--auto`. `--body-file` and `-F` give no scope too, because they upload a local file to GitHub. A joined call gives no scope too. The scope also names the repository: JADE reads the remote URLs and the `gh repo set-default` choice from the project's git config file. A worktree reads the shared config. If the remotes change, the scope does not match and JADE asks again. If the config cannot be read, there is no merge scope. A project with a per-worktree config file (`config.worktree`) gets no merge scope either, because that file can change a remote. Control characters in a folder name are removed from the scope label. A leading `cd` to another git project gives that project's own scope, which does not match this project's scope. A second `cd`, `pushd`, a subshell, a variable, a missing folder, or a folder that is not a git project gives no scope. No scope ever covers delete, force, tag or release.
+
+**Confirm.** `jade review confirm` shows the scope, how long it lives, and how to undo it. A scope lives 30 days after its last use and never more than 180 days after you confirm it. Undo it with `jade knows rm ID`. `jade knows list` shows the scope label.
+
+**Edit the file.** `jade knows edit` opens a template. It starts with two model sentences, then one line per kind of answer, each with its risk.
+
+**Risk accepted.** A confirmed scope lets a later call of the same key run with no question. Read the scope text before you type yes. See T30 in `docs/05`.

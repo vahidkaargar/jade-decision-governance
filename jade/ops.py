@@ -827,18 +827,18 @@ def review_mark(decision_id: str, mark: str, stdin_isatty: bool | None = None) -
         if not isinstance(ask, dict) or not ask.get("ask_id"):
             raise ValueError("this decision was not answered by an ask or a standing answer, so there is nothing to mark")
         if ask.get("channel") == "memory":
-            answers = db.con.execute("SELECT answer_id, exact_key, class_key FROM human_answers WHERE answer_id=?", (f"ans_{ask['ask_id']}",)).fetchall()
+            answers = db.con.execute("SELECT answer_id, exact_key, class_key, scope_key FROM human_answers WHERE answer_id=?", (f"ans_{ask['ask_id']}",)).fetchall()
         elif ask.get("channel") == "jev":
             ev = db.con.execute("SELECT detail_json FROM events WHERE kind='jev_allowed' AND entity_id=?", (f"call_{ask['ask_id']}",)).fetchone()
             det = json.loads(ev["detail_json"]) if ev and ev["detail_json"] else {}
             answers = [{"answer_id": None, "exact_key": det.get("exact_key"), "class_key": det.get("class_key"), "coarse_key": det.get("coarse_key")}] if det.get("exact_key") else []
         else:
             a = db.con.execute("SELECT hold_key, fingerprints_json FROM asks WHERE ask_id=?", (ask["ask_id"],)).fetchone()
-            answers = db.con.execute("SELECT answer_id, exact_key, class_key FROM human_answers WHERE exact_key=? AND answer='allow'",
+            answers = db.con.execute("SELECT answer_id, exact_key, class_key, scope_key FROM human_answers WHERE exact_key=? AND answer='allow'",
                                      (memory.exact_key(a["hold_key"], a["fingerprints_json"]),)).fetchall() if a else []
         with db.tx():
             db.event(decision_id, "review_mark", guard=f"jade review mark {mark}", actor=f"human:{user()}", detail={"mark": mark, "answer_ids": [r["answer_id"] for r in answers if r["answer_id"]]})
-            retired = sum(db.retire_answers(r["exact_key"], r["class_key"]) for r in answers) if mark == "wrong" else 0
+            retired = sum(db.retire_answers(r["exact_key"], r["class_key"], r["scope_key"] if "scope_key" in r.keys() else None) for r in answers) if mark == "wrong" else 0
             if mark == "wrong" and ask.get("channel") == "jev":
                 from . import proxy
 
@@ -851,6 +851,28 @@ def review_mark(decision_id: str, mark: str, stdin_isatty: bool | None = None) -
 
 def _pending_hints(db) -> list:
     return [r for r in db.human_answers(strength="hint", limit=100000) if r["answer"] == "allow"][::-1]
+
+
+def _confirm_group(r) -> tuple:
+    """(rule, class or exact key, is a class, scope key): the group of `jade review confirm` a hint is shown in. A hint with a scope is grouped by its rule and scope
+    only: one yes makes the scope standing for every call it covers, so all hints of that scope (one per PR for a merge) are one question."""
+    if r["scope_key"]:
+        return (r["rule_id"], None, False, r["scope_key"])
+    return (r["rule_id"], r["class_key"] or r["exact_key"], bool(r["class_key"]), None)
+
+
+def _scope_lines(r) -> list[str]:
+    """The plain-words lines for a hint that carries a scope: what it would become, what it covers (`scopes.COVERS`, the text the chat showed), how long it lasts,
+    how to undo it."""
+    from . import memory, scopes
+
+    lines = [f"Would become standing for: {r['scope_label']} ({memory.USE_DAYS} days after last use)"]
+    covers = scopes.COVERS.get(r["scope_kind"])
+    if covers:
+        lines.append(covers)
+    lines.append(f"Confirming makes this proposal standing. It lasts {memory.USE_DAYS} days after its last use, and never more than {memory.CAP_DAYS} days. "
+                 "Undo it with jade knows rm ID.")
+    return lines
 
 
 def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, all_: bool = False) -> int:
@@ -867,11 +889,16 @@ def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, al
             return 0
         groups: dict[tuple, list] = {}
         for r in rows:
-            groups.setdefault((r["rule_id"], r["class_key"] or r["exact_key"], bool(r["class_key"])), []).append(r)
+            groups.setdefault(_confirm_group(r), []).append(r)
         chosen: list = []
-        for (rule, _, is_class), rs in groups.items():
-            kind = "this kind of call" if is_class else "this exact call only"
-            say(f"{rs[-1]['label'] or '(no text kept)'}  [{rule}]  allowed {len(rs)}x  ->  would be standing for {kind}")
+        for (rule, _, is_class, scope_key), rs in groups.items():
+            if scope_key:
+                say(f"{rs[-1]['label'] or '(no text kept)'}  [{rule}]  allowed {len(rs)}x")
+                for line in _scope_lines(rs[-1]):
+                    say(f"   {line}")
+            else:
+                kind = "this kind of call" if is_class else "this exact call only"
+                say(f"{rs[-1]['label'] or '(no text kept)'}  [{rule}]  allowed {len(rs)}x  ->  would be standing for {kind}")
             if rule in memory.NEVER_RULES:
                 say("   (rule is always asked; confirming it changes nothing)")
             if all_ or ask("  stand for this? [y/N] ").strip().lower() in ("y", "yes"):
@@ -879,7 +906,7 @@ def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, al
         if not chosen:
             say("nothing confirmed")
             return 0
-        say(f"{len(chosen)} answer(s) in {len({(r['rule_id'], r['class_key'] or r['exact_key']) for r in chosen})} group(s) become standing: from now on, at level low or medium, a call that matches "
+        say(f"{len(chosen)} answer(s) in {len({_confirm_group(r) for r in chosen})} group(s) become standing: from now on, at level low or medium, a call that matches "
             f"runs without a question for {memory.USE_DAYS} days after its last use (never more than {memory.CAP_DAYS} days). `jade knows list` shows them, `jade knows rm ID` forgets one.")
         if ask("Type yes to confirm: ").strip() != "yes":
             say("cancelled; nothing changed")
@@ -912,7 +939,8 @@ def knows_list() -> str:
         cap_end = parse_ts(r["confirmed_ts"]) + timedelta(days=memory.CAP_DAYS)
         end = min(x for x in (use_end, cap_end) if x)
         note = "  (near its 180-day end: confirm again to keep it)" if (cap_end - now()) <= timedelta(days=memory.NEAR_CAP_DAYS) else ""
-        out.append(f"{r['answer_id']}  [{r['rule_id']}]  {'kind' if r['class_key'] else 'exact'}  {r['label'] or ''}  stops deciding {ts(end)[:10]}{note}")
+        scope = f"  scope  {r['scope_label']}" if r["scope_label"] else ""
+        out.append(f"{r['answer_id']}  [{r['rule_id']}]  {'kind' if r['class_key'] else 'exact'}  {r['label'] or ''}{scope}  stops deciding {ts(end)[:10]}{note}")
     return "\n".join(out) or "no standing answers"
 
 
@@ -933,22 +961,54 @@ def preferences_path() -> Path:
     return paths.config_dir() / PREFERENCES_FILE
 
 
+KNOWS_MAX_LINES = 40
+KNOWS_LABEL_CHARS = 90
+_KNOWS_MODELS = (
+    "# Example, an ssh host: For ssh <user@host> (the <name> project): allow anything, except <what must stay a question>. Always ask me before <what must stay a question>.",
+    "# Example, code projects: For the <name> projects on GitHub and GitLab: allow reading and writing, like <the commands you use>. "
+    "Always ask me before any delete. Never push to the main branch.",
+)
+
+
+def knows_template(rows) -> str:
+    """The first text of the preferences file (pure): two header lines, two model sentences with placeholders, then one commented line per kind of standing answer.
+    Rows of one scope (same rule and scope key) are one line with the scope label; rows without a scope are grouped by rule and first word and show the newest call.
+    Every line starts with `#`, and there are at most KNOWS_MAX_LINES lines."""
+    from . import askplain
+
+    out = ["# What JADE may decide for you. Write plain sentences; a later release reads this file when it decides in your place.",
+           "# Lines that start with # are ignored.", "#", *_KNOWS_MODELS, "#"]
+    seen: dict[tuple, str] = {}
+    for r in rows:   # newest first, so the first row of a group names it
+        text = r["scope_label"] or r["label"]
+        if r["answer"] != "allow" or not text:
+            continue
+        key = (r["rule_id"], r["scope_key"]) if r["scope_key"] else (r["rule_id"], None, (r["label"] or "").split(" ", 1)[0])
+        if key in seen:
+            continue
+        text = " ".join(text.split())
+        if len(text) > KNOWS_LABEL_CHARS:
+            text = text[:KNOWS_LABEL_CHARS - 3] + "..."
+        seen[key] = f"# I am fine with: {text}  [{r['rule_id']}]  (risk: {askplain.risk_line(r['rule_id'])})"
+    lines = list(seen.values())
+    room = KNOWS_MAX_LINES - len(out)
+    if len(lines) > room:
+        lines = [*lines[:room - 1], "# (more kinds are not shown here: `jade knows list` shows all)"]
+    return "\n".join([*out, *lines])
+
+
 def knows_edit(stdin_isatty: bool | None = None, editor: str | None = None) -> Path:
     """`jade knows edit`: open the preferences file in the human's editor. It starts as a template with one commented-out sentence per standing kind of call."""
     _require_human("jade knows edit", stdin_isatty)
     p = preferences_path()
     if not p.exists():
-        lines = ["# What JADE may decide for you. Write plain sentences; a later release reads this file when it decides in your place.",
-                 "# Lines that start with # are ignored.", ""]
         db = ledger.open(timeout=5)
         try:
-            for r in db.human_answers(strength="strong", limit=1000):
-                if r["answer"] == "allow" and r["label"]:
-                    lines.append(f"# I am fine with: {r['label']}  [{r['rule_id']}]")
+            text = knows_template(db.human_answers(strength="strong", limit=1000))
         finally:
             db.close()
         p.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write(p, "\n".join(lines) + "\n")
+        atomic_write(p, text + "\n")
     subprocess.run([editor or os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi", str(p)], check=False)
     return p
 
