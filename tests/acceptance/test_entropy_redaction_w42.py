@@ -150,6 +150,7 @@ def test_a_command_with_a_sha_a_pod_name_or_a_path_stays_approvable():
         assert redact.redact(cmd, secrets_only=True) == (cmd, 0), cmd
 
 
+@pytest.mark.timing
 @pytest.mark.parametrize("unit", ["Ab1", "Zq8vK2mN5pQ8sT1vW4xZ", "a" * 19 + " ", "Ab1" * 6 + "-", "Ab1/" * 8, "x" * 19 + "A1 "])
 def test_the_entropy_pass_is_linear(unit):
     n = 150_000

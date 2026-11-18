@@ -1,18 +1,28 @@
 name: ci
+# Every action is pinned by commit sha (the comment after it is the tag it was taken from); Dependabot updates both (.github/dependabot.yml).
+# The token is read-only for every job. Each job has a time limit. A newer run on the same pull request cancels the older one.
 on:
   push:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         python: ["3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: ${{ matrix.python }}
       - name: Install uv (pinned)
@@ -32,3 +42,49 @@ jobs:
           printf '%s\n' '{"session":"s1","ts":"2026-01-01T00:00:00Z","primitive":"verify","dry_run":false,"question":"q","p":0.9}' \
                         '{"session":"s1","ts":"2026-01-01T00:00:01Z","primitive":"verify","dry_run":false,"question":"q","p":0.5,"next_text_done_claim":true}' > /tmp/rows.jsonl
           uv run python evals/replay_policy.py /tmp/rows.jsonl
+
+  # macOS is the platform the owner uses. This job runs the setup tests, the hook payload tests and the install check on a hosted macOS runner, one after the other.
+  # It does not run the real-shell oracle (evals/realshell.py): whether a hosted runner may run it is not decided (docs/14-v6 section 8), so that stays an owner run.
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.13"
+      - name: Install uv (pinned)
+        run: pip install --quiet uv==0.13.6
+      - name: Sync dev environment
+        run: uv sync --frozen
+      - name: Setup and hook payload tests (serial)
+        run: uv run pytest -q -m "not timing" tests/test_setup.py tests/acceptance/test_hook_payloads_w40.py
+      - name: Build, install the wheel in an isolated directory and run it
+        env:
+          UV_OFFLINE: "0"
+        run: sh scripts/verify_install.sh
+
+  # Secrets in the new commits only. The config is .gitleaks.toml; it allows fake credentials under tests/ and evals/ and nowhere else.
+  # The binary is pinned by version and by sha256 (from the gitleaks release checksums file).
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+      SCAN_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks (pinned, checked)
+        run: |
+          set -eu
+          curl -fsSL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf gitleaks.tar.gz -C "$RUNNER_TEMP/bin" gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          rm gitleaks.tar.gz
+      - name: Scan the new commits
+        run: sh scripts/scan_new_changes.sh "$SCAN_BASE" HEAD

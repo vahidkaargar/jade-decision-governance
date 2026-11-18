@@ -303,6 +303,7 @@ def test_store_time_redaction_keeps_emails():
     assert redact.redact("a@b.example")[1] == 1
 
 
+@pytest.mark.timing
 def test_redaction_is_linear_on_long_unbroken_tokens():
     """A base64 line or a long run of key characters must not make a call hang: redact() runs on every byte `jade ask` sends."""
     import random

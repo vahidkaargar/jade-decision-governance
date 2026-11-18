@@ -113,6 +113,7 @@ def test_a_background_child_does_not_outlive_its_case(sb):
         pytest.fail("a background child survived its case")
 
 
+@pytest.mark.timing
 @needs_sandbox
 def test_a_case_that_runs_too_long_is_stopped(sb):
     t = time.monotonic()
