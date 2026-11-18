@@ -74,6 +74,9 @@ CREATE INDEX IF NOT EXISTS human_answers_scope ON human_answers(scope_key, stren
 CREATE INDEX IF NOT EXISTS human_answers_class ON human_answers(class_key, strength);
 CREATE INDEX IF NOT EXISTS human_answers_ts ON human_answers(ts);
 CREATE INDEX IF NOT EXISTS asks_call ON asks(session_id, hold_key, status);
+CREATE INDEX IF NOT EXISTS asks_created ON asks(created_ts);
+CREATE INDEX IF NOT EXISTS decisions_created ON decisions(created_at);
+CREATE INDEX IF NOT EXISTS calls_decision ON jev_calls(decision_id);
 """
 MIGRATIONS = {"jev_calls": [("language", "TEXT"), ("source", "TEXT")], "decisions": [("hold_key", "TEXT"), ("source", "TEXT")],
               "permits": [("source", "TEXT")], "events": [("source", "TEXT")], "asks": [("class_key", "TEXT"), ("label", "TEXT"), ("ho", "INTEGER"), ("scopes_json", "TEXT")],

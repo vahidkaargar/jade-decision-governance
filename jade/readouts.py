@@ -54,7 +54,7 @@ def load_counts(db, since: str) -> dict:
 
 def gated_rows(db, since: str) -> list:
     """The detail of every call `load_counts` counts: the `gated` events and the invariant blocks, not the SI-07 repeat."""
-    return db.all(f"SELECT kind, detail_json FROM events WHERE (kind='gated' OR (kind='safety_block' AND COALESCE(guard,'') NOT LIKE '% SI-07')) AND ts>=? AND {ledger.live()}", (since,))  # noqa: S608
+    return db.all(f"SELECT kind, detail_json FROM events WHERE kind IN ('gated','safety_block') AND COALESCE(guard,'') NOT LIKE '% SI-07' AND ts>=? AND {ledger.live()}", (since,))  # noqa: S608
 
 
 # ---- asks: how often, how long, how many ran out --------------------------------------------------------
@@ -103,7 +103,7 @@ def verify_links(db, since: str) -> dict:
     decisions no Jev call was ever attached to (165 of them in the first measurement)."""
     live_c, live_d = ledger.live("c"), ledger.live("d")
     r = db.one(f"SELECT COUNT(*) AS n, COALESCE(SUM(c.decision_id IS NOT NULL),0) AS linked FROM jev_calls c WHERE c.question_id=? AND c.ts>=? AND {live_c}", (VERIFY_QID, since))  # noqa: S608
-    bare = db.one(f"SELECT COUNT(*) AS n FROM decisions d WHERE d.created_at>=? AND {live_d} AND NOT EXISTS (SELECT 1 FROM jev_calls c WHERE c.decision_id=d.decision_id)", (since,)).n  # noqa: S608
+    bare = db.one(f"SELECT COUNT(*) AS n FROM decisions d WHERE d.created_at>=? AND {live_d} AND NOT EXISTS (SELECT 1 FROM jev_calls c WHERE c.decision_id=d.decision_id)", (since,)).n  # noqa: S608   # `calls_decision` answers each lookup
     return {"verify_calls": r.n, "linked_to_a_decision": r.linked, "linked_share_percent": pct(r.linked, r.n), "decisions_without_a_call": bare}
 
 

@@ -176,7 +176,7 @@ def _stats(a) -> int:
     out["verify_links"] = readouts.verify_links(db, since_ts)
     out["label_coverage"] = readouts.label_coverage(db, since_ts)
     out["shadow_agreement"] = readouts.shadow_agreement(db, since_ts)
-    if a.json:   # one line, sorted keys, so a script or a diff reads it the same way every time
+    if getattr(a, "json", False):   # one line, sorted keys, so a script or a diff reads it the same way every time
         print(json.dumps(out, sort_keys=True, separators=(",", ":")))
     else:
         print(json.dumps(out, indent=1))
