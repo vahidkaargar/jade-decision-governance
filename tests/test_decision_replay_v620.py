@@ -63,8 +63,9 @@ def test_outcome_of_a_hook_result(dr):
 
 
 def test_a_silent_allow_is_an_allow_or_an_error_with_no_watched_note(dr):
-    assert dr.silent_allow(out("x")) and dr.silent_allow(out("x", "error"))
-    assert not dr.silent_allow(out("x", watched="block")) and not dr.silent_allow(out("x", "ask", exit_=2))
+    a, logging = arm("x", []), arm("l", [], level="off")
+    assert dr.silent_allow(out("x"), a) and dr.silent_allow(out("x", "error"), a)
+    assert not dr.silent_allow(out("x", watched="block"), logging) and not dr.silent_allow(out("x", "ask", exit_=2), a)
 
 
 def test_confusion_matrix_and_the_calls_that_ran(dr):
@@ -399,3 +400,82 @@ def test_an_arm_on_another_commit_runs_that_trees_own_code(dr, tmp_path):
     assert {o["id"]: o["action"] for o in head["outcomes"]} == {"E1": "allow", "E2": "block"}
     with pytest.raises(dr.ReplayError):
         dr.replay(corpus, [dr.parse_arm("no-such-ref-xyz:unset")])
+
+
+# ---- fixes after review ------------------------------------------------------------------------------------------------------------------
+def test_a_watched_note_is_a_stop_only_in_an_arm_that_only_logs(dr, rp):
+    enforcing, logging = arm("e", []), arm("l", [], level="off")
+    o = out("x", watched="block")
+    assert dr.silent_allow(o, enforcing) and dr.strength(o, enforcing) == 0   # an enforcing arm that only notes `watched` let the call run
+    assert not dr.silent_allow(o, logging) and dr.strength(o, logging) == 2
+    rows = [row("b", "block"), row("c", "not_allow")]
+    regressed = arm("mut", [out("b", watched="block"), out("c", watched="ask")])   # enforce and level unset, yet every call only carries a note
+    g = by_gate(rp.gates(result(rows, [regressed])), "G3 should-block")[0]
+    assert g["state"] == rp.FAIL and "b" in g["detail"]
+    assert dr.exit_code(result(rows, [regressed])) == 1
+    base = arm("base", [out("b", "block", exit_=2), out("c", "ask", exit_=2)])
+    assert dr.pair(rows, base, regressed)["looser"] == ["b", "c"]
+    assert by_gate(rp.gates(result(rows, [base, regressed])), "G3 never-looser")[0]["state"] == rp.FAIL
+    assert dr.exit_code(result(rows, [base, regressed])) == 1
+
+
+def test_an_enforcing_base_against_a_log_only_candidate_is_not_comparable_never_a_pass(dr, rp):
+    rows = [row("b", "block"), row("c", "not_allow")]
+    base = arm("base", [out("b", "block", exit_=2), out("c", "ask", exit_=2)])
+    for cand in (arm("off", [out("b", watched="block"), out("c", watched="ask")], level="off"),
+                 arm("adv", [out("b", watched="block"), out("c", watched="ask")], gate="advisory")):
+        p = dr.pair(rows, base, cand)
+        assert p["not_comparable"] and p["looser"] == []
+        g = by_gate(rp.gates(result(rows, [base, cand])), "G3 never-looser")[0]
+        assert g["state"] == rp.NODATA and "not comparable" in g["detail"]
+        assert dr.exit_code(result(rows, [base, cand])) == 0
+        assert "not comparable" in dr.render(result(rows, [base, cand]))
+    gate_off = arm("go", [out("b"), out("c")], gate="off")   # the gate decides nothing: that is looser, not a log
+    assert not dr.pair(rows, base, gate_off).get("not_comparable") and dr.pair(rows, base, gate_off)["looser"] == ["b", "c"]
+
+
+def test_the_report_fails_on_a_cassette_miss_and_exits_two(rp, tmp_path, capsys):
+    rows = [row("b", "block")]
+    res = result(rows, [arm("x", [out("b", "block", exit_=2)])], misses=["deadbeef"])
+    g = by_gate(rp.gates(res), "cassette")[0]
+    assert g["state"] == rp.FAIL and g["blocks_pr"] and "deadbeef" in g["detail"]
+    assert not by_gate(rp.gates(result(rows, [arm("x", [out("b", "block", exit_=2)])])), "cassette")
+    f = tmp_path / "r.json"
+    f.write_text(json.dumps(res))
+    assert rp.main([str(f)]) == 2
+    capsys.readouterr()
+
+
+def test_the_report_refuses_a_base_that_is_not_an_arm(rp, tmp_path, capsys):
+    rows = [row("b", "block")]
+    base, cand = arm("base", [out("b", "block", exit_=2)]), arm("cand", [out("b")], level="high")
+    f = tmp_path / "r.json"
+    f.write_text(json.dumps(result(rows, [base, cand])))
+    assert rp.main([str(f)]) == 1
+    assert rp.main([str(f), "--base", "typo"]) == 2
+    assert "typo" in capsys.readouterr().err
+    with pytest.raises(ValueError):
+        rp.gates(result(rows, [base, cand]), "typo")
+
+
+def test_a_known_gap_needs_a_work_item_that_exists_and_a_real_past_date(dr, tmp_path):
+    good = {"id": "G1", "command": "ls", "label": "block", "known_gap": True, "work_item": "V6-20", "gap_date": "2026-01-01"}
+    assert dr.load_corpus([write(tmp_path, [good])])["rows"][0]["known_gap"]
+    for bad in ({"work_item": "nope"}, {"work_item": "W-99999999"}, {"work_item": "V6-99"}, {"gap_date": "never"}, {"gap_date": "2999-01-01"}, {"gap_date": "2026-02-30"}):
+        with pytest.raises(dr.ReplayError):
+            dr.load_corpus([write(tmp_path, [{**good, **bad}], "bad.jsonl")])
+
+
+def test_jev_is_not_reached_in_a_replay_without_preferences_and_a_cassette_miss_exits_two_with_them(dr, tmp_path, capsys):
+    corpus_file = write(tmp_path, [CORPUS[0], CORPUS[2]])   # ls, and a push to a feature branch (a plain high call, the kind Jev may judge)
+    cas = tmp_path / "jev-empty.jsonl"
+    cas.write_text("")
+    args = [str(corpus_file), "--arm", "medium", "--cassette", str(cas)]
+    assert dr.main(args) == 0   # no preferences and no past allow: the proxy never asks Jev, so nothing can miss
+    capsys.readouterr()
+    prefs = tmp_path / "preferences.md"
+    prefs.write_text("I am fine with pushes to my own feature branches.\n")
+    assert dr.main(args + ["--preferences", str(prefs)]) == 2
+    assert "cassette: 1 Jev call" in capsys.readouterr().err
+    assert dr.main([str(corpus_file), "--arm", "medium", "--preferences", str(tmp_path / "missing.md")]) == 2   # a file that cannot be read is exit 2
+    capsys.readouterr()

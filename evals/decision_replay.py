@@ -2,7 +2,7 @@
 and a paired report. Nothing is executed and nothing leaves the machine. The command text is never printed: the report shows row ids, counts and rule ids.
 
     uv run python evals/decision_replay.py [CORPUS.jsonl ...] [--arm REF:LEVEL[:GATE] ...] [--base ARM] [--json OUT] [--report]
-                                           [--known-gap-ceiling N] [--cassette FILE]
+                                           [--known-gap-ceiling N] [--cassette FILE] [--preferences FILE]
 
 CORPUS: JSONL files of rows. The default is the case files under evals/ (the `gate`, `gate_write` and `gate_mcp` rows; a row with `seed` needs files and is
 skipped, and counted). A row is a case row, so these files are valid corpus files:
@@ -10,7 +10,8 @@ skipped, and counted). A row is a case row, so these files are valid corpus file
     label     allow | ask | block | not_allow (ask or block, the label does not say which). Default: from `expect` (allow -> allow; block with
               `expect_blocked` -> block; block without -> not_allow). A row with no label is skipped, and counted
     cluster   the source task or attack family (default: `class`); the unit of the paired analysis, because calls of one task are not independent
-    known_gap true on a row whose label is right and whose behaviour is wrong (V6-03); it needs `work_item` and `gap_date` as in run_cases.py
+    known_gap true on a row whose label is right and whose behaviour is wrong (V6-03); it needs `work_item` and `gap_date`, checked as in run_cases.py
+              (the work item must exist, the date must be a real date that is not in the future); a bad one is an error
     friction_ok  true on a call labelled allow that is allowed to cost a question (the reviewed "expected friction" list)
 
 ARM: `REF:LEVEL[:GATE]`. REF is a git commit-ish of this repository or a directory that holds a jade tree (default `.`, the working tree). LEVEL is unset,
@@ -20,8 +21,12 @@ the base of the paired report unless `--base` names another. An arm with LEVEL u
 
 What the hook did, for each call: allow (exit 0), ask (exit 2, a permit or an answer is needed), block (exit 2, a safety invariant), error (the hook raised or
 timed out: counted as a call let through, as never_looser.py does). `watched` says an advisory exit 0 that names what it would have done: at level `off` and in
-advisory mode the hook only logs, so that is the answer to "would it have stopped this". Output has no clock, no timing and no random value, so a run
-repeats byte for byte; `--cassette FILE` answers every Jev call from a recorded file and a call it does not hold is a miss (exit 2).
+advisory mode the hook only logs, so that is the answer to "would it have stopped this". In an arm that enforces, a `watched` note is a call that ran (a tree that
+regressed to advisory must not look strict). An enforcing base against a log-only arm is "not comparable", never a pass. Output has no clock, no timing and no
+random value, so a run repeats byte for byte; `--cassette FILE` answers every Jev call from a recorded file and a call it does not hold is a miss (exit 2).
+Jev is reached only at level low, medium or high, for a plain high call, when the config has a `preferences.md` or the ledger has a past allow. A replay has an
+empty ledger and, by default, no preferences, so by default no call reaches Jev and a cassette is never read. `--preferences FILE` puts that file in every arm's
+config; with it a call can reach the cassette. The recorded files (`evals/cassettes/jev-<model>.jsonl`) are not built yet.
 Exit: 0 nothing looser and no should-block call allowed, 1 a call that the base blocks is let through or a should-block call is allowed, 2 it could not run.
 """
 from __future__ import annotations
@@ -78,7 +83,8 @@ def _derive_label(row: dict) -> str | None:
 
 def load_corpus(files: list[Path]) -> dict:
     """The frozen corpus: rows with an event, a label, a cluster and the gap and friction marks, plus what was skipped and why, and a hash over all of it.
-    A row id that appears twice, a label that is not one of LABELS, or a known gap with no work item or date is an error: a corpus is not hand-fixed on the fly."""
+    A row id that appears twice, a label that is not one of LABELS, or a known gap with a work item that does not exist or a date that is not real is an error:
+    a corpus is not hand-fixed on the fly."""
     run_cases = _module("run_cases")
     rows, skipped, seen = [], {"needs files (seed)": 0, "not a gate call": 0, "no label": 0}, set()
     for f in files:
@@ -103,8 +109,8 @@ def load_corpus(files: list[Path]) -> dict:
             if not isinstance(rid, str) or not rid or rid in seen:
                 raise ReplayError(f"{f}:{n}: a row needs an id that no other row has (got {rid!r})")
             seen.add(rid)
-            if c.get("known_gap") and not (c.get("work_item") and c.get("gap_date")):
-                raise ReplayError(f"{f}:{n}: known_gap row {rid} has no work_item or gap_date")
+            if c.get("known_gap") and (problems := run_cases._gap_owner(c)):   # the same check as run_cases.py: the item exists and the date is real
+                raise ReplayError(f"{f}:{n}: known_gap row {rid}: {'; '.join(problems)}")
             rows.append({"id": rid, "event": run_cases.gate_event({**c, "kind": kind}), "label": label, "cluster": str(c.get("cluster") or c.get("class") or rid),
                          "known_gap": bool(c.get("known_gap")), "friction_ok": bool(c.get("friction_ok")), "work_item": c.get("work_item", "")})
     rows.sort(key=lambda r: r["id"])
@@ -207,7 +213,8 @@ def _child(argv: list[str]) -> int:
         return 3
     from jade import hooks, paths, proxy
 
-    rows = json.load(sys.stdin)
+    payload = json.load(sys.stdin)
+    rows = payload["rows"]
     work = Path(tempfile.mkdtemp(prefix="decision-replay-"))
     misses: list[str] = []
     try:
@@ -217,6 +224,8 @@ def _child(argv: list[str]) -> int:
         if level != "unset":
             conf["level"] = level
         (cfg / "config.json").write_text(json.dumps(conf))
+        if payload.get("preferences"):   # the text Jev reads as the owner's preferences: without it (and without a past allow) the proxy never asks Jev
+            (cfg / "preferences.md").write_text(payload["preferences"], encoding="utf-8")
         os.environ["JADE_CONFIG"] = str(cfg)
         for k in ("JADE_GATE_MODE", "JADE_POLICY_DIR", "JADE_SOURCE", "JADE_SESSION_ID"):
             os.environ.pop(k, None)
@@ -261,12 +270,13 @@ def _env(home: Path, ceiling: Path) -> dict:
     return env
 
 
-def run_arm(arm: dict, rows: list[dict], scratch: Path, cassette: str = "") -> dict:
+def run_arm(arm: dict, rows: list[dict], scratch: Path, cassette: str = "", preferences: str = "") -> dict:
     tree, tree_id = _tree(arm["ref"], scratch)
     home = scratch / "home"
     home.mkdir(exist_ok=True)
     args = [sys.executable, str(Path(__file__).resolve()), "--child", str(tree), arm["level"], arm["gate"]] + ([cassette] if cassette else [])
-    r = subprocess.run(args, input=json.dumps([{"id": x["id"], "event": x["event"]} for x in rows]), capture_output=True, text=True, env=_env(home, scratch),
+    payload = {"rows": [{"id": x["id"], "event": x["event"]} for x in rows], "preferences": preferences}
+    r = subprocess.run(args, input=json.dumps(payload), capture_output=True, text=True, env=_env(home, scratch),
                        timeout=CHILD_S, check=False)
     if r.returncode:
         raise ReplayError(f"arm {arm['name']} failed (exit {r.returncode}): {r.stderr.strip()[-2000:]}")
@@ -276,10 +286,10 @@ def run_arm(arm: dict, rows: list[dict], scratch: Path, cassette: str = "") -> d
     return {**arm, "tree": tree_id, "outcomes": got["outcomes"], "misses": got["misses"]}
 
 
-def replay(corpus: dict, arms: list[dict], cassette: str = "") -> dict:
+def replay(corpus: dict, arms: list[dict], cassette: str = "", preferences: str = "") -> dict:
     """The result, with no clock and no command text in it (ids, counts and rule ids only), so equal inputs give byte-equal output."""
     with tempfile.TemporaryDirectory(prefix="decision-replay-parent-") as d:
-        done = [run_arm(a, corpus["rows"], Path(d), cassette) for a in arms]
+        done = [run_arm(a, corpus["rows"], Path(d), cassette, preferences) for a in arms]
     return {"corpus": {k: corpus[k] for k in ("hash", "clusters", "skipped")} | {"n": len(corpus["rows"])},
             "rows": [{k: r[k] for k in ("id", "label", "cluster", "known_gap", "friction_ok", "work_item")} for r in corpus["rows"]],
             "arms": [{k: a[k] for k in ("name", "ref", "level", "gate", "tree", "outcomes")} for a in done],
@@ -287,14 +297,20 @@ def replay(corpus: dict, arms: list[dict], cassette: str = "") -> dict:
 
 
 # ---- analysis (pure: the same on a saved result) ------------------------------------------------------------------------------------------
-def silent_allow(o: dict) -> bool:
-    """The call ran with no ask, no block and no advisory note: an error counts as a call let through."""
-    return o["action"] in ("allow", "error") and not o.get("watched")
+def _noted(o: dict, arm: dict) -> bool:
+    """An advisory `watched` note counts as an answer only in an arm that only logs. In an arm that enforces, the hook had to stop the call: a note means it ran."""
+    return bool(o.get("watched")) and watching(arm)
 
 
-def strength(o: dict) -> int:
-    """0 let through, 1 ask, 2 block. An advisory `watched` counts as what it says it would do, so a log-only arm can be compared with a log-only arm."""
-    return RANK[o["watched"]] if o["action"] == "allow" and o.get("watched") else RANK[o["action"]]
+def silent_allow(o: dict, arm: dict) -> bool:
+    """The call ran: no ask and no block, and no advisory note that a log-only arm may give. An error counts as a call let through."""
+    return o["action"] in ("allow", "error") and not _noted(o, arm)
+
+
+def strength(o: dict, arm: dict) -> int:
+    """0 let through, 1 ask, 2 block. In a log-only arm an advisory `watched` counts as what it says it would do, so a log-only arm can be compared with a
+    log-only arm. In an enforcing arm it is 0, as the call ran."""
+    return RANK[o["watched"]] if o["action"] == "allow" and _noted(o, arm) else RANK[o["action"]]
 
 
 def should_block(label: str) -> bool:
@@ -311,12 +327,12 @@ def arm_summary(rows: list[dict], arm: dict) -> dict:
         o = by_id[r["id"]]
         matrix[r["label"]][o["action"]] += 1
         out["watched"] += 1 if o.get("watched") else 0
-        if r["label"] != "allow" and silent_allow(o):
+        if r["label"] != "allow" and silent_allow(o, arm):
             out["false_allow_gap" if r["known_gap"] else "false_allow"].append(r["id"])
-        if r["label"] == "allow" and strength(o) > 0 and not r["friction_ok"]:
+        if r["label"] == "allow" and strength(o, arm) > 0 and not r["friction_ok"]:
             out["stopped_allow_gap" if r["known_gap"] else "stopped_allow"].append(r["id"])
     # a should-block call that ran, of any kind (known gaps and the ask labels apart): the first number of G3
-    out["should_block_allowed"] = [r["id"] for r in rows if should_block(r["label"]) and silent_allow(by_id[r["id"]]) and not r["known_gap"]]
+    out["should_block_allowed"] = [r["id"] for r in rows if should_block(r["label"]) and silent_allow(by_id[r["id"]], arm) and not r["known_gap"]]
     return out
 
 
@@ -326,12 +342,17 @@ def pair(rows: list[dict], base: dict, cand: dict) -> dict:
     that is not on the friction list it is new friction. `cluster_false_allow`: per cluster, 1 when any call labelled ask, block or not_allow ran silently
     (the unit of the paired bootstrap, because the calls of one task are not independent)."""
     b, c = {o["id"]: o for o in base["outcomes"]}, {o["id"]: o for o in cand["outcomes"]}
-    out = {"base": base["name"], "cand": cand["name"], "looser": [], "stricter": [], "new_friction": [], "base_stops": 0, "same": 0}
+    # an enforcing base against a candidate that only logs: the candidate lets every call run by design, so what it says it would do is not a stop that can be
+    # held against the base. The pair is marked, and nothing in it is looser (never a pass: the report states "not comparable")
+    out = {"base": base["name"], "cand": cand["name"], "looser": [], "stricter": [], "new_friction": [], "base_stops": 0, "same": 0,
+           "not_comparable": enforcing(base) and watching(cand)}
     clusters: dict[str, list[int]] = {}
     for r in rows:
-        sb, sc = strength(b[r["id"]]), strength(c[r["id"]])
+        sb, sc = strength(b[r["id"]], base), strength(c[r["id"]], cand)
         out["base_stops"] += 1 if sb > 0 else 0
-        if sc < sb:
+        if out["not_comparable"]:
+            pass
+        elif sc < sb:
             out["looser"].append(r["id"])
         elif sc > sb:
             out["stricter"].append(r["id"])
@@ -340,8 +361,8 @@ def pair(rows: list[dict], base: dict, cand: dict) -> dict:
         else:
             out["same"] += 1
         fa = clusters.setdefault(r["cluster"], [0, 0])
-        fa[0] += 1 if r["label"] != "allow" and silent_allow(b[r["id"]]) else 0
-        fa[1] += 1 if r["label"] != "allow" and silent_allow(c[r["id"]]) else 0
+        fa[0] += 1 if r["label"] != "allow" and silent_allow(b[r["id"]], base) else 0
+        fa[1] += 1 if r["label"] != "allow" and silent_allow(c[r["id"]], cand) else 0
     ks = sorted(clusters)
     out["cluster_false_allow"] = {"n": len(ks), "base": [min(1, clusters[k][0]) for k in ks], "cand": [min(1, clusters[k][1]) for k in ks]}
     return out
@@ -379,6 +400,10 @@ def render(result: dict, base_name: str | None = None) -> str:
             if cand is base:
                 continue
             p = pair(rows, base, cand)
+            if p["not_comparable"]:
+                lines += ["", f"paired: base {p['base']} against {p['cand']}",
+                          "  not comparable: the base enforces and the candidate only logs, so it lets every call run by design; nothing is held against the base"]
+                continue
             lines += ["", f"paired: base {p['base']} against {p['cand']}",
                       f"  same strength {p['same']}, stricter {len(p['stricter'])}, looser {len(p['looser'])}, new friction on calls labelled allow {len(p['new_friction'])}",
                       f"  calls the base stops: {p['base_stops']}; of them the candidate lets through or stops less: {len(p['looser'])}"
@@ -416,6 +441,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--report", action="store_true", help="also print the gate states of evals/report.py")
     ap.add_argument("--known-gap-ceiling", type=int, help="with --report: the owner-signed count of known gaps; more is a fail")
     ap.add_argument("--cassette", help="answer every Jev call from this recorded file; a call it does not hold exits 2")
+    ap.add_argument("--preferences", type=Path, help="a preferences.md for the throwaway config of every arm. Without it (and without a past allow, which a replay never has) "
+                                                     "the proxy never asks Jev at level low, medium or high, so a cassette is never used")
     args = ap.parse_args(argv)
     try:
         corpus = load_corpus(args.files or [f for f in DEFAULT_FILES if f.exists()])
@@ -424,7 +451,11 @@ def main(argv: list[str] | None = None) -> int:
             raise ReplayError("two arms have the same name")
         if args.base and args.base not in {a["name"] for a in arms}:
             raise ReplayError(f"--base {args.base!r} is not one of the arms ({', '.join(a['name'] for a in arms)})")
-        result = replay(corpus, arms, args.cassette or "")
+        try:
+            prefs = args.preferences.read_text(encoding="utf-8") if args.preferences else ""
+        except (OSError, UnicodeError) as e:
+            raise ReplayError(f"cannot read {args.preferences}: {e}") from e
+        result = replay(corpus, arms, args.cassette or "", prefs)
     except ReplayError as e:
         print(f"decision_replay: {e}", file=sys.stderr)
         return 2

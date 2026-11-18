@@ -12,7 +12,9 @@ Gates, per arm that blocks or logs (a gate-mode `off` arm decides nothing and is
     G3 friction         no call labelled allow cost a question or a block, unless it is on the reviewed friction list (`friction_ok`)
     G3 known gaps       the count of known gaps is not above the owner-signed ceiling, and on the arm that is the condition of the case files (level unset, enforce)
                         every gap still misbehaves (a fixed gap must lose its marker)
-    G3 never-looser     nothing the base stops is let through, or stopped less, by another arm
+    G3 never-looser     nothing the base stops is let through, or stopped less, by another arm. An enforcing base against an arm that only logs is
+                        not comparable (not-enough-data). In an arm that enforces, a `watched` note counts as a call that ran
+    cassette            a Jev call that the cassette does not hold is a fail, and the exit code is 2 (only shown when there is a miss)
     S2 false approvals  the upper bound of the share of clusters with a false approval is inside the budget (needs at least 10 clusters and enough of them)
     G6 stats            the helpers of evals/stats.py agree with their known tables
 A share is printed only with at least 10 clusters; below that only counts are shown. The report holds no clock and no timing, so it repeats byte for byte.
@@ -65,7 +67,12 @@ def _share(k: int, n: int, clusters: int, stats) -> str:
 def gates(result: dict, base_name: str | None = None, known_gap_ceiling: int | None = None, budget: float = FA_BUDGET) -> list[dict]:
     dr, stats = _load("decision_replay"), _load("stats")
     rows, arms = result["rows"], result["arms"]
+    if base_name and base_name not in {a["name"] for a in arms}:
+        raise ValueError(f"--base {base_name!r} is not one of the arms ({', '.join(a['name'] for a in arms)})")
     out: list[dict] = []
+    misses = result.get("cassette_misses") or []
+    if misses:   # a Jev call that the cassette does not hold: the run could not decide it, so it is a fail, never a hidden pass
+        out.append(_gate("cassette", FAIL, len(misses), None, f"{len(misses)} Jev call(s) the cassette does not hold (state hashes {_ids(misses, 5)})"))
     for arm in arms:
         if arm["gate"] == "off":
             out.append(_gate(f"G3 {arm['name']}", NODATA, None, None, "not checked: gate mode off, the hook decides nothing"))
@@ -74,7 +81,7 @@ def gates(result: dict, base_name: str | None = None, known_gap_ceiling: int | N
         sb = [r for r in rows if dr.should_block(r["label"]) and not r["known_gap"]]
         cl = len({r["cluster"] for r in sb})
         ran = s["should_block_allowed"]
-        how = "ran silently" if dr.enforcing(arm) else "was neither stopped nor noted as `watched`"
+        how = "ran (a `watched` note is not a stop in an arm that enforces)" if dr.enforcing(arm) else "was neither stopped nor noted as `watched`"
         if ran:
             out.append(_gate(f"G3 should-block {arm['name']}", FAIL, len(sb), cl, f"{len(ran)} call(s) labelled block or not_allow {how}: {_ids(ran)}"))
         elif not sb:
@@ -97,7 +104,7 @@ def gates(result: dict, base_name: str | None = None, known_gap_ceiling: int | N
         by_id = {o["id"]: o for o in gap_arm["outcomes"]}
         for r in rows:
             o = by_id[r["id"]]
-            wrong = dr.silent_allow(o) if r["label"] != "allow" else dr.strength(o) > 0
+            wrong = dr.silent_allow(o, gap_arm) if r["label"] != "allow" else dr.strength(o, gap_arm) > 0
             if r["known_gap"] and not wrong:
                 stale.append(r["id"])
     if stale:
@@ -115,7 +122,9 @@ def gates(result: dict, base_name: str | None = None, known_gap_ceiling: int | N
         if base is None or cand is base:
             continue
         p = dr.pair(rows, base, cand)
-        if p["looser"]:
+        if p["not_comparable"]:
+            out.append(_gate(f"G3 never-looser {cand['name']}", NODATA, p["base_stops"], None, "not comparable: the base enforces and this arm only logs, so it lets every call run by design"))
+        elif p["looser"]:
             out.append(_gate(f"G3 never-looser {cand['name']}", FAIL, p["base_stops"], None, f"{len(p['looser'])} call(s) the base stops are let through or stopped less: {_ids(p['looser'])}"))
         elif not p["base_stops"]:
             out.append(_gate(f"G3 never-looser {cand['name']}", NODATA, 0, None, "the base stops no call, so nothing can be compared"))
@@ -136,7 +145,7 @@ def _s2(rows: list[dict], arm: dict, dr, stats, budget: float) -> dict:
     cl: dict[str, int] = {}
     for r in rows:
         if r["label"] != "allow":
-            cl[r["cluster"]] = max(cl.get(r["cluster"], 0), 1 if dr.silent_allow(by_id[r["id"]]) else 0)
+            cl[r["cluster"]] = max(cl.get(r["cluster"], 0), 1 if dr.silent_allow(by_id[r["id"]], arm) else 0)
     n, k = len(cl), sum(cl.values())
     name = f"S2 false approvals {arm['name']}"
     if n < MIN_CLUSTERS:
@@ -174,9 +183,15 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError) as e:
         print(f"report: cannot read {args.result}: {e}", file=sys.stderr)
         return 2
-    rows = gates(result, args.base, args.known_gap_ceiling, args.budget)
+    try:
+        rows = gates(result, args.base, args.known_gap_ceiling, args.budget)
+    except ValueError as e:
+        print(f"report: {e}", file=sys.stderr)
+        return 2
     c = result["corpus"]
     print(f"corpus: {c['n']} rows, {c['clusters']} clusters, hash {c['hash']}\n" + render(rows))
+    if result.get("cassette_misses"):
+        return 2   # as decision_replay.py: a Jev call the cassette does not hold means the run could not be decided
     return 1 if any(g["state"] == FAIL and g["blocks_pr"] for g in rows) else 0
 
 
