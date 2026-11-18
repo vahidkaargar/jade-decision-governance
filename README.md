@@ -9,7 +9,7 @@ It governs how agents (Claude Code first) use [TypeSafe Jev](https://docs.typesa
 
 - every model call is journaled, with typed errors that never count as "yes";
 - a probability maps to accept / abstain / reject through per-task-family thresholds, with abstention as a real exit code;
-- side effects above a risk level need a single-use **execution permit** that only a human at a terminal can approve;
+- side effects above a risk level need a single-use approval that only a human can give: a signed **execution permit** approved in their own terminal (30 minutes), or, once they set a level with `jade level`, an Allow answer in the chat or a dialog (10 minutes, one call, never for live JADE wiring). Safety invariants such as pushing the default branch cannot be approved by anyone;
 - improvement of prompts and thresholds is measured offline and cannot touch its own safety rules.
 
 > **Guiding invariant.** No model output (the decision model, a reasoning model, an evaluator, or an improvement agent) can authorize a side effect, weaken protected policy, declare an unobserved outcome successful, or bypass a human approval boundary.

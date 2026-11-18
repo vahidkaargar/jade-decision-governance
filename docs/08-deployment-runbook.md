@@ -130,7 +130,7 @@ jade permit list
 jade permit approve prm_xxxxxxxxxxxx     # shows the whole command, its length and the plan hash; type the 6-character code shown (no -y)
 ```
 
-Single use, 30 minutes, bound to the exact command text and working directory. A safety invariant (for example pushing the default branch) cannot be approved. Claude Code's own permission prompt is a second, independent gate only when the host asks: with `bypassPermissions`, `auto`, headless runs and unattended subagents JADE's gate is the only gate (section 4).
+Single use, 30 minutes, bound to the exact command text and working directory. (Once the human has set a level with `jade level`, an Allow answer in the chat or a dialog also approves one call: single use, 10 minutes, this session; see `docs/12`. Live JADE wiring always needs the signed permit.) A safety invariant (for example pushing the default branch) cannot be approved. Claude Code's own permission prompt is a second, independent gate only when the host asks: with `bypassPermissions`, `auto`, headless runs and unattended subagents JADE's gate is the only gate (section 4).
 
 Emergency bypass for one launch: `JADE_GATE_MODE=off claude` (typed by you; an agent typing it is blocked).
 
