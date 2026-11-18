@@ -186,7 +186,7 @@ def test_every_human_only_class_has_a_phrase():
     ("gh pr merge 940", "Merge pull request 940."),
     ("gh pr merge --squash 940", "Merge pull request 940."),
     ("gh pr merge", "Merge the pull request of this branch."),
-    ("gh pr merge --squash --delete-branch", "Merge the pull request of this branch."),
+    ("gh pr merge --squash --delete-branch", "Merge the pull request of this branch and delete its branch (--delete-branch)."),
     ("gh pr merge --body done --squash", "Merge a pull request."),
 ])
 def test_the_merge_sentence_names_the_real_target(cmd, line):
@@ -205,7 +205,7 @@ def test_the_merge_sentence_names_the_real_target(cmd, line):
     ("gh pr merge 940 --squash", "Merge pull request 940."),
     ("gh pr merge 940 --body 5", "Merge pull request 940."),
     ("gh pr merge --squash 940", "Merge pull request 940."),
-    ("gh pr merge --squash --delete-branch 940", "Merge pull request 940."),
+    ("gh pr merge --squash --delete-branch 940", "Merge pull request 940 and delete its branch (--delete-branch)."),
     ("gh pr merge --body=5 940", "Merge pull request 940."),
 ])
 def test_a_value_flag_before_the_number_does_not_name_a_pull_request(cmd, line):

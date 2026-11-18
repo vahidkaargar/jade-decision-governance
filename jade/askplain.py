@@ -286,12 +286,52 @@ def _push_line(key: str) -> str:
     return text
 
 
+_MERGE_KEY = re.compile(r"^(?:gh pr|glab mr) merge\b")
+_SHORT_FLAGS = re.compile(r"-[A-Za-z]+")
+_NOT_PLAIN = re.compile(r"[$`*?\[~\x06]")
+
+
+def _merge_notes(key: str) -> list[str]:
+    """What a merge flag lets the call do besides merging, with the flag as written. The first line of the question never says less than the call can do (V6-05): `--admin` skips the
+    branch rules, `--delete-branch` (`-d`, also inside a cluster such as `-sd`) deletes the branch of the pull request, `--auto` merges later, when the checks pass. A word that is
+    not plain (`$X`, a glob) can be any flag, so the line says that."""
+    words = key.split()
+    gh = words[0] == "gh"
+    flags = {w.split("=", 1)[0] for w in words[3:] if w.startswith("-")}
+    letters = "".join(w[1:] for w in words[3:] if _SHORT_FLAGS.fullmatch(w))
+    notes = []
+    if gh and "--admin" in flags:
+        notes.append("skip the branch rules (--admin)")
+    if gh and ("--delete-branch" in flags or "d" in letters):
+        notes.append("delete its branch (" + ("--delete-branch" if "--delete-branch" in flags else "-d") + ")")
+    if not gh and ("--remove-source-branch" in flags or "d" in letters):
+        notes.append("delete its branch (" + ("--remove-source-branch" if "--remove-source-branch" in flags else "-d") + ")")
+    if gh and "--auto" in flags:
+        notes.append("wait for the checks, then merge it (--auto)")
+    if _NOT_PLAIN.search(key):
+        notes.append("maybe more, because some words are not plain")
+    return notes
+
+
+def _merge_line(key: str, line: str) -> str:
+    notes = _merge_notes(key)
+    if not notes:
+        return line
+    head = line[:-1] if line.endswith(".") else line
+    if len(notes) == 1:
+        return f"{head} and {notes[0]}."
+    if len(notes) == 2:
+        return f"{head}, {notes[0]} and {notes[1]}."
+    return f"{head}, " + ", ".join(notes[:-1]) + f", and {notes[-1]}."
+
+
 def _render(key: str) -> str:
     if key == "git push" or key.startswith("git push "):
         return _push_line(key)
     for rx, text in SEGMENT_TEXT:
         if m := rx.search(key):
-            return m.expand(text)
+            line = m.expand(text)
+            return _merge_line(key, line) if _MERGE_KEY.match(key) else line
     return "Run: " + key[:FALLBACK_CHARS]
 
 

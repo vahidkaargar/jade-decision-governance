@@ -93,11 +93,15 @@ def test_glab_value_flag_is_not_the_number(cmd):
 @pytest.mark.parametrize("cmd", [
     "glab mr merge 12 --squash",
     "glab mr merge --squash 12",
-    "glab mr merge -d -y 12",
     "glab mr merge --message=5 12",
 ])
 def test_glab_no_value_flags_keep_the_number(cmd):
     assert line_of(cmd) == "Merge merge request 12."
+
+
+def test_glab_delete_flag_is_said_in_the_merge_line():
+    assert line_of("glab mr merge -d -y 12") == "Merge merge request 12 and delete its branch (-d)."
+    assert line_of("glab mr merge 12 --remove-source-branch") == "Merge merge request 12 and delete its branch (--remove-source-branch)."
 
 
 HARD_WORDS = ("reflog", "boot service", "deployment", "dependencies", "credential", "connectors", "cluster", "pipeline", "overlay", "invariant", "refspec")
