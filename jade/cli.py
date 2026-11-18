@@ -610,8 +610,23 @@ def _git_hook(a) -> int:
     return 0 if guarded else 1
 
 
+def _purge_dry_run(days: int) -> int:
+    """What the retention purge would clear, per table, with and without the chat-question and label text. Changes nothing."""
+    from . import ops
+
+    db = ledger.open()
+    base = ops.purge_report(db, days, dry_run=True)
+    full = ops.purge_report(db, days, ask_text=True, dry_run=True)
+    print(f"jade: dry run, rows older than {days} d that the purge would clear (nothing was changed):")
+    for t in ops.PURGE_TABLES:
+        print(f"  {t:14} {base[t]:6} now   {full[t] - base[t]:6} more with --ask-text")
+    print("jade: --ask-text clears the chat question and the labels `jade review confirm` and `jade knows` show; a standing answer keeps its label while it decides.")
+    return 0
+
+
 def _maintain(a) -> int:
-    """Daily job: expiries, retention, drift canary, miner. Prints one JSON line for the log."""
+    """Daily job: expiries, retention, drift canary, miner. Prints one JSON line for the log. It never clears the chat-question and label text (`ask_text`): that
+    is the owner's yes (docs/05 T15), asked by a human with `jade ledger purge --ask-text`. It leaves a last-run stamp that `jade check` reads."""
     from . import decide, improve, ops, permits
 
     db = ledger.open()
@@ -620,6 +635,7 @@ def _maintain(a) -> int:
     rows = ops.check(live=not a.offline)
     out["check_failed"] = [n for n, ok, _ in rows if ops.check_failed(ok)]   # a WARN row (None) is not a failure
     out["mined"] = [] if improve.frozen(paths.home()) else improve.mine(db)
+    db.meta_set("last_maintain_ts", out["at"])   # written last: a run that stopped part way leaves the old stamp
     print(json.dumps(out))
     return 1 if out["check_failed"] else 0
 
@@ -660,6 +676,8 @@ def build_parser() -> argparse.ArgumentParser:
     pg.add_argument("--older-than", type=_days, default=90, metavar="DAYS", help="retention window in days: 90 or 90d (default 90)")
     pg.add_argument("--test-rows", action="store_true", help="instead of the retention purge, remove the rows a run under JADE_SOURCE=test left in the ledger")
     pg.add_argument("--id", action="append", default=[], metavar="ID", help="with --test-rows: a permit or decision id written before the tag existed (repeatable)")
+    pg.add_argument("--dry-run", action="store_true", help="count the rows the purge would clear, per table, and change nothing (needs no terminal)")
+    pg.add_argument("--ask-text", action="store_true", help="also clear the chat question and the labels of ended asks and of answers (the owner's yes, docs/05 T15); the daily job never does")
 
     c = sub.add_parser("check", help="probe ledger, policies, registry, hooks, shim and the provider; non-zero on any failure")
     c.add_argument("--offline", action="store_true")
@@ -801,6 +819,8 @@ def build_parser() -> argparse.ArgumentParser:
     sg.add_argument("--status", action="store_true", help="read-only: what is done and what is missing")
     lp = sub.add_parser("launchd-plist")
     lp.add_argument("--label", default="com.jade.maintain")
+    ms = sub.add_parser("maintain-schedule", help="print a cron line or systemd units that run `jade maintain` daily, for a machine without launchd; installs nothing")
+    ms.add_argument("--format", choices=("cron", "systemd"), default="cron")
     return p
 
 
@@ -821,6 +841,11 @@ def main(argv: list[str] | None = None) -> int:
         if a.id and not a.test_rows:
             print("jade: --id is only used with --test-rows", file=sys.stderr)
             return 2
+        if a.dry_run and (a.test_rows or a.id):
+            print("jade: --dry-run counts the retention purge; it does not combine with --test-rows", file=sys.stderr)
+            return 2
+        if a.dry_run:
+            return _purge_dry_run(a.older_than)
         if not is_human_tty():
             print("jade: a purge outside the daily job is run by a human at a terminal", file=sys.stderr)
             return 1
@@ -832,7 +857,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             print(f"removed {sum(n.values())} test row(s): " + ", ".join(f"{k} {v}" for k, v in n.items()))
             return 0
-        print(f"purged state text from {ops.purge(ledger.open(), a.older_than)} row(s)")
+        print(f"purged state text from {ops.purge(ledger.open(), a.older_than, ask_text=a.ask_text)} row(s)")
         return 0
     if a.cmd == "check":
         from . import ops
@@ -850,6 +875,11 @@ def main(argv: list[str] | None = None) -> int:
         from . import ops
 
         print(ops.launchd_plist(a.label), end="")
+        return 0
+    if a.cmd == "maintain-schedule":
+        from . import ops
+
+        print(ops.maintain_schedule(a.format), end="")
         return 0
     table = {"permit": _permit, "decide": _decide, "ack": _ack, "question": _question, "route": _route, "fast": _fast, "work": _work,
              "label": _label, "eval": _eval, "improve": _improve, "hooks": _ops, "gate": _ops, "review": _ops, "knows": _ops, "level": _ops, "claude-md": _ops, "maintain": _maintain, "git-hook": _git_hook}

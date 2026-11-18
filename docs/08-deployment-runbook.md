@@ -101,7 +101,7 @@ jade gate advisory
 jade hooks install
 ```
 
-`hooks install` backs up `~/.claude/settings.json` next to itself (`settings.json.bak-jade-<time>`; a second run in the same second gets a `-1` suffix, a backup is never overwritten), writes the file atomically (temp file in the same directory, then rename; a symlink stays a symlink and the target keeps its permission bits, a new file is 0600), adds four hook entries (PreToolUse for Bash, PowerShell, Monitor, file edits, RemoteTrigger and MCP tools; PostToolUse for the same tools except the reads, W-40; Stop; SessionStart). An install made before the matcher grew shows `pretool matcher` as FAIL in `jade check`, and one whose PostToolUse matcher is still `Bash` shows `hook wiring` as FAIL; run `jade hooks install` again, and leaves other hooks alone. Hooks are read at session start: open a new Claude Code session afterwards.
+`hooks install` backs up `~/.claude/settings.json` next to itself (`settings.json.bak-jade-<time>`; a second run in the same second gets a `-1` suffix, a backup is never overwritten), writes the file atomically (temp file in the same directory, then rename; a symlink stays a symlink and the target keeps its permission bits, a new file is 0600), adds five hook entries (PreToolUse for Bash, PowerShell, Monitor, file edits, RemoteTrigger and MCP tools; PostToolUse for the same tools except the reads, W-40; PostToolUseFailure for the same tools, W-100d; Stop; SessionStart). An install made before the matcher grew shows `pretool matcher` as FAIL in `jade check`, and one whose PostToolUse matcher is still `Bash` shows `hook wiring` as FAIL; run `jade hooks install` again, and leaves other hooks alone. Hooks are read at session start: open a new Claude Code session afterwards.
 
 In advisory mode the gate never blocks. It records a `would_block` event (or a `safety_block` event when a safety invariant such as SI-08, a push to the default branch, would have stopped the call) and prints what it would have done, so you can see the real false-positive rate before it can interrupt work.
 
@@ -162,6 +162,10 @@ The plist sets `PATH` (the directory of `jade` and `jev`, then `/opt/homebrew/bi
 The job's `purge` holds the ledger's write lock for the length of its transaction (0.67 s the first time it clears 30 days of text at 100k rows, 56 ms afterwards) and `VACUUM` for about 0.6 s; a hook waits at most 1.5 s for the lock and then blocks a high-risk call (docs/05 T17). Schedule the job away from working hours and re-run `evals/performance/ledger_load.py` (docs/04 4c) if the ledger passes about 300k rows. Back the ledger up with `sqlite3 ~/.local/share/jade/jade.sqlite ".backup <file>"`, not a file copy, which misses the `-wal` sidecar.
 
 Undo: `launchctl bootout "gui/$(id -u)/com.example.jade-maintain"` and delete the plist.
+
+**Without launchd (Linux, or macOS without the LaunchAgent).** Retention, expiry sweeps, the drift canary and the miner run only inside `jade maintain`, so something must schedule it. `jade maintain-schedule` prints one crontab line (the default) or a systemd user service and timer (`--format systemd`, each under a comment with the path to save it at). It installs nothing; you add the line with `crontab -e`, or save the units and run `systemctl --user enable --now jade-maintain.timer`. `jade maintain` leaves a last-run stamp in the ledger, and the `maintain job` row of `jade check` reads it: ok when the job ran within 3 days, WARN otherwise, whoever schedules it.
+
+**Try the retention purge first.** `jade ledger purge --dry-run` runs the same code as the purge and rolls it back: it prints, per table, how many rows the purge would clear now and how many more `--ask-text` would clear (the chat question and the labels of ended asks and answers; docs/05 T15). It changes nothing and needs no terminal. `jade maintain` never uses `--ask-text`: a human decides that, once.
 
 ### 2.5 Hang the check off your health command
 

@@ -152,12 +152,15 @@ def active_version(path, question_id: str, key: str | None = None) -> int | None
 
 
 # ---- drift ---------------------------------------------------------------------------------------
-def check_drift(path, resolved_model: str, expected: list[str]):
+def check_drift(path, resolved_model: str, expected: list[str], db: ledger.Ledger | None = None):
     """None when the resolved model is expected. Otherwise a MODEL_DRIFT finding, recorded once per new string.
-    Drift is informational (decision Q6): the new snapshot is a new calibration group at default thresholds."""
+    Drift is informational (decision Q6): the new snapshot is a new calibration group at default thresholds.
+    `db` is the ledger the call itself uses: it is written to and left open. Without it, `path` (None: the JADE home) is opened and closed here (V6-11: a run
+    with a ledger of its own must not write to the home)."""
     if resolved_model in expected:
         return None
-    db = ledger.open(_dir(path))
+    own = db is None
+    db = db or ledger.open(_dir(path))
     try:
         known = json.loads(db.meta_get("known_models", "[]"))
         first = resolved_model not in known
@@ -171,7 +174,8 @@ def check_drift(path, resolved_model: str, expected: list[str]):
             db.con.execute("INSERT OR REPLACE INTO work_items(id, status, doc_json, updated_at) VALUES(?,?,?,?)", (wid, "open", json.dumps(item), ts()))
         return SimpleNamespace(kind="MODEL_DRIFT", resolved_model=resolved_model, expected=list(expected), first_seen=first)
     finally:
-        db.close()
+        if own:
+            db.close()
 
 
 def check_question_drift(path=None, db: ledger.Ledger | None = None) -> list:
@@ -232,39 +236,82 @@ PURGED = "[purged by retention]"
 OPEN_PERMIT = ("PENDING", "ISSUED")
 
 
-def purge(db: ledger.Ledger, older_than_days: int = 90) -> int:
+PURGED_ASK = json.dumps({"purged": True})   # `asks.question_json` is NOT NULL and a reader parses it: a marker, not NULL
+PURGE_TABLES = ("jev_calls", "decisions", "permits", "events", "asks", "human_answers")
+
+
+class _DryRun(Exception):
+    """Raised inside the purge transaction of a dry run so that it rolls back."""
+
+
+def _purge_rows(con, cutoff: str, *, ask_text: bool) -> dict[str, int]:
+    """Clear the text, inside the caller's transaction, and count the rows cleared per table. One place, so a dry run and a purge cannot disagree."""
+    n = dict.fromkeys(PURGE_TABLES, 0)
+    n["jev_calls"] = con.execute("UPDATE jev_calls SET state_text=NULL, question_text=NULL WHERE ts<? AND (state_text IS NOT NULL OR question_text IS NOT NULL)",
+                                 (cutoff,)).rowcount
+    for r in con.execute("SELECT decision_id, doc_json FROM decisions WHERE updated_at<? AND json_extract(doc_json,'$.objective') IS NOT ?", (cutoff, PURGED)).fetchall():
+        doc = json.loads(r["doc_json"])
+        doc["objective"] = PURGED
+        doc["candidate_actions"] = [{**act, "description": PURGED} if isinstance(act, dict) else act for act in doc.get("candidate_actions", [])]
+        doc["constraints"], doc["assumptions"], doc["evidence_refs"] = [], [], []
+        con.execute("UPDATE decisions SET doc_json=? WHERE decision_id=?", (json.dumps(doc, ensure_ascii=False), r["decision_id"]))
+        n["decisions"] += 1
+    for r in con.execute("SELECT permit_id, scope FROM permits WHERE issued_at<? AND (state NOT IN ('PENDING','ISSUED') OR expires_at<=?) AND scope LIKE '{%'",
+                         (cutoff, ts())).fetchall():
+        try:
+            ctx = json.loads(r["scope"])
+        except ValueError:
+            continue
+        if isinstance(ctx, dict) and "subject" in ctx and ctx["subject"] != PURGED:
+            keep = {k: v for k, v in ctx.items() if k in ("tool", "length", "rule", "bound", "session_id", "agent_id", "permission_mode", "hash_cwd")}
+            con.execute("UPDATE permits SET scope=? WHERE permit_id=?", (json.dumps({**keep, "subject": PURGED, "purged": True}), r["permit_id"]))
+            n["permits"] += 1
+    n["events"] = con.execute("UPDATE events SET detail_json=NULL WHERE ts<? AND detail_json IS NOT NULL AND kind<>'purge'", (cutoff,)).rowcount
+    if ask_text:
+        # The chat question (it holds a "Command:" block), the one-line label and the scope labels of an ask that is over: never an ask still open.
+        n["asks"] = con.execute(
+            "UPDATE asks SET question_json=?, label=CASE WHEN label IS NULL THEN NULL ELSE ? END, scopes_json=CASE WHEN scopes_json IS NULL THEN NULL ELSE '[]' END "
+            "WHERE created_ts<? AND NOT (status IN ('PENDING','SHOWN') AND expires_ts>?) "
+            "AND (question_json<>? OR (label IS NOT NULL AND label<>?) OR (scopes_json IS NOT NULL AND scopes_json<>'[]'))",
+            (PURGED_ASK, PURGED, cutoff, ts(), PURGED_ASK, PURGED)).rowcount
+        # The label of an answer is what `jade review confirm` and `jade knows` print. A standing answer keeps it while it decides (30 days after its last use,
+        # 180 at most), and so does an allow the human has not confirmed yet (it can be confirmed for 180 days); the keys, the answer and the rule stay for good.
+        cap, use = memory.valid_since()
+        n["human_answers"] = con.execute(
+            "UPDATE human_answers SET label=CASE WHEN label IS NULL THEN NULL ELSE ? END, scope_label=CASE WHEN scope_label IS NULL THEN NULL ELSE ? END "
+            "WHERE ts<? AND ((label IS NOT NULL AND label<>?) OR (scope_label IS NOT NULL AND scope_label<>?)) "
+            "AND NOT (answer='allow' AND strength='strong' AND COALESCE(source,'')<>'test' AND confirmed_ts>=? AND COALESCE(last_used_ts, confirmed_ts)>=?) "
+            "AND NOT (answer='allow' AND strength='hint' AND ts>=?)",
+            (PURGED, PURGED, cutoff, PURGED, PURGED, cap, use, cap)).rowcount
+    return n
+
+
+def purge_report(db: ledger.Ledger, older_than_days: int = 90, *, ask_text: bool = False, dry_run: bool = False) -> dict[str, int]:
+    """The retention purge, with the rows cleared per table. `dry_run` runs the same statements and rolls them back, so the ledger, its audit event and its file
+    are as they were. `ask_text` also clears the chat question and the labels of ended asks and of answers (DX-H2); it is off until the owner says yes, so
+    `jade maintain` never turns it on."""
+    cutoff = ts(now() - timedelta(days=older_than_days))
+    out: dict[str, int] = {}
+    try:
+        with db.tx() as con:
+            out = _purge_rows(con, cutoff, ask_text=ask_text)
+            if dry_run:
+                raise _DryRun
+            if (total := sum(out.values())):
+                db.event("ledger", "purge", guard=f"older than {older_than_days} d", detail={"rows": total, "tables": {t: c for t, c in out.items() if c}}, con=con)
+    except _DryRun:
+        return out
+    if sum(out.values()):
+        db.scrub()   # the cleared text must not stay readable in the file's free pages or the write-ahead log
+    return out
+
+
+def purge(db: ledger.Ledger, older_than_days: int = 90, *, ask_text: bool = False) -> int:
     """Remove stored project text older than the retention window and keep every metric (decision Q7): the state and question text of Jev
     calls, the objective and command text of decisions, the command a permit carried (never one still open: PENDING or ISSUED and not yet expired) and the detail of
-    events. Statuses, hashes, risk levels, timings, costs and probabilities stay. Returns the number of rows cleared."""
-    cutoff = ts(now() - timedelta(days=older_than_days))
-    n = 0
-    with db.tx() as con:
-        n += con.execute("UPDATE jev_calls SET state_text=NULL, question_text=NULL WHERE ts<? AND (state_text IS NOT NULL OR question_text IS NOT NULL)",
-                         (cutoff,)).rowcount
-        for r in con.execute("SELECT decision_id, doc_json FROM decisions WHERE updated_at<? AND json_extract(doc_json,'$.objective') IS NOT ?",
-                             (cutoff, PURGED)).fetchall():
-            doc = json.loads(r["doc_json"])
-            doc["objective"] = PURGED
-            doc["candidate_actions"] = [{**act, "description": PURGED} if isinstance(act, dict) else act for act in doc.get("candidate_actions", [])]
-            doc["constraints"], doc["assumptions"], doc["evidence_refs"] = [], [], []
-            con.execute("UPDATE decisions SET doc_json=? WHERE decision_id=?", (json.dumps(doc, ensure_ascii=False), r["decision_id"]))
-            n += 1
-        for r in con.execute("SELECT permit_id, scope FROM permits WHERE issued_at<? AND (state NOT IN ('PENDING','ISSUED') OR expires_at<=?) AND scope LIKE '{%'",
-                             (cutoff, ts())).fetchall():
-            try:
-                ctx = json.loads(r["scope"])
-            except ValueError:
-                continue
-            if isinstance(ctx, dict) and "subject" in ctx and ctx["subject"] != PURGED:
-                keep = {k: v for k, v in ctx.items() if k in ("tool", "length", "rule", "bound", "session_id", "agent_id", "permission_mode", "hash_cwd")}
-                con.execute("UPDATE permits SET scope=? WHERE permit_id=?", (json.dumps({**keep, "subject": PURGED, "purged": True}), r["permit_id"]))
-                n += 1
-        n += con.execute("UPDATE events SET detail_json=NULL WHERE ts<? AND detail_json IS NOT NULL AND kind<>'purge'", (cutoff,)).rowcount
-        if n:
-            db.event("ledger", "purge", guard=f"older than {older_than_days} d", detail={"rows": n}, con=con)
-    if n:
-        db.scrub()   # the cleared text must not stay readable in the file's free pages or the write-ahead log
-    return n
+    events. Statuses, hashes, risk levels, timings, costs and probabilities stay. With `ask_text` (the owner's yes, DX-H2) the chat question and the labels of ended
+    asks and of answers go too. Returns the number of rows cleared."""
+    return sum(purge_report(db, older_than_days, ask_text=ask_text).values())
 
 
 TEST_ID = re.compile(r"(?:prm|dec)_[0-9a-f]{12}")
@@ -1152,6 +1199,36 @@ def launchd_plist(label: str) -> str:
     return plistlib.dumps(doc, sort_keys=False).decode()
 
 
+def maintain_schedule(fmt: str = "cron") -> str:
+    """Where launchd does not exist: the line or the units that run `jade maintain` once a day at 09:15 (the time of the LaunchAgent). Printed only: nothing is
+    installed, the human does that. `cron` is one crontab line; `systemd` is a user service and its timer, each under a comment that names its path."""
+    if fmt not in ("cron", "systemd"):
+        raise ValueError(f"unknown format {fmt!r}: cron or systemd")
+    jade, log = jade_bin(), paths.home() / "maintain.log"
+    if fmt == "cron":
+        return f"15 9 * * * {shlex.quote(jade)} maintain >> {shlex.quote(str(log))} 2>&1\n".replace("%", "\\%")   # cron reads a bare % as a newline
+    quote = lambda s: '"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'   # noqa: E731 - systemd's own quoting; % is a specifier
+    return ("# ~/.config/systemd/user/jade-maintain.service\n[Unit]\nDescription=JADE daily maintenance (expiry sweeps, retention, drift canary, miner)\n\n"
+            f"[Service]\nType=oneshot\nExecStart={quote(jade)} maintain\n\n"
+            "# ~/.config/systemd/user/jade-maintain.timer\n[Unit]\nDescription=Run JADE maintenance daily\n\n"
+            "[Timer]\nOnCalendar=*-*-* 09:15:00\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n")
+
+
+MAINTAIN_STALE_DAYS = 3   # a job that runs daily and has not left its stamp for this long is not running
+
+
+def _last_maintain() -> str | None:
+    """When `jade maintain` last finished, from the stamp it leaves in the ledger; None when it never did or the ledger cannot be read."""
+    try:
+        db = ledger.open()
+        try:
+            return db.meta_get("last_maintain_ts")
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - a row of `jade check` must not crash the check
+        return None
+
+
 PROBE_SESSION = "jade-check-probe"
 
 
@@ -1490,8 +1567,17 @@ def maintain_jobs() -> list[tuple[Path, str, list]]:
 def _maintain_row() -> tuple[str, bool, str]:
     jobs = maintain_jobs()
     if not jobs:
+        last = _last_maintain()
+        try:
+            age = (now() - parse_ts(last)).total_seconds() / 86400 if last else None
+        except (ValueError, TypeError):   # a stamp that is not a time counts as no stamp
+            last, age = None, None
+        if age is not None and age <= MAINTAIN_STALE_DAYS:   # no LaunchAgent, but `jade maintain` ran lately: cron, a systemd timer or another scheduler runs it
+            return ("maintain job", True, f"`jade maintain` last ran {last} (no LaunchAgent: another scheduler runs it, JADE cannot tell which)")
+        since = f" It last ran {last}." if age is not None else " It has never left a last-run stamp."
         return ("maintain job", None, f"not installed: no `jade maintain` LaunchAgent in {launch_agents_dir()}, so retention, expiry sweeps, the drift canary and the "
-                "miner do not run unless something else schedules `jade maintain` (docs/08 2.4)")
+                "miner do not run unless something else schedules `jade maintain` (docs/08 2.4)." + since +
+                " Off macOS, `jade maintain-schedule` prints a cron line or a systemd timer for you to install")
     bad = []
     for f, label, args in jobs:
         if not (os.path.isfile(str(args[0])) and os.access(str(args[0]), os.X_OK)):
