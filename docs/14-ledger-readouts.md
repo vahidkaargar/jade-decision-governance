@@ -33,6 +33,8 @@ There is one definition now (`readouts.load_counts`). A gated call is every `gat
 - `invariant_blocks_without_gated_event`
 - `si07_blocks_counted_once_in_gated`
 
+The `asks` section of `jade ledger stats` uses the same number. Its `gated_calls` is now `calls` (it was `gated_events` before V6-23), and `per_100_gated` is divided by it. An invariant block can never become an ask, so it makes the per-100 figures lower than before for the same answers. Old `per_100_gated` output is not comparable with new output. `asks.gated_events` is printed beside `gated_calls`, so the old denominator can be read too.
+
 What is still not known. The code reading explains how the two counters can differ. It does not prove that this explains the whole gap in the first measurement (the 7-day number was larger than the 14-day number, which needs at least 758 safety blocks in 7 days). The owner can check this: run `jade ledger stats --days 7 --json` and read the `load` section. If `invariant_blocks_without_gated_event` plus `gated_events` is not close to 3,424, something else is going on. This is the owner step for U-10. No real ledger was read to write this page.
 
 Two other differences remain on purpose. The `events` block of `jade ledger stats` has no time window (it counts all time). The `jade check` row "host mode bypass" counts calls with no host prompt, and now counts them the same way.
@@ -95,7 +97,7 @@ The label filter is decision LD-31 of the plan, and it needs the owner's yes. Th
 
 ## 6. Shadow agreement
 
-`shadow_agreement` compares Jev's answer with the owner's for the same call. It uses only rows that exist already: the ask (session and hold key), the `jev_asked` event of that pair just before the ask, and the proxy's Jev call of that session between the two.
+`shadow_agreement` compares Jev's answer with the owner's for the same call. It uses only rows that exist already: the ask (session and hold key), the `jev_asked` event of that pair just before the ask, and the proxy's Jev call. Since this fix the proxy writes a `jev_answered` event (the call id only, no text) for the same session and hold key, so the pair is exact. A ledger from before it has no such event: the call is taken only when exactly one proxy call of the session fits between the two, and no call is used for two asks. A session runs tool calls in parallel, so "the newest call of the session" can belong to another command; the join never guesses it.
 
 - **owner_denies**: asks the owner denied that Jev was also asked about.
 - **jev_caught**: of those, Jev did not allow (abstain or reject).

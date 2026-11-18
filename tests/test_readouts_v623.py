@@ -2,6 +2,7 @@
 
 All rows here are synthetic and written into a temporary JADE home (tests/conftest.py). Nothing reads a real ledger.
 """
+# ruff: noqa: F811   (the fixtures are imported from the proxy tests and then named as test arguments)
 import json
 import sqlite3
 import time
@@ -12,6 +13,9 @@ import pytest
 
 from jade import adapter, ask, cli, hooks, ledger, ops, proxy, readouts
 from jade.util import now, ts
+from tests.acceptance import test_memory_w101 as m
+from tests.acceptance.test_jev_proxy_w102 import KIND, calls, prov, ready  # noqa: F401  (fixtures)
+from tests.acceptance.test_memory_w101 import medium  # noqa: F401  (fixture used by `ready`)
 from tests.test_ledger_migration import build, columns, dump
 
 NEW_COLUMNS = {"label_type", "sample_prob", "audit_source"}
@@ -28,24 +32,32 @@ def at(seconds_ago):
 
 
 # ---- the migration is additive and stays inside the hook budget ------------------------------------------------
-def test_an_old_ledger_opens_with_the_new_columns_inside_the_hook_budget(tmp_path):
+def test_an_old_ledger_opens_with_the_new_columns_and_keeps_its_rows(tmp_path):
     path = tmp_path / "old" / "jade.sqlite"
     path.parent.mkdir()
     counts = build(path)
     before = dump(path)
     assert not NEW_COLUMNS & columns(path, "labels")
-    started = time.perf_counter()
     ledger.open(path, timeout=hooks.LEDGER_TIMEOUT_S).close()   # the first open does the migration
-    first = time.perf_counter() - started
     assert NEW_COLUMNS <= columns(path, "labels")
-    assert first < hooks.LEDGER_TIMEOUT_S, f"the one-time migration took {first:.2f} s; the hook waits {hooks.LEDGER_TIMEOUT_S} s for the ledger"
-    started = time.perf_counter()
-    ledger.open(path, timeout=hooks.LEDGER_TIMEOUT_S).close()   # every later hook process: a version check only
-    assert time.perf_counter() - started < hooks.LEDGER_TIMEOUT_S / 3
     after = dump(path)
     assert {t: len(r) for t, r in after.items()} == counts
     assert after["labels"][0]["label_type"] is None and after["labels"][0]["sample_prob"] is None   # old rows stay null
     assert [{k: v for k, v in r.items() if k in before["labels"][0]} for r in after["labels"]] == before["labels"]
+
+
+@pytest.mark.timing
+def test_the_migration_of_an_old_ledger_is_inside_the_hook_budget(tmp_path):
+    path = tmp_path / "old" / "jade.sqlite"
+    path.parent.mkdir()
+    build(path)
+    started = time.perf_counter()
+    ledger.open(path, timeout=hooks.LEDGER_TIMEOUT_S).close()   # the first open does the migration
+    first = time.perf_counter() - started
+    assert first < hooks.LEDGER_TIMEOUT_S, f"the one-time migration took {first:.2f} s; the hook waits {hooks.LEDGER_TIMEOUT_S} s for the ledger"
+    started = time.perf_counter()
+    ledger.open(path, timeout=hooks.LEDGER_TIMEOUT_S).close()   # every later hook process: a version check only
+    assert time.perf_counter() - started < hooks.LEDGER_TIMEOUT_S / 3
 
 
 # ---- purge ------------------------------------------------------------------------------------------------------------------
@@ -119,6 +131,17 @@ def test_the_load_window_is_the_same_in_both(capsys):
     db.close()
     assert ops.no_prompt_gated_calls(7)[0] == 1 and ops.no_prompt_gated_calls(14)[0] == 2
     assert stats(capsys, "--days", "7")["load"]["calls"] == 1 and stats(capsys, "--days", "14")["load"]["calls"] == 2
+
+
+def test_per_100_gated_uses_all_gated_calls_and_the_stats_print_both_denominators(capsys):
+    db = ledger.open()
+    gate_events(db)   # 7 gated events + 3 invariant blocks: 10 calls
+    for i in range(5):
+        db.record_human_answer(session="s", decision_id=None, rule_id="R-11", class_key=None, exact_key=f"{i:064d}", answer="allow", channel="chat")
+    db.close()
+    asks = stats(capsys)["asks"]
+    assert asks["gated_calls"] == 10 and asks["gated_events"] == 7   # `gated_events` is what `gated_calls` was before V6-23
+    assert asks["per_100_gated"]["chat"] == 50.0   # 5 answers over 10 calls; over the old 7 it was 71.4
 
 
 def test_the_test_tagged_rows_are_left_out_of_the_load(monkeypatch):
@@ -258,14 +281,20 @@ def test_label_coverage_counts_fit_labels_apart_from_heuristic_and_other_kinds()
 
 
 # ---- Jev's shadow answer against the owner's ---------------------------------------------------------------------------------
-def shadow_pair(db, owner, jev_exit, session, hold):
-    """One ask the owner answered, with the `jev_asked` event and the proxy's call of that pair just before it (what the hook leaves behind)."""
-    add_ask(db, "R-11", "DENIED" if owner == "deny" else "CONSUMED", created=60, answered=30, session=session, hold=hold)
-    db.event(proxy._attempt_key(session, hold), "jev_asked", guard="R-11 high", actor="hook")
-    db.con.execute("UPDATE events SET ts=? WHERE entity_id=?", (at(62), proxy._attempt_key(session, hold)))
-    call = db.begin_call(proxy.QID, "h" + session, session, version=2, primitive="noul", task_family="human_proxy")
+def shadow_pair(db, owner, jev_exit, session, hold, *, created=60, answered=30, asked=62, called=61, link=True):
+    """One ask the owner answered, with the `jev_asked` event and the proxy's call of that pair just before it (what the hook leaves behind). `link` writes the
+    `jev_answered` event that ties the call to the pair; an older ledger has none."""
+    add_ask(db, "R-11", "DENIED" if owner == "deny" else "CONSUMED", created=created, answered=answered, session=session, hold=hold)
+    key = proxy._attempt_key(session, hold)  # noqa: SLF001
+    db.event(key, "jev_asked", guard="R-11 high", actor="hook")
+    db.con.execute("UPDATE events SET ts=? WHERE entity_id=? AND kind='jev_asked' AND id=(SELECT MAX(id) FROM events)", (at(asked), key))
+    call = db.begin_call(proxy.QID, "h" + session + hold, session, version=2, primitive="noul", task_family="human_proxy")
     db.finish_call(call, p=0.5, exit_code=jev_exit, verdict="ACCEPT" if jev_exit == 0 else "ABSTAIN" if jev_exit == 3 else None)
-    db.con.execute("UPDATE jev_calls SET ts=? WHERE call_id=?", (at(61), call))
+    db.con.execute("UPDATE jev_calls SET ts=? WHERE call_id=?", (at(called), call))
+    if link:
+        db.event(key, "jev_answered", guard="R-11 high", actor="hook", detail={"call_id": call})
+        db.con.execute("UPDATE events SET ts=? WHERE id=(SELECT MAX(id) FROM events)", (at(called),))
+    return call
 
 
 def test_the_shadow_join_reports_owner_denies_jev_recall_and_false_allows_with_counts():
@@ -298,6 +327,46 @@ def test_an_old_jev_asked_event_does_not_pair_with_a_later_ask():
     shadow_pair(db, "deny", 0, "s1", "h1")
     db.con.execute("UPDATE events SET ts=? WHERE kind='jev_asked'", (at(60 + readouts.SHADOW_PAIR_S + 30),))
     assert readouts.shadow_agreement(db, SINCE)["joined"] == 0
+
+def test_two_commands_of_one_session_are_not_mixed_up():
+    db = ledger.open()
+    shadow_pair(db, "deny", 3, "s1", "hA", created=60, answered=30, asked=65, called=62)    # A: the owner denied, Jev did not allow
+    shadow_pair(db, "allow", 0, "s1", "hB", created=59, answered=30, asked=65, called=61)   # B: the owner allowed, Jev allowed
+    out = readouts.shadow_agreement(db, SINCE)
+    assert (out["joined"], out["owner_denies"], out["jev_caught"], out["jev_false_allows"]) == (2, 1, 1, 0)
+    assert (out["owner_allows"], out["jev_agreed_allows"]) == (1, 1) and out["recall_percent"] == 100.0
+
+
+def test_a_ledger_without_the_link_event_joins_only_when_one_call_fits():
+    db = ledger.open()
+    shadow_pair(db, "deny", 3, "s1", "hA", created=60, asked=65, called=62, link=False)
+    shadow_pair(db, "allow", 0, "s1", "hB", created=59, asked=65, called=61, link=False)
+    out = readouts.shadow_agreement(db, SINCE)   # two calls of the session fit each ask: a guess would mix them up, so there is no join
+    assert (out["asks_answered"], out["joined"], out["jev_false_allows"], out["jev_caught"]) == (2, 0, 0, 0)
+
+
+def test_a_ledger_without_the_link_event_still_joins_a_lone_call():
+    db = ledger.open()
+    shadow_pair(db, "deny", 3, "s1", "hA", link=False)
+    out = readouts.shadow_agreement(db, SINCE)
+    assert (out["joined"], out["jev_caught"]) == (1, 1)
+
+
+def test_one_jev_call_is_not_counted_for_a_second_ask_of_the_same_hold():
+    db = ledger.open()
+    shadow_pair(db, "deny", 3, "s1", "h1")
+    add_ask(db, "R-11", "DENIED", created=40, answered=20, session="s1", hold="h1")   # a retry: a new ask, and no new `jev_asked` event
+    out = readouts.shadow_agreement(db, SINCE)
+    assert out["asks_answered"] == 2 and out["joined"] == 1 and out["owner_denies"] == 1 and out["jev_caught"] == 1
+    assert out["recall_percent"] == 100.0 and out["recall_lower_95_percent"] < 100   # one answer is one answer
+
+
+def test_the_proxy_leaves_a_link_from_the_pair_to_its_jev_call(ready):
+    assert hooks.pretool(m.call(KIND)).exit_code == 0
+    (c,) = calls()
+    (link,) = m.rows("SELECT entity_id, detail_json FROM events WHERE kind='jev_answered'")
+    assert json.loads(link["detail_json"]) == {"call_id": c["call_id"]} and link["entity_id"].startswith("jevtry:")
+
 
 
 # ---- jade review: friction beside correctness -------------------------------------------------------------------------------

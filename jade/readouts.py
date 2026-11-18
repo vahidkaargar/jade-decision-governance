@@ -7,6 +7,7 @@ often Jev's shadow answer agreed with the owner. Nothing here writes a row, chan
 
 from __future__ import annotations
 
+import json
 import math
 from datetime import timedelta
 
@@ -124,10 +125,21 @@ def label_coverage(db, since: str) -> dict:
             "labels_by_source": by_source, "labels_by_type": by_type}
 
 
+def _link_call(detail_json: str | None) -> str | None:
+    try:
+        cid = json.loads(detail_json or "{}").get("call_id")
+    except (ValueError, AttributeError):
+        return None
+    return cid if isinstance(cid, str) else None
+
+
 # ---- Jev's shadow answer against the owner's ----------------------------------------------------------
 def shadow_agreement(db, since: str) -> dict:
     """For each ask the owner answered, the answer Jev's proxy gave to the same call (question `q.human_proxy.would_allow`), when the proxy was asked. The pair is found
-    from rows that already exist: the ask (session, hold key), the `jev_asked` event of that pair just before it, and the Jev call of that session between the two.
+    from rows that already exist: the ask (session, hold key), the `jev_asked` event of that pair just before it, and the Jev call the proxy tied to that pair with a
+    `jev_answered` event (call id only). A ledger from before that event has no tie: the call is taken only when exactly one proxy call of the session fits between the
+    two, never the newest of several (a session runs parallel tool calls, and a guess would read another command's answer). An event and its call pair with the first ask
+    after them, once: a retry that asks the owner again without asking Jev has no pair.
     Jev 'allows' with exit code 0; abstain and reject (3, 4) count as not allowing; no answer (5, 6) is counted apart.
 
     owner_denies: asks the owner denied that Jev was also asked about. jev_caught: of those, Jev did not allow. jev_false_allows: Jev allowed what the owner denied.
@@ -135,22 +147,38 @@ def shadow_agreement(db, since: str) -> dict:
     never reached an ask, so it is not in this join: its audit is `jade review mark`."""
     from . import evals, proxy
 
-    pairs = db.all(f"SELECT ask_id, session_id, hold_key, status, created_ts, answered_ts, expires_ts FROM asks WHERE created_ts>=? AND {ledger.live()}", (since,))  # noqa: S608
+    pairs = db.all(f"SELECT ask_id, session_id, hold_key, status, created_ts, answered_ts, expires_ts FROM asks WHERE created_ts>=? AND {ledger.live()} ORDER BY created_ts", (since,))  # noqa: S608
     now_s = ts()
     out = {"asks_answered": 0, "joined": 0, "owner_denies": 0, "jev_caught": 0, "jev_false_allows": 0, "jev_no_answer_on_denies": 0,
            "owner_allows": 0, "jev_agreed_allows": 0, "jev_did_not_allow_on_allows": 0, "jev_no_answer_on_allows": 0}
+    linked = {_link_call(e.detail_json) for e in db.all(f"SELECT detail_json FROM events WHERE kind='jev_answered' AND {ledger.live()}")}
+    used_events: set[int] = set()   # an event, and so its Jev call, belongs to the first ask after it: a retry that asks again without asking Jev has no pair
+    used_calls: set[str] = set()
     for p in pairs:
         kind = _kind(p.status, p.answered_ts is not None, p.expires_ts or "", now_s)
+        key = proxy._attempt_key(p.session_id, p.hold_key)  # noqa: SLF001
+        events = [e for e in db.all(f"SELECT id, kind, ts, detail_json FROM events WHERE kind IN ('jev_asked','jev_answered') AND entity_id=? AND ts<=? AND {ledger.live()} ORDER BY id", (key, p.created_ts))  # noqa: S608
+                  if e.id not in used_events]
+        used_events.update(e.id for e in events)
+        asked = [e for e in events if e.kind == "jev_asked"]
         if kind not in ("allowed", "denied"):
             continue
         out["asks_answered"] += 1
-        tried = db.one("SELECT ts FROM events WHERE kind='jev_asked' AND entity_id=? AND ts<=? ORDER BY id DESC LIMIT 1", (proxy._attempt_key(p.session_id, p.hold_key), p.created_ts))  # noqa: SLF001
-        if tried is None or (parse_ts(p.created_ts) - parse_ts(tried.ts)).total_seconds() > SHADOW_PAIR_S:
+        if not asked or (parse_ts(p.created_ts) - parse_ts(asked[-1].ts)).total_seconds() > SHADOW_PAIR_S:
             continue
-        call = db.one(f"SELECT exit_code FROM jev_calls WHERE question_id=? AND session_id=? AND ts>=? AND ts<=? AND state='DONE' AND {ledger.live()} ORDER BY rowid DESC LIMIT 1",  # noqa: S608
-                      (proxy.QID, p.session_id, tried.ts, p.created_ts))
+        tried = asked[-1]
+        call = None
+        links = [e for e in events if e.kind == "jev_answered" and e.id > tried.id]
+        if links:   # the proxy wrote which call answered this pair (hold key and session): no guess
+            cid = _link_call(links[-1].detail_json)
+            call = db.one(f"SELECT call_id, exit_code FROM jev_calls WHERE call_id=? AND state='DONE' AND {ledger.live()}", (cid,)) if cid else None
+        else:   # a ledger from before the link: only when exactly one call of this session could be the answer, never the newest of several
+            fits = [c for c in db.all(f"SELECT call_id, exit_code FROM jev_calls WHERE question_id=? AND session_id=? AND ts>=? AND ts<=? AND state='DONE' AND {ledger.live()}",  # noqa: S608
+                                      (proxy.QID, p.session_id, tried.ts, p.created_ts)) if c.call_id not in used_calls and c.call_id not in linked]
+            call = fits[0] if len(fits) == 1 else None
         if call is None:
             continue
+        used_calls.add(call.call_id)
         out["joined"] += 1
         said = "allow" if call.exit_code == 0 else "no_answer" if call.exit_code in (5, 6) else "not_allow"
         if kind == "denied":

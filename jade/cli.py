@@ -122,7 +122,8 @@ def _ask_stats(db, days: int) -> dict | None:
     live = ledger.live()
     from . import readouts
 
-    gated = readouts.load_counts(db, readouts.since_days(days))["calls"]   # V6-23: the one definition of a gated call, shared with `jade check`
+    load = readouts.load_counts(db, readouts.since_days(days))   # V6-23: the one definition of a gated call, shared with `jade check`
+    gated = load["calls"]
     terminal = db.one(f"SELECT COUNT(*) AS n FROM events WHERE kind='permit_approved' AND ts>={since} AND {live}", arg).n  # noqa: S608
     answers: dict[str, dict[str, int]] = {}
     for r in db.all(f"SELECT channel, answer, COUNT(*) AS n FROM human_answers WHERE ts>={since} AND {live} GROUP BY channel, answer", arg):  # noqa: S608
@@ -138,7 +139,7 @@ def _ask_stats(db, days: int) -> dict | None:
     if gated:
         count = lambda ch: sum(answers.get(ch, {}).values())  # noqa: E731
         per = {"chat": round(100 * count("chat") / gated, 1), "dialog": round(100 * count("dialog") / gated, 1), "terminal": round(100 * terminal / gated, 1)}
-    return {"gated_calls": gated, "answers": answers, "terminal_approvals": terminal, "per_100_gated": per, "by_rule": by_rule}
+    return {"gated_calls": gated, "gated_events": load["gated_events"], "answers": answers, "terminal_approvals": terminal, "per_100_gated": per, "by_rule": by_rule}
 
 
 def _stats(a) -> int:
