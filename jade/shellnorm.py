@@ -32,7 +32,10 @@ UNSAFE_MARK = "@unsafe!"   # prefix of the copy of a stage whose verb can write 
 UNSAFE_GIT = "git:unsafe-config "
 TEXT_MARK = "@text!"   # prefix of a line the scanner extracted from a program (`import jade.cli`): words for the invariants to read, no operands to resolve
 
-NULL_REDIRECT = re.compile(r"(\d*>&\d+|&>>?\s*/dev/null|\d*>>?\s*/dev/null|\d*<\s*/dev/null)")
+# Same matches as the frozen copy's pattern, in linear time (V6-08, WT W-104): a descriptor only starts at the start of a run of digits. Without `(?<!\d)` the engine tried every
+# start inside a long run of digits and read the rest of the run again each time, so eight times the digits took about 55 times as long.
+NULL_REDIRECT = re.compile(r"((?:(?<!\d)\d+)?>&\d+|&>>?\s*/dev/null|(?:(?<!\d)\d+)?>>?\s*/dev/null|(?:(?<!\d)\d+)?<\s*/dev/null)")
+NULL_REDIRECT_OLD = r"(\d*>&\d+|&>>?\s*/dev/null|\d*>>?\s*/dev/null|\d*<\s*/dev/null)"   # the pattern as it was, kept for the test that the two match alike
 # A redirect as the shell reads it, wherever it stands in the command: an optional descriptor that starts a word (`2>log`; in `a2>log` the 2 is part of `a2`), the
 # operator (`&>`, `&>>`, `>>`, `>&`, `>|`, `>`, `<<<`, `<<HEREDOC` as the scanner spells a heredoc, `<&`, `<>`, `<`), and the target word, which may follow after blanks (`>&-main` closes a descriptor and then names the word `main`: a `-` right after `>&` or `<&` is the whole target).
 REDIRECT = re.compile(r"(?P<fd>(?<!\S)\d+)?(?P<op><<HEREDOC|(?:&>>?|>>?&?)[|!]?|<<<|<&|<>|<)(?:(?<!HEREDOC)[ \t]*(?P<tgt>(?<=[<>]&)-|[^\s<>&|]*))?")   # `[|!]`: zsh `>|`, `>!`, `>>|`, `>&!`, `&>>|` ...
@@ -60,8 +63,10 @@ _INERT = re.compile(r"[;&|<>(){}`]")   # characters a quoted word may hold that 
 
 HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|(\\?)([^\s;&|<>()'\"\\`$]+))")
 HEREDOC_AT = re.compile(r"(?<!<)" + HEREDOC_OP.pattern + r"(?!<)")   # a heredoc operator, not the end of `<<<`
+# A word that starts with `#` ends the stage: the shell ignores it and the rest of the line (V6-08, N18). Before, ` # x` after `| sh` read as two arguments
+# and hid that the stage reads its pipe as code.
 NEXT_STAGE = re.compile(
-    r"[ \t]*(?:\w+=\S*[ \t]+)*(?:(?:sudo|env|command|exec|nohup|time|xargs)(?:[ \t]+-[ugphCDrtUT][ \t]+\S+|[ \t]+-\S+(?:[ \t]+\d+)?)*[ \t]+)*[\\'\"]?(?P<w>[\w./+-]+)['\"]?(?P<a>(?:[ \t]+(?!\d+[<>])[^\s;&|()<>`$]+)*)(?:[ \t]+\d+(?=[<>]))*[ \t]*(?=$|[;&|()\n<>])")
+    r"[ \t]*(?:\w+=\S*[ \t]+)*(?:(?:sudo|env|command|exec|nohup|time|xargs)(?:[ \t]+-[ugphCDrtUT][ \t]+\S+|[ \t]+-\S+(?:[ \t]+\d+)?)*[ \t]+)*[\\'\"]?(?P<w>[\w./+-]+)['\"]?(?P<a>(?:[ \t]+(?!\d+[<>])(?!#)[^\s;&|()<>`$]+)*)(?:[ \t]+\d+(?=[<>]))*(?:[ \t]+(?=#)|[ \t]*(?=$|[;&|()\n<>]))")
 PIPE_REST = re.compile(r"\|(?!\|)")
 PRODUCER = re.compile(r"^\s*(?:echo|printf|print|cat|yes)\b(?:\s+-[a-zA-Z]+)*")
 PRINTER = re.compile(r"^\s*\\?(?:\S*/)?(?P<name>echo|printf|print|cat|yes)\b(?:\s+-[a-zA-Z]+)*")   # the program that prints, after `time`, `env`, `command`, `!`, `\echo`, `/bin/echo`
@@ -882,6 +887,39 @@ class _Scan:
         # expanded, so `'$X'` there stays a live expansion (security review PRE2-1).
         self.literal_end = literal_end if depth == 0 else 0
         self.legacy = len(budget) > 3 and budget[3]   # origin/main's reading of `"${NAME}"` (`$X`): the third reading of `_skeleton_both_top`
+        self.assigns: dict[str, list[str]] = {}   # `g=git` earlier in this text: the literal values a variable was given (V6-08, N19)
+
+    def _note_assignments(self, raw: str) -> None:
+        """A stage that is only `NAME=value` words (or `export NAME=value`) gives a shell variable a value. Every plain literal value a name was given is kept,
+        wherever the assignment stood (a subshell, a branch, before a later one): `_variable_command` reads a command named by that variable once for each of them.
+        A reading is only added, never taken away, so a guess about the scope of an assignment can cost an extra ask and never hides a command."""
+        if "=" not in raw or len(raw) > 400:
+            return
+        ws = words_of(raw)
+        while ws and ws[0] in ("then", "do", "else", "if", "while", "until", "!", "time"):   # `if x; then g=git; fi`
+            ws = ws[1:]
+        if ws and ws[0] in EXPORTISH:
+            ws = [w for w in ws[1:] if not w.startswith("-")]
+        if not ws or not all(ENV_ASSIGN.match(w) for w in ws):
+            return
+        for w in ws:
+            name, val = ENV_ASSIGN.match(w).groups()
+            val = _dec(val)
+            if val and re.fullmatch(r"[\w./+:=@%,~ -]+", val):
+                known = self.assigns.setdefault(name, [])
+                if val not in known and len(known) < 4:
+                    known.append(val)
+
+    def _variable_command(self, raw: str) -> list[str]:
+        """The stage with its command word, a variable set earlier in this text (`$g`, `${g}`), written as each value it was given: `g=git; $g push origin main` is
+        also read as `git push origin main`. The stage as written is read as before, so this only adds readings."""
+        lead = raw.lstrip()
+        bare = PREFIX.sub("", lead, count=1)
+        m = re.match(r"\$(?:\{(\w+)\}|(\w+))", bare)
+        if not m or not (values := self.assigns.get(m.group(1) or m.group(2))):
+            return []
+        head = lead[:len(lead) - len(bare)]
+        return [head + v + bare[m.end():] for v in values]
 
     def _sub(self, text: str, step: float = 1) -> str:
         """The skeleton of a nested text. A text that is read again at the same depth (the stages of a pipeline are produced once per `|`, a text is read for every
@@ -1160,6 +1198,9 @@ class _Scan:
             raw = s[raw_at:sep_at]
             if raw.strip():
                 self._stage(raw, deferred)
+                if self.assigns:
+                    deferred.extend(self._sub(t) for t in self._variable_command(raw))   # `g=git; $g push origin main`
+                self._note_assignments(raw)
             if pipe:
                 chain.append(raw)
                 whole.append(s[whole_at:sep_at])
@@ -1222,6 +1263,8 @@ class _Scan:
                 else:
                     if d.isalnum() or d in ORDINARY_ESCAPE:
                         emit(d)
+                    elif d in " \t":
+                        emit(_enc(d))   # `my\ repo` is one word with a space in it, as `'my repo'` is (V6-08, N19): `git -C my\ repo push` read `my\` as the path and `repo` as the verb
                     elif _INERT.fullmatch(d):
                         emit(ESCAPED + d)   # `a\&>log`: a word `a&` and a `>` in one reading, a backslash and an operator in the other (`_readings`)
                         escaped = True
@@ -1366,6 +1409,8 @@ class _Scan:
         raw = s[raw_at:stop]
         if raw.strip():
             self._stage(raw, deferred)
+            if self.assigns:
+                deferred.extend(self._sub(t) for t in self._variable_command(raw))
         self.nest -= 1
         text = _readings("".join(out), braced, escaped)
         return text + "".join(f" ; {d} ; " for d in dict.fromkeys(deferred)), i   # a text produced for several pipes is written once
@@ -1640,11 +1685,9 @@ _NOCORRECT = re.compile(r"(?<![\w./$-])nocorrect(?![\w./-])")
 
 
 def _base_skeleton(command: str) -> str:
-    from . import shellnorm_base
-
     # origin/main's own reading with its own budget (`BUDGET`, 4 000 000 characters): never cut earlier than it cut itself, so no command is read as less than main read it.
     # Its cost is main's cost too (a chain of pipelines nested six deep took 24 s there).
-    return _NOCORRECT.sub("nocorrect\x06", shellnorm_base.skeleton(command))
+    return _NOCORRECT.sub("nocorrect\x06", _base().skeleton(command))
 
 
 def _parts(command: str, literal_end: int | None = None) -> list[tuple[str, re.Pattern, re.Pattern]]:
@@ -1656,6 +1699,10 @@ def _parts(command: str, literal_end: int | None = None) -> list[tuple[str, re.P
 def _base():
     from . import shellnorm_base
 
+    if shellnorm_base.NULL_REDIRECT is not NULL_REDIRECT:
+        # The frozen copy is not edited (its hash is pinned), but its pattern for `2>&1` and `>/dev/null` took quadratic time on a long run of digits (V6-08, WT W-104). The
+        # linear pattern matches the same text (tests/test_null_redirect_linear.py), so main's reading is the same and only its cost changes.
+        shellnorm_base.NULL_REDIRECT = NULL_REDIRECT
     return shellnorm_base
 
 
