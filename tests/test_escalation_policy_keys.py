@@ -31,8 +31,8 @@ PROSE_ONLY = {
 DELETED = ("abstain_to", "max_revisions", "each_question_includes", "deadline_default_h", "human_question", "gates")
 
 
-def test_every_key_in_escalation_yaml_is_read_by_code_or_declared_prose(monkeypatch):
-    doc = yaml.safe_load((REAL / "escalation.yaml").read_text())
+def _read_keys(doc, monkeypatch) -> set[str]:
+    """Run every code path that reads the policy over every family and risk, and return the key paths the code read."""
     seen: set[str] = set()
     monkeypatch.setattr(thresholds, "escalation", lambda: Tracked(doc, "", seen))
     risks = ("low", "medium", "high", "critical")
@@ -43,12 +43,31 @@ def test_every_key_in_escalation_yaml_is_read_by_code_or_declared_prose(monkeypa
         for answer in ({"type": "noul", "noul": 0.5}, {"type": "choice", "choice": "a", "probabilities": {"a": 0.8, "b": 0.2}}):
             for risk in risks:
                 thresholds.judge(answer, family, risk, 1, "p/m", primitive=answer["type"])
+    return seen
+
+
+def test_every_key_in_escalation_yaml_is_read_by_code_or_declared_prose(monkeypatch):
+    doc = yaml.safe_load((REAL / "escalation.yaml").read_text())
+    seen = _read_keys(doc, monkeypatch)
     unread = sorted(set(leaves(doc)) - seen - set(PROSE_ONLY))
     assert not unread, f"policies/escalation.yaml declares {unread}, which no code reads: read it where it acts, delete it, or list it in PROSE_ONLY with the reason"
     stale = sorted(k for k in PROSE_ONLY if k not in set(leaves(doc)))
     assert not stale, f"PROSE_ONLY names keys the file no longer declares: {stale}"
     read_but_prose = sorted(k for k in PROSE_ONLY if k in seen)
     assert not read_but_prose, f"{read_but_prose} are read by code now: take them off PROSE_ONLY"
+
+
+def test_a_new_dead_key_inside_a_noul_or_choice_block_is_seen_as_unread(monkeypatch):
+    """The reader of a band block must touch only the keys it uses. If it copies the whole block (`{**a, **b}`), every key in it counts as read and a dead key hides."""
+    for where in (("defaults", "noul"), ("defaults", "choice"), ("families", "risk_triage", "noul"), ("families", "strategy_choice", "choice")):
+        doc = yaml.safe_load((REAL / "escalation.yaml").read_text())
+        block = doc
+        for part in where:
+            block = block[part]
+        block["escalate_to"] = "human"
+        seen = _read_keys(doc, monkeypatch)
+        unread = sorted(set(leaves(doc)) - seen - set(PROSE_ONLY))
+        assert unread == [".".join(where) + ".escalate_to"], f"a dead key under {where} was not found: {unread}"
 
 
 def test_the_five_unread_keys_are_gone_and_no_document_promises_them():

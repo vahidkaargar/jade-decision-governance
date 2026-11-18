@@ -328,3 +328,26 @@ def test_a_document_that_says_the_question_shows_a_recommended_default_is_not_tr
         for line in _read(rel).splitlines():
             if "recommended default" in line.lower() and "consequence of no answer" in line.lower():
                 assert "not shown" in line.lower() or "does not show" in line.lower(), f"{rel}: promises a recommended default and the cost of no answer; the question shows neither: {line[:100]}"
+
+
+def test_no_document_promises_a_recommended_default_or_an_abstention_budget_the_code_does_not_have():
+    """The question shows no recommended default, and no code tracks an abstention budget (T14 said both). Each mention must be a denial (\"no\", \"not\" ... the phrase)."""
+    root = Path(__file__).resolve().parent.parent
+    denial = re.compile(r"\b(no|not|never|without|neither|nor|none)\b[^.;|]{0,60}(recommended default|abstention budget|abstain budget)", re.I)
+    for rel in ("README.md", *(f"docs/{p.name}" for p in sorted((root / "docs").glob("0*.md")))):
+        for line in _read(rel).splitlines():
+            for m in re.finditer(r"recommended default|abstention budget|abstain budget", line, re.I):
+                head = line[max(0, m.start() - 70): m.end()]
+                assert denial.search(head) or re.search(r"(does not|not) show a recommended default", line, re.I), f"{rel}: promises {m.group(0)!r}, which the code does not have: {line[:120]}"
+
+
+def test_the_ask_text_purge_waits_in_the_backlog_for_the_owner():
+    """`jade ledger purge --ask-text` is built and off (V6-11). The owner's decision must be an open row, in both files, or nothing will ask for it."""
+    rows = [json.loads(line) for line in _read("work-items.jsonl").splitlines() if line.strip()]
+    mine = [w for w in rows if "--ask-text" in w["title"] + w["next_action"]]
+    assert mine, "no work item names the --ask-text purge: the owner's decision is only in the CHANGELOG"
+    assert all(w["owner"] == "human" and w["status"] == "open" for w in mine)
+    assert any("DX-H2" in w["evidence_refs"] and "docs/05 T15" in w["evidence_refs"] for w in mine)
+    backlog = _read("BACKLOG.md")
+    for w in mine:
+        assert re.search(rf"^\| {w['id']} \|", backlog, re.M), f"{w['id']} missing from BACKLOG.md"
