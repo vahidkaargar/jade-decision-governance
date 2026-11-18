@@ -70,33 +70,133 @@ def clip(text: str) -> str:
 _clip = clip   # the old name, for any caller outside this package
 
 
-def _pieces(text: str):
-    """(start, end) of each simple command of a shell text, split where the gate splits."""
-    start = 0
-    for m in shellnorm.SPLIT.finditer(text):
-        yield start, m.start()
-        start = m.end()
-    yield start, len(text)
+_HEREDOC = re.compile(r"<<-?[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?(\w+))")
+_PLAIN = re.compile(r"[\w./@:=+,%~ \t-]*\Z")   # a statement with no quote, no nesting, no redirect: its key is read from its words alone
+ASSESS_CAP = 40        # statements with a quote or a nested form are rated one by one, at most this many
+
+
+def _statements(text: str) -> list[tuple[int, int]]:
+    """(start, end) of each top-level statement of a shell text: split at a line break, `;`, `&&`, `||`, `|` and `&` that are outside quotes, `$( )`, `( )`, `${ }`, backticks
+    and here-document bodies. A nested form (`bash -c '...'`, `$(...)`) and everything it holds is one statement, so a `cd` inside it stays with the command that follows it.
+    Quotes this cannot close make one long statement: the question then shows its start and says to read the call elsewhere."""
+    n, i, start = len(text), 0, 0
+    out: list[tuple[int, int]] = []
+    pending: list[str] = []   # here-document delimiters opened on this line
+
+    def cut(end: int, width: int):
+        nonlocal start
+        if text[start:end].strip():
+            out.append((start, end))
+        start = end + width
+
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            i += 2
+        elif c == "'":
+            k = text.find("'", i + 1)
+            i = n if k < 0 else k + 1
+        elif c == '"':
+            i = shellnorm._dq_end(text, i + 1) + 1
+        elif c == "`":
+            k = i + 1
+            while k < n and text[k] != "`":
+                k += 2 if text[k] == "\\" else 1
+            i = k + 1
+        elif c == "$" and text.startswith("${", i):
+            i = shellnorm._match_brace(text, i + 2)
+        elif c == "$" and text.startswith("$(", i):
+            i = shellnorm._skip_span(text, i + 1)
+        elif c in "<>" and text.startswith("(", i + 1):
+            i = shellnorm._skip_span(text, i + 1)
+        elif c == "(":
+            i = shellnorm._skip_span(text, i)
+        elif c == "<" and text.startswith("<<", i) and not text.startswith("<<<", i) and (m := _HEREDOC.match(text, i)):
+            pending.append(m.group(1) or m.group(2) or m.group(3))
+            i = m.end()
+        elif c == "\n":
+            if pending:   # the here-document bodies start on the next line and end at their delimiter line: they are part of this statement
+                pos = i + 1
+                for word in pending:
+                    while pos < n:
+                        eol = text.find("\n", pos)
+                        eol = n if eol < 0 else eol
+                        line = text[pos:eol].strip()
+                        pos = eol + 1
+                        if line == word:
+                            break
+                pending.clear()
+                i = max(i + 1, pos - 1)
+            else:
+                cut(i, 1)
+                i += 1
+        elif c == ";":
+            cut(i, 1)
+            i += 1
+        elif c == "&":
+            if text.startswith("&&", i):
+                cut(i, 2)
+                i += 2
+            elif (i and text[i - 1] in "<>") or text.startswith("&>", i):
+                i += 1
+            else:
+                cut(i, 1)
+                i += 1
+        elif c == "|":
+            if text.startswith(("||", "|&"), i):
+                cut(i, 2)
+                i += 2
+            elif i and text[i - 1] == ">":
+                i += 1
+            else:
+                cut(i, 1)
+                i += 1
+        else:
+            i += 1
+    if text[start:].strip():
+        out.append((start, n))
+    return out
+
+
+_CD = re.compile(r"\s*(?:cd|pushd)(?:\s|\Z)")
 
 
 def _hidden_gated(keys: set[str], text: str) -> tuple[list[tuple[int, int]], bool]:
-    """Which commands of `text` the gate rated, and are not wholly in the head or the tail that the question shows; and whether every rated key was found in the text at all.
-    Never raises: a text the gate read in a way that this cannot follow gives (no pieces, False), and the question then says to read the call elsewhere."""
-    hidden: list[tuple[int, int]] = []
-    found: set[str] = set()
+    """Which parts of `text` hold a command the gate rated and are not wholly in the head or the tail that the question shows, and whether every rated key was found in the text.
+    A part is a whole top-level statement, so a rated command inside `bash -c '...'` or `$(...)` is shown with the form it sits in, and a `cd` just before it is shown with it. The
+    same key twice, one copy visible and one hidden, shows the hidden one. A statement with a quote or a nested form is rated by the gate's own `assess` (at most ASSESS_CAP of them).
+    Never raises: a text this cannot follow gives (no parts, False), and the question then says to read the call elsewhere."""
     try:
-        for s, e in _pieces(text):
+        stmts = _statements(text)
+        edge = len(text) - TAIL_CHARS
+        shown = [e <= HEAD_CHARS or s >= edge for s, e in stmts]
+        found: set[str] = set()
+        got: dict[int, set[str]] = {}
+        calls, unsure = 0, False
+        for idx in sorted(range(len(stmts)), key=lambda k: shown[k]):   # the hidden statements first, so the cap never takes them
+            s, e = stmts[idx]
             seg = text[s:e].strip()
-            if not seg:
+            if _PLAIN.match(seg):
+                got[idx] = {policy._segment_key(policy._bare(seg))} & keys
+            elif calls >= ASSESS_CAP:
+                unsure = True
+            else:
+                calls += 1
+                got[idx] = set(policy.assess("Bash", {"command": seg}, cwd="").seg_keys) & keys
+            found |= got.get(idx, set())
+        hidden: list[tuple[int, int]] = []
+        for idx, (_s, e) in enumerate(stmts):
+            if shown[idx] or not got.get(idx):
                 continue
-            key = policy._segment_key(policy._bare(seg))
-            if key in keys:
-                found.add(key)
-                if not (e <= HEAD_CHARS or s >= len(text) - TAIL_CHARS):
-                    hidden.append((s, e))
+            j = idx
+            while j > 0 and not shown[j - 1] and _CD.match(text, stmts[j - 1][0]):   # a hidden `cd` or `pushd` right before it changes where it runs
+                j -= 1
+            if hidden and hidden[-1][1] >= e:
+                continue
+            hidden.append((stmts[j][0], e))
     except Exception:   # noqa: BLE001 - a command the segmenter cannot read is never a reason to show less
         return [], False
-    return hidden, keys <= found
+    return hidden, keys <= found and not unsure
 
 
 READ_ELSEWHERE = "Deny it and ask the agent to run the risky command on its own, so that you can read all of it."

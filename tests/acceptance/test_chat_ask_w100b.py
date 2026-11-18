@@ -572,3 +572,99 @@ def test_the_scope_options_and_lines_have_no_raw_bidi_characters_when_the_folder
     _no_raw(q["question"])
     for o in q["options"]:
         _no_raw(o["label"] + o["description"])
+
+
+# ------------------------------------------------------------------ V6-09 review fixes: invisible look-alikes, a rated command hidden in a nested form
+
+LOOKALIKES = ["ㅤ", "ᅟ", "ᅠ", "ﾠ", "⠀", "͏", "᠋", "᠏", "︀", "️", "\U000e0100", "឴", "̸"]
+
+
+@pytest.mark.parametrize("ch", LOOKALIKES)
+def test_invisible_letters_symbols_and_marks_are_written_out_in_a_command_or_path(ch):
+    from jade import util
+    assert ch not in util.show_safely(f"/Users/me/project{ch}")
+    assert ch not in util.show_safely(f"a{ch}b")
+
+
+@pytest.mark.parametrize("ch", ["ㅤ", "ᅟ", "ᅠ", "ﾠ", "⠀"])
+def test_a_blank_filler_letter_is_written_out_even_in_prose(ch):
+    from jade import util
+    assert ch not in util.show_safely(f"a{ch}b", prose=True)
+
+
+def test_persian_marks_and_the_half_space_survive_where_they_are_needed():
+    from jade import util
+    word = "مَن‌خواهم"   # a vowel mark on an Arabic letter, then the half-space
+    assert util.show_safely(word, prose=True) == word
+    assert util.show_safely("مَن") == "مَن"   # a mark after a non-ASCII letter is part of the word, in a path too
+    assert util.show_safely("xّ", prose=True) == "xّ"   # prose keeps marks
+
+
+def test_the_gate_writes_out_an_invisible_filler_in_the_folder_and_the_command(level_high):
+    cmd = "cd /Users/me/projectㅤ && git reset --hard HEAD~1"
+    q = shown(token_of(hooks.pretool(call(cmd, cwd="/Users/me/project⠀")).stderr))["question"]
+    _no_raw(q)
+    assert "\\u3164" in q
+
+
+def test_the_question_for_a_write_writes_out_an_invisible_path_and_content():
+    from jade import askchat
+    q = askchat.question_for("0123456789ab", _assess(CMD), "Write᠋",
+                             {"subject": "/tmp/aㅤb", "cwd": "/tmp/x️y", "content": {"length": 9, "sha256": "ab" * 32, "text": "xᅟy͏"}})["question"]
+    _no_raw(q)
+
+
+def _nested_tail(cmd):
+    from jade import askchat
+    a = _assess(cmd)
+    assert a.seg_keys and len(cmd) > 1000, (a.seg_keys, len(cmd))
+    out = askchat.command_text(a, cmd)
+    assert "characters not shown" in out
+    return a, out.partition("characters not shown")[2]
+
+
+PAD = "echo " + "x" * 400
+
+
+def test_a_rated_command_in_a_nested_form_is_shown_when_a_visible_command_has_the_same_key():
+    cmd = f"kubectl apply -f a.yaml ; {PAD} ; {PAD} ; bash -c 'KUBECONFIG=/prod.yaml kubectl apply -f a.yaml' ; {PAD} ; {PAD}"
+    a, tail = _nested_tail(cmd)
+    assert a.seg_keys == ["kubectl apply -f a.yaml"]
+    assert "KUBECONFIG=/prod.yaml kubectl apply -f a.yaml" in tail and "not shown above" in tail, tail
+
+
+def test_a_nested_form_with_a_changed_folder_is_shown_with_its_cd():
+    cmd = f"git reset --hard HEAD~1 ; {PAD} ; {PAD} ; echo $(cd /prod; git reset --hard HEAD~1) ; {PAD} ; {PAD}"
+    _, tail = _nested_tail(cmd)
+    assert "echo $(cd /prod; git reset --hard HEAD~1)" in tail and "not shown above" in tail, tail
+    assert "in full:\ngit reset --hard HEAD~1" not in tail   # the old text: the part alone, as if it were the whole call
+
+
+def test_a_top_level_cd_before_a_hidden_rated_part_is_shown_with_it():
+    cmd = f"git reset --hard HEAD~1 ; {PAD} ; {PAD} ; cd /prod && git reset --hard HEAD~1 ; {PAD} ; {PAD}"
+    _, tail = _nested_tail(cmd)
+    assert "cd /prod && git reset --hard HEAD~1" in tail and "not shown above" in tail, tail
+
+
+def test_a_harmless_nested_form_in_the_hidden_middle_adds_no_warning():
+    cmd = f"git reset --hard HEAD~1 ; {PAD} ; {PAD} ; echo $(date) ; bash -c 'echo hello' ; {PAD} ; {PAD}"
+    _, tail = _nested_tail(cmd)
+    assert "cannot show which part" not in tail and "not shown above" not in tail, tail
+
+
+def test_a_nested_rated_command_behind_a_quoted_separator_is_shown_whole():
+    cmd = f"git reset --hard HEAD~1 ; {PAD} ; {PAD} ; bash -c 'cd /prod; git reset --hard HEAD~1' ; {PAD} ; {PAD}"
+    _, tail = _nested_tail(cmd)
+    assert "bash -c 'cd /prod; git reset --hard HEAD~1'" in tail and "not shown above" in tail, tail
+
+
+def test_more_nested_statements_than_the_cap_say_so_and_stay_fast():
+    import time
+    from types import SimpleNamespace
+
+    from jade import askchat
+    nested = " ; ".join(f"bash -c 'echo {i} > /tmp/f{i}'" for i in range(askchat.ASSESS_CAP + 20))
+    cmd = f"git reset --hard HEAD~1 ; {PAD} ; {PAD} ; {nested} ; {PAD}"
+    t0 = time.monotonic()
+    out = askchat.command_text(SimpleNamespace(seg_keys=["git reset --hard HEAD~1"]), cmd)
+    assert "cannot show which part" in out and time.monotonic() - t0 < 5
