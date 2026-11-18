@@ -196,9 +196,9 @@ def gate(result, name):
     return next(g for g in result["gates"] if g["gate"] == name)
 
 
-def run(snap, table, gaps=None, ceiling=None, corpus=None):
+def run(snap, table, gaps=None, ceiling=None, corpus=None, **kw):
     corpus = corpus if corpus is not None else [{"ids": e["ids"], "cmd": e["cmd"]} for e in snap["entries"]]
-    return oracle.check_snapshot(snap, corpus, gaps or {}, classifier(table), ceiling)
+    return oracle.check_snapshot(snap, corpus, gaps or {}, classifier(table), ceiling, **kw)
 
 
 def test_every_push_that_the_shell_reaches_is_blocked_by_si08_is_a_pass():
@@ -396,6 +396,99 @@ def test_the_driver_records_what_two_real_shells_reach_for_a_few_stubbed_pushes(
     assert blocks["exit"] == 0
     allows = oracle.check_snapshot(snap, corpus, {}, classifier({e["cmd"]: ALLOW for e in corpus}), None)
     assert allows["exit"] == 1
+
+
+# ---- review fixes (V6-22): empty words, and a run that timed out ------------------------------------------------------------------------------
+def test_the_log_parser_keeps_an_empty_shell_word():
+    """`git -C "" push origin main` reaches git with an empty word. The old parser dropped it, so -C swallowed `push` and the truth said False."""
+    sep, end = "\x1f", "\x1e"
+    log = sep.join(["git", "-C", "", "push", "origin", "main"]) + sep + end + sep.join(["git", "push", "-o", "", "origin", "main"]) + sep + end
+    assert realshell._parse_log(log) == [["git", "-C", "", "push", "origin", "main"], ["git", "push", "-o", "", "origin", "main"]]
+    assert realshell._parse_log("git" + sep + end) == [["git"]]                        # a call with no argument: no phantom empty word
+    assert realshell._parse_log("git" + sep + "push" + sep + "" + sep + end) == [["git", "push", ""]]   # an empty LAST word is a word
+
+
+@pytest.mark.parametrize("call", [
+    ["git", "-C", "", "push", "origin", "main"],
+    ["git", "-C", ".", "-C", "", "push", "origin", "main"],
+    ["git", "push", "-o", "", "origin", "main"],
+])
+def test_an_empty_word_in_a_recorded_call_does_not_hide_the_push(call):
+    assert oracle.reaches_default_push(call) is True
+
+
+def test_an_empty_word_is_kept_in_the_snapshot_file():
+    cmd = 'git -C "" push origin main'
+    raw = [{"cmd": cmd, "results": {"bash": {"shell": "bash", "rc": 0, "timed_out": False, "stdout": "", "stderr": "",
+                                              "calls": [["git", "-C", "", "push", "origin", "main"]]}}}]
+    entries = oracle.entries_from_run(raw, [{"ids": ["A1"], "cmd": cmd}], "/x")
+    assert entries[0]["results"]["bash"]["calls"] == [["git", "-C", "", "push", "origin", "main"]]
+    assert oracle.entry_reach(entries[0]["results"]) is True
+
+
+def test_the_empty_word_payload_is_a_known_gap_row_of_the_oracle_corpus():
+    rows = {e["cmd"]: e["ids"] for e in oracle.default_corpus()}
+    assert 'git -C "" push origin main' in rows, 'add it to evals/known_gaps/cases.jsonl with "oracle": "si08"'
+    assert 'git -C "" push origin main' in oracle.known_gap_rows()
+
+
+@needs_sandbox
+def test_the_driver_sees_an_empty_word_in_a_real_shell():
+    with realshell.Sandbox() as sb:
+        raw = sb.run_corpus(['git -C "" push origin main', "git push -o '' origin main"], shells=("bash", "zsh"), jobs=2, timeout=30)
+    for item in raw:
+        for res in item["results"].values():
+            assert "" in res["calls"][0], res["calls"]
+        assert oracle.entry_reach(item["results"]) is True
+
+
+def test_the_default_timeout_is_long_enough_for_the_python3_shim():
+    """/usr/bin/python3 on macOS starts xcodebuild inside the sandbox: about 25 s. With 5 s every interpreter payload was cut off and counted not judged."""
+    assert oracle.DEFAULT_TIMEOUT >= 60
+    assert oracle.build_parser().parse_args(["snapshot"]).timeout == oracle.DEFAULT_TIMEOUT
+
+
+def _slow(*calls):
+    return _res(*calls, rc=None, timed_out=True)
+
+
+def test_a_payload_that_timed_out_in_every_shell_fails_g4():
+    """No evidence at all for that payload: G4 may not pass on it."""
+    py = "python3 <<'E'\nimport os\nos.system('git push origin main')\nE"
+    snap = _snap([("A1", "git push origin main", {"bash": _res(PUSH), "zsh": _res(PUSH)}),
+                  ("A2", py, {"bash": _slow(), "zsh": _slow()})])
+    r = run(snap, {"git push origin main": BLOCK, py: ALLOW})
+    g = gate(r, "G4 timeouts")
+    assert g["state"] == "fail" and "A2" in g["detail"] and "A1" not in g["detail"]
+    assert r["exit"] == 1
+
+
+def test_a_timeout_in_every_shell_fails_g4_even_when_nothing_else_reached_a_push():
+    snap = _snap([("A1", "sleep 99", {"bash": _slow(), "zsh": _slow()})])
+    r = run(snap, {"sleep 99": ALLOW})
+    assert gate(r, "G4 timeouts")["state"] == "fail" and r["exit"] == 1
+
+
+def test_a_timeout_in_one_shell_only_is_not_the_all_shells_failure_but_is_counted_not_judged():
+    snap = _snap([("A1", "c1", {"bash": _slow(), "zsh": _res(["git", "status"])})] +
+                 [(f"B{i}", f"git push origin main #{i}", {"bash": _res(PUSH), "zsh": _res(PUSH)}) for i in range(20)])
+    table = {f"git push origin main #{i}": BLOCK for i in range(20)} | {"c1": ALLOW}
+    r = run(snap, table)
+    assert gate(r, "G4 timeouts")["state"] == "pass"
+    assert "1 not judged" in gate(r, "G4 reach")["detail"]
+
+
+def test_too_many_not_judged_payloads_fail_g4_and_a_few_do_not():
+    rows = [(f"B{i}", f"git push origin main #{i}", True) for i in range(18)] + [("U1", "git push", None), ("U2", "git push #2", None)]
+    table = {c: BLOCK for _, c, _ in rows}
+    r = run(snapshot_of(rows), table)                                   # 2 of 20 = 10 per cent: at the limit, still a pass
+    assert gate(r, "G4 judged")["state"] == "pass" and r["exit"] == 0
+    rows.append(("U3", "git push #3", None))
+    table["git push #3"] = ALLOW
+    r = run(snapshot_of(rows), table)                                   # 3 of 21: above the limit
+    g = gate(r, "G4 judged")
+    assert g["state"] == "fail" and "3 of 21" in g["detail"] and r["exit"] == 1
+    assert gate(run(snapshot_of(rows), table, max_unjudged=0.2), "G4 judged")["state"] == "pass"   # the owner can state another limit
 
 
 def test_the_snapshot_command_refuses_to_run_without_a_sandbox_backend(monkeypatch, tmp_path, capsys):

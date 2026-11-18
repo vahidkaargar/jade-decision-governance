@@ -2,13 +2,15 @@
 `evals/realshell.py`, PATH stubs record which programs the shell reached, and the classifier is then compared with what the shell did. A payload where the
 shell reaches `git push origin main` and the gate does not block it with SI-08 is a bypass.
 
-    uv run python evals/realshell_oracle.py snapshot [--add FILE] [--out DIR] [--shells bash,zsh] [--jobs 8] [--timeout 5] [--dry-run]
-    uv run python evals/realshell_oracle.py check [--dir DIR] [--known-gap-ceiling N]
+    uv run python evals/realshell_oracle.py snapshot [--add FILE] [--out DIR] [--shells bash,zsh] [--jobs 8] [--timeout 120] [--dry-run]
+    uv run python evals/realshell_oracle.py check [--dir DIR] [--known-gap-ceiling N] [--max-unjudged 0.10]
     uv run python evals/realshell_oracle.py stoploss [--file evals/oracle/rounds.jsonl]
 
 snapshot   Owner run, on macOS, before each release. It runs every payload of the corpus in each shell, only through `evals/realshell.py` (macOS
            sandbox-exec and a canary check; where there is no sandbox nothing runs and the exit code is 2; there is no flag that skips it). It writes
            `evals/oracle/realshell-<shell versions>.json`: the recorded stub calls, no output, no clock, no host path. `--dry-run` only prints what would run.
+           Time: `/usr/bin/python3` on macOS is the xcode-select shim and starts xcodebuild inside the sandbox, about 25 s per run, so the default timeout is
+           120 s (about 5 minutes in all with --jobs 8). A payload that times out in every shell is no evidence: `check` fails on it.
            `--add FILE` adds the payloads of an independent review round (a JSON list or JSON Lines of strings or of objects with `cmd` or `command` and an
            optional `id`). A new bypass found this way must then enter the case files as a `known_gap` row with `"oracle": "si08"` (docs/13).
 check      G4. Pure: it reads the snapshot files and replays the classifier (the real hook, in a child process with its own empty HOME), so it runs on
@@ -42,6 +44,8 @@ DEFAULT_SHELLS = ("bash", "zsh")
 VERSION_PROBE = {"bash": 'echo "$BASH_VERSION"', "zsh": 'echo "$ZSH_VERSION"', "sh": 'echo "${BASH_VERSION:-posix}"'}
 DEFAULT_BRANCHES = ("main", "master")
 STOP_AFTER = 2   # independent rounds in a row with no new gap
+DEFAULT_TIMEOUT = 120.0   # seconds per payload and shell. /usr/bin/python3 on macOS is the xcode-select shim and takes about 25 s in the sandbox; 5 s cut every interpreter payload off
+UNJUDGED_LIMIT = 0.10     # G4 fails when more than this share of the payloads gave no evidence
 
 
 class OracleError(Exception):
@@ -321,9 +325,11 @@ def _kind(outcome: dict) -> str:
     return "another invariant"
 
 
-def check_snapshot(snap: dict, corpus: list[dict], gaps: dict[str, str], classify, ceiling: int | None) -> dict:
+def check_snapshot(snap: dict, corpus: list[dict], gaps: dict[str, str], classify, ceiling: int | None, max_unjudged: float = UNJUDGED_LIMIT) -> dict:
     """G4 for one snapshot. `corpus` is the current payload list, `gaps` maps a command to its known-gap row, `classify(cmds)` gives command -> outcome.
-    A mismatch: the shell reached a push to the default branch and SI-08 is not among the invariants that blocked it."""
+    A mismatch: the shell reached a push to the default branch and SI-08 is not among the invariants that blocked it.
+    A payload with no evidence is never a pass: one that timed out in every shell fails G4 (G4 timeouts), and so does a share of not-judged payloads
+    above `max_unjudged` (G4 judged)."""
     entries = snap["entries"]
     have = {e["cmd"] for e in snap["entries"]}
     missing = sorted(i for e in corpus if e["cmd"] not in have for i in e["ids"][:1])
@@ -334,6 +340,14 @@ def check_snapshot(snap: dict, corpus: list[dict], gaps: dict[str, str], classif
     reached = [e for e in entries if reach[e["cmd"]] is True]
     unjudged = [e for e in entries if reach[e["cmd"]] is None]
     split = [e for e in reached if not all(any(reaches_default_push(c) is True for c in r.get("calls", [])) for r in e["results"].values())]
+    blind = [e for e in entries if reach[e["cmd"]] is not True and e["results"] and all(r.get("timed_out") for r in e["results"].values())]
+    gates.append(_gate("G4 timeouts", FAIL, f"{len(blind)} payload(s) timed out in every shell, so there is no evidence for them: {_ids([e['id'] for e in blind])}; "
+                                           f"run `snapshot` again with a longer --timeout (a python3 payload needs about 30 s on macOS)")
+                 if blind else _gate("G4 timeouts", PASS, "no payload timed out in every shell"))
+    share = len(unjudged) / len(entries) if entries else 0.0
+    gates.append(_gate("G4 judged", FAIL, f"{len(unjudged)} of {len(entries)} payloads gave no evidence ({100 * share:.1f} per cent), above the limit of {100 * max_unjudged:.0f} per cent: "
+                                         f"{_ids([e['id'] for e in unjudged])}")
+                 if share > max_unjudged + 1e-9 else _gate("G4 judged", PASS, f"{len(unjudged)} of {len(entries)} payloads gave no evidence, within the limit of {100 * max_unjudged:.0f} per cent"))
     if not reached:
         gates.append(_gate("G4 reach", NODATA, f"no payload reached a push to main in any shell ({len(entries)} payloads, {len(unjudged)} not judged): nothing to compare"))
         gates.append(_gate("G4 SI-08 mismatch", NODATA, "nothing to compare"))
@@ -373,7 +387,7 @@ def render(result: dict, title: str = "") -> str:
     return "\n".join(lines)
 
 
-def check_dir(d: Path, ceiling: int | None, classify=classify_with_hook) -> tuple[int, str]:
+def check_dir(d: Path, ceiling: int | None, classify=classify_with_hook, max_unjudged: float = UNJUDGED_LIMIT) -> tuple[int, str]:
     files = sorted(Path(d).glob("realshell-*.json")) if Path(d).is_dir() else []
     if not files:
         return 0, ("real-shell oracle G4\n  G4                  not-enough-data  no snapshot in " + str(d) + ". The owner runs `snapshot` on the Mac before a release; "
@@ -382,7 +396,7 @@ def check_dir(d: Path, ceiling: int | None, classify=classify_with_hook) -> tupl
     out, code = [], 0
     for f in files:
         snap = load_snapshot(f)
-        r = check_snapshot(snap, corpus, gaps, classify, ceiling)
+        r = check_snapshot(snap, corpus, gaps, classify, ceiling, max_unjudged)
         out.append(render(r, f.name))
         code = max(code, r["exit"])
     if len(files) > 1:
@@ -451,14 +465,17 @@ def cmd_snapshot(args) -> int:
     (out / name).write_text(dump_snapshot(snap), encoding="utf-8")
     reached = sum(1 for e in entries if entry_reach(e["results"]) is True)
     unjudged = sum(1 for e in entries if entry_reach(e["results"]) is None)
+    blind = sum(1 for e in entries if entry_reach(e["results"]) is not True and e["results"] and all(r["timed_out"] for r in e["results"].values()))
     print(f"wrote {out / name}: {len(entries)} payloads, {reached} reach a push to main, {unjudged} not judged. Next: `check`, then commit the file.")
+    if blind:
+        print(f"warning: {blind} payload(s) timed out in every shell (timeout {args.timeout:g} s), so G4 will fail on them. Run again with a longer --timeout.")
     others = sorted(p.name for p in out.glob("realshell-*.json") if p.name != name)
     if others:
         print("other snapshots here (delete one that is out of date): " + ", ".join(others))
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("snapshot", help="owner run on macOS: run the corpus in real shells inside the sandbox and write the snapshot")
@@ -466,21 +483,26 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--out", type=Path, default=ORACLE_DIR)
     s.add_argument("--shells", default=",".join(DEFAULT_SHELLS))
     s.add_argument("--jobs", type=int, default=8)
-    s.add_argument("--timeout", type=float, default=5.0)
+    s.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="seconds per payload and shell (default %(default)s: a python3 payload needs about 30 s on macOS)")
     s.add_argument("--dry-run", action="store_true", help="print what would run and stop")
     c = sub.add_parser("check", help="G4: replay the classifier against the committed snapshot files (any platform)")
     c.add_argument("--dir", type=Path, default=ORACLE_DIR)
     c.add_argument("--known-gap-ceiling", type=int, help="the owner-signed count of known gaps that may still reach a push to main")
+    c.add_argument("--max-unjudged", type=float, default=UNJUDGED_LIMIT, help="the share of payloads (0 to 1) that may give no evidence (default %(default)s)")
     t = sub.add_parser("stoploss", help="print the new-gap rate of each review round and whether to stop adding parser waves")
     t.add_argument("--file", type=Path, default=ROUNDS_FILE)
-    args = ap.parse_args(argv)
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     try:
         if args.cmd == "snapshot":
             return cmd_snapshot(args)
         if args.cmd == "stoploss":
             print(stoploss(load_rounds(args.file)))
             return 0
-        code, text = check_dir(args.dir, args.known_gap_ceiling)
+        code, text = check_dir(args.dir, args.known_gap_ceiling, max_unjudged=args.max_unjudged)
         print(text)
         return code
     except OracleError as e:
