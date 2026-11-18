@@ -238,9 +238,17 @@ def test_a_reworded_command_does_not_use_the_grant(level_high):
     assert r.exit_code == 2 and "[jade:ask_" in r.stderr
 
 
-def test_quoting_and_an_env_prefix_do_not_make_it_a_new_command(level_high):
+@pytest.mark.parametrize("spelled", ["git  reset --hard   HEAD~1", "'git' reset --hard HEAD~1"])
+def test_quoting_and_spacing_do_not_make_it_a_new_command(level_high, spelled):
     ask_and_allow()
-    assert hooks.pretool(call("FOO=1  git reset --hard   HEAD~1")).exit_code == 0
+    assert hooks.pretool(call(spelled)).exit_code == 0
+
+
+def test_an_env_prefix_is_another_target_and_asks_again(level_high):
+    """V6-06: the hold key drops the env prefix, the target does not. A grant for the plain call is not a grant for `FOO=1 ...`."""
+    ask_and_allow()
+    r = hooks.pretool(call("FOO=1  git reset --hard   HEAD~1"))
+    assert r.exit_code == 2 and "[jade:ask_" in r.stderr
 
 
 def test_another_session_cannot_use_the_grant(level_high):

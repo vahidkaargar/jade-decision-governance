@@ -145,7 +145,7 @@ def test_kind_any_alone(p, q):
 def test_kind_any_then_deny_of_the_same_call(p, q):
     record(RESET, p, "allow", kind="kind_any", age=2)
     record(RESET, p, "deny", age=1)
-    assert not same([(RESET, p), (RESET, q)])
+    assert not same([(RESET, p)])   # V6-06: the deny is of this place; repoB (the other call) is a kind of its own and stays allowed
 
 
 def test_kind_any_then_deny_spelled_with_cd(p, q):
