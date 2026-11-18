@@ -643,7 +643,7 @@ def set_level(value: str, stdin_isatty: bool | None = None) -> None:
 
 
 OFF_MEANS = ("off is observe plus floor: most rules only log, but SI-07, SI-08, SI-09 to SI-12 and writes to JADE's own wiring (HO-wiring, HO-checkout-install, "
-             "HO-settings-shadow) block. Use `jade level high` to have JADE ask about high-risk calls.")
+             "HO-settings-shadow, HO-state-path) block. Use `jade level high` to have JADE ask about high-risk calls.")
 
 
 def _level_row() -> tuple[str, bool, str]:

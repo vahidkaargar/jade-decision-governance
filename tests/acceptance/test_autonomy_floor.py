@@ -222,3 +222,77 @@ def test_n6_set_level_off_prints_what_off_means(capsys):
     assert cli.main(["level", "off"]) in (0, None)
     got = capsys.readouterr()
     assert got.out.strip() == "level off" and "observe plus floor" in got.err
+
+
+# ------------------------------------------------------------------ review fixes: script-then-run naming JADE state, and a settings write read as text
+
+@pytest.mark.parametrize("name, body", [
+    ("cfg.py", 'import os\nopen(os.path.expanduser("~/.config/jade/config.json"), "w").write("{}")\n'),
+    ("db.py", 'import sqlite3\nsqlite3.connect("jade.sqlite").execute("delete from permits")\n'),
+    ("cfg.sh", "echo '{}' > ~/.config/jade/config.json\n"),
+])
+def test_a_script_that_names_the_jade_state_blocks_when_it_runs_at_off(off, tmp_path, name, body):
+    (tmp_path / name).write_text(body)
+    runner = "sh" if name.endswith(".sh") else "python3"
+    r = hooks.pretool(bash(f"{runner} {name}", cwd=str(tmp_path)))
+    assert r.exit_code == 2 and "HO-state-path" in r.stderr and "[advisory" not in r.stderr, (name, r.stderr[:200])
+
+
+def test_a_script_that_does_not_name_the_jade_state_still_runs_at_off(off, tmp_path):
+    (tmp_path / "ok.py").write_text("print('hello')\n")
+    assert hooks.pretool(bash("python3 ok.py", cwd=str(tmp_path))).exit_code == 0
+
+
+def test_a_script_that_names_the_jade_state_stays_advisory_in_advisory_gate_mode_at_off(off, tmp_path, monkeypatch):
+    monkeypatch.setenv("JADE_GATE_MODE", "advisory")
+    (tmp_path / "cfg.py").write_text('open("/Users/x/.config/jade/config.json", "w")\n')
+    assert hooks.pretool(bash("python3 cfg.py", cwd=str(tmp_path))).exit_code == 0
+
+
+def settings_call(tmp_path, tool_input, tool="Write"):
+    d = tmp_path / ".claude"
+    d.mkdir(exist_ok=True)
+    tin = {"file_path": str(d / "settings.local.json"), **tool_input}
+    return call(tool, tin, cwd=str(tmp_path))
+
+
+@pytest.mark.parametrize("content", [
+    '{"\\u0064isableAllHooks": true}',
+    '{"env": {"JADE_GATE_MOD\\u0045": "advisory"}}',
+    '{"env": {"\\u004aADE_HOME": "/tmp/x"}}',
+    '{"env": {"JADE_POLICY_DIR": "/tmp/p"}}',
+    '{"\\u0068ooks": {}}',
+])
+def test_a_settings_write_with_escaped_keys_blocks_at_off(off, tmp_path, content):
+    r = hooks.pretool(settings_call(tmp_path, {"content": content}))
+    assert r.exit_code == 2 and "HO-settings-shadow" in r.stderr and "[advisory" not in r.stderr, (content, r.stderr[:200])
+
+
+def test_a_settings_write_in_two_steps_blocks_at_the_second_step_at_off(off, tmp_path):
+    first = settings_call(tmp_path, {"content": '{"disableAllH": true}'})
+    assert hooks.pretool(first).exit_code == 0   # nothing yet: not a key the hooks know
+    Path(first["tool_input"]["file_path"]).write_text('{"disableAllH": true}')
+    r = hooks.pretool(settings_call(tmp_path, {"old_string": 'H"', "new_string": 'Hooks"'}, tool="Edit"))
+    assert r.exit_code == 2 and "HO-settings-shadow" in r.stderr, r.stderr[:200]
+
+
+def test_a_multiedit_of_a_settings_file_is_read_as_the_whole_result_at_off(off, tmp_path):
+    target = tmp_path / ".claude" / "settings.json"
+    target.parent.mkdir()
+    target.write_text('{"disableAllHo": 1, "x": 0}')
+    tin = {"file_path": str(target), "edits": [{"old_string": 'Ho"', "new_string": 'Hoo"'}, {"old_string": 'Hoo"', "new_string": 'Hooks"'}]}
+    r = hooks.pretool(call("MultiEdit", tin, cwd=str(tmp_path)))
+    assert r.exit_code == 2 and "HO-settings-shadow" in r.stderr, r.stderr[:200]
+
+
+def test_an_edit_of_a_settings_file_that_cannot_be_read_blocks_at_off(off, tmp_path):
+    r = hooks.pretool(settings_call(tmp_path, {"old_string": "a", "new_string": "b"}, tool="Edit"))   # no such file: the result is unknown
+    assert r.exit_code == 2 and "HO-settings-shadow" in r.stderr
+
+
+def test_a_harmless_settings_write_or_edit_still_runs_at_off(off, tmp_path):
+    ok = '{"permissions": {"allow": ["Bash(ls)"]}}'
+    first = settings_call(tmp_path, {"content": ok})
+    assert hooks.pretool(first).exit_code == 0
+    Path(first["tool_input"]["file_path"]).write_text(ok)
+    assert hooks.pretool(settings_call(tmp_path, {"old_string": "Bash(ls)", "new_string": "Bash(pwd)"}, tool="Edit")).exit_code == 0

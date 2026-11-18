@@ -12,9 +12,11 @@ It decides nothing by itself: only `jade review confirm` in a terminal makes it 
 
 import dataclasses
 import json
+import os
 import re
 import shutil
 import tempfile
+import unicodedata
 from datetime import timedelta
 from pathlib import Path
 
@@ -411,3 +413,39 @@ def test_the_scope_text_says_what_it_covers():
     text = scopes.COVERS["rule_project"]
     assert "this project" in text and "JADE" in text and "remote" in text
     assert askchat.SUGGEST_LABELS["rule_project"] == askchat.SUGGEST_PROJECT
+
+
+# ------------------------------------------------------------------ review fix: the live JADE is found whatever the spelling of its path
+
+def _spellings(root, name):
+    """The same project folder spelled another way, for each way this volume allows: other case, the data-volume firmlink, NFD for NFC. Spellings the volume does not accept are left out."""
+    project = root / name
+    out = {"case": str(root / name.upper()), "firmlink": "/System/Volumes/Data" + str(project), "nfd": str(root / unicodedata.normalize("NFD", name))}
+    got = {k: v for k, v in out.items() if v != str(project) and os.path.isdir(v)}
+    if not got:
+        pytest.skip("this volume accepts no other spelling of a path")
+    return got
+
+
+@pytest.mark.parametrize("kind", ["case", "firmlink", "nfd"])
+def test_the_running_checkout_gets_no_scope_whatever_the_spelling_of_its_path(root, monkeypatch, kind):
+    project = make_project(root, "jadé-live")
+    monkeypatch.setattr(scopes, "_live_code_root", lambda: project)   # an editable install from this checkout
+    spelled = _spellings(root, "jadé-live").get(kind)
+    if spelled is None:
+        pytest.skip(f"this volume does not accept the {kind} spelling")
+    assert write_scopes(spelled)[1] == []
+    assert write_scopes(project, cwd=spelled)[1] == []
+    assert offered_for("Write", {"file_path": "jade/hooks.py", "content": "x = 1\n"}, spelled)[1] == []   # a relative path in a folder spelled another way
+    assert shell_scopes("ssh host uptime", spelled)[1] == []
+
+
+def test_a_checkout_that_is_not_running_still_gets_one_scope_whatever_the_spelling_and_the_key_is_the_same(root, monkeypatch):
+    project = make_project(root, "jadé-other")
+    monkeypatch.setattr(scopes, "_live_code_root", lambda: str(root / "elsewhere"))
+    keys = {write_scopes(project)[1][0].key}
+    for spelled in _spellings(root, "jadé-other").values():
+        got = write_scopes(spelled)[1]
+        assert kinds(got) == ["rule_project"]
+        keys.add(got[0].key)
+    assert len(keys) == 1   # a confirmed answer holds for the project under any spelling of its path

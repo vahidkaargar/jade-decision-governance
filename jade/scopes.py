@@ -370,7 +370,7 @@ def _own_checkout(project: str | None) -> bool:
     if not project or not policy._is_checkout(project):
         return False
     live = _live_code_root()
-    return os.path.normcase(live) != os.path.normcase(project)
+    return policy._fold(policy.real(live)) != policy._fold(project)   # the form every root check uses: case, the data-volume firmlink and NFC/NFD do not make another folder
 
 
 def _rule_project(a, tool: str, tool_input: dict | None, cwd: str) -> Scope | None:
@@ -389,9 +389,9 @@ def _rule_project(a, tool: str, tool_input: dict | None, cwd: str) -> Scope | No
             return None
         target = _real(os.path.join(cwd or "", os.path.expanduser(named[0])))
         project = _git_root(os.path.dirname(target)) if target else None
-        if not target or not _own_checkout(project) or not target.startswith(os.path.join(project, "jade") + os.sep):
+        if not target or not _own_checkout(project) or not policy._fold(target).startswith(policy._fold(os.path.join(project, "jade")) + os.sep):
             return None
-        key = memory.sha256(memory.canonical({"kind": "rule_project", "rule": "R-16", "project": project}))
+        key = memory.sha256(memory.canonical({"kind": "rule_project", "rule": "R-16", "project": policy._fold(project)}))   # one key for every spelling of the path
         return Scope("rule_project", key, _label("writes to JADE's own code (R-16)", project), COVERS["rule_project"], "Edits of JADE's code, this project")
     if a.rule_id != "R-14" or not _is_plain_shell_call(a, tool, tin) or list(a.seg_rules) != ["R-14"] or len(a.seg_keys) != 1:
         return None
@@ -401,7 +401,7 @@ def _rule_project(a, tool: str, tool_input: dict | None, cwd: str) -> Scope | No
         return None
     m = _LEADING_CD.match(a.subject or "")
     text = ((a.subject or "")[m.end():] if m else (a.subject or "")).strip()
-    key = memory.sha256(memory.canonical({"kind": "rule_project", "rule": "R-14", "project": project, "text": text, "target": memory._target(a)}))
+    key = memory.sha256(memory.canonical({"kind": "rule_project", "rule": "R-14", "project": policy._fold(project), "text": text, "target": memory._target(a)}))
     return Scope("rule_project", key, _label(text, project), COVERS["rule_project"], "Same remote command, this project")
 
 

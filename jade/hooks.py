@@ -463,7 +463,9 @@ def pretool(event: dict, permit=None) -> HookResult:
 GOVERNANCE_INVARIANTS = frozenset({"SI-09", "SI-10", "SI-11", "SI-12"})
 # V6-16: level `off` is "observe plus floor". At `off` (gate mode enforce) these two invariants block too, and so does a write to JADE's live wiring.
 OFF_FLOOR_INVARIANTS = frozenset({"SI-07", "SI-08"})
-OFF_FLOOR_CLASSES = frozenset({policy.HO_WIRING, policy.HO_INSTALL, policy.HO_SETTINGS})   # the running install and hook files, an install built from a checkout, a settings write that disables the hooks
+# the running install and hook files, an install built from a checkout, a settings write that disables the hooks, and a script run that names the JADE state or config
+# (a script can set `gate_mode` to `advisory` in the config, and that turns the whole floor off)
+OFF_FLOOR_CLASSES = frozenset({policy.HO_WIRING, policy.HO_INSTALL, policy.HO_SETTINGS, policy.HO_STATE})
 
 
 def _verdict(mode: str, message: str, blocked: list[str] | tuple[str, ...] = ()) -> HookResult:
