@@ -584,9 +584,13 @@ def _ops(a) -> int:
         elif a.cmd == "level":
             if a.value is None:
                 print(paths.level() or "unset")
+                if paths.level() == "off":
+                    print(ops.OFF_MEANS, file=sys.stderr)   # V6-16: stdout keeps the bare value for scripts; the words go to the terminal
             else:
                 ops.set_level(a.value)
                 print(f"level {a.value}")
+                if a.value == "off":
+                    print(ops.OFF_MEANS, file=sys.stderr)
         elif a.cmd == "claude-md":
             if a.action == "show":
                 print(ops.claude_md_section())

@@ -15,6 +15,9 @@ Three kinds, at most two offered per call:
   does not change which repository gh resolves; the key holds the project and `host/owner/name` and nothing else about the machine. A call without
   `--repo`, or with a bare `OWNER/NAME` (gh would take the host from GH_HOST), gets no merge scope.
 
+- `rule_project` (V6-16): for the two rules that made most of the asks, in a JADE checkout that is not the running JADE only. R-16: a write of one file under the checkout's
+  `jade/`, any content. R-14: this same plain `ssh`, `scp`, `sftp` or `rsync` command, by its exact text. See `_rule_project`. Never next to `kind_project`.
+
 Never offered: a human-only class, a blocked call, the never rules, a call the gate could not read, an inline program, and two or more risky commands in one call.
 No scope covers delete, force, tag or release.
 
@@ -42,7 +45,11 @@ COVERS: dict[str, str] = {
     "kind_project": "The same kind of command in this project. The same exact call is also remembered.",
     "kind_any": "The same kind of command in any project. Delete, force, tag and release still ask.",
     "merge_project": "Merging any pull request of this repository, named with --repo, with the listed options only. The same exact call is also remembered.",
+    "rule_project": "In this JADE project only: any write to JADE's own code (rule R-16), or this same remote command (rule R-14, exact text). Nothing outside this project, and "
+                    "never the live JADE wiring. The same exact call is also remembered.",
 }
+RULE_PROJECT_RULES = frozenset({"R-14", "R-16"})   # V6-16: the two rules that made 77 of 100 answers; their scope is `rule_project`
+REMOTE_PROGRAMS = frozenset({"ssh", "scp", "sftp", "rsync"})
 # A section header of a git config file: `[name]`, `[name "sub"]` or `[name.sub]`.
 _SECTION = re.compile(r'^\[\s*([A-Za-z0-9.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]')
 _ELLIPSIS = "…"
@@ -62,7 +69,7 @@ _EXPANDS = re.compile(r"[$`*?\[~{]")   # a word the shell may expand or split: a
 
 @dataclass(frozen=True)
 class Scope:
-    kind: str     # "kind_project", "kind_any" or "merge_project"
+    kind: str     # "kind_project", "kind_any", "merge_project" or "rule_project"
     key: str      # what a standing answer is matched by
     label: str    # one line, at most 120 characters, secrets removed; the owner sees it in `jade knows list`
     covers: str   # simple English: what this scope would allow
@@ -98,6 +105,11 @@ def project_of(subject: str, cwd: str) -> str | None:
     here = _real(base)
     if here is None or not os.path.isdir(here):
         return None
+    return _git_root(here)
+
+
+def _git_root(here: str) -> str | None:
+    """The nearest folder at or above `here` that holds a `.git` entry (a folder or a worktree file), or None."""
     while True:
         if os.path.lexists(os.path.join(here, ".git")):
             return here
@@ -347,6 +359,52 @@ def _family(a) -> str:
     return " ; ".join(sorted({memory.normalise_segment(k) for k in a.seg_keys}))
 
 
+def _live_code_root() -> str:
+    """The folder whose `jade/` package is the JADE that is running now (the checkout of an editable install or of a run from source, else the site-packages folder)."""
+    return os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+def _own_checkout(project: str | None) -> bool:
+    """A JADE checkout that is not the JADE in use: it holds `jade/__init__.py` and `jade/hooks.py`, and the running package is somewhere else. An edit of a checkout
+    that is the running JADE would be live at once, so no scope covers it."""
+    if not project or not policy._is_checkout(project):
+        return False
+    live = _live_code_root()
+    return os.path.normcase(live) != os.path.normcase(project)
+
+
+def _rule_project(a, tool: str, tool_input: dict | None, cwd: str) -> Scope | None:
+    """The `rule_project` scope of an R-16 write or an R-14 remote command in a JADE checkout, or None (V6-16).
+
+    R-16, a Write, Edit, MultiEdit or NotebookEdit of exactly one file under `<project>/jade/`: any content, any file of that folder, in this project. R-14, one plain
+    `ssh`, `scp`, `sftp` or `rsync` command: its exact text (the quoted words stay in the key, unlike the segment key, which blanks them) after a leading `cd PATH &&`,
+    in this project. The call must be plain (`_is_plain_shell_call` for a shell call; a tool call has no human-only class, nothing blocked, nothing unread, not
+    critical), the project must be a JADE checkout that is not the running JADE (`_own_checkout`), and the call must be one risky command."""
+    if a.rule_id not in RULE_PROJECT_RULES or a.level != "high" or a.ho_ids or a.blocked or a.blind or getattr(a, "unread", None) or a.rule_id in memory.NEVER_RULES:
+        return None
+    tin = tool_input if isinstance(tool_input, dict) else {}
+    if tool in policy.WRITE_TOOLS:
+        named = [tin[k] for k in policy.WRITE_KEYS if isinstance(tin.get(k), str) and tin[k].strip()]
+        if a.rule_id != "R-16" or len(named) != 1 or len(named[0]) > 4096 or "\x00" in named[0]:
+            return None
+        target = _real(os.path.join(cwd or "", os.path.expanduser(named[0])))
+        project = _git_root(os.path.dirname(target)) if target else None
+        if not target or not _own_checkout(project) or not target.startswith(os.path.join(project, "jade") + os.sep):
+            return None
+        key = memory.sha256(memory.canonical({"kind": "rule_project", "rule": "R-16", "project": project}))
+        return Scope("rule_project", key, _label("writes to JADE's own code (R-16)", project), COVERS["rule_project"], "Edits of JADE's code, this project")
+    if a.rule_id != "R-14" or not _is_plain_shell_call(a, tool, tin) or list(a.seg_rules) != ["R-14"] or len(a.seg_keys) != 1:
+        return None
+    project = project_of(a.subject or "", cwd)
+    words = _simple_command_words(a.subject or "")
+    if not _own_checkout(project) or words is None or words[0] not in REMOTE_PROGRAMS:
+        return None
+    m = _LEADING_CD.match(a.subject or "")
+    text = ((a.subject or "")[m.end():] if m else (a.subject or "")).strip()
+    key = memory.sha256(memory.canonical({"kind": "rule_project", "rule": "R-14", "project": project, "text": text, "target": memory._target(a)}))
+    return Scope("rule_project", key, _label(text, project), COVERS["rule_project"], "Same remote command, this project")
+
+
 def offered(a, tool: str, tool_input: dict | None, fp: dict | None, cwd: str) -> list[Scope]:
     """The scopes the owner may be offered for this call, at most two. Empty when the call may only be answered as itself."""
     cwd = cwd or getattr(a, "plan_cwd", "") or ""
@@ -359,6 +417,8 @@ def offered(a, tool: str, tool_input: dict | None, fp: dict | None, cwd: str) ->
         out.append(Scope("kind_any", memory.any_project_key(a),_label(family, "any project"), COVERS["kind_any"], "Same command, any project"))
     if (merge := _merge_project(a, tool, tool_input, project)) is not None:
         out.append(Scope("merge_project", merge[0], _label(f"gh pr merge * --repo {merge[1]}", project), COVERS["merge_project"], "Merge in this repository"))
+    if not any(s.kind == "kind_project" for s in out) and (rule := _rule_project(a, tool, tool_input, cwd)) is not None:
+        out.append(rule)   # V6-16: never next to a `kind_project` scope (the chat shows one project option)
     return out
 
 

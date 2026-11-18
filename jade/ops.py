@@ -642,6 +642,10 @@ def set_level(value: str, stdin_isatty: bool | None = None) -> None:
     atomic_write(paths.config_dir() / "config.json", json.dumps(cfg, indent=1) + "\n")
 
 
+OFF_MEANS = ("off is observe plus floor: most rules only log, but SI-07, SI-08, SI-09 to SI-12 and writes to JADE's own wiring (HO-wiring, HO-checkout-install, "
+             "HO-settings-shadow) block. Use `jade level high` to have JADE ask about high-risk calls.")
+
+
 def _level_row() -> tuple[str, bool, str]:
     raw, lv = paths.config().get("level"), paths.level()
     if raw is None:
@@ -650,8 +654,9 @@ def _level_row() -> tuple[str, bool, str]:
         return ("level", False, f"the config level {raw!r} is not off, low, medium or high, so it counts as unset; `jade level unset` clears it")
     if raw != _recorded_level():
         return ("level", False, f"{lv}, but no `jade level` command recorded it (written some other way?); run `jade level unset`, look at the config directory, set it again")
-    if lv == "off":   # V6-10: not a failure (the human chose it), but not "ok": most rules only log
-        return ("level", None, "off: JADE only watches; most rules only log (the row `what blocks` lists them)")
+    if lv == "off":   # V6-10: not a failure (the human chose it), but not "ok": most rules only log. V6-16: the floor blocks
+        return ("level", None, "off (observe plus floor): most rules only log; SI-07, SI-08 and writes to JADE's own wiring block, as do SI-09 to SI-12 "
+                               "(the row `what blocks` lists them)")
     return ("level", True, f"{lv}")
 
 
@@ -682,8 +687,11 @@ def blocking_summary(mode: str | None = None, level: str | None | bool = False) 
         return (None, "advisory gate mode, no level set: nothing blocks; every safety invariant (" + ", ".join(active) + ") and every risk rule only log" + unset)
     if mode == "advisory":
         return (None, "advisory gate mode: " + ", ".join(gov) + " block; " + ", ".join(soft) + " and every risk rule only log")
-    if level == "off":
-        return (None, "advisory: " + ", ".join(soft) + ", R-13, R-16 and all risk rules only log; " + ", ".join(gov) + " block (level off, docs/12)")
+    if level == "off":   # V6-16: observe plus floor; hooks._verdict and hooks.pretool
+        floor = sorted(hooks.OFF_FLOOR_INVARIANTS)
+        firm = sorted(set(floor) | set(gov))
+        return (None, "advisory: " + ", ".join(i for i in soft if i not in floor) + " and every risk rule (R-13 and R-16 too) only log; "
+                + ", ".join(firm) + " block, and so does a write to JADE's own wiring (" + ", ".join(sorted(hooks.OFF_FLOOR_CLASSES)) + ") (level off, observe plus floor, docs/12)")
     if level is None:
         return (True, "every active safety invariant (" + ", ".join(active) + ") blocks; a high or critical risk call is held for a human approval (docs/12)" + unset)
     if level in ("low", "medium"):   # hooks._gate: memory.step, then proxy.step, run before the human is asked
@@ -1837,8 +1845,10 @@ def _permission_row() -> tuple[str, bool, str]:
         return ("host permission prompt", False, f"permissions.defaultMode is {mode} (the host never asks) and the gate is {gate} (JADE never blocks): nothing stops a call. "
                 "Set the gate to enforce or the host to a prompting mode. " + detail)
     if mode in PERMISSIVE_MODES and paths.level() == "off":   # V6-10: a warning, not a failure (blocking at level off is V6-16)
+        from . import hooks
+
         return ("host permission prompt", None, f"permissions.defaultMode is {mode} (the host never asks) and level off (JADE only logs most rules): only "
-                + ", ".join(sorted(_governance_ids())) + " stop a call. " + detail)
+                + ", ".join(sorted(_governance_ids() | hooks.OFF_FLOOR_INVARIANTS)) + " and a write to JADE's own wiring stop a call. " + detail)
     return ("host permission prompt", True, detail)
 
 

@@ -51,7 +51,7 @@ def _clip(text: str) -> str:
 ALLOW, DENY = "Allow", "Deny"
 SUGGEST_PROJECT = "Allow, suggest for this project"
 SUGGEST_ANY = "Allow, suggest for any project"
-SUGGEST_LABELS = {"kind_project": SUGGEST_PROJECT, "merge_project": SUGGEST_PROJECT, "kind_any": SUGGEST_ANY}   # scopes.offered gives at most one project scope
+SUGGEST_LABELS = {"kind_project": SUGGEST_PROJECT, "merge_project": SUGGEST_PROJECT, "rule_project": SUGGEST_PROJECT, "kind_any": SUGGEST_ANY}   # scopes.offered gives at most one project scope
 SUGGEST_LATER = "You confirm it later in a terminal. Undo with `jade knows rm`."
 
 
@@ -90,6 +90,15 @@ def _scope_for(row, label: str) -> dict | None:
         if isinstance(sc, dict) and SUGGEST_LABELS.get(sc.get("kind")) == label:
             return sc
     return None
+
+
+def _scope_of_kind(row, kind: str) -> dict | None:
+    """The scope of this kind that the ask stored, or None."""
+    try:
+        stored = json.loads(row.scopes_json or "[]")
+    except ValueError:
+        return None
+    return next((sc for sc in stored if isinstance(sc, dict) and sc.get("kind") == kind), None) if isinstance(stored, list) else None
 
 
 def refusal(db, session: str, hold: str, fpj: str, tool: str, where: str):
@@ -264,6 +273,8 @@ def settle(event: dict):
             if label in SUGGEST_LABELS.values() and scope is None:
                 continue   # a suggest label this ask did not offer (a forged answer): nothing is decided
             allow = label != DENY
+            if not allow:
+                scope = _scope_of_kind(row, "rule_project")   # V6-16: a Deny of a call that has the R-16 / R-14 project scope takes that scope out (the newest answer wins)
             until = ts(now() + timedelta(seconds=GRANT_TTL_S)) if allow else ts(now() + timedelta(seconds=ASK_TTL_S))
             with db.tx():
                 if db.con.execute("UPDATE asks SET status=?, answered_ts=?, expires_ts=? WHERE ask_id=? AND status='SHOWN'",
