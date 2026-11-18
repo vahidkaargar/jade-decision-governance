@@ -297,3 +297,8 @@ def language(text: str | None) -> str:
         return "unknown"
     share = sum(1 for c in letters if ord(c) in ARABIC) / len(letters)
     return "fa" if share >= 0.6 else "en" if share <= 0.05 else "mixed"
+
+
+def one_line(text: str | None) -> str:
+    """One printable line: every control character (ESC, BEL, a line break) becomes a space, then each run of spaces becomes one. None gives an empty string."""
+    return re.sub(r"\s+", " ", "".join(c if c.isprintable() else " " for c in text or "")).strip()

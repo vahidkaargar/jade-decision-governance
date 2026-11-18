@@ -666,6 +666,17 @@ def _choice_payload(qid: str, version: int, champ: dict, row_version: int | None
     return questions.build_choice(qid, {n: desc.get(n, n) for n in champ["probabilities"] if n not in skip}, version=version)
 
 
+def _replay_state(question_id: str, state_text: str) -> dict:
+    """A stored state as it is sent again. For the proxy question the past answers are rebuilt in their current shape (`proxy.replay_past_answers`): a row
+    written before version 2 holds deny labels, text the agent wrote that the owner never confirmed, and a replay must not send it to a provider again."""
+    from . import proxy
+
+    state = json.loads(state_text)
+    if question_id == proxy.QID and isinstance(state, dict) and "past_answers" in state:
+        state["past_answers"] = proxy.replay_past_answers(state["past_answers"])
+    return state
+
+
 def shadow(db: ledger.Ledger, candidate_id: str, question_id: str, version: int, provider=None, limit: int = 100, days: int = 7) -> dict:
     """Asynchronous shadow run: replay recent champion questions' stored (redacted) state through a challenger
     question version and compare verdicts. It runs from a maintenance command, writes nothing to the live call
@@ -706,7 +717,7 @@ def shadow(db: ledger.Ledger, candidate_id: str, question_id: str, version: int,
         except questions.InvalidQuestion:
             skipped += 1
             continue
-        res = provider.ask(json.loads(r.state_text), {"q": payload})
+        res = provider.ask(_replay_state(question_id, r.state_text), {"q": payload})
         if not res.ok or "q" not in res.answers or adapter.check_answer(res.answers["q"], payload):
             errors += 1
             continue
@@ -833,7 +844,7 @@ def protected_check(db: ledger.Ledger, candidate_id: str, provider=None, stdin_i
             row = db.one("SELECT state_text FROM jev_calls WHERE call_id=?", (r["call_id"],))
             if not row or not row.state_text:
                 continue
-            ans = provider.ask(json.loads(row.state_text), {"q": payload})
+            ans = provider.ask(_replay_state(qid, row.state_text), {"q": payload})
             if not ans.ok or "q" not in ans.answers or adapter.check_answer(ans.answers["q"], payload):
                 continue
             champ_p.append(r["p"])

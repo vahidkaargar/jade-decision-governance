@@ -56,8 +56,18 @@ def versions(question_id: str) -> list[int]:
     return sorted(_all().get(question_id, {}))
 
 
+def default_version(question_id: str) -> int:
+    """The version served when no pin names one: the highest that the registry ships as champion (`shipped_champion`), else the lowest registered."""
+    vs = _all().get(question_id)
+    if not vs:
+        raise InvalidQuestion(f"unknown question_id {question_id}")
+    shipped = [v for v, e in vs.items() if e.get("shipped_champion") is True]
+    return max(shipped) if shipped else min(vs)
+
+
 def get(question_id: str, version: int | None = None) -> dict:
-    """Registry entry. Without a version: the active one (champion/challenger pin, else the lowest registered)."""
+    """Registry entry. Without a version: the active one (the owner's champion/challenger pin, else the highest version the registry marks
+    `shipped_champion`, else the lowest registered)."""
     vs = _all().get(question_id)
     if not vs:
         raise InvalidQuestion(f"unknown question_id {question_id}")
@@ -65,7 +75,7 @@ def get(question_id: str, version: int | None = None) -> dict:
         from . import ops
         from .util import session_id
 
-        version = ops.active_version(None, question_id, key=session_id()) or min(vs)
+        version = ops.active_version(None, question_id, key=session_id()) or default_version(question_id)
     if version not in vs:
         raise InvalidQuestion(f"{question_id} has no version {version}")
     problem = schema_problem(vs[version])

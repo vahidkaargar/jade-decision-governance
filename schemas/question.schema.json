@@ -29,6 +29,7 @@
     "dependencies": { "type": "array", "items": { "type": "string" } },
     "batch_eligibility": { "type": "boolean" },
     "no_match_option": { "type": ["string", "null"] },
-    "min_options": { "type": "integer", "minimum": 2 }
+    "min_options": { "type": "integer", "minimum": 2 },
+    "shipped_champion": { "type": "boolean", "description": "This version is served when the owner's pins name none (docs/07 section 1). Without it the lowest registered version is." }
   }
 }
