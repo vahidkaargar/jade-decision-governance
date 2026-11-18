@@ -702,6 +702,29 @@ def blocking_summary(mode: str | None = None, level: str | None | bool = False) 
                   "this level, docs/12)")
 
 
+def list_b() -> tuple[dict, dict]:
+    """List B of the floor (V6-17): what is advisory by design, for gate mode `off` and gate mode `advisory`, as `{"mode", "firm", "advisory"}` of safety invariant ids.
+    The R rules and the HO classes are advisory in both modes and are not listed one by one. `jade check` prints it (`_list_b_row`) and the floor tests assert it."""
+    from . import hooks
+
+    every = sorted(str(i["id"]) for i in policy.safety()["invariants"])
+    gov = sorted(hooks.GOVERNANCE_INVARIANTS)
+    return ({"mode": "off", "firm": [], "advisory": every},
+            {"mode": "advisory", "firm": gov, "advisory": [i for i in every if i not in gov]})
+
+
+def _list_b_row() -> tuple[str, bool, str]:
+    """What the owner chose to leave advisory by design (List B of the floor). Never a warning: it says what gate mode `off` and `advisory` mean, whatever is set now."""
+    try:
+        off, adv = list_b()
+    except Exception as e:  # noqa: BLE001 - the `policies load` row reports the failure
+        return ("advisory by design", True, f"unknown: the safety policy does not load ({type(e).__name__})")
+    return ("advisory by design", True,
+            f"gate mode off: nothing blocks ({', '.join(off['advisory'])}, every R rule and every HO class are skipped); "
+            f"gate mode advisory: {', '.join(adv['firm'])} block once a level is set, and {', '.join(adv['advisory'])}, every R rule and every HO class only log "
+            "(the floor of level `off` is another thing: it needs gate mode enforce)")
+
+
 def _what_blocks_row(pretool_ok: bool | None = None, wiring: list[str] | None = None) -> tuple[str, bool | None, str]:
     """`blocking_summary` for the mode and level in force, unless the PreToolUse hook is missing or out of date (then nothing blocks) or the wiring has
     problems (then it is not known). `check` passes what it already found, so the live wiring probe is not run twice."""
@@ -1720,6 +1743,7 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
     rows.append(_gate_mode_row())
     rows.append(_level_row())
     rows.append(_what_blocks_row(st.get("PreToolUse", False), problems))
+    rows.append(_list_b_row())
     rows.append(pending_row())
     rows.append(_overrides_row())
     rows.append(_ack_audit_row())
