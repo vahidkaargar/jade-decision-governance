@@ -196,14 +196,22 @@ def test_knows_edit_a_hint_allow_never_appears():
     assert edit_and_read() == []
 
 
-@pytest.mark.parametrize("deny", ['cd "/a b" && git reset --hard HEAD~1', "cd /p; git reset --hard HEAD~1", "git -C /p reset --hard HEAD~1",
-                                  "VAR=1 git reset --hard HEAD~1", "/usr/bin/git reset --hard HEAD~1"])
+@pytest.mark.parametrize("deny", ["/usr/bin/git reset --hard HEAD~1", "git  reset   --hard HEAD~1", "cd /tmp/x && git reset --hard HEAD~1"])
 def test_knows_edit_a_deny_in_another_spelling_hides_the_allow_of_the_same_kind(deny):
     record_call("allow", "git reset --hard HEAD~1", confirm=True)
     assert len(edit_and_read()) == 1
     ops.preferences_path().unlink()
     record_call("deny", deny)
     assert edit_and_read() == []
+
+
+@pytest.mark.parametrize("deny", ['cd "/a b" && git reset --hard HEAD~1', "cd /p; git reset --hard HEAD~1", "git -C /p reset --hard HEAD~1", "VAR=1 git reset --hard HEAD~1"])
+def test_knows_edit_a_deny_of_another_place_or_target_leaves_the_allow(deny):
+    """V6-06: a kind has a target and a place. A deny of the same words in another directory, or with another env or `git -C`, is another kind."""
+    record_call("allow", "git reset --hard HEAD~1", confirm=True)
+    ops.preferences_path().unlink(missing_ok=True)
+    record_call("deny", deny)
+    assert len(edit_and_read()) == 1
 
 
 def test_knows_edit_a_deny_of_gh_pr_create_does_not_hide_gh_pr_merge():

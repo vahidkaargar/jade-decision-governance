@@ -328,7 +328,7 @@ def _merge_project(a, tool: str, tool_input: dict | None, project: str | None) -
 
 def _kind_project_key(a, project: str) -> str:
     family = sorted({memory.normalise_segment(k) for k in a.seg_keys})
-    return memory.sha256(memory.canonical({"kind": "kind_project", "family": family, "project": project}))
+    return memory.sha256(memory.canonical({"kind": "kind_project", "family": family, "project": project, "target": memory._target(a)}))
 
 
 def _label(command: str, where: str) -> str:
@@ -356,7 +356,7 @@ def offered(a, tool: str, tool_input: dict | None, fp: dict | None, cwd: str) ->
         family = _family(a)
         if project:
             out.append(Scope("kind_project", _kind_project_key(a, project), _label(family, project), COVERS["kind_project"], "Same command, this project"))
-        out.append(Scope("kind_any", memory.class_key(a), _label(family, "any project"), COVERS["kind_any"], "Same command, any project"))
+        out.append(Scope("kind_any", memory.any_project_key(a),_label(family, "any project"), COVERS["kind_any"], "Same command, any project"))
     if (merge := _merge_project(a, tool, tool_input, project)) is not None:
         out.append(Scope("merge_project", merge[0], _label(f"gh pr merge * --repo {merge[1]}", project), COVERS["merge_project"], "Merge in this repository"))
     return out

@@ -19,6 +19,7 @@ Lifetime: a row is valid while its last human confirm or its last use is within 
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import timedelta
 
@@ -27,8 +28,13 @@ from .util import canonical, now, sha256, ts
 USE_DAYS = 30
 CAP_DAYS = 180
 NEAR_CAP_DAYS = 14
-NEVER_RULES = frozenset({"R-21", "R-22"})
+NEVER_RULES = frozenset({"R-21", "R-22", "R-13", "R-18"})   # R-13, R-18: what guards the agent and the files it reads its instructions from (as in proxy.NEVER_RULES)
 EXACT_ONLY_RULES = frozenset({"R-14", "M-05", "M-07"})
+_ENV_WORD = re.compile(r"(?<![\w.-])[A-Za-z_]\w*=\S*")   # a NAME=value word: an env prefix, `env X=1 cmd`, `export X=1;` (it may also match inside an argument: that only asks more)
+_CD_WORD = re.compile(r"(?:^|[;&|(`{]\s*)(?:cd|pushd|popd)(?=[\s;&|)`}]|$)\s*(\S*)")
+_LEADING_CD = re.compile(r"""^[ \t]*cd[ \t]+(?:"([^"$`\\]*)"|'([^']*)'|([^\s"'$`\\;&|()<>*?\[\]{}!#]+))[ \t]*(?:&&|;)[ \t]*""")
+_GIT_C = re.compile(r"(?<![\w.-])git(?:\s+-[a-zA-Z](?:\s+\S+)?)*?\s+-C\s+(\S+)")
+_SUDO_WORD = re.compile(r"(?<![\w.-])sudo(?![\w.-])")
 _PR_NUMBER = re.compile(r"^((?:gh pr|glab mr) [\w-]+) \d+(?= |$)")
 MERGE = re.compile(r"^(?:gh pr merge|glab mr merge|git merge)(?= |$)")
 INLINE = re.compile(r"(?:^|\s)-[A-Za-z]*[ce](?=\s|\Z)|<<|<\(")
@@ -49,7 +55,7 @@ def eligibility(a, tool: str, tool_input: dict | None, fp: dict | None) -> str:
     """`never`, `exact` or `class`: how far an answer to this call may be generalised."""
     from . import policy
 
-    if a.ho_ids or a.blocked or a.rule_id in NEVER_RULES:
+    if a.ho_ids or a.blocked or a.rule_id in NEVER_RULES or a.level == "critical":
         return "never"
     if not policy.runs_shell(tool, tool_input or {}):
         return "exact"
@@ -62,14 +68,47 @@ def eligibility(a, tool: str, tool_input: dict | None, fp: dict | None) -> str:
     return "class"
 
 
+def _target(a) -> dict:
+    """What the segment keys drop but the call's target depends on: env assignments (`KUBECONFIG=`, `AWS_PROFILE=`, `DOCKER_HOST=`), `sudo` and a git `-C DIR`."""
+    s = a.subject or ""
+    return {"env": sorted(set(_ENV_WORD.findall(s))), "sudo": bool(_SUDO_WORD.search(s)), "git_c": sorted(set(_GIT_C.findall(s)))}
+
+
+def _where(a) -> str:
+    """The directory the call runs in: the launch directory, moved by a leading `cd PATH` (`&&` or `;`) when that is the only `cd`. Another `cd` (a later one, `pushd`, a
+    variable or a subshell) makes the place unreadable: the words of every `cd` are part of it, so it never equals a place that was read."""
+    base, s = getattr(a, "plan_cwd", "") or "", a.subject or ""
+    if m := _LEADING_CD.match(s):
+        path = next(v for v in m.groups() if v is not None)
+        rest = s[m.end():]
+        if path and not _CD_WORD.search(rest):
+            path = os.path.expanduser(path) if path == "~" or path.startswith("~/") else path
+            return os.path.normpath(path if os.path.isabs(path) else os.path.join(base, path))
+    cds = sorted(set(_CD_WORD.findall(s)))
+    return f"{base}|{'|'.join(cds)}" if cds else base
+
+
 def class_key(a) -> str:
-    return sha256(canonical({"rule": a.rule_id, "segments": sorted({normalise_segment(k) for k in a.seg_keys})}))
+    """The kind of call at its target and in its place: the rule, the segment keys, the target (`_target`) and the directory it runs in (`_where`). A confirmed
+    staging answer does not cover prod."""
+    return sha256(canonical({"rule": a.rule_id, "segments": sorted({normalise_segment(k) for k in a.seg_keys}), "target": _target(a), "where": _where(a)}))
+
+
+def any_project_key(a) -> str:
+    """The kind of call at its target in any directory (the `kind_any` scope): `class_key` without the directory."""
+    return sha256(canonical({"rule": a.rule_id, "segments": sorted({normalise_segment(k) for k in a.seg_keys}), "target": _target(a)}))
+
+
+def keyed_fp(a, fp: dict | None) -> dict:
+    """The fingerprints of the call with its target and place (`_target`, `_where`) added: what the exact key and the ask rows (`fingerprints_json`) are made from.
+    The hold key drops prefixes and the directory, so without this a staging answer would be the same exact call as the prod one."""
+    return {**(fp or {}), "_ctx": sha256(canonical({"target": _target(a), "where": _where(a)}))[:16]}
 
 
 def keys(a, tool: str, tool_input: dict | None, fp: dict | None) -> tuple[str, str | None, str]:
     """(exact key, class key or None, eligibility) of a call."""
     el = eligibility(a, tool, tool_input, fp)
-    return exact_key(a.hold_key or a.plan_hash, fp), (class_key(a) if el == "class" else None), el
+    return exact_key(a.hold_key or a.plan_hash, keyed_fp(a, fp)), (class_key(a) if el == "class" else None), el
 
 
 def valid_since() -> tuple[str, str]:

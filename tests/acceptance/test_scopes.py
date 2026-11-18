@@ -226,7 +226,8 @@ def test_kind_scopes_for_a_class_call(repo):
     assert memory.eligibility(a, "Bash", {"command": CLASS_CMD}, {}) == "class"
     got = offered(CLASS_CMD, repo)
     assert [s.kind for s in got] == ["kind_project", "kind_any"]
-    assert got[1].key == memory.class_key(a)
+    assert got[1].key == memory.any_project_key(a)   # the kind in any directory: the class key without the directory
+    assert got[1].key != memory.class_key(a)
     assert got[0].key != got[1].key
     assert repo in got[0].label and "git reset --hard HEAD~1" in got[0].label
     assert "git reset --hard HEAD~1" in got[1].label and repo not in got[1].label

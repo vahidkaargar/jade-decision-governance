@@ -119,7 +119,7 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
     ctx = permits.make_context(tool, a, event, cwd=cwd)
     if ctx.get("redacted"):
         return None   # a secret-shaped value is never stored or shown: the terminal permit path says what to do
-    session, hold, fpj = event["session_id"], a.hold_key or a.plan_hash, canonical(fp)
+    session, hold, fpj = event["session_id"], a.hold_key or a.plan_hash, canonical(memory.keyed_fp(a, fp))
     askchat._expire(db)
     if (res := askchat.refusal(db, session, hold, fpj, tool, "a dialog")) is not None:
         return res
