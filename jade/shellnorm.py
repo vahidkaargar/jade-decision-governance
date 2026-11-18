@@ -874,9 +874,14 @@ def git_env_danger(name: str, val: str) -> bool:
 
 
 class _Scan:
-    def __init__(self, s: str, depth: int, budget: list[int]):
+    def __init__(self, s: str, depth: int, budget: list[int], literal_end: int = 0):
         self.s, self.n, self.depth, self.budget = s, len(s), depth, budget
         self.nest = 0
+        # Single quotes before this index are literal to the shell that runs the text: only the top-level text the outer shell parses. A body that is
+        # re-parsed (`bash -c "..."`, `eval`, `| sh`, a here-string, a heredoc, a script the command writes) may hold text the outer shell already
+        # expanded, so `'$X'` there stays a live expansion (security review PRE2-1).
+        self.literal_end = literal_end if depth == 0 else 0
+        self.legacy = len(budget) > 3 and budget[3]   # origin/main's reading of `"${NAME}"` (`$X`): the third reading of `_skeleton_both_top`
 
     def _sub(self, text: str, step: float = 1) -> str:
         """The skeleton of a nested text. A text that is read again at the same depth (the stages of a pipeline are produced once per `|`, a text is read for every
@@ -1110,7 +1115,7 @@ class _Scan:
                 inner = s[i + 2:j - 1]
                 if "$(" in inner or "`" in inner:
                     subs.append(self._sub(inner))
-                plain.append("$X")
+                plain.append("$" + inner if not self.legacy and re.fullmatch(r"[A-Za-z_]\w*", inner) else "$X")  # `"${HOME}"` reads as $HOME, as it does unquoted
                 i = j
             else:
                 plain.append(c)
@@ -1192,7 +1197,9 @@ class _Scan:
             elif cur.lstrip().startswith(("cd ", "pushd ")):
                 emit(re.sub(r"\s", "\x01", plain))  # keep a directory with spaces readable for cwd tracking
             else:
-                emit('""' if re.search(r"\s", plain) else _INERT.sub("\x06", plain))   # `awk 'NR>1'`: a quoted `>` is data, not a redirect
+                inert = _INERT.sub("\x06", plain)   # `awk 'NR>1'`: a quoted `>` is data, not a redirect
+                literal_sq = quote == "'" and i <= self.literal_end   # `'$HOME'` at the top level is literal: it never expands
+                emit('""' if re.search(r"\s", plain) else inert.replace("$", "\x06") if literal_sq else inert)
 
         while i < n:
             c = s[i]
@@ -1390,27 +1397,31 @@ class _Scan:
 
 
 @functools.lru_cache(maxsize=16)
-def _skeleton_top(command: str) -> str:
-    return _skeleton(command, 0, None)
+def _skeleton_top(command: str, literal_end: int, legacy: bool = False) -> str:
+    return _skeleton(command, 0, None, literal_end, legacy)
 
 
-def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None) -> str:
+def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None, literal_end: int | None = None) -> str:
     """The command with quoting, escapes, comments, heredoc bodies and expansions resolved; separators are left for SPLIT.
+
+    `literal_end`: single quotes before this index are literal (default: the whole text). A caller that appends text the command runs without writing
+    it on the command line (a script it writes, an alias expansion) passes the length of the command, so the appended text keeps `'$X'` live.
 
     The top-level call is pure on a string, and one assessment asks for the same text several times (views, segments, masks),
     so it is memoised: a 2 MB command is scanned once, not once per caller."""
     if _depth == 0 and _budget is None:
-        return _skeleton_top(command)
+        return _skeleton_top(command, len(command) if literal_end is None else literal_end)
     return _skeleton(command, _depth, _budget)
 
 
-def _skeleton(command: str, _depth: int, _budget: list[int] | None) -> str:
-    budget = _budget if _budget is not None else [BUDGET, HERE_ALLOWANCE, {}]
+def _skeleton(command: str, _depth: int, _budget: list[int] | None, literal_end: int = 0, legacy: bool = False) -> str:
+    # `legacy` rides in the budget, which every nested scan shares: origin/main's reading of a quoted `${NAME}` (`$X`, see `_Scan`) at every depth
+    budget = _budget if _budget is not None else [BUDGET, HERE_ALLOWANCE, {}, legacy]
     budget[0] -= len(command)
     command = _MARK_CHARS.sub("\x06", command)   # a byte that is one of the marks stays a word
     if _depth > MAX_DEPTH or budget[0] < 0:
         return " ; " + _code(command) + " ; "
-    text, _ = _Scan(command, _depth, budget).run(0, None)
+    text, _ = _Scan(command, _depth, budget, literal_end).run(0, None)
     return _hoist_redirects(expand_braces(NULL_REDIRECT.sub(" ", text)))
 
 
@@ -1597,17 +1608,30 @@ JOIN = "\x17"
 _JOIN_CHAR = re.compile(JOIN)
 
 
+_QUOTED_VAR = re.compile(r"'[^']*\$|\"[^\"]*\$\{")   # the two places the current reading differs from main's: a single-quoted `$X`, a double-quoted `${NAME}`
+
+
 @functools.lru_cache(maxsize=16)
-def _skeleton_both_top(command: str) -> str:
+def _skeleton_both_top(command: str, literal_end: int) -> tuple[tuple[str, bool], ...]:
+    """The readings of a command, each as (text, is_current): the current reading; the current reading with a single-quoted `$X` and a double-quoted `${NAME}` read as main read
+    them (`literal_end` 0, `legacy`), when the command has one and the two differ; and origin/main's own reading (cut as main cut it). Every one is a command line of its own, so the rating and the push check are the stricter
+    of all of them: a literal `'$B'` that is one reading's branch name stays the other readings' unknown branch (PR 46 merge review, ADV-1 and ADV-2)."""
     command = _JOIN_CHAR.sub("\x06", command)   # a byte that is the join stays a word
-    current = _skeleton_top(command)
+    out = [(_skeleton_top(command, literal_end), True)]
+    if _QUOTED_VAR.search(command):
+        loose = _skeleton_top(command, 0, True)
+        if loose != out[0][0]:
+            out.append((loose, True))
     floor = _base_skeleton(command)
-    return current if floor == current else current + JOIN + floor
+    if all(floor != text for text, _ in out):
+        out.append((floor, False))
+    return tuple(out)
 
 
-def skeleton_both(command: str) -> str:
-    """The text of `skeleton` and, after `JOIN`, the text origin/main gave, when the two differ. `segments`, `segments_cwd` and `text_views` read it."""
-    return _skeleton_both_top(command)
+def skeleton_both(command: str, literal_end: int | None = None) -> str:
+    """The text of `skeleton` and, after `JOIN`, the other readings when they differ (see `_skeleton_both_top`). `segments`, `segments_cwd` and `text_views` read it.
+    `literal_end`: as in `skeleton` (the current reading; the second reading is main's, where a single-quoted `$X` is not literal)."""
+    return JOIN.join(text for text, _ in _skeleton_both_top(command, len(command) if literal_end is None else literal_end))
 
 
 # The one word the current `PREFIX` strips and origin/main's did not: main read `nocorrect echo git push origin main | sh <<< x` as a command named `nocorrect` and rated its
@@ -1623,10 +1647,10 @@ def _base_skeleton(command: str) -> str:
     return _NOCORRECT.sub("nocorrect\x06", shellnorm_base.skeleton(command))
 
 
-def _parts(command: str) -> list[tuple[str, re.Pattern, re.Pattern]]:
-    """The readings of a command with the separators each is cut by: the second is cut as origin/main cut it (`git push >&|log origin feature` is `git push >&` piped to `log` there)."""
-    parts = skeleton_both(command).split(JOIN)
-    return [(parts[0], SPLIT, SEG_TOKEN), *((p, _base().SPLIT, _base().SEG_TOKEN) for p in parts[1:])]
+def _parts(command: str, literal_end: int | None = None) -> list[tuple[str, re.Pattern, re.Pattern]]:
+    """The readings of a command with the separators each is cut by: origin/main's is cut as origin/main cut it (`git push >&|log origin feature` is `git push >&` piped to `log` there)."""
+    return [(text, SPLIT, SEG_TOKEN) if current else (text, _base().SPLIT, _base().SEG_TOKEN)
+            for text, current in _skeleton_both_top(command, len(command) if literal_end is None else literal_end)]
 
 
 def _base():
@@ -1642,15 +1666,16 @@ def segments(command: str) -> list[str]:
 SEG_TOKEN = re.compile(r"(\n|;|&&|\|\||(?<!>)(?<!>&)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\})")
 
 
-def segments_cwd(command: str, cwd: str = "") -> list[tuple[str, tuple[str, ...]]]:
+def segments_cwd(command: str, cwd: str = "", literal_end: int | None = None) -> list[tuple[str, tuple[str, ...]]]:
     """Like `segments`, with the directories the segment may run in: `cd`/`pushd`/`popd` are followed, a subshell keeps its own.
+    `literal_end`: as in `skeleton`.
 
     A command that carries substitutions is ordered by the canonical text, not by execution, so every directory the
     command passes through counts for every segment then.
     """
     rows: list[tuple[str, tuple[str, ...]]] = []
     big: set[tuple[str, tuple[str, ...]]] = set()
-    for text, _, token in _parts(command):
+    for text, _, token in _parts(command, literal_end):
         for row in _segments_cwd_of(text, cwd, token):
             if len(row[0]) > BIG_SEGMENT:   # the plain text a scanner leaves when it stops reading comes out of both readings: a segment of this size is classified once (the cost of reading it twice is the cost of the command twice)
                 if row in big:
@@ -1768,6 +1793,7 @@ class GitCall:
     dirs: list[str] = field(default_factory=list)
     git_dir: str | None = None
     work_tree: str | None = None
+    config_work_tree: str | None = None   # `-c core.worktree=D`: the work tree when no --work-tree is given
     danger: list[str] = field(default_factory=list)
 
 
@@ -1890,6 +1916,8 @@ def git_calls(text: str) -> tuple[str, list[GitCall]]:
                     call.work_tree = val
                 elif name in ("-c", "--config-env"):
                     key = val.split("=", 1)[0].strip().lower()
+                    if name == "-c" and key == "core.worktree" and "=" in val:
+                        call.config_work_tree = val.split("=", 1)[1]
                     if not key or "$" in key or '"' in key or DANGEROUS_KEY.search(key):
                         call.danger.append(f"{name} {key or '?'}")
             elif name == "--exec-path":

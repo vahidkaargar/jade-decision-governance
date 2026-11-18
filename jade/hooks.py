@@ -349,7 +349,7 @@ def _on_default_branch(cwd: str, command: str) -> bool:
 
 def _on_default_branch_asked(cwd: str, command: str) -> bool:
     extra, _ = policy.hidden(command, cwd)   # a git alias that expands to a push, a script the command writes and runs (W-31)
-    segs = policy.segments_cwd(command + "".join("\n" + e for e in extra), cwd)
+    segs = policy.segments_cwd(command + "".join("\n" + e for e in extra), cwd, literal_end=len(command))
     # the two readings of the command (`shellnorm.skeleton_both`) and the readings of a brace repeat a push: each distinct segment in each directory is asked of git once
     pushes = [(call, dirs) for seg, dirs in dict.fromkeys(segs) if not policy.is_read_only(seg) for call in policy.git_calls(seg) if call.sub == "push"]
     if not pushes:
@@ -364,8 +364,14 @@ def _on_default_branch_asked(cwd: str, command: str) -> bool:
         if creates and any(_git(call, d, "rev-parse", "--git-dir") is None for d in dirs):
             unresolved = unresolved or GitUnresolved("the repository of this push does not exist yet: the same command creates it")
             continue
-        if any(_push_hits_default(call, d) for d in dirs):
-            return True   # a push that is found on main answers, whatever a push before it left open (the command is read in two readings, `shellnorm.skeleton_both`)
+        for d in dirs:
+            try:
+                hit = _push_hits_default(call, d)
+            except GitUnresolved as e:   # one reading of the command cannot be resolved (`git push . '$B'`: no remote named `.`); another reading may still find it on main
+                unresolved = unresolved or e
+                continue
+            if hit:
+                return True   # a push that is found on main answers, whatever a push before it left open (the command is read in several readings, `shellnorm.skeleton_both`)
     if unresolved:
         raise unresolved
     return False
