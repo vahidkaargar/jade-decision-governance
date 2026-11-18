@@ -188,7 +188,7 @@ def test_the_work_items_named_in_the_docs_exist():
     for rel in DOCS + ["policies/routing.yaml", "policies/escalation.yaml", "policies/promotion.yaml"]:
         p = ROOT / rel
         if p.exists() and rel != "BACKLOG.md":
-            for w in set(re.findall(r"\bW-\d{2}\b", p.read_text())):
+            for w in set(re.findall(r"\bW-\d{2}\b", p.read_text())) - {f"W-{n}" for n in range(96, 100)}:   # W-96..W-99: historic feature ids, no rows (tests/test_ids_unique.py)
                 assert w in work_ids, f"{rel} names {w}, which is not in work-items.jsonl"
 
 
