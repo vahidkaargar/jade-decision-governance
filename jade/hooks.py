@@ -935,12 +935,14 @@ def _expired_twice_notice(db, reshow: bool) -> list[str]:
 
         since = ts_in(-86400)
         plans = []
+        keys = []   # plan hash + newest issue time of the set: the same command expiring twice again later is news again, the same pair is told once
         for r in db.all("SELECT plan_hash, MAX(issued_at) AS last FROM permits WHERE state='EXPIRED' AND expires_at>=? AND " + ledger.live() +
                         " GROUP BY plan_hash HAVING COUNT(*)>=2", (since,)):
             later = db.one("SELECT 1 AS x FROM permits WHERE plan_hash=? AND state IN ('CONSUMED','ISSUED') AND issued_at>? LIMIT 1", (r.plan_hash, r.last))
             if later is None:
                 plans.append(r.plan_hash)
-        if not plans or not _once(db, "expired_twice_notice", plans, reshow):
+                keys.append(f"{r.plan_hash}@{r.last}")
+        if not plans or not _once(db, "expired_twice_notice", keys, reshow):
             return []
         shown = f" Plan hashes: {', '.join(sorted(p[:12] for p in plans)[:5])}." if reshow else ""
         return [f"JADE: permits that expired twice: {len(plans)}. Nobody approved them in time, or the approved permit was not used. Ask the human before you request the same call again.{shown}"]

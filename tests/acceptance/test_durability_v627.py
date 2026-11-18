@@ -231,6 +231,21 @@ def test_two_expired_permits_of_one_plan_make_a_line_told_once():
     assert "permits that expired twice" not in start("sess-two00000")
 
 
+def test_a_new_pair_of_expired_permits_of_the_same_plan_is_news_again():
+    add_permit("p-1", "plan-a", "EXPIRED", issued="2026-11-18T10:00:00Z")
+    add_permit("p-2", "plan-a", "EXPIRED", issued="2026-11-18T11:00:00Z")
+    assert "permits that expired twice: 1" in start("sess-one00000")
+    db = ledger.open()
+    with db.tx() as con:
+        con.execute("UPDATE permits SET expires_at=? WHERE permit_id IN ('p-1','p-2')", (ts_in(-3 * 86400),))   # the first pair is now outside the 24 hour window
+    db.close()
+    assert "expired twice" not in start("sess-two00000")
+    add_permit("p-3", "plan-a", "EXPIRED", issued="2026-11-20T10:00:00Z")
+    add_permit("p-4", "plan-a", "EXPIRED", issued="2026-11-20T11:00:00Z")
+    assert "permits that expired twice: 1" in start("sess-three000")     # the same command, a new pair: told again
+    assert "expired twice" not in start("sess-four0000")                 # but only once for that pair
+
+
 def test_a_later_use_clears_the_expired_twice_line():
     add_permit("p-1", "plan-a", "EXPIRED", issued="2026-11-18T10:00:00Z")
     add_permit("p-2", "plan-a", "EXPIRED", issued="2026-11-18T11:00:00Z")
