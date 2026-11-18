@@ -41,6 +41,28 @@ def canonical(obj) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
+
+def normalise_text(text: str) -> str:
+    """The text as a repeat check reads it (V6-24, DI-3a): colour and cursor codes gone, CRLF as LF, no trailing space or tab on a line, no trailing blank
+    lines. Nothing else: no case folding, no digit mapping, no word change. A leading space stays (indented output carries meaning), and so does a lone CR.
+    It is used only to compare two texts; the text that is sent and stored is the original."""
+    text = _ANSI.sub("", text).replace("\r\n", "\n")
+    return "\n".join(line.rstrip(" \t\f\v") for line in text.split("\n")).rstrip("\n")
+
+
+def normalise_obj(obj):
+    """`normalise_text` over every string of a JSON-like value (dict keys are kept as they are)."""
+    if isinstance(obj, str):
+        return normalise_text(obj)
+    if isinstance(obj, dict):
+        return {k: normalise_obj(v) for k, v in obj.items()}
+    if isinstance(obj, list | tuple):
+        return [normalise_obj(v) for v in obj]
+    return obj
+
+
 def sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()   # a lone surrogate hashes as itself, not as the `?` of another text
 

@@ -100,7 +100,13 @@ def ask_main(argv: list[str], prog: str = "jade ask", provider=None) -> int:
               f"{'a secret-shaped string survived redaction, a real call would be refused (exit 6)' if leaked else 'no secret-shaped string left'}", file=sys.stderr)
         return 0
     decision = a.decision or (ask.open_verify_decision(a.text) if a.cmd == "verify" else None)   # V6-23: a verify call with no decision named gets its own, so it is linked
-    result = ask.run(specs, state, risk=a.risk, decision_id=decision, provider=provider, model=a.model, use_cache=not a.no_cache)
+    use_cache, resample_cap = True, None
+    if a.no_cache:   # H16: a fresh sample of the same text is for a human or a test run, and it is capped; an agent gets the stored answer
+        if is_human_tty() or paths.row_source() == "test":
+            use_cache, resample_cap = False, ask.NO_CACHE_SAMPLES
+        else:
+            print("jade: warning: --no-cache is for a human terminal or a test run; the stored answer is used when there is one", file=sys.stderr)
+    result = ask.run(specs, state, risk=a.risk, decision_id=decision, provider=provider, model=a.model, use_cache=use_cache, resample_cap=resample_cap)
     return ask.emit(result, raw=a.raw, as_json=a.json)
 
 
@@ -172,6 +178,7 @@ def _stats(a) -> int:
     from . import readouts
 
     since_ts = readouts.since_days(a.days)   # V6-23: the readouts that the plan's baseline needs; present in every output, empty ledgers show zeros and "not measured"
+    out["repeat_reasons"] = {x.guard: x.n for x in db.all("SELECT guard, COUNT(*) AS n FROM events WHERE kind='ask_repeat' AND ts>=? AND " + ledger.live() + " GROUP BY guard", (since_ts,))}   # V6-24: why asks were repeats (exact, whitespace, no_cache, cap_hit)
     out["load"] = readouts.load_counts(db, since_ts)
     out["friction"] = readouts.ask_load(db, since_ts)
     out["verify_links"] = readouts.verify_links(db, since_ts)
@@ -290,7 +297,8 @@ def _decide(a) -> int:
                       f"need an interactive human terminal ({why})", file=sys.stderr)
                 return 1
         elif not state_machine.agent_may(event, row.status, row.risk_level):
-            print(f"jade: refused: '{event}' is not an event an agent session may send. Evaluation results, evidence, escalation and cancel are; "
+            print(f"jade: refused: '{event}' is not an event an agent session may send. Evidence, escalation and cancel are; "
+                  "a Jev result (jev_result_*) is written only by `jade ask --decision`, which names the call; "
                   "execution is the hook's job (with a permit at risk >= high), and verified/failed/unknown follow only from `jade decide outcome`.", file=sys.stderr)
             return 1
         res = decide.step(db, a.decision_id, event, guard=a.note or "", actor="human" if human else "agent", caller_session=session_id())
