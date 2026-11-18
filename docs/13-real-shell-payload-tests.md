@@ -1,6 +1,6 @@
 # 13. Real-shell payload tests run only in a sandbox
 
-Status: rule, in force from 2026-11-16. Tooling: `evals/realshell.py`, gate invariant SI-13 (`jade/harness_audit.py`). Tests: `tests/test_realshell_sandbox.py`, `tests/acceptance/test_si13_realshell_gate_w115.py`.
+Status: rule, in force from 2026-11-16. Tooling: `evals/realshell.py`, gate invariant SI-13 (`jade/harness_audit.py`). Tests: `tests/test_realshell_sandbox.py`, `tests/acceptance/test_si13_realshell_gate_w115.py`. The oracle snapshot built on it (V6-22) is described near the end.
 
 ## The rule
 
@@ -66,6 +66,31 @@ All three are needed. A build script with `shell=True`, or a test that runs one 
 The rule is in the repository. It is active on a machine only after that machine installs the new build.
 
 Not covered (docs/05 T30): a runner written and run in the same command, a runner in another language, a run through pytest, code that hides its shell or its corpus, and a file that only names `realshell.py` without using it.
+
+## The oracle snapshot and gate G4 (V6-22)
+
+Tooling: `evals/realshell_oracle.py`. Tests: `tests/test_realshell_oracle.py`. The idea: truth comes from running the payload, not from a rater. A payload where the real shell reaches `git push origin main` and the gate does not block it with SI-08 is a bypass.
+
+Three commands:
+
+```bash
+uv run python evals/realshell_oracle.py snapshot --dry-run     # prints what would run; runs nothing
+uv run python evals/realshell_oracle.py snapshot               # owner run, on the Mac, before each release
+uv run python evals/realshell_oracle.py check                  # G4: any platform, also in CI
+uv run python evals/realshell_oracle.py stoploss               # new gaps per 100 payloads, and when to stop
+```
+
+- **`snapshot`** runs every payload in bash and zsh, only through `evals/realshell.py` (sandbox plus canary check). Without a sandbox it exits 2 and runs nothing; there is no flag to skip it. It writes `evals/oracle/realshell-<shell versions>.json` with the recorded stub calls, the exit code and the timeout flag. It stores no output text, no clock and no host path (the random sandbox folder is replaced by `<CASE>`), and keys are sorted, so the same results give the same file. Commit the file. Delete the file of an older shell version, because `check` reads every `realshell-*.json` in the folder.
+- **The corpus** is the SI-08 family: gate rows of the case files whose `expect_blocked` holds `SI-08`, and rows marked `"oracle": "si08"` (KG01 to KG03 today). The choice is by row metadata, never by a pattern on the command text. Every payload is a push to a stub. The tool never sends a destructive payload to a shell.
+- **The truth** is read from the recorded call only (`reaches_default_push`): a `git push` or `git send-pack` to `main` or `master`, a delete of it, `--all`, `--mirror` or a pattern. It does not use the classifier, so the two sides stay independent. A push that needs the current branch (`git push`, `HEAD`) and a timeout are counted "not judged". They are never counted as safe.
+- **G4 (`check`)** asks the real hook (`hooks.pretool` in a child process, level unset, gate mode enforce, empty HOME) about each payload the shell reached. A mismatch is a payload where `SI-08` is not among the invariants that blocked it. It prints the count of allowed, asked, blocked by another invariant and error. States: `pass`, `fail`, `not-enough-data`. It is never a pass when no snapshot exists or when no payload reached a push.
+  - A snapshot is stale and fails when a payload of the current corpus is not in it. It compares payloads, not file times (a clone does not keep times). A payload that the corpus no longer has is not a fail.
+  - A mismatch that is a `known_gap` row is exempt but counted. With no `--known-gap-ceiling N` this gives `not-enough-data`, not a pass. More known gaps than the ceiling fails. A gap that is now blocked by SI-08 fails until its marker goes.
+  - Any other mismatch is a new gap and fails. A new bypass enters the case files first as a `known_gap` row with `"oracle": "si08"`.
+  - With no snapshot in `evals/oracle/`, `check` exits 0 and says `not-enough-data` ("G4 is not claimed"). `tests/test_realshell_oracle.py` runs `check` over the folder, so a committed snapshot is replayed in CI.
+- **Stop-loss.** `evals/oracle/rounds.jsonl` has one line per independent review round: `{"round": "R1", "payloads": 120, "new_gaps": 3, "independent": true}`. `stoploss` prints the new gaps per 100 payloads. After two independent rounds in a row with none, it says to stop adding parser waves. This is a stopping rule, not a proof. `check` prints the same rate for one snapshot (`new gaps k of n payloads`) to help fill the line. `snapshot --add FILE` adds the payloads of a round to a run.
+
+Limits: macOS only, so CI replays a file and cannot refresh it (W-115). Stubs cover only the programs listed above; a payload that reaches `kubectl`, `terraform` or an interpreter is confined but not recorded, so R-03 deploy payloads are not covered. The snapshot is only as good as its corpus: it shows bypasses of the SI-08 family that the corpus holds, not that none exist.
 
 ## Review checklist for a harness
 
