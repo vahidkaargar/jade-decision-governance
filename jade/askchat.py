@@ -7,7 +7,7 @@ At a level (`jade level`), gate mode enforce, host mode auto or bypassPermission
 2. PreToolUse on that AskUserQuestion calls `rewrite`: the whole question is REPLACED by the hook's own text (rule, rationale, the command, the part that is
    not shown), so the agent's wording never reaches the human. The host shows the replaced question (probe cell 5b, evals/probes/hook_ask/RESULTS.md).
 3. PostToolUse on it calls `settle`: the answer is read from the host's `tool_response.answers` (never from agent text). Allow makes a single-use grant
-   (10 minutes, this session, this call); Deny closes the ask. The answer is recorded as a hint in `human_answers`; it teaches nothing yet.
+   (10 minutes, this session, this exact call: its tool, text and folder, the `plan_hash`); Deny closes the ask. The answer is recorded as a hint in `human_answers`; it teaches nothing yet.
 4. The identical retry reaches `step` again, which consumes the grant, opens a decision (so SI-07 still holds an unknown outcome) and lets the call run.
 
 A grant is never valid for live JADE wiring, a host mode outside the two above, or a call with secrets in it: those keep the signed terminal permit.
@@ -76,7 +76,9 @@ def question_for(ask_id: str, a, tool: str, ctx: dict, scopes: list | None = Non
         seen.add(label)
         lines.append(f"{label}: {sc.label}")
         options.append({"label": label, "description": f"{sc.covers} {SUGGEST_LATER}"})
-    lines.append("Allow this one call? Single use, 10 minutes, this session only.")
+    lines.append(f"Folder: {_clip(str(ctx.get('cwd') or '(not given)'))}")
+    lines.append("Allow this one call? It covers exactly this text, this tool and this folder. Single use, 10 minutes, this session only. "
+                 "A changed text, prefix or folder asks again.")
     return {"question": "\n".join(lines), "header": "JADE gate", "multiSelect": False, "options": options}
 
 
@@ -178,8 +180,8 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
     _expire(db)
     try:
         with db.tx():
-            row = db.one("SELECT ask_id FROM asks WHERE session_id=? AND status='ALLOWED' AND hold_key=? AND fingerprints_json=? AND expires_ts>? ORDER BY answered_ts LIMIT 1",
-                         (session, hold, fpj, ts()))
+            row = db.one("SELECT ask_id FROM asks WHERE session_id=? AND status='ALLOWED' AND plan_hash=? AND hold_key=? AND fingerprints_json=? AND expires_ts>? ORDER BY answered_ts LIMIT 1",
+                         (session, a.plan_hash, hold, fpj, ts())) if a.plan_hash else None   # V6-07: the grant is for this tool, this text and this folder; a row without the hash is never honoured
             if row is not None and db.con.execute("UPDATE asks SET status='CONSUMED' WHERE ask_id=? AND status='ALLOWED'", (row.ask_id,)).rowcount == 1:
                 did = run_decision(db, a, tool, cwd, session, row.ask_id, "chat")
                 db.con.execute("UPDATE asks SET decision_id=? WHERE ask_id=?", (did, row.ask_id))
@@ -187,8 +189,8 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
                 return HookResult(0, f"JADE: your Allow in the chat (ask {row.ask_id}) was used for this {tool} call. It is spent; the next identical call asks again.")
             if (res := refusal(db, session, hold, fpj, tool, "the chat")) is not None:
                 return res
-            open_ask = db.one("SELECT ask_id FROM asks WHERE session_id=? AND status IN ('PENDING','SHOWN') AND hold_key=? AND fingerprints_json=? AND expires_ts>? ORDER BY created_ts DESC LIMIT 1",
-                              (session, hold, fpj, ts()))
+            open_ask = db.one("SELECT ask_id FROM asks WHERE session_id=? AND status IN ('PENDING','SHOWN') AND plan_hash=? AND hold_key=? AND fingerprints_json=? AND expires_ts>? ORDER BY created_ts DESC LIMIT 1",
+                              (session, a.plan_hash, hold, fpj, ts()))   # an open question shows one text: a changed text gets its own question
             if open_ask is not None:
                 ask_id = open_ask.ask_id
             else:

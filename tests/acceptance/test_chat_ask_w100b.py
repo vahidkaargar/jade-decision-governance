@@ -238,9 +238,71 @@ def test_a_reworded_command_does_not_use_the_grant(level_high):
     assert r.exit_code == 2 and "[jade:ask_" in r.stderr
 
 
-def test_quoting_and_an_env_prefix_do_not_make_it_a_new_command(level_high):
+def test_an_env_prefix_or_other_spacing_is_a_new_call_and_asks_again(level_high):
+    """V6-07 (N10): the grant is for the text the human saw. It was keyed on the command shape, so a changed prefix or spacing spent it."""
     ask_and_allow()
-    assert hooks.pretool(call("FOO=1  git reset --hard   HEAD~1")).exit_code == 0
+    for text in ("FOO=1  git reset --hard   HEAD~1", "git  reset --hard HEAD~1", "KUBECONFIG=prod git reset --hard HEAD~1"):
+        r = hooks.pretool(call(text))
+        assert r.exit_code == 2 and "[jade:ask_" in r.stderr, text
+    assert asks()[0]["status"] == "ALLOWED"   # the grant for the shown text is still unspent
+
+
+def test_only_the_trimmed_ends_of_the_same_text_use_the_grant(level_high):
+    ask_and_allow()
+    assert hooks.pretool(call(CMD + "  \n")).exit_code == 0   # plan_hash trims a space, tab or newline at the ends only
+
+
+def test_a_grant_for_one_text_is_refused_for_another_text_and_another_cwd(level_high):
+    """N10: Allow for text A is not spent on text B, nor on text A in another folder."""
+    staging = "KUBECONFIG=staging kubectl apply -f x.yaml"
+    prod = "KUBECONFIG=prod kubectl apply -f x.yaml"
+    ask_and_allow(cmd=staging)
+    assert hooks.pretool(call(prod)).exit_code == 2
+    elsewhere = hooks.pretool(call(staging, cwd="/var"))
+    assert elsewhere.exit_code == 2 and "[jade:ask_" in elsewhere.stderr
+    statuses = {r["plan_hash"]: r["status"] for r in asks()}
+    assert list(statuses.values()).count("ALLOWED") == 1 and "CONSUMED" not in statuses.values()
+    assert hooks.pretool(call(staging)).exit_code == 0   # the same text in the same folder still uses it
+
+
+def test_a_second_text_gets_its_own_question_not_the_open_one(level_high):
+    first = token_of(hooks.pretool(call("KUBECONFIG=staging kubectl apply -f x.yaml")).stderr)
+    second = token_of(hooks.pretool(call("KUBECONFIG=prod kubectl apply -f x.yaml")).stderr)
+    assert first != second and len(asks()) == 2
+
+
+def test_another_agent_cannot_use_the_grant_and_the_grant_stays(level_high):
+    """N11: a subagent never takes the chat channel, so it cannot spend a grant the human gave the main session."""
+    ask_and_allow()
+    r = hooks.pretool(call(agent_id="a1b2c3", agent_type="general-purpose"))
+    assert r.exit_code == 2 and "jade permit approve" in r.stderr
+    assert [x["status"] for x in asks()] == ["ALLOWED"]
+
+
+def test_another_session_cannot_use_the_grant_after_the_first_run_is_closed(level_high):
+    """N11: the first run is closed (SI-07 no longer holds), so only the key can stop the other session."""
+    ask_and_allow()
+    assert hooks.pretool(call()).exit_code == 0
+    hooks.posttool({**call(), "tool_response": {"stdout": "", "stderr": "", "interrupted": False}})
+    other = hooks.pretool(call(session=OTHER))
+    assert other.exit_code == 2 and "[jade:ask_" in other.stderr and "SI-07" not in other.stderr
+    assert [x["status"] for x in asks()] == ["CONSUMED", "PENDING"]
+
+
+def test_a_grant_row_without_the_exact_plan_hash_is_not_honoured(level_high):
+    ask_and_allow()
+    d = db()
+    try:
+        d.con.execute("UPDATE asks SET plan_hash=''")
+    finally:
+        d.close()
+    r = hooks.pretool(call())
+    assert r.exit_code == 2 and "[jade:ask_" in r.stderr
+
+
+def test_the_question_says_what_the_grant_covers(level_high):
+    q = shown(token_of(hooks.pretool(call()).stderr))
+    assert "exactly this text" in q["question"] and "this folder" in q["question"] and "/tmp" in q["question"]
 
 
 def test_another_session_cannot_use_the_grant(level_high):
