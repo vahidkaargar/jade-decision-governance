@@ -16,6 +16,12 @@ from .util import is_human_tty, language, now, parse_ts, ts  # noqa: F401 - re-e
 
 SPLITS = (("dev", 50), ("calibration", 70), ("validation", 85), ("protected", 100))
 FIT_SOURCES = ("observed", "user_correction", "adjudicated")
+# V6-23: what a label says. They are three different facts and are never merged: one call holds one kind (`set_label` refuses to change it), and only `claim_true`
+# labels fit a threshold. A row from before the column (NULL) is a `claim_true` label.
+LABEL_TYPES = ("claim_true", "owner_would_allow", "harm_observed")
+FIT_LABEL_TYPE = "claim_true"
+FIT_TYPE_SQL = "(l.label_type IS NULL OR l.label_type='claim_true')"   # a fit reader joins `labels l` and adds this
+AUDIT_SOURCES = ("random_audit", "adjudication", "owner_mark", "ci_file")   # short codes: where the call came to be labelled from, never free text
 MIN_LABELED = 200
 FA_BUDGET = 0.05
 ADJUDICATION_PER_WEEK = 10
@@ -208,21 +214,45 @@ def load_protected(family: str, root: Path | None = None, stdin_isatty: bool | N
 
 
 # ---- labels ----------------------------------------------------------------------------------------
-def set_label(db: ledger.Ledger, call_id: str, label: int, source: str, note: str = "") -> None:
+class LabelTypeConflict(ValueError):
+    """A call already holds a label of another kind. The kinds are never merged (V6-23)."""
+
+
+def set_label(db: ledger.Ledger, call_id: str, label: int, source: str, note: str = "", *, label_type: str = FIT_LABEL_TYPE,
+              sample_prob: float | None = None, audit_source: str | None = None) -> None:
+    """Store the label of a call. `label_type` says which fact it is (`LABEL_TYPES`); `sample_prob` is the stored chance that this call was drawn for an audit
+    (0 < p <= 1; the audit draw itself is V6-29); `audit_source` is one of `AUDIT_SOURCES`. A call that holds a label of another kind is refused: one row,
+    one kind. A value left None does not erase one stored earlier."""
     if source not in (*FIT_SOURCES, "heuristic"):
         raise ValueError(f"unknown label source {source}")
+    if label_type not in LABEL_TYPES:
+        raise ValueError(f"unknown label type {label_type}")
+    if sample_prob is not None and not 0 < sample_prob <= 1:
+        raise ValueError("sample_prob is a chance: more than 0 and at most 1")
+    if audit_source is not None and audit_source not in AUDIT_SOURCES:
+        raise ValueError(f"unknown audit source {audit_source}")
     with db.tx() as con:
-        con.execute("INSERT INTO labels(call_id, label, source, note, ts) VALUES(?,?,?,?,?) "
-                    "ON CONFLICT(call_id) DO UPDATE SET label=excluded.label, source=excluded.source, note=excluded.note, ts=excluded.ts "
-                    "WHERE labels.source='heuristic' OR excluded.source<>'heuristic'", (call_id, int(bool(label)), source, note, ts()))
+        have = con.execute("SELECT label_type FROM labels WHERE call_id=?", (call_id,)).fetchone()
+        if have is not None and (have["label_type"] or FIT_LABEL_TYPE) != label_type:
+            raise LabelTypeConflict(f"call {call_id} already holds a {have['label_type'] or FIT_LABEL_TYPE} label; a {label_type} label is another fact and is never merged with it")
+        con.execute("INSERT INTO labels(call_id, label, source, note, ts, label_type, sample_prob, audit_source) VALUES(?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(call_id) DO UPDATE SET label=excluded.label, source=excluded.source, note=excluded.note, ts=excluded.ts, label_type=excluded.label_type, "
+                    "sample_prob=COALESCE(excluded.sample_prob, labels.sample_prob), audit_source=COALESCE(excluded.audit_source, labels.audit_source) "
+                    "WHERE labels.source='heuristic' OR excluded.source<>'heuristic'", (call_id, int(bool(label)), source, note, ts(), label_type, sample_prob, audit_source))
 
 
 def auto_label(db: ledger.Ledger) -> dict:
     """Join outcomes to the call that gated the decision (source `observed`), and mark answers that were later contradicted in the
     same session (source `heuristic`). The label says whether *that call's own claim* held, so only the call a decision acted on is
     labelled: the primary verify call named last in the decision's `evaluation_refs`, and only when it was accepted (exit 0). A
-    companion question, an earlier rejected call on another claim and a call a human overrode stay unlabelled (the adjudication queue)."""
-    n = {"observed": 0, "heuristic": 0}
+    companion question, an earlier rejected call on another claim and a call a human overrode stay unlabelled (the adjudication queue).
+
+    DI-8 (V6-23): an outcome labels a call only when its `goal_check` is `independent` or `human` (`decide.FIT_GOAL_CHECKS`). "The command exited 0" (`exit_only`, the
+    hook's own close), "the agent says it worked" (`agent_reported`) and an outcome with no mark (written before V6-23) are not evidence that the claim was true.
+    Such a decision stays in the monitoring figures; `not_fit` counts the calls it would otherwise have labelled, by mark."""
+    from . import decide
+
+    n: dict = {"observed": 0, "heuristic": 0, "not_fit": {}}
     for d in db.all("SELECT d.decision_id, d.status, d.doc_json FROM decisions d WHERE d.status='FAILED' OR (d.status='SUCCEEDED' AND EXISTS (SELECT 1 FROM outcomes o "
                     "WHERE o.decision_id=d.decision_id AND json_extract(o.doc_json,'$.observation_type')='observed' AND json_extract(o.doc_json,'$.success')=1))"):
         refs = json.loads(d.doc_json).get("evaluation_refs") or []
@@ -230,7 +260,12 @@ def auto_label(db: ledger.Ledger) -> dict:
         if gate is None or gate.p is None or gate.primitive != "noul" or gate.task_family != "verify_claim" or gate.exit_code != 0:
             continue
         target = gate.dedup_of or gate.call_id   # a cached repeat labels the call that produced the answer
-        if db.one("SELECT 1 AS x FROM labels WHERE call_id=? AND source<>'heuristic'", (target,)):
+        if db.one("SELECT 1 AS x FROM labels WHERE call_id=? AND (source<>'heuristic' OR label_type IN ('owner_would_allow','harm_observed'))", (target,)):
+            continue
+        mark = db.one("SELECT json_extract(doc_json,'$.measurements.goal_check') AS g FROM outcomes WHERE decision_id=? ORDER BY ts DESC, rowid DESC LIMIT 1", (d.decision_id,))
+        check = mark.g if mark and mark.g in decide.GOAL_CHECKS else "unmarked"
+        if check not in decide.FIT_GOAL_CHECKS:
+            n["not_fit"][check] = n["not_fit"].get(check, 0) + 1
             continue
         set_label(db, target, 1 if d.status == "SUCCEEDED" else 0, "observed", "outcome join")
         n["observed"] += 1
@@ -259,7 +294,7 @@ def distinct_claims(rows: list[dict]) -> int:
 def labeled(db: ledger.Ledger, fit_only: bool = True, include_protected: bool = False) -> list[dict]:
     """Labeled answers, one per independent (claim, state, calibration group). Cached repeats (`dedup_of`) and answers with no model
     string (no calibration group) are not evidence; neither is a second row for a (claim, state) the group already holds."""
-    src = "AND l.source<>'heuristic'" if fit_only else ""
+    src = f"AND l.source<>'heuristic' AND {FIT_TYPE_SQL}" if fit_only else f"AND {FIT_TYPE_SQL}"   # a label of another kind (V6-23) is never a claim label
     rows = db.all("SELECT c.call_id, c.p, c.task_family, c.question_id, c.question_version, c.resolved_model, c.session_id, c.risk, c.language, c.claim_hash, c.state_hash, "
                   "l.label, l.source FROM jev_calls c JOIN labels l ON l.call_id=c.call_id WHERE c.p IS NOT NULL AND c.primitive='noul' "
                   f"AND {ledger.live('c')} AND c.dedup_of IS NULL AND c.resolved_model IS NOT NULL {src} ORDER BY c.rowid")  # noqa: S608 - constant fragment
@@ -314,7 +349,7 @@ def choice_rows(db: ledger.Ledger, include_protected: bool = False) -> list[dict
     """Labelled choice answers: label 1 means the top option was right. Cached repeats and heuristic labels are left out, as in `labeled`."""
     out = []
     for r in db.all("SELECT c.call_id, c.answers_json, c.session_id, l.label FROM jev_calls c JOIN labels l ON l.call_id=c.call_id WHERE c.primitive='choice' "
-                    f"AND c.dedup_of IS NULL AND c.answers_json IS NOT NULL AND l.source<>'heuristic' AND {ledger.live('c')} ORDER BY c.rowid"):  # noqa: S608 - constant fragment
+                    f"AND c.dedup_of IS NULL AND c.answers_json IS NOT NULL AND l.source<>'heuristic' AND {FIT_TYPE_SQL} AND {ledger.live('c')} ORDER BY c.rowid"):  # noqa: S608 - constant fragment
         try:
             probs = json.loads(r.answers_json).get("probabilities")
         except (ValueError, AttributeError):

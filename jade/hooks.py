@@ -728,7 +728,7 @@ def _close_decision(event: dict, success: bool, method: str) -> HookResult:
             db.event(event.get("session_id") or "session", "BYPASS", guard="raw Decisions API call outside the adapter", actor="hook")
         did = _executing_decision(db, tool, tin, event, cwd)
         if did:
-            decide.record_outcome(db, did, "observed", success, method, attribution="indirect")
+            decide.record_outcome(db, did, "observed", success, method, attribution="indirect", goal_check="exit_only")   # the exit status is not the goal (DI-8)
     finally:
         db.close()
     return HookResult()

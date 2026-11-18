@@ -99,7 +99,8 @@ def ask_main(argv: list[str], prog: str = "jade ask", provider=None) -> int:
         print(f"jade: dry run: {hits} redaction(s){', state truncated to 32 KiB' if cut else ''}; "
               f"{'a secret-shaped string survived redaction, a real call would be refused (exit 6)' if leaked else 'no secret-shaped string left'}", file=sys.stderr)
         return 0
-    result = ask.run(specs, state, risk=a.risk, decision_id=a.decision, provider=provider, model=a.model, use_cache=not a.no_cache)
+    decision = a.decision or (ask.open_verify_decision(a.text) if a.cmd == "verify" else None)   # V6-23: a verify call with no decision named gets its own, so it is linked
+    result = ask.run(specs, state, risk=a.risk, decision_id=decision, provider=provider, model=a.model, use_cache=not a.no_cache)
     return ask.emit(result, raw=a.raw, as_json=a.json)
 
 
@@ -119,7 +120,9 @@ def _ask_stats(db, days: int) -> dict | None:
     arg = (f"-{days} days",)
     since = "strftime('%Y-%m-%dT%H:%M:%SZ','now',?)"
     live = ledger.live()
-    gated = db.one(f"SELECT COUNT(*) AS n FROM events WHERE kind='gated' AND ts>={since} AND {live}", arg).n  # noqa: S608 - constant fragments
+    from . import readouts
+
+    gated = readouts.load_counts(db, readouts.since_days(days))["calls"]   # V6-23: the one definition of a gated call, shared with `jade check`
     terminal = db.one(f"SELECT COUNT(*) AS n FROM events WHERE kind='permit_approved' AND ts>={since} AND {live}", arg).n  # noqa: S608
     answers: dict[str, dict[str, int]] = {}
     for r in db.all(f"SELECT channel, answer, COUNT(*) AS n FROM human_answers WHERE ts>={since} AND {live} GROUP BY channel, answer", arg):  # noqa: S608
@@ -165,7 +168,18 @@ def _stats(a) -> int:
                     "events": {x.kind: x.n for x in db.all("SELECT kind, COUNT(*) AS n FROM events WHERE kind IN ('BYPASS','MODEL_DRIFT','INVALID_QUESTION','would_block','safety_block','secret_read','blind_spot') AND " + ledger.live() + " GROUP BY kind")}})
     if (asks := _ask_stats(db, a.days)) is not None:
         out["asks"] = asks
-    print(json.dumps(out, indent=1))
+    from . import readouts
+
+    since_ts = readouts.since_days(a.days)   # V6-23: the readouts that the plan's baseline needs; present in every output, empty ledgers show zeros and "not measured"
+    out["load"] = readouts.load_counts(db, since_ts)
+    out["friction"] = readouts.ask_load(db, since_ts)
+    out["verify_links"] = readouts.verify_links(db, since_ts)
+    out["label_coverage"] = readouts.label_coverage(db, since_ts)
+    out["shadow_agreement"] = readouts.shadow_agreement(db, since_ts)
+    if a.json:   # one line, sorted keys, so a script or a diff reads it the same way every time
+        print(json.dumps(out, sort_keys=True, separators=(",", ":")))
+    else:
+        print(json.dumps(out, indent=1))
     return 0
 
 
@@ -656,6 +670,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("ledger").add_subparsers(dest="action", required=True)
     st = s.add_parser("stats")
     st.add_argument("--days", type=int, default=14)
+    st.add_argument("--json", action="store_true", help="the same figures on one line with sorted keys, for a script (the default is the same data, indented)")
     pg = s.add_parser("purge")
     pg.add_argument("--older-than", type=_days, default=90, metavar="DAYS", help="retention window in days: 90 or 90d (default 90)")
     pg.add_argument("--test-rows", action="store_true", help="instead of the retention purge, remove the rows a run under JADE_SOURCE=test left in the ledger")
@@ -663,6 +678,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     c = sub.add_parser("check", help="probe ledger, policies, registry, hooks, shim and the provider; non-zero on any failure")
     c.add_argument("--offline", action="store_true")
+    c.add_argument("--json", action="store_true", help="the rows as JSON (ok is true, false, or null for a warning) and the load counters; the exit code is the same")
 
     pm = sub.add_parser("permit").add_subparsers(dest="action", required=True)
     pm.add_parser("list").add_argument("--all", action="store_true")
@@ -837,6 +853,8 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "check":
         from . import ops
 
+        if a.json:
+            return ops.print_check_json(ops.check(live=not a.offline))
         return ops.print_check(ops.check(live=not a.offline))
     if a.cmd in ("version", "upgrade"):
         from . import upgrade

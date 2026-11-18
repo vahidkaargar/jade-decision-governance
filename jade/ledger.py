@@ -77,6 +77,7 @@ CREATE INDEX IF NOT EXISTS asks_call ON asks(session_id, hold_key, status);
 """
 MIGRATIONS = {"jev_calls": [("language", "TEXT"), ("source", "TEXT")], "decisions": [("hold_key", "TEXT"), ("source", "TEXT")],
               "permits": [("source", "TEXT")], "events": [("source", "TEXT")], "asks": [("class_key", "TEXT"), ("label", "TEXT"), ("ho", "INTEGER"), ("scopes_json", "TEXT")],
+              "labels": [("label_type", "TEXT"), ("sample_prob", "REAL"), ("audit_source", "TEXT")],   # V6-23: old rows keep NULL, which reads as a `claim_true` label
               "human_answers": [("last_used_ts", "TEXT"), ("label", "TEXT"), ("ho", "INTEGER"), ("scope_kind", "TEXT"), ("scope_key", "TEXT"), ("scope_label", "TEXT"), ("family_key", "TEXT")]}   # columns added after the first release: (name, type)
 # PRAGMA user_version of a file once SCHEMA, the migrations and INDEXES have been applied to it; a file already at this value skips all three (W-58). It is a
 # digest of those three, so changing any of them changes the version and every file is brought up to date once: nobody has to remember to bump a number.

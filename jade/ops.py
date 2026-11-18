@@ -727,7 +727,7 @@ def review(since_s: float | None = None) -> str:
     window = "all time" if since_s is None else f"last {int(since_s // 3600)}h" if since_s >= 3600 else f"last {int(since_s // 60)}m"
     db = ledger.open(timeout=5)
     try:
-        extra = review_lines(db, since_s)
+        extra = review_lines(db, since_s) + friction_review_lines(db, since_s, window)
     finally:
         db.close()
     if not rows:
@@ -772,6 +772,16 @@ def _latest_marks(db, since: str) -> dict[str, str]:
     return out
 
 
+def friction_review_lines(db, since_s: float | None, window: str) -> list[str]:
+    """V6-23: the effort side of the review, beside the correctness side: how often JADE asked, how long answers took, how many asks ran out, and what is known about
+    whether the answers were right (marked runs, checked labels), or the plain statement that correctness is not measured (d11 checklist item 17)."""
+    from . import readouts
+
+    since = readouts.since_seconds(since_s)
+    marks = _latest_marks(db, since)
+    return readouts.friction_lines(db, since, window, len(marks), sum(1 for m in marks.values() if m == "wrong"), readouts.label_coverage(db, since)["fit_labelled"])
+
+
 def review_lines(db, since_s: float | None) -> list[str]:
     """What the standing answers are doing: how often a question was avoided, what the human marked wrong, and how far the answer count is from the 50 that a later
     step needs. Counts and rule ids only; no command text beyond the label the human already saw in `jade review confirm`."""
@@ -796,13 +806,15 @@ def review_lines(db, since_s: float | None) -> list[str]:
     wrong = sum(1 for m in marked.values() if m == "wrong")
     by_jev = sum(1 for r in silent if r["kind"] == "jev_allowed")
     share = 100 * len(silent) // (len(silent) + asked) if len(silent) + asked else 0
-    who = f"silent runs from standing answers: {len(silent)}" if not by_jev else f"silent runs: {len(silent)} ({len(silent) - by_jev} from standing answers, {by_jev} by Jev)"
-    out = [f"{who}; questions answered: {asked}; silent share {share}% of plain-high calls"]
+    who = f"calls that ran from standing answers, without asking you: {len(silent)}" if not by_jev else \
+        f"calls that ran without asking you: {len(silent)} ({len(silent) - by_jev} from standing answers, {by_jev} by Jev)"
+    out = [f"{who}; questions you answered: {asked}; {share}% of the ordinary high-risk calls ran without asking you"]   # V6-23: plain words for "silent share of plain-high calls"
     if marked:
-        out.append(f"marked: {len(marked)} silent run(s), {len(marked) - wrong} right, {wrong} wrong; wrong runs are below {100 * wrong_rate_upper(wrong, len(marked)):.0f}% of such runs (95% bound)")
+        out.append(f"you marked {len(marked)} of these calls: {len(marked) - wrong} right, {wrong} wrong; we are 95% sure that no more than "
+                   f"{100 * wrong_rate_upper(wrong, len(marked)):.0f}% of such calls are wrong")
     elif silent:
-        out.append("none of the silent runs is marked yet: `jade review mark DECISION_ID right|wrong` in your terminal (wrong makes JADE ask that call, and its kind, again)")
-    out.append(f"owner-answered plain-high calls: {plain_all} of {JEV_BAND_ANSWERS} (a model deciding for you stays off until then)")
+        out.append("you have not marked any of these calls yet: `jade review mark DECISION_ID right|wrong` in your terminal (wrong makes JADE ask that call, and its kind, again)")
+    out.append(f"ordinary high-risk calls you have answered (each call counted once): {plain_all} of the {JEV_BAND_ANSWERS} needed before a model may decide for you; it stays off until then")
     if jev:
         allowed = sum(1 for r in silent if r["kind"] == "jev_allowed")
         lat = sorted(r["latency_ms"] or 0.0 for r in jev)
@@ -1874,13 +1886,14 @@ def unknown_rows() -> list[tuple[str, bool | None, str]]:
 
 
 def no_prompt_gated_calls(days: int = 7) -> tuple[int, int]:
-    """(gated calls seen, of those with no host prompt) in the last `days` days; (0, 0) when the ledger cannot be read."""
-    from . import hooks
+    """(gated calls seen, of those with no host prompt) in the last `days` days; (0, 0) when the ledger cannot be read. V6-23: counted as `jade ledger stats` counts
+    (`readouts.load_counts`): an SI-07 hold is one call, not two."""
+    from . import hooks, readouts
 
     try:
         db = ledger.open(timeout=2)
         try:
-            rows = db.all("SELECT detail_json FROM events WHERE kind IN ('gated','safety_block') AND " + ledger.live() + " AND ts>=?", (ts(now() - timedelta(days=days)),))
+            rows = readouts.gated_rows(db, readouts.since_days(days))
         finally:
             db.close()
     except Exception:  # noqa: BLE001 - informational and a pre-flight: an unreadable ledger is reported by its own check row
@@ -1948,4 +1961,25 @@ def print_check(rows) -> int:
     failed = [n for n, ok, _ in rows if check_failed(ok)]
     if failed:
         print(f"jade check: {len(failed)} failed ({', '.join(failed)})", file=sys.stderr)
+    return 1 if failed else 0
+
+
+def print_check_json(rows) -> int:
+    """`jade check --json` (V6-23): the same rows and the same exit code as `print_check`. `ok` is true, false (a failure) or null (a warning). `load_last_7_days` is the
+    gated-call count that `jade ledger stats` prints too, from one definition (`readouts.load_counts`), with how many of those calls had no host prompt."""
+    from . import readouts
+
+    failed = [n for n, ok, _ in rows if check_failed(ok)]
+    load = None
+    try:
+        db = ledger.open(timeout=2)
+        try:
+            load = readouts.load_counts(db, readouts.since_days(7))
+        finally:
+            db.close()
+        load["no_host_prompt"] = no_prompt_gated_calls()[1]
+    except Exception:  # noqa: BLE001 - an unreadable ledger is the ledger row's failure
+        load = None
+    print(json.dumps({"ok": not failed, "failed": failed, "rows": [{"name": n, "ok": None if ok is None else bool(ok), "detail": d} for n, ok, d in rows],
+                      "load_last_7_days": load}, sort_keys=True, separators=(",", ":")))
     return 1 if failed else 0

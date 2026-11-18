@@ -267,6 +267,22 @@ def _run(specs: list[Spec], items: list[Item], state: dict, hits: int, warnings:
     return result
 
 
+def open_verify_decision(claim: str) -> str | None:
+    """V6-23: the decision a `jade ask verify` call with no `--decision` is attached to, so that its answer is linked and labels can join it later (165 decisions had
+    no call attached, and verify calls had no decision). It is always a new decision of this session: a decision the caller did not name is never advanced, and a
+    decision of another session is never touched. Returns None when the ledger cannot be opened or written: the call then runs, unlinked, as before."""
+    from . import decide
+
+    try:
+        db = ledger.open()
+        try:
+            return decide.open_decision(db, f"Verify claim: {claim}", route="JEV")["decision_id"]
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - linking is a bonus: it never stops the question
+        return None
+
+
 def claim_hash(spec: Spec, state: dict) -> str:
     return sha256(canonical({"q": spec.payload, "claim": state.get("claim")}))
 
