@@ -297,7 +297,7 @@ def _decide(a) -> int:
                       f"need an interactive human terminal ({why})", file=sys.stderr)
                 return 1
         elif not state_machine.agent_may(event, row.status, row.risk_level):
-            print(f"jade: refused: '{event}' is not an event an agent session may send. Evidence, escalation and cancel are; "
+            print(f"jade: refused: '{event}' is not an event an agent session may send. Fast and deep results, evidence, escalation and cancel are; "
                   "a Jev result (jev_result_*) is written only by `jade ask --decision`, which names the call; "
                   "execution is the hook's job (with a permit at risk >= high), and verified/failed/unknown follow only from `jade decide outcome`.", file=sys.stderr)
             return 1

@@ -281,7 +281,8 @@ def _run_secret_stored(c: dict) -> list[str]:
 def _run_lifecycle(c: dict) -> list[str]:
     """Permit and decision-lifecycle cases (review cluster B). `permit_variant`: a human approves a permit for `command`, the hook then sees
     `variant`; `permit_forged`: a row nobody approved (`claim_risk`) exists for `command`; `decide_walk`: an agent sends `events` through
-    `jade decide event`. The human terminal is simulated by replacing the ancestry and session-leader probes; nothing here touches a real terminal or ledger."""
+    `jade decide event`, after the optional `runtime_events` (what `jade ask` records, set up in process: an agent cannot send a Jev result, V6-24).
+    The human terminal is simulated by replacing the ancestry and session-leader probes; nothing here touches a real terminal or ledger."""
     import contextlib
     import io
 
@@ -318,6 +319,8 @@ def _run_lifecycle(c: dict) -> list[str]:
             with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
                 cli.main(["decide", "open", "--objective", "an objective long enough", *(["--command", c["command"]] if c.get("command") else [])])
                 did = json.loads(out.getvalue().strip().splitlines()[-1])["decision_id"]
+                for e in c.get("runtime_events", []):   # V6-24 (H17): the Jev result that `jade ask` writes; an agent cannot send it, so the case sets it up in process
+                    decide.step(db, did, e)
                 for e in c["events"]:
                     cli.main(["decide", "event", did, e])
             status = decide.get(db, did)["status"]

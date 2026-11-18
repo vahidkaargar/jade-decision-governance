@@ -163,8 +163,10 @@ def make_cassette_provider(path: str, misses: list):
 
         def ask(self, state: dict, questions: dict, model: str = adapter.DEFAULT_MODEL):
             key = util.sha256(util.canonical(state))
+            norm = getattr(util, "normalise_obj", None)   # V6-24: the ledger keeps the hash of the normalised state; a tree from before it has no `normalise_obj`
+            keys = [util.sha256(util.canonical(norm(state))), key] if norm else [key]
             self.calls.append(key)
-            hit = table.get(key)
+            hit = next((table[k] for k in keys if k in table), None)
             if hit is None:
                 misses.append(key)
                 return adapter.Result(ok=False, error_kind="CASSETTE_MISS")

@@ -192,7 +192,7 @@ def _run(specs: list[Spec], items: list[Item], state: dict, hits: int, warnings:
                             it.answer, it.cached, origs[i] = answer, True, orig
                             reasons[i] = "exact" if (orig.state_text or "") == state_text[:ledger.STATE_CAP] else "whitespace"
                         elif resample_cap is not None:
-                            if samples_of(db, orig.call_id) >= resample_cap:
+                            if samples_of(db, orig) >= resample_cap:
                                 it.answer, it.cached, origs[i], reasons[i] = answer, True, orig, "cap_hit"
                                 warnings.append(f"--no-cache cap reached ({resample_cap} provider answers for this claim and evidence in this session); the stored answer is returned and nothing was sent")
                             else:
@@ -329,10 +329,12 @@ def effective_risk(db: ledger.Ledger, decision_id: str, risk: str) -> tuple[str,
     return risk, ""
 
 
-def samples_of(db: ledger.Ledger, anchor_call_id: str) -> int:
-    """How many times the provider answered this claim on this evidence: the original and every fresh sample that points at it, not the answers served from the ledger."""
-    return int(db.one("SELECT COUNT(*) AS n FROM jev_calls WHERE (call_id=? OR dedup_of=?) AND state='DONE' AND exit_code IN (0,3,4) AND COALESCE(provider,'')<>'cache'",
-                      (anchor_call_id, anchor_call_id)).n)
+def samples_of(db: ledger.Ledger, anchor) -> int:
+    """How many times the provider answered this claim on this evidence: the original (`anchor`, an answered ledger row) and every fresh sample after it with the same
+    key, not the answers served from the ledger. It reads by the index `calls_session` (session, question, state hash), as the repeat lookup does."""
+    return int(db.one("SELECT COUNT(*) AS n FROM jev_calls WHERE session_id=? AND question_id=? AND state_hash=? AND COALESCE(claim_hash,'')=COALESCE(?, '') AND ts>=? "
+                      "AND COALESCE(source,'')=COALESCE(?, '') AND state='DONE' AND exit_code IN (0,3,4) AND COALESCE(provider,'')<>'cache'",
+                      (anchor.session_id, anchor.question_id, anchor.state_hash, anchor.claim_hash, anchor.ts, anchor.source)).n)
 
 
 def journal_repeat(db: ledger.Ledger, entity_id: str, reason: str, **detail) -> None:
