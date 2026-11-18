@@ -31,6 +31,9 @@ ASK_TTL_S = 600
 GRANT_TTL_S = 600
 PERMIT_ONLY = frozenset({"HO-wiring", "HO-checkout-install", "HO-settings-shadow", "HO-state-path"})   # live JADE wiring: a human types `jade permit approve`
 TOKEN = re.compile(r"\[jade:ask_([0-9a-f]{12})\]")
+# V6-26, Fix B (docs d13 X-15, d07 4.1): `rewrite` replaces every question of the call that carries the token with the one JADE question, so a batch loses its other questions.
+# The words below tell the agent to send the JADE question alone. Fix C (`rewrite` refuses a batch with a token) is the next release.
+SEND_ALONE = "Send it alone: no other question in the same call, because JADE replaces every other question of that call with its own. Put your other questions in a separate AskUserQuestion call."
 HEAD_CHARS, TAIL_CHARS = 450, 150
 GATED_CAP = 600        # a rated command that the clip hides is shown again up to this many characters
 GATED_PARTS = 3        # ... and at most this many of them
@@ -236,6 +239,11 @@ def command_text(a, text: str) -> str:
     return out
 
 
+def channel() -> askplain.Channel:
+    """What the chat does with an answer and with none, read from the constants now (V6-26): the question text states these numbers."""
+    return askplain.Channel("chat", wait_s=ASK_TTL_S, allow_s=GRANT_TTL_S, deny_s=ASK_TTL_S, deny_cap=DENY_CAP)
+
+
 ALLOW, DENY = "Allow", "Deny"
 SUGGEST_PROJECT = "Allow, suggest for this project"
 SUGGEST_ANY = "Allow, suggest for any project"
@@ -256,8 +264,8 @@ def question_for(ask_id: str, a, tool: str, ctx: dict, scopes: list | None = Non
         lines.append(f"It also writes {content.get('length')} characters of content (sha256 {str(content.get('sha256'))[:12]}). First part:\n{clip(str(content.get('text') or ''))}")
     if ctx.get("run_fields"):
         lines.append("It also runs with: " + ", ".join(f"{show_safely(str(k))}={show_safely(str(v))}" for k, v in ctx["run_fields"].items()))
-    options = [{"label": ALLOW, "description": "Run this one call once. It is not remembered."},
-               {"label": DENY, "description": "Do not run it. The agent is told you said no."}]
+    parts = askplain.build(a, tool, channel(), folder=clip(str(ctx.get("cwd") or "(not given)")), who="main session")   # V6-26: the one builder
+    options = list(parts.options)
     seen: set[str] = set()
     for sc in scopes or []:
         label = SUGGEST_LABELS.get(sc.kind)
@@ -266,9 +274,7 @@ def question_for(ask_id: str, a, tool: str, ctx: dict, scopes: list | None = Non
         seen.add(label)
         lines.append(f"{label}: {sc.label}")
         options.append({"label": label, "description": f"{sc.covers} {SUGGEST_LATER}"})
-    lines.append(f"Folder: {clip(str(ctx.get('cwd') or '(not given)'))}")
-    lines.append("Allow this one call? It covers exactly this text, this tool, this folder and any run settings shown above. Single use, 10 minutes, this session only. "
-                 "A changed text, prefix or folder asks again.")
+    lines.extend(parts.lines)   # the folder, who asks, what Allow and Deny do, and what no answer does: in the question itself, because the host may not draw option descriptions
     return {"question": "\n".join(lines), "header": "JADE gate", "multiSelect": False, "options": options}
 
 
@@ -325,7 +331,7 @@ def stop_nudge(db, session: str):
             continue
         db.event(row.ask_id, "ask_nudged", guard="stop with an ask that never reached the question", actor="hook")
         return HookResult(2, "JADE: a gated call of this session is waiting for the human's answer in the chat. Call the AskUserQuestion tool now with ONE question whose text starts "
-                             f"with [jade:ask_{row.ask_id}] and the options Allow and Deny, wait for the answer, then retry the identical call. This reminder is shown once per ask.")
+                             f"with [jade:ask_{row.ask_id}] and the options Allow and Deny. {SEND_ALONE} Wait for the answer, then retry the identical call. This reminder is shown once per ask.")
     return None
 
 
@@ -407,6 +413,7 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
         return HookResult(2, f"JADE gate: the chat approval for this {tool} call could not be used ({e}). Ask the human to run `jade decide list` and look at it.")
     return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}). The human decides this {tool} call in the chat.\n"
                          f"Call the AskUserQuestion tool now with ONE question whose text starts with {f'[jade:ask_{ask_id}]'} and the options Allow and Deny. "
+                         f"{SEND_ALONE} "
                          "JADE replaces the question text with the real one, so do not write the command into it. Wait for the answer. "
                          f"Then retry the identical {tool} call, unchanged. Do not answer the question yourself and do not rephrase the call to avoid the gate.")
 
