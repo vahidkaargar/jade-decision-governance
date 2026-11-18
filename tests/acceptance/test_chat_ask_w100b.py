@@ -253,11 +253,15 @@ def test_only_the_trimmed_ends_of_the_same_text_use_the_grant(level_high):
 
 
 def test_a_grant_for_one_text_is_refused_for_another_text_and_another_cwd(level_high):
-    """N10: Allow for text A is not spent on text B, nor on text A in another folder."""
+    """N10: Allow for text A is not spent on text B, nor on text A in another folder.
+    Status of this test: V6-06 already put the env prefix and the folder into the keyed fingerprints, so the prod text and the other folder were refused
+    before V6-07 too (this part is a regression guard). The respaced text is the part that is red before V6-07: only plan_hash tells it apart."""
     staging = "KUBECONFIG=staging kubectl apply -f x.yaml"
     prod = "KUBECONFIG=prod kubectl apply -f x.yaml"
     ask_and_allow(cmd=staging)
     assert hooks.pretool(call(prod)).exit_code == 2
+    respaced = hooks.pretool(call("KUBECONFIG=staging  kubectl  apply  -f x.yaml"))
+    assert respaced.exit_code == 2 and "[jade:ask_" in respaced.stderr
     elsewhere = hooks.pretool(call(staging, cwd="/var"))
     assert elsewhere.exit_code == 2 and "[jade:ask_" in elsewhere.stderr
     statuses = {r["plan_hash"]: r["status"] for r in asks()}
@@ -272,7 +276,9 @@ def test_a_second_text_gets_its_own_question_not_the_open_one(level_high):
 
 
 def test_another_agent_cannot_use_the_grant_and_the_grant_stays(level_high):
-    """N11: a subagent never takes the chat channel, so it cannot spend a grant the human gave the main session."""
+    """N11: a subagent never takes the chat channel, so it cannot spend a grant the human gave the main session.
+    Status: a regression guard, not red before V6-07. The grant lookup already had the session, and a subagent never takes the chat channel, so no earlier
+    commit could fail this test. V6-07 does not change that part; the test pins it."""
     ask_and_allow()
     r = hooks.pretool(call(agent_id="a1b2c3", agent_type="general-purpose"))
     assert r.exit_code == 2 and "jade permit approve" in r.stderr
@@ -280,7 +286,9 @@ def test_another_agent_cannot_use_the_grant_and_the_grant_stays(level_high):
 
 
 def test_another_session_cannot_use_the_grant_after_the_first_run_is_closed(level_high):
-    """N11: the first run is closed (SI-07 no longer holds), so only the key can stop the other session."""
+    """N11: the first run is closed (SI-07 no longer holds), so only the key can stop the other session.
+    Status: a regression guard, not red before V6-07 (the session was already part of the grant lookup). It is the probe the V6-07 card asked for, with the
+    first run closed, so SI-07 no longer hides the result."""
     ask_and_allow()
     assert hooks.pretool(call()).exit_code == 0
     hooks.posttool({**call(), "tool_response": {"stdout": "", "stderr": "", "interrupted": False}})
@@ -303,6 +311,46 @@ def test_a_grant_row_without_the_exact_plan_hash_is_not_honoured(level_high):
 def test_the_question_says_what_the_grant_covers(level_high):
     q = shown(token_of(hooks.pretool(call()).stderr))
     assert "exactly this text" in q["question"] and "this folder" in q["question"] and "/tmp" in q["question"]
+
+
+def bash_call(extra=None, cmd=CMD):
+    tin = {"command": cmd, **(extra or {})}
+    return {"tool_name": "Bash", "tool_input": tin, "session_id": SESSION, "cwd": "/tmp", "permission_mode": "auto"}
+
+
+@pytest.mark.parametrize("extra", [{"dangerouslyDisableSandbox": True}, {"run_in_background": True}, {"timeout": 600000},
+                                   {"dangerouslyDisableSandbox": True, "run_in_background": True}])
+def test_an_allow_is_not_spent_on_the_same_text_run_another_way(level_high, extra):
+    """V6-07 fix: the plan_hash covers the tool, the text and the folder only. The fields that change how a Bash call runs (sandbox off, background,
+    time limit) are part of the call the human allowed."""
+    first = hooks.pretool(bash_call())
+    assert first.exit_code == 2
+    hooks.posttool(answer_event(shown(token_of(first.stderr)), "Allow"))
+    r = hooks.pretool(bash_call(extra))
+    assert r.exit_code == 2 and "[jade:ask_" in r.stderr, r.stderr
+    assert sorted(x["status"] for x in asks()) == ["ALLOWED", "PENDING"]   # the grant for the shown call is still unspent
+    assert hooks.pretool(bash_call()).exit_code == 0                         # and it still works for the call as shown
+
+
+def test_the_question_shows_the_fields_that_change_how_the_call_runs(level_high):
+    r = hooks.pretool(bash_call({"dangerouslyDisableSandbox": True, "run_in_background": True}))
+    q = shown(token_of(r.stderr))["question"]
+    assert "dangerouslyDisableSandbox=True" in q and "run_in_background=True" in q
+    plain = shown(token_of(hooks.pretool(bash_call(cmd="git reset --hard HEAD~2")).stderr))["question"]
+    assert "dangerouslyDisableSandbox" not in plain
+
+
+def test_the_same_extra_fields_use_the_grant_and_the_description_does_not_matter(level_high):
+    extra = {"dangerouslyDisableSandbox": True}
+    first = hooks.pretool(bash_call({**extra, "description": "list"}))
+    hooks.posttool(answer_event(shown(token_of(first.stderr)), "Allow"))
+    assert hooks.pretool(bash_call({**extra, "description": "something else", "run_in_background": False})).exit_code == 0   # description is display only; False is the default
+
+
+def test_a_default_field_is_the_same_call(level_high):
+    first = hooks.pretool(bash_call())
+    hooks.posttool(answer_event(shown(token_of(first.stderr)), "Allow"))
+    assert hooks.pretool(bash_call({"dangerouslyDisableSandbox": False, "description": "x"})).exit_code == 0
 
 
 def test_another_session_cannot_use_the_grant(level_high):

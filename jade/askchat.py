@@ -7,7 +7,7 @@ At a level (`jade level`), gate mode enforce, host mode auto or bypassPermission
 2. PreToolUse on that AskUserQuestion calls `rewrite`: the whole question is REPLACED by the hook's own text (rule, rationale, the command, the part that is
    not shown), so the agent's wording never reaches the human. The host shows the replaced question (probe cell 5b, evals/probes/hook_ask/RESULTS.md).
 3. PostToolUse on it calls `settle`: the answer is read from the host's `tool_response.answers` (never from agent text). Allow makes a single-use grant
-   (10 minutes, this session, this exact call: its tool, text and folder, the `plan_hash`); Deny closes the ask. The answer is recorded as a hint in `human_answers`; it teaches nothing yet.
+   (10 minutes, this session, this exact call: its tool, text and folder, the `plan_hash`, and the Bash run settings such as the sandbox switch); Deny closes the ask. The answer is recorded as a hint in `human_answers`; it teaches nothing yet.
 4. The identical retry reaches `step` again, which consumes the grant, opens a decision (so SI-07 still holds an unknown outcome) and lets the call run.
 
 A grant is never valid for live JADE wiring, a host mode outside the two above, or a call with secrets in it: those keep the signed terminal permit.
@@ -21,11 +21,12 @@ import json
 import re
 from datetime import timedelta
 
-from . import askplain, memory, paths
+from . import askplain, memory, paths, policy
 from . import scopes as scopes_mod
-from .util import canonical, new_id, now, ts
+from .util import canonical, new_id, now, sha256, ts
 
 CHAT_MODES = ("auto", "bypassPermissions")
+RUN_FIELDS_IGNORED = frozenset({"command", "cmd", "script", "description"})   # the text (the plan hash covers it) and the display line
 ASK_TTL_S = 600
 GRANT_TTL_S = 600
 PERMIT_ONLY = frozenset({"HO-wiring", "HO-checkout-install", "HO-settings-shadow", "HO-state-path"})   # live JADE wiring: a human types `jade permit approve`
@@ -40,6 +41,16 @@ def applicable(mode: str, a, event: dict) -> bool:
     """Does this call take the chat channel? (Secrets in the call are checked by the caller: it needs the context.)"""
     return (mode == "enforce" and paths.level() in ("low", "medium", "high") and event.get("permission_mode") in CHAT_MODES and not event.get("agent_id")
             and bool(event.get("session_id")) and not (set(a.ho_ids) & PERMIT_ONLY))
+
+
+def run_fields(tool: str, tool_input) -> dict:
+    """The fields of a shell call, other than its text, that change how it runs (Bash: `dangerouslyDisableSandbox`, `run_in_background`, `timeout`).
+    The plan hash covers the tool, the text and the folder only, so these are bound to the grant here. `description` is display text and does not count.
+    A value that is empty or false is the default and does not count either, so an absent field and a false one are the same call."""
+    if not isinstance(tool_input, dict) or not policy.runs_shell(tool, tool_input):
+        return {}
+    return {str(k): v for k, v in sorted(tool_input.items(), key=lambda kv: str(kv[0]))
+            if k not in RUN_FIELDS_IGNORED and v not in (None, False, "", 0, [], {})}
 
 
 def _clip(text: str) -> str:
@@ -66,6 +77,8 @@ def question_for(ask_id: str, a, tool: str, ctx: dict, scopes: list | None = Non
     content = ctx.get("content")
     if isinstance(content, dict):
         lines.append(f"It also writes {content.get('length')} characters of content (sha256 {str(content.get('sha256'))[:12]}). First part:\n{_clip(str(content.get('text') or ''))}")
+    if ctx.get("run_fields"):
+        lines.append("It also runs with: " + ", ".join(f"{k}={v}" for k, v in ctx["run_fields"].items()))
     options = [{"label": ALLOW, "description": "Run this one call once. It is not remembered."},
                {"label": DENY, "description": "Do not run it. The agent is told you said no."}]
     seen: set[str] = set()
@@ -77,7 +90,7 @@ def question_for(ask_id: str, a, tool: str, ctx: dict, scopes: list | None = Non
         lines.append(f"{label}: {sc.label}")
         options.append({"label": label, "description": f"{sc.covers} {SUGGEST_LATER}"})
     lines.append(f"Folder: {_clip(str(ctx.get('cwd') or '(not given)'))}")
-    lines.append("Allow this one call? It covers exactly this text, this tool and this folder. Single use, 10 minutes, this session only. "
+    lines.append("Allow this one call? It covers exactly this text, this tool, this folder and any run settings shown above. Single use, 10 minutes, this session only. "
                  "A changed text, prefix or folder asks again.")
     return {"question": "\n".join(lines), "header": "JADE gate", "multiSelect": False, "options": options}
 
@@ -176,7 +189,12 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
     ctx = permits.make_context(tool, a, event, cwd=cwd)
     if ctx.get("redacted"):
         return None   # a secret-shaped value is never stored or shown: the terminal permit path says what to do
-    session, hold, fpj = event["session_id"], a.hold_key or a.plan_hash, canonical(memory.keyed_fp(a, fp))
+    extras = run_fields(tool, event.get("tool_input"))
+    keyed = memory.keyed_fp(a, fp)
+    if extras:   # how the call runs is part of the call the human allows: the key, the open question and the question text all carry it
+        keyed = {**keyed, "_run": sha256(canonical(extras))[:16]}
+        ctx["run_fields"] = {k: _clip(str(v))[:80] for k, v in extras.items()}
+    session, hold, fpj = event["session_id"], a.hold_key or a.plan_hash, canonical(keyed)
     _expire(db)
     try:
         with db.tx():
