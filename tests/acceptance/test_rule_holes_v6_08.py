@@ -87,7 +87,7 @@ def test_plumbing_pushes_are_rated_like_a_push(cmd):
 @pytest.mark.parametrize("cmd", [
     "g=git; $g push origin main", "g=git && ${g} push origin main", "g=git\n$g push origin main", "g='git'; $g push origin main", "g=git; sudo $g push origin main",
     'g="git push"; $g origin main', "g=git; (cd x; $g push origin main)", "g=git; echo $($g push origin main)", "g=gh; $g pr merge 3",
-    "a=1 g=git; $g push origin main",
+    "a=1 g=git; $g push origin main", 'g=git; "$g" push origin main', 'g=git; "${g}" push origin main', "g=git; command $g push origin main",
 ])
 def test_a_variable_set_in_the_same_command_and_used_as_the_command_is_its_value(cmd):
     a = assess(cmd)
@@ -100,6 +100,7 @@ def test_a_variable_set_in_the_same_command_and_used_as_the_command_is_its_value
     "g=echo; $g push origin main",                 # the value is echo
     "g=$(x); $g push origin main",                 # a value that is not a literal gives no reading: nothing is known about it
     "g=git; echo $g push origin main",             # the variable is an argument
+    "g=git; '$g' push origin main",                # a single-quoted `$g` is the text `$g`
     "x=1; echo $x push",
     "g=git",                                       # an assignment alone
 ])

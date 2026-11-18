@@ -915,7 +915,7 @@ class _Scan:
         also read as `git push origin main`. The stage as written is read as before, so this only adds readings."""
         lead = raw.lstrip()
         bare = PREFIX.sub("", lead, count=1)
-        m = re.match(r"\$(?:\{(\w+)\}|(\w+))", bare)
+        m = re.match(r'"?\$(?:\{(\w+)\}|(\w+))"?', bare)   # `"$g"` expands as `$g` does (a single-quoted `'$g'` does not)
         if not m or not (values := self.assigns.get(m.group(1) or m.group(2))):
             return []
         head = lead[:len(lead) - len(bare)]
