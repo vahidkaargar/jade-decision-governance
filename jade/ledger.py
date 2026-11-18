@@ -270,6 +270,18 @@ class Ledger:
         row = self._anchor(self.con, session, question_id, version, state_hash, claim_hash)
         return self.get_call(row["call_id"]) if row else None
 
+    def find_first_answer(self, question_id: str, version: int, state_hash: str, claim_hash: str | None, session: str):
+        """The first answer the provider gave to this question on this state in this session, from ANY source (a live row or a `JADE_SOURCE=test` row), or None.
+        This is not an anchor and nothing points at it: it only holds a fresh sample to the first verdict (the never-looser rule) and counts the `--no-cache`
+        cap. A run under the test tag therefore cannot start over with no first answer. Cache rows are not answers of the provider. Read-only."""
+        ttl = dedup_ttl_s()
+        row = self.con.execute(
+            "SELECT call_id FROM jev_calls WHERE session_id=? AND question_id=? AND question_version=? "
+            "AND state_hash=? AND COALESCE(claim_hash,'')=COALESCE(?, '') AND ts>=? "
+            "AND state='DONE' AND exit_code IN (0,3,4) AND COALESCE(provider,'')<>'cache' ORDER BY rowid ASC LIMIT 1",
+            (session, question_id, version, state_hash, claim_hash, ts(now() - timedelta(seconds=ttl)))).fetchone()
+        return self.get_call(row["call_id"]) if row else None
+
     def in_flight_batches(self, within_s: float, exclude: tuple[str, ...] = ()) -> int:
         """Provider requests still waiting for an answer, over every process: the distinct (session, state) pairs of calls left EVALUATING in the
         last `within_s` seconds (the questions of one batch share both). Older rows belong to a process that died, not to a live exchange."""

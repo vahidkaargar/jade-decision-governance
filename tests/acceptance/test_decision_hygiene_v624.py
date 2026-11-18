@@ -159,6 +159,40 @@ def test_h16_a_test_run_may_resample(monkeypatch):
     assert len(prov.calls) == 2
 
 
+def test_h16_the_test_tag_does_not_hide_the_first_answer_from_the_never_looser_rule(monkeypatch):
+    """Review finding: an anchor is per source, so `JADE_SOURCE=test` found none, took a fresh sample and said yes after a live abstain."""
+    prov = provider([0.5, 0.9])
+    argv = ["verify", "tests pass", "-s", "42 passed"]
+    assert run_cli(argv, prov, monkeypatch) == 3                  # live: abstain
+    monkeypatch.setenv("JADE_SOURCE", "test")
+    assert run_cli(argv, prov, monkeypatch) == 3                  # test tag, new provider answer 0.9: the first non-yes stands
+    assert len(prov.calls) == 2                                   # the sample is still drawn, it is only held to the first answer
+    monkeypatch.delenv("JADE_SOURCE")
+    assert run_cli(argv, prov, monkeypatch) == 3                  # back in live mode: the stored live answer
+
+
+def test_h16_a_live_ask_after_a_test_abstain_is_held_to_it_too(monkeypatch):
+    prov = provider([0.5, 0.9])
+    argv = ["verify", "tests pass", "-s", "42 passed"]
+    monkeypatch.setenv("JADE_SOURCE", "test")
+    assert run_cli(argv, prov, monkeypatch) == 3
+    monkeypatch.delenv("JADE_SOURCE")
+    assert run_cli(argv, prov, monkeypatch) == 3                  # a fresh live sample cannot turn the first abstain into a yes
+    assert len(prov.calls) == 2
+
+
+def test_h16_the_test_tag_does_not_give_a_second_cap(monkeypatch, capsys):
+    """Review finding: live calls and test calls each had their own cap, so the tag bought 3 more provider answers."""
+    prov = provider([0.5, 0.9, 0.9, 0.9, 0.9, 0.9])
+    argv = ["verify", "tests pass", "-s", "42 passed", "--no-cache"]
+    assert run_cli(argv, prov, monkeypatch) == 3                  # live (agent: the flag is ignored), the first answer
+    monkeypatch.setenv("JADE_SOURCE", "test")
+    for _ in range(ask.NO_CACHE_SAMPLES + 2):
+        assert run_cli(argv, prov, monkeypatch) == 3
+    assert len(prov.calls) == ask.NO_CACHE_SAMPLES                # the live answer counts: first call plus the resamples the cap lets through
+    assert "cap" in capsys.readouterr().err
+
+
 def test_h16_no_cache_is_capped_and_after_the_cap_there_is_no_provider_call(monkeypatch, capsys):
     prov = provider(0.9)
     argv = ["verify", "tests pass", "-s", "42 passed", "--no-cache"]

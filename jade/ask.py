@@ -166,6 +166,7 @@ def _run(specs: list[Spec], items: list[Item], state: dict, hits: int, warnings:
     state_text, state_hash = canonical(state), hash_state(state)
     origs: dict[int, object] = {}       # the stored answers that are served again
     anchors: dict[int, object] = {}     # every answered original a repeat points at, served or not
+    priors: dict[int, object] = {}      # the first provider answer of ANY source (live or test tag): it holds a fresh sample to the first verdict and counts the cap
     reasons: dict[int, str] = {}        # why a call is a repeat (DI-3a): exact, whitespace, no_cache, cap_hit
     if db and decision_id:
         risk, why = effective_risk(db, decision_id, risk)   # DI-4: the stricter of the caller's risk and the decision's
@@ -182,6 +183,10 @@ def _run(specs: list[Spec], items: list[Item], state: dict, hits: int, warnings:
                                        state_bytes=len(state_text.encode()), state_text=state_text, risk=risk, redactions=hits, language=state_language(state),
                                        question_text=str(s.payload.get("instructions", ""))[:2000] + (" | " + str(state.get("claim", ""))[:500] if state.get("claim") else ""))
             row = db.get_call(it.call_id)
+            if use_cache or resample_cap is not None:   # the human proxy path (neither) stays unconstrained
+                prior = db.find_first_answer(s.question_id, s.version, state_hash, claim_hash(s, state), session)
+                if prior is not None and prior.call_id != it.call_id and prior.answers_json and adapter.check_answer(json.loads(prior.answers_json), s.payload) is None:
+                    priors[i] = prior
             if row.dedup_of:
                 orig = db.get_call(row.dedup_of)
                 if orig and orig.state == "DONE" and orig.answers_json and orig.exit_code in (0, 3, 4):
@@ -192,11 +197,18 @@ def _run(specs: list[Spec], items: list[Item], state: dict, hits: int, warnings:
                             it.answer, it.cached, origs[i] = answer, True, orig
                             reasons[i] = "exact" if (orig.state_text or "") == state_text[:ledger.STATE_CAP] else "whitespace"
                         elif resample_cap is not None:
-                            if samples_of(db, orig) >= resample_cap:
+                            if samples_of(db, priors.get(i) or orig) >= resample_cap:
                                 it.answer, it.cached, origs[i], reasons[i] = answer, True, orig, "cap_hit"
                                 warnings.append(f"--no-cache cap reached ({resample_cap} provider answers for this claim and evidence in this session); the stored answer is returned and nothing was sent")
                             else:
                                 reasons[i] = "no_cache"
+            elif i in priors and resample_cap is not None and not use_cache:
+                # No anchor of this source, but the first answer is from another source (a run under `JADE_SOURCE=test` next to a live one): the same cap counts it.
+                if samples_of(db, priors[i]) >= resample_cap:
+                    it.answer, it.cached, origs[i], reasons[i] = json.loads(priors[i].answers_json), True, priors[i], "cap_hit"
+                    warnings.append(f"--no-cache cap reached ({resample_cap} provider answers for this claim and evidence in this session); the stored answer is returned and nothing was sent")
+                else:
+                    reasons[i] = "no_cache"
         today = db.one("SELECT COUNT(*) AS n FROM jev_calls WHERE ts >= strftime('%Y-%m-%dT00:00:00Z','now')").n
         if today > DAILY_BUDGET:
             warnings.append(f"daily call budget exceeded ({today} > {DAILY_BUDGET})")
@@ -220,7 +232,9 @@ def _run(specs: list[Spec], items: list[Item], state: dict, hits: int, warnings:
     for i, it in enumerate(items):
         s = it.spec
         orig = origs.get(i)
-        first = orig if orig is not None else (anchors.get(i) if resample_cap is not None else None)   # a fresh `--no-cache` answer is held to the first one too
+        # A fresh answer is held to the first non-yes answer of this claim and evidence, from any source: the test tag does not start the claim over.
+        cands = [c for c in (orig, anchors.get(i) if resample_cap is not None else None, priors.get(i)) if c is not None]
+        first = next((c for c in cands if c.exit_code in (3, 4)), cands[0] if cands else None)
         if orig is not None:
             resolved = orig.resolved_model   # a repeat is judged in the group of the call that produced the answer
         else:
@@ -331,10 +345,10 @@ def effective_risk(db: ledger.Ledger, decision_id: str, risk: str) -> tuple[str,
 
 def samples_of(db: ledger.Ledger, anchor) -> int:
     """How many times the provider answered this claim on this evidence: the original (`anchor`, an answered ledger row) and every fresh sample after it with the same
-    key, not the answers served from the ledger. It reads by the index `calls_session` (session, question, state hash), as the repeat lookup does."""
+    key, from any source (a `JADE_SOURCE=test` run does not get a second cap), not the answers served from the ledger. It reads by the index `calls_session` (session, question, state hash), as the repeat lookup does."""
     return int(db.one("SELECT COUNT(*) AS n FROM jev_calls WHERE session_id=? AND question_id=? AND state_hash=? AND COALESCE(claim_hash,'')=COALESCE(?, '') AND ts>=? "
-                      "AND COALESCE(source,'')=COALESCE(?, '') AND state='DONE' AND exit_code IN (0,3,4) AND COALESCE(provider,'')<>'cache'",
-                      (anchor.session_id, anchor.question_id, anchor.state_hash, anchor.claim_hash, anchor.ts, anchor.source)).n)
+                      "AND state='DONE' AND exit_code IN (0,3,4) AND COALESCE(provider,'')<>'cache'",
+                      (anchor.session_id, anchor.question_id, anchor.state_hash, anchor.claim_hash, anchor.ts)).n)
 
 
 def journal_repeat(db: ledger.Ledger, entity_id: str, reason: str, **detail) -> None:
