@@ -367,6 +367,20 @@ def _fast(a) -> int:
 
 
 def _work(a) -> int:
+    """Every action but `list` reads, changes and saves the work file: it does all three under one lock, so two parallel `jade work` commands lose no item (V6-27)."""
+    from . import work
+
+    if a.action == "list" or not Path(a.file).resolve().parent.is_dir():   # no directory: nothing to lock, and `load` says so in its own words
+        return _work_run(a)
+    try:
+        with work.locked(Path(a.file)):
+            return _work_run(a)
+    except TimeoutError as e:
+        print(f"jade: {e}", file=sys.stderr)
+        return 1
+
+
+def _work_run(a) -> int:
     from . import work
 
     src = Path(a.file)
