@@ -26,7 +26,9 @@ SAME_CALL = [
 FOUND = ("FOUND by V6-17: the ask and the Deny are keyed by the hold key AND by the fingerprints of the call, and since V6-05 the fingerprints carry the target "
          "(`memory.keyed_fp`: an env prefix, `sudo`, a git `-C`) and the place (the working folder). That is right for an Allow: a staging answer must not cover prod. "
          "For a Deny it is the other way: the retry with a prefix, or from another folder, is a new ask, so the Deny is not honoured. Changing it is a change in "
-         "jade/askchat.py (the hook path) and needs the owner's yes; V6-17 only records it. Remove the xfail marker when it is closed.")
+         "jade/askchat.py (the hook path) and needs the owner's yes; V6-17 only records it. The same cause makes the older test test_quoting_and_an_env_prefix_do_not_make_it_a_new_command "
+         "in test_chat_ask_w100b.py fail on the base branch v6/16-floor (an Allow is not used for `FOO=1 git ...` either): V6-07 is to change that test (N10). Remove the xfail "
+         "marker when it is closed.")
 
 
 def _denied_then(retry, *, cwd=None):

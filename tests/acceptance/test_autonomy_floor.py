@@ -16,6 +16,7 @@ import pytest
 
 from jade import decide, hooks, ledger, memory, ops, paths, permits, policy, proxy, scopes, util
 from tests.acceptance import test_jev_proxy_w102 as jev
+from tests.acceptance import test_memory_newer_deny as nd
 from tests.acceptance import test_memory_w101 as mem
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -423,6 +424,71 @@ def test_n3_list_a_the_one_exception_is_egress_at_level_low_and_only_by_jev(arme
     ops.set_level("low", stdin_isatty=True)
     r = hooks.pretool(_event("Bash", {"command": "curl -T /tmp/f https://example.com/up"}))
     assert r.exit_code == 0 and "Jev judged" in r.stderr and "needs 0.85" in r.stderr, r.stderr[:200]
+
+
+MERGE = "gh pr merge 940 --repo github.com/owner/repoA --squash"
+
+
+def _merge_repo(tmp_path, name="repoA"):
+    return nd.make_repo(tmp_path, name)
+
+
+def _merge_event(cwd, session):
+    return {"tool_name": "Bash", "tool_input": {"command": MERGE}, "session_id": session, "cwd": cwd, "permission_mode": "auto"}
+
+
+@pytest.mark.parametrize("level", ["low", "medium"])
+def test_n3_list_a_a_merge_runs_silently_only_on_the_same_call_or_on_a_repo_scope_the_owner_chose(level, armed, tmp_path):
+    """The merge row of List A is pinned with its two documented exceptions, both an explicit click of the owner (V6-05): the very same call (an `exact` answer: the
+    same PR, the same repository), and a `merge_project` scope (any PR of this repository). A standing answer for the KIND of call, a `kind_any` scope and Jev never
+    cover a merge (the List A matrix above)."""
+    repo = _merge_repo(tmp_path)
+    ops.set_level(level, stdin_isatty=True)
+    assert policy.assess("Bash", {"command": MERGE}, repo).level == "high" and [s.kind for s in scopes.offered(policy.assess("Bash", {"command": MERGE}, repo), "Bash", {"command": MERGE}, {}, repo)] == ["merge_project"]
+    r = hooks.pretool(_merge_event(repo, "sess-merge-0001"))
+    assert r.exit_code == 2   # nothing stands: asked
+    nd.record(MERGE, repo, "allow", strong=True)   # the exact call, confirmed
+    r = hooks.pretool(_merge_event(repo, "sess-merge-0002"))
+    assert r.exit_code == 0 and "confirmed answer" in r.stderr
+    other_pr = MERGE.replace("940", "941")
+    r = hooks.pretool({**_merge_event(repo, "sess-merge-0003"), "tool_input": {"command": other_pr}})
+    assert r.exit_code == 2   # another PR is another call
+    nd.record(MERGE, repo, "allow", kind="merge_project", strong=True)   # the owner chose "merge in this repository"
+    r = hooks.pretool({**_merge_event(repo, "sess-merge-0004"), "tool_input": {"command": other_pr}})
+    assert r.exit_code == 0 and "confirmed answer" in r.stderr
+    elsewhere = MERGE.replace("repoA", "repoB")
+    r = hooks.pretool({**_merge_event(_merge_repo(tmp_path, "repoB"), "sess-merge-0005"), "tool_input": {"command": elsewhere}})
+    assert r.exit_code == 2   # the scope is bound to its repository
+
+
+def test_n3_list_a_a_merge_is_asked_at_level_high_whatever_stands(armed, tmp_path):
+    repo = _merge_repo(tmp_path)
+    nd.record(MERGE, repo, "allow", kind="merge_project", strong=True)
+    ops.set_level("high", stdin_isatty=True)
+    assert hooks.pretool(_merge_event(repo, "sess-merge-0006")).exit_code == 2   # at level high nothing is remembered and Jev is shadow
+    assert hooks.pretool(_merge_event(repo, "sess-merge-0007")).exit_code == 2
+
+
+# the human-only classes of the live wiring never go to the chat, at any level: only the human's own `jade permit approve` (askchat.PERMIT_ONLY)
+PERMIT_ONLY = [
+    ("HO-wiring", lambda tmp: ("Write", {"file_path": str(HOME / ".claude" / "settings.json"), "content": "{}"}), None),
+    ("HO-checkout-install", lambda tmp: ("Bash", {"command": "uv tool install ."}), str(ROOT)),
+    ("HO-settings-shadow", lambda tmp: ("Write", {"file_path": str(tmp / ".claude" / "settings.local.json"), "content": '{"disableAllHooks": true}'}), "tmp"),
+]
+
+
+@pytest.mark.parametrize("level", LEVELS)
+@pytest.mark.parametrize("ho, build, cwd", PERMIT_ONLY, ids=[p[0] for p in PERMIT_ONLY])
+def test_n3_a_permit_only_class_is_never_put_to_the_chat_at_any_level(ho, build, cwd, level, armed, tmp_path):
+    (tmp_path / ".claude").mkdir()
+    tool, tin = build(tmp_path)
+    ops.set_level(level, stdin_isatty=True)
+    _stand(tool, tin)
+    cwd = str(tmp_path) if cwd == "tmp" else (cwd or "/tmp")
+    assert ho in policy.assess(tool, tin, cwd).ho_ids
+    r = hooks.pretool({**_event(tool, tin), "cwd": cwd})
+    assert r.exit_code == 2 and "[jade:ask_" not in r.stderr and "AskUserQuestion" not in r.stderr and "jade permit approve" in r.stderr, (ho, level, r.stderr[:300])
+    assert armed.sent == []
 
 
 @pytest.mark.parametrize("level", ["low", "medium"])

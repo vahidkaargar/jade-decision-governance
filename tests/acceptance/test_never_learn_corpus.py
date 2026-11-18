@@ -18,12 +18,16 @@ One documented exception: egress (R-21) at level `low` may go to Jev, with the h
 import importlib.util
 import json
 import os
+import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from jade import hooks, memory, policy, proxy, scopes
+from tests.acceptance import test_floor_project_scope as fps
 from tests.acceptance import test_human_only_w98b as ho
+from tests.acceptance import test_memory_newer_deny as nd
 from tests.acceptance import test_memory_w101 as m
 from tests.acceptance.test_memory_w101 import OTHER, enforce, medium  # noqa: F401  (fixtures)
 
@@ -98,6 +102,17 @@ def corpus(tmp_path):
     return human_only_calls() + case_calls(home)
 
 
+@pytest.fixture
+def places():
+    """The folders a scope can depend on: no repository, a repository with a GitHub origin (`kind_project`, `merge_project`) and a JADE checkout that is not the
+    running JADE (`rule_project`). A scope check in a folder with no repository can never see three of the four kinds."""
+    root = Path(tempfile.mkdtemp(prefix="jneverlearn-", dir="/tmp")).resolve()
+    try:
+        yield {"none": "/tmp/case", "repo": nd.make_repo(root, "repoA"), "checkout": fps.make_project(root, "jade-a")}
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_the_corpus_is_big_enough_to_mean_something(corpus):
     """A change that empties the corpus (a renamed key, a moved file) must fail here, not pass by checking nothing."""
     assert len(corpus) >= 300
@@ -105,7 +120,18 @@ def test_the_corpus_is_big_enough_to_mean_something(corpus):
     assert sum(1 for n, _, _ in corpus if n.startswith("adversarial:")) >= 150
 
 
-def test_n_never_learn_no_call_of_the_never_group_is_remembered_sent_to_jev_or_given_a_scope(corpus):
+def test_control_the_places_let_every_kind_of_scope_be_offered_for_a_plain_call(places):
+    """The scope check below is only worth something if each of the four scope kinds CAN be offered in the folders it runs in. Here a plain call gets each of them."""
+    got = set()
+    for cmd, place in (("docker compose up -d", "repo"), ("gh pr merge 940 --repo github.com/owner/repoA --squash", "repo"), ("ssh admin@host.example.net uptime", "checkout")):
+        a = policy.assess("Bash", {"command": cmd}, places[place])
+        got |= {s.kind for s in scopes.offered(a, "Bash", {"command": cmd}, {}, places[place])}
+    tin = {"file_path": os.path.join(places["checkout"], "jade", "other.py"), "content": "x = 1\n"}
+    got |= {s.kind for s in scopes.offered(policy.assess("Write", tin, places["checkout"]), "Write", tin, {}, places["checkout"])}
+    assert got == {"kind_project", "kind_any", "merge_project", "rule_project"}
+
+
+def test_n_never_learn_no_call_of_the_never_group_is_remembered_sent_to_jev_or_given_a_scope(corpus, places):
     problems, never, plain = [], 0, 0
     for name, tool, tin in corpus:
         a = policy.assess(tool, tin, "/tmp/case")
@@ -119,8 +145,10 @@ def test_n_never_learn_no_call_of_the_never_group_is_remembered_sent_to_jev_or_g
         for level in LEVELS:
             if proxy.skip_reason(a, tool, tin, level) is None and not (EGRESS in {a.rule_id, *(a.seg_rules or [])} and level == "low" and not (a.ho_ids or a.blocked)):
                 problems.append(f"{name} ({why}): proxy.skip_reason is None at level {level}")
-        if offered := scopes.offered(a, tool, tin, {}, "/tmp/case"):
-            problems.append(f"{name} ({why}): scopes offered {[s.kind for s in offered]}")
+        for place, folder in places.items():   # the scope kinds that depend on a repository or a JADE checkout can only show up in one
+            b = policy.assess(tool, tin, folder)
+            if offered := scopes.offered(b, tool, tin, {}, folder):
+                problems.append(f"{name} ({why}): scopes offered in {place}: {[s.kind for s in offered]}")
     assert not problems, "\n".join(problems[:40]) + f"\n({len(problems)} problems in {never} never-group calls)"
     assert never >= 150 and plain >= 20, (never, plain)   # the partition has two real halves: nothing is checked against an empty side
 
