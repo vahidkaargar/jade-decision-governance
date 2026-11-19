@@ -234,6 +234,10 @@ def expected_models(db: ledger.Ledger | None = None) -> list[str]:
 # ---- retention -----------------------------------------------------------------------------------
 PURGED = "[purged by retention]"
 OPEN_PERMIT = ("PENDING", "ISSUED")
+# Events whose detail is the record itself, not project text, so retention keeps it (V6-28 review): `jev` is the value the human set (cleared, `jade jev on` read `off`);
+# `jev_accepted` and `jev_allowed` hold only hashes, rule ids and session ids (the command text of a `jev_allowed` label is removed above), and they are what links a
+# Jev yes to the owner's later deny (cleared, a false allow vanished after 90 days and the deny gate opened by itself).
+KEPT_DETAIL = ("jev", "jev_accepted", "jev_allowed")
 
 
 PURGED_ASK = json.dumps({"purged": True})   # `asks.question_json` is NOT NULL and a reader parses it: a marker, not NULL
@@ -266,7 +270,9 @@ def _purge_rows(con, cutoff: str, *, ask_text: bool) -> dict[str, int]:
             keep = {k: v for k, v in ctx.items() if k in ("tool", "length", "rule", "bound", "session_id", "agent_id", "permission_mode", "hash_cwd")}
             con.execute("UPDATE permits SET scope=? WHERE permit_id=?", (json.dumps({**keep, "subject": PURGED, "purged": True}), r["permit_id"]))
             n["permits"] += 1
-    n["events"] = con.execute("UPDATE events SET detail_json=NULL WHERE ts<? AND detail_json IS NOT NULL AND kind<>'purge'", (cutoff,)).rowcount
+    n["events"] = con.execute("UPDATE events SET detail_json=json_remove(detail_json,'$.label') WHERE kind='jev_allowed' AND ts<? AND json_extract(detail_json,'$.label') IS NOT NULL",
+                              (cutoff,)).rowcount   # the label is command text; the keys beside it are hashes and stay (below)
+    n["events"] += con.execute("UPDATE events SET detail_json=NULL WHERE ts<? AND detail_json IS NOT NULL AND kind NOT IN ('purge', ?, ?, ?)", (cutoff, *KEPT_DETAIL)).rowcount
     if ask_text:
         # The chat question (it holds a "Command:" block), the one-line label and the scope labels of an ask that is over: never an ask still open.
         n["asks"] = con.execute(
@@ -309,7 +315,7 @@ def purge_report(db: ledger.Ledger, older_than_days: int = 90, *, ask_text: bool
 def purge(db: ledger.Ledger, older_than_days: int = 90, *, ask_text: bool = False) -> int:
     """Remove stored project text older than the retention window and keep every metric (decision Q7): the state and question text of Jev
     calls, the objective and command text of decisions, the command a permit carried (never one still open: PENDING or ISSUED and not yet expired) and the detail of
-    events. Statuses, hashes, risk levels, timings, costs and probabilities stay. With `ask_text` (the owner's yes, DX-H2) the chat question and the labels of ended
+    events (not `KEPT_DETAIL`). Statuses, hashes, risk levels, timings, costs and probabilities stay. With `ask_text` (the owner's yes, DX-H2) the chat question and the labels of ended
     asks and of answers go too. Returns the number of rows cleared."""
     return sum(purge_report(db, older_than_days, ask_text=ask_text).values())
 
@@ -689,6 +695,91 @@ def set_level(value: str, stdin_isatty: bool | None = None) -> None:
     atomic_write(paths.config_dir() / "config.json", json.dumps(cfg, indent=1) + "\n")
 
 
+JEV_CHOICES = ("unset", "on", "off")
+
+
+def jev_effective(db: ledger.Ledger | None = None) -> str:
+    """`on` or `off` (V6-28): whether a model may be asked at all. The config key and the newest `jev` ledger event are read together and `paths.jev` fails
+    closed; a ledger that cannot be read leaves `on` unprovable, so it reads `off`. Pass the open ledger inside the hook to use its connection."""
+    own = db is None
+    try:
+        if own:
+            db = ledger.open(timeout=5)
+        recorded = ledger.last_setting(db, "jev", "jev")
+    except Exception:  # noqa: BLE001 - an unreadable ledger records nothing a person can be believed by
+        recorded = ledger.UNREADABLE_RECORD
+    finally:
+        if own and db is not None:
+            db.close()
+    return paths.jev(recorded)
+
+
+def set_jev(value: str, stdin_isatty: bool | None = None) -> None:
+    """`jade jev on|off|unset`: human terminal only (SI-09). The change is journaled as a `jev` event first, then the key is written, so the file always has a human
+    record behind it. `off` and `unset` are always allowed. `on` is refused when the config already holds a value that no `jade jev` command recorded (written
+    some other way): the human clears it with `unset` first."""
+    _require_human("jade jev", stdin_isatty)
+    if value not in JEV_CHOICES:
+        raise ValueError(f"jev must be one of {', '.join(JEV_CHOICES)}, not {value!r}")
+    cfg = paths.config()
+    db = ledger.open(timeout=5)
+    try:
+        if value == "on" and "jev" in cfg and cfg["jev"] != "off" and cfg["jev"] != ledger.last_setting(db, "jev", "jev"):
+            raise HumanOnly("the config holds a jev value that no `jade jev` command recorded (it was written some other way): run `jade jev unset`, check "
+                            "the config directory, then set it again")
+        db.event("jev", "jev", guard=f"jade jev {value}", actor=f"human:{user()}", detail={"jev": None if value == "unset" else value})
+    finally:
+        db.close()
+    if value == "unset":
+        cfg.pop("jev", None)
+    else:
+        cfg["jev"] = value
+    atomic_write(paths.config_dir() / "config.json", json.dumps(cfg, indent=1) + "\n")
+
+
+def autonomy_label(level: str | None, jev: str) -> str:
+    """The display name of a `(level, jev)` pair (V6-28). Never stored: a stored name beside the keys could drift, and drift is a quiet way to raise autonomy."""
+    if level is None:
+        return "legacy"
+    if level == "off":
+        return "observe"
+    return {("high", "off"): "MANUAL", ("medium", "off"): "ASSISTED", ("medium", "on"): "BALANCED", ("low", "on"): "FAST"}.get((level, jev), "custom")
+
+
+def _jev_row() -> tuple[str, bool | None, str]:
+    """`jade check` row `jev`: the value in force and where it comes from. A failure is a file that does not match the human's record; a warning is `on` with no
+    signed approval backend (V6-12)."""
+    cfg, lv = paths.config(), paths.level()
+    try:
+        db = ledger.open(timeout=5)
+        try:
+            recorded = ledger.last_setting(db, "jev", "jev")
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001
+        return ("jev", False, "off: the ledger cannot be read, so `on` cannot be shown to be the human's choice")
+    eff = paths.jev(recorded)
+    if "jev" in cfg:
+        raw = cfg["jev"]
+        if not isinstance(raw, str) or raw not in paths.JEV_VALUES:
+            return ("jev", False, f"off: the config value {raw!r} is not on or off, so it reads off; `jade jev unset` clears it")
+        if raw == "on" and recorded != "on":
+            return ("jev", False, "off: the config says on, but no `jade jev on` recorded it (written some other way?); run `jade jev unset`, look at the config directory, set it again")
+        if recorded is not None and recorded != raw:
+            return ("jev", False, f"{eff}: the config says {raw}, but the last `jade jev` event says {recorded!r}; run `jade jev unset`, look at the config directory, set it again")
+        where = "the last `jade jev` event, which the config matches" if recorded is not None else "the config (a new install writes off; no `jade jev` event)"
+    elif recorded is not None:
+        return ("jev", False, f"off: the last `jade jev` event says {recorded!r}, but the key is gone from the config; run `jade jev unset`, look at the config directory, set it again")
+    else:
+        where = f"the default (no key and no `jade jev` event; on at level low or medium, off at every other level; level {lv or 'unset'})"
+    label = autonomy_label(lv, eff)
+    base = f"{eff} ({label}) from {where}"
+    if eff == "on" and not signing.signed_backend():
+        return ("jev", None, base + "; a model may be asked, and there is no signed approval backend (docs/10), so a terminal approval can be forged by a same-user process; "
+                             "`jade jev off` stops every model call")
+    return ("jev", True, base)
+
+
 OFF_MEANS = ("off is observe plus floor: most rules only log, but SI-07, SI-08, SI-09 to SI-12 and writes to JADE's own wiring (HO-wiring, HO-checkout-install, "
              "HO-settings-shadow, HO-state-path) block. Use `jade level high` to have JADE ask about high-risk calls.")
 
@@ -712,7 +803,8 @@ def blocking_summary(mode: str | None = None, level: str | None | bool = False) 
     True when every safety invariant blocks and every high or critical risk call waits for a human; None (a warning, never a failure) otherwise. It mirrors
     `hooks.pretool`, `hooks._verdict` and `hooks._gate`: gate off returns before any verdict; the governance invariants block once a level is set; level off
     and advisory gate mode make the other invariants and the risk gate log only; at level low and medium `memory.step` (a confirmed answer) and `proxy.step`
-    (Jev, plain high calls only, once its band has enough owner answers) may let a call run with no human; at level high Jev is shadow only. It does not
+    (Jev, plain high calls only, never egress, only with the `jev` key on and once the deny gate is met) may let a call run with no human; at level high Jev is shadow
+    only, and with the key off nothing is sent to a model at all. It does not
     look at the hooks: `_what_blocks_row` does."""
     from . import hooks
 
@@ -744,7 +836,8 @@ def blocking_summary(mode: str | None = None, level: str | None | bool = False) 
     if level in ("low", "medium"):   # hooks._gate: memory.step, then proxy.step, run before the human is asked
         return (None, "every safety invariant (" + ", ".join(ids) + f") blocks; at level {level} a high or critical risk call runs without a human when a "
                       "confirmed answer covers it (`jade knows list`), and a plain high call runs without a human when Jev accepts it inside its band "
-                      "(once enough owner answers exist); any other high or critical call is held for a human (docs/12)")
+                      "(only with the `jev` key on, never for egress, and only once the deny gate is met: `jade review` shows the count); any other high or critical call is "
+                      "held for a human (docs/12)")
     return (True, "every safety invariant (" + ", ".join(ids) + ") blocks; a high or critical risk call is held for a human approval (Jev decides nothing at "
                   "this level, docs/12)")
 
@@ -831,9 +924,6 @@ def review(since_s: float | None = None) -> str:
     return "\n".join(lines + extra)
 
 
-JEV_BAND_ANSWERS = 50   # owner-answered plain-high calls before a model may decide in the owner's place (plan v3)
-
-
 def wrong_rate_upper(wrong: int, n: int) -> float:
     """The 95% upper bound of the share of wrong runs among n marked ones: 3/n when none is wrong (the rule of three; 50 clean marks show the error rate is below
     about 1 in 17), the Wilson upper bound otherwise."""
@@ -897,7 +987,14 @@ def review_lines(db, since_s: float | None) -> list[str]:
                    f"{100 * wrong_rate_upper(wrong, len(marked)):.0f}% of such calls are wrong")
     elif silent:
         out.append("you have not marked any of these calls yet: `jade review mark DECISION_ID right|wrong` in your terminal (wrong makes JADE ask that call, and its kind, again)")
-    out.append(f"ordinary high-risk calls you have answered (each call counted once): {plain_all} of the {JEV_BAND_ANSWERS} needed before a model may decide for you; it stays off until then")
+    gate = proxy.deny_gate(db)
+    out.append(f"ordinary high-risk calls you have answered (each call counted once): {plain_all} (a count of answers gates nothing: an always-allow model would agree with all of them)")
+    out.append(f"Jev deny gate: {gate['denies']} of {proxy.MIN_DENIES} kinds of call you denied, from {gate['rules']} of {proxy.MIN_DENY_RULES} rules; {gate['samples']} of "
+               f"{proxy.MIN_SAMPLES} shadow questions over {int(gate['days'])} of {proxy.MIN_SAMPLE_DAYS} days; {gate['false_allows']} false allow(s) (Jev said yes to a call you denied "
+               f"or marked wrong)" + ("; met: with the jev key on at level low or medium, Jev now decides plain high calls inside its band; `jade jev off` stops it" if gate["ok"] else "; not met, so a model deciding for you stays off"))
+    if gate["ok"] and gate["recall_bound"] is not None:
+        out.append(f"no false allow among {gate['denies']} denies: the most that shows is a deny-recall of about {100 * gate['recall_bound']:.1f}% (95% lower bound, and only for "
+                   "denies that Jev was asked about)")
     if jev:
         allowed = sum(1 for r in silent if r["kind"] == "jev_allowed")
         lat = sorted(r["latency_ms"] or 0.0 for r in jev)
@@ -1845,6 +1942,7 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
         rows.append(("pretool matcher", not gaps, "covers every gated tool" if not gaps else f"does not cover {', '.join(gaps)}: re-run `jade hooks install` in a terminal"))
     rows.append(_gate_mode_row())
     rows.append(_level_row())
+    rows.append(_jev_row())
     rows.append(_what_blocks_row(st.get("PreToolUse", False), problems))
     rows.append(_list_b_row())
     rows.append(pending_row())

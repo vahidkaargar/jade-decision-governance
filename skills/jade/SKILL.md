@@ -72,7 +72,7 @@ Ordinary work that is rated high on purpose: running text fetched at run time (`
 
 ## Human-only commands
 
-Never run these; tell the user which one is waiting: `jade permit approve`, `jade permit show ... --raw`, `jade hooks install|uninstall`, `jade gate enforce|advisory|off`, `jade level`, `jade claude-md apply`, `jade setup` (`--status` is read-only), `jade upgrade` (`--check` is read-only), `jade ledger purge`, `jade label set|auto`.
+Never run these; tell the user which one is waiting: `jade permit approve`, `jade permit show ... --raw`, `jade hooks install|uninstall`, `jade gate enforce|advisory|off`, `jade level`, `jade jev`, `jade claude-md apply`, `jade setup` (`--status` is read-only), `jade upgrade` (`--check` is read-only), `jade ledger purge`, `jade label set|auto`.
 
 ## Testing JADE or anything that calls the hook
 

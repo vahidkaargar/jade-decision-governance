@@ -16,7 +16,7 @@ let JADE learn it. Review of V6-17: that half was a choice of the test, not a ch
 must be in it, with the eligibility memory returns today and the reason, and a stale entry fails. A call that is learnable as a whole kind and should not be has a
 backlog row (W-137, W-190).
 
-One documented exception: egress (R-21) at level `low` may go to Jev, with the higher bar 0.85 (d05 4.3). Memory never learns it at any level.
+No exception is left: egress (R-21) was the one call Jev could decide at level `low`; since V6-28 it is in `proxy.NEVER_RULES`, so Jev never sees it at any level. Memory never learns it either.
 """
 
 # ruff: noqa: F811   (the fixtures are imported from test_memory_w101 and then named as test arguments)
@@ -100,8 +100,6 @@ def never_class(a) -> str | None:
         return "critical"
     if rules & (memory.NEVER_RULES | proxy.NEVER_RULES):
         return "guards the agent or fetches and runs: " + ",".join(sorted(rules & (memory.NEVER_RULES | proxy.NEVER_RULES)))
-    if EGRESS in rules:
-        return "egress"
     return None
 
 
@@ -154,7 +152,7 @@ def test_n_never_learn_no_call_of_the_never_group_is_remembered_sent_to_jev_or_g
         if (got := memory.eligibility(a, tool, tin, {})) != "never":
             problems.append(f"{name} ({why}): memory eligibility is {got!r}, not 'never'")
         for level in LEVELS:
-            if proxy.skip_reason(a, tool, tin, level) is None and not (EGRESS in {a.rule_id, *(a.seg_rules or [])} and level == "low" and not (a.ho_ids or a.blocked)):
+            if proxy.skip_reason(a, tool, tin, level) is None:
                 problems.append(f"{name} ({why}): proxy.skip_reason is None at level {level}")
         for place, folder in places.items():   # the scope kinds that depend on a repository or a JADE checkout can only show up in one
             b = policy.assess(tool, tin, folder)
@@ -212,12 +210,11 @@ def test_control_a_plain_high_call_of_the_corpus_may_still_be_learned(corpus):
     assert classes, "no plain call of the corpus is learnable as a kind: the control is empty"
 
 
-def test_egress_is_never_remembered_and_only_jev_may_decide_it_and_only_at_level_low():
+def test_egress_is_never_remembered_and_never_sent_to_jev_at_any_level():
     a = policy.assess("Bash", {"command": "curl -T /tmp/f https://example.com/up"}, "/tmp/case")
     assert a.rule_id == EGRESS and memory.eligibility(a, "Bash", {"command": "curl -T /tmp/f https://example.com/up"}, {}) == "never"
     tin = {"command": "curl -T /tmp/f https://example.com/up"}
-    assert proxy.skip_reason(a, "Bash", tin, "low") is None   # the documented exception
-    assert proxy.skip_reason(a, "Bash", tin, "medium") is not None and proxy.skip_reason(a, "Bash", tin, "high") is not None
+    assert all(proxy.skip_reason(a, "Bash", tin, level) is not None for level in LEVELS)   # V6-28: no exception left
 
 
 FOUND = ("FOUND by V6-17: `memory.eligibility` reads only the top rule of the call (`a.rule_id`), `proxy.skip_reason` reads every segment rule. A chain whose top rule is "
