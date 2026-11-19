@@ -1799,7 +1799,7 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     a.ho_ids = list(ho.ho_ids)
     if HO_STATE not in a.ho_ids and any(_STATE_LITERAL.search(e) for e in extra):   # a script the command runs names the JADE state paths: what it does there is not the gate's to read
         _ho_add(a, HO_STATE)
-    if a.rule_id == "R-17":
+    if a.rule_id == "R-17" or "R-17" in gated_rules:   # V6-17 review: also a second command (`ssh host 'git config core.hooksPath x'`, `a; git config core.hooksPath x`), not only the top rule
         _ho_add(a, HO_R17)
     _seal(a, tool, subject, cwd, subject)
     a.hold_key = sha256(canonical({"shell": sorted(set(gated_keys or keys))}))

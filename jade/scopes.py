@@ -313,7 +313,7 @@ def _simple_command_words(subject: str) -> list[str] | None:
     kind (a gated segment is not the only one that can change what a merge does: an export, a function, a remote change is not gated). None otherwise."""
     m = _LEADING_CD.match(subject)
     raw = subject[m.end():] if m else subject
-    skeleton = shellnorm.skeleton(raw)
+    skeleton = shellnorm.skeleton(raw, ssh=False)   # the remote command of `ssh host 'cmd'` is part of the key, not a second command (it is read as one for the rating)
     if _ODD_SPACE.search(raw) or _ODD_SPACE.search(skeleton) or shellnorm.SPLIT.search(skeleton):
         return None
     words = [w for w in re.split(r"[ \t]+", skeleton) if w]

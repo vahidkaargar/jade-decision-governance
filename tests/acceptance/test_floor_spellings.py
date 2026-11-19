@@ -126,6 +126,22 @@ def test_control_a_wrapped_plain_call_is_not_made_human_only(cmd):
     assert a.ho_ids == [] and not a.blocked, (cmd, a.rule_id, a.ho_ids, a.blocked)
 
 
+@pytest.mark.parametrize("args, remote", [
+    (["host", "uptime"], "uptime"), (["-p", "2222", "admin@host", "ls", "/srv"], "ls /srv"), (["-o", "StrictHostKeyChecking=no", "host", "id"], "id"),
+    (["-oStrictHostKeyChecking=no", "-p22", "host", "id"], "id"), (["-i", "key", "-J", "jump", "host", "uname -a"], "uname -a"), (["-fp", "22", "host", "id"], "id"),
+    (["-lroot", "host", "id"], "id"), (["-tt", "host", "sudo reboot"], "sudo reboot"), (["--", "host", "id"], "id"), (["host"], None), (["-v", "host"], None), ([], None),
+])
+def test_ssh_remote_is_the_command_text_after_the_host(args, remote):
+    from jade import shellnorm
+
+    assert shellnorm.ssh_remote(args) == remote
+
+
+@pytest.mark.parametrize("cmd", ["git config core.hooksPath /tmp/hooks", "ls; git config core.hooksPath /tmp/hooks", "ssh localhost 'git config core.hooksPath /tmp/hooks'"])
+def test_hook_path_change_is_human_only_as_a_second_command_too(cmd):
+    assert "HO-R17" in policy.assess("Bash", {"command": cmd}, FOLDER).ho_ids, cmd
+
+
 # ------------------------------------------------------------------ other spellings of a human-only call (a flag between the tool and the verb, a second name)
 
 OTHER_SPELLINGS = [
