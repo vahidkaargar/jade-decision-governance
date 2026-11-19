@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import itertools
 import json
 import math
 import os
@@ -14,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1476,9 +1478,8 @@ def managed_settings_path() -> Path:
     return Path(os.environ.get("JADE_MANAGED_SETTINGS") or _MANAGED_SETTINGS)
 
 
-def project_settings_files(cwd) -> list[Path]:
-    """The project `.claude/settings.json` and `settings.local.json` a session started in `cwd` can read: in `cwd` and each ancestor up to the
-    repository root (the nearest directory with `.git`; without one, `cwd` alone). The user's own two files are not listed: wiring_problems owns them."""
+def _project_dirs(cwd) -> list[Path]:
+    """`cwd` and each ancestor up to the repository root (the nearest directory with `.git`; without one, `cwd` alone)."""
     try:
         start = Path(cwd).resolve()
     except (OSError, RuntimeError, TypeError, ValueError):
@@ -1490,6 +1491,13 @@ def project_settings_files(cwd) -> list[Path]:
             break
     else:
         dirs = [start]
+    return dirs
+
+
+def project_settings_files(cwd) -> list[Path]:
+    """The project `.claude/settings.json` and `settings.local.json` a session started in `cwd` can read: in `cwd` and each ancestor up to the
+    repository root (the nearest directory with `.git`; without one, `cwd` alone). The user's own two files are not listed: wiring_problems owns them."""
+    dirs = _project_dirs(cwd)
     sp = settings_path()
     user = {os.path.realpath(sp), os.path.realpath(sp.with_name("settings.local.json"))}
     return [f for d in dirs for name in ("settings.json", "settings.local.json") if os.path.realpath(f := d / ".claude" / name) not in user]
@@ -1613,6 +1621,231 @@ def shadow_problems(cwd=None, *, managed: bool = True, plugins: bool = True) -> 
     return out
 
 
+# ---- what a repository controls before the trust dialog (V6-18 e, BS-01, BS-02; display only) ----------------------------
+_INSTRUCTION_FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".claude/CLAUDE.md")
+_MAX_RULE_FILES = 200       # rules files scanned; more are counted and reported, never dropped silently
+_MAX_RULE_ENUM = 5000       # rules files listed at most, so a repository with a million files cannot slow the scan
+_MAX_RULE_BYTES = 16 * 1024 * 1024   # all the rules files together
+_PLAIN_NAME = re.compile(r"[\w.-]{1,40}")
+_TAG_RANGES = ((0xE0000, 0xE007F), (0xE0100, 0xE01EF))   # tag characters and the variation selectors supplement: text no reader sees
+_BIDI_CONTROLS = frozenset({*range(0x202A, 0x202F), *range(0x2066, 0x206A)})   # embeddings, overrides and isolates (Trojan Source)
+_ALWAYS_HIDDEN = frozenset({0x200B, *range(0x2060, 0x2065), 0x00AD, 0x180E, 0x034F, 0xFEFF,
+                            *range(0xFE00, 0xFE0F),                 # variation selectors 1 to 15 (a text-smuggling channel); VS16 is the emoji selector, read below
+                            *range(0x206A, 0x2070),                 # deprecated format characters
+                            0x3164, 0x115F, 0x1160, 0xFFA0,         # Hangul fillers: blank, and not a letter
+                            0x2800,                                 # braille blank
+                            *range(0xFFF9, 0xFFFD),                 # interlinear annotation marks and the object replacement character
+                            *range(0x1D173, 0x1D17B)})              # musical format controls
+_VS16 = 0xFE0F                                                      # ordinary after an emoji; a run of them carries bits
+_JOINERS = frozenset({0x200C, 0x200D})
+_NEEDS_A_SCRIPT = frozenset({0x200C, 0x200D, 0x200E, 0x200F, 0x061C})   # ordinary in Persian and Arabic text and in emoji sequences, hidden anywhere else
+_JOINER_MIN, _JOINER_RATIO = 8, 6   # a line with this many joiners, and one in every six characters or more, hides bits in them
+
+
+def _repo_name(k) -> str:
+    """A key or server name of a repository file as it may be shown: plain word characters only, else a fixed placeholder (a name is repository text)."""
+    return k if isinstance(k, str) and _PLAIN_NAME.fullmatch(k) else "(unusual name)"
+
+
+def _repo_names(keys, limit: int = 8) -> str:
+    shown = sorted({_repo_name(k) for k in keys})
+    return ", ".join(shown[:limit]) + (f" and {len(shown) - limit} more" if len(shown) > limit else "")
+
+
+def _joins_text(c: str | None) -> bool:
+    """A neighbour that makes a joiner or a direction mark ordinary: a letter of an Arabic, Hebrew, Syriac, Thaana or Indic script, a symbol or a pictograph."""
+    if not c:
+        return False
+    o = ord(c)
+    return 0x0590 <= o <= 0x0DFF or 0xFB1D <= o <= 0xFDFF or 0xFE70 <= o <= 0xFEFC or o >= 0x1F000 or unicodedata.category(c) == "So" or c == "️"
+
+
+def hidden_unicode(text: str) -> tuple[dict[str, int], int]:
+    """({class: count}, line of the first hit) of the characters in `text` that a reader does not see but a model reads. Classes: `tag`, `bidi`, `zero-width`.
+    A byte order mark at the very start is not counted, and a joiner or direction mark next to Persian, Arabic or emoji text is ordinary writing, unless two
+    joiners touch, or a line holds many of them (`_JOINER_MIN`, `_JOINER_RATIO`: bits of a hidden message). Also counted as `zero-width`: variation selectors
+    (a run of the emoji selector too), Hangul fillers, the braille blank, the deprecated format characters, the interlinear and object marks, musical format controls."""
+    if text.isascii():
+        return {}, 0
+    counts: dict[str, int] = {}
+    first = 0
+    line = 1
+    line_len = ordinary_joiners = 0   # the joiners of this line that were exempt as ordinary writing; too many of them in a line are bits of a hidden message
+
+    def end_of_line() -> None:
+        nonlocal first
+        if ordinary_joiners >= _JOINER_MIN and ordinary_joiners * _JOINER_RATIO >= line_len:
+            counts["zero-width"] = counts.get("zero-width", 0) + ordinary_joiners
+            first = first or line
+
+    for i, c in enumerate(text):
+        o = ord(c)
+        if c == "\n":
+            end_of_line()
+            line += 1
+            line_len = ordinary_joiners = 0
+            continue
+        line_len += 1
+        if o < 0x80:
+            continue
+        prev, nxt = (ord(text[i - 1]) if i else 0), (ord(text[i + 1]) if i + 1 < len(text) else 0)
+        if any(a <= o <= b for a, b in _TAG_RANGES):
+            kind = "tag"
+        elif o in _BIDI_CONTROLS:
+            kind = "bidi"
+        elif o in _ALWAYS_HIDDEN and not (o == 0xFEFF and i == 0):
+            kind = "zero-width"
+        elif o == _VS16 and (0xFE00 <= prev <= _VS16 or 0xFE00 <= nxt <= _VS16):   # one after an emoji is ordinary; a run is not
+            kind = "zero-width"
+        elif o in _NEEDS_A_SCRIPT:
+            if (o in _JOINERS and (prev in _JOINERS or nxt in _JOINERS)) or not (_joins_text(text[i - 1] if i else None) or _joins_text(text[i + 1] if i + 1 < len(text) else None)):
+                kind = "zero-width"
+            else:
+                kind = None
+                ordinary_joiners += o in _JOINERS
+        else:
+            kind = None
+        if kind:
+            counts[kind] = counts.get(kind, 0) + 1
+            first = first or line
+    end_of_line()
+    return counts, first
+
+
+def _bounded_text(f: Path) -> tuple[str | None, str | None]:
+    """(text, problem) of a repository file, read as the host would (symlinks followed), at most MAX_SETTINGS_BYTES. (None, None) when it is no regular file."""
+    try:
+        st = os.stat(f)
+        if not stat.S_ISREG(st.st_mode):
+            return None, None
+        if st.st_size > MAX_SETTINGS_BYTES:
+            return None, f"too large ({st.st_size} bytes) to scan"
+        with open(f, "rb") as fh:
+            return fh.read(MAX_SETTINGS_BYTES + 1).decode("utf-8", "replace"), None
+    except FileNotFoundError:
+        return None, None
+    except OSError as e:
+        return None, f"cannot be read ({type(e).__name__})"
+
+
+def _settings_findings(label: str, data: dict) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    hooks_map = data.get("hooks")
+    n_hooks, events = 0, []
+    for event, groups in (hooks_map.items() if isinstance(hooks_map, dict) else ()):
+        n = sum(len(g["hooks"]) for g in (groups if isinstance(groups, list) else ()) if isinstance(g, dict) and isinstance(g.get("hooks"), list))
+        if n:
+            n_hooks += n
+            events.append(event)
+    if n_hooks:
+        out.append(("hooks", f"{label}: {n_hooks} hook(s) for {_repo_names(events)}"))
+    if data.get("enableAllProjectMcpServers"):
+        out.append(("mcp", f"{label}: enableAllProjectMcpServers is true (every server in .mcp.json starts without a question)"))
+    if isinstance(data.get("enabledMcpjsonServers"), list) and data["enabledMcpjsonServers"]:
+        out.append(("mcp", f"{label}: enabledMcpjsonServers names {len(data['enabledMcpjsonServers'])} server(s)"))
+    if isinstance(data.get("env"), dict) and data["env"]:
+        out.append(("env", f"{label}: env keys {_repo_names(data['env'])}"))
+    return out
+
+
+def repo_config_findings(cwd=None) -> list[tuple[str, str]]:
+    """(kind, line) for what the repository of `cwd` (and the directories above it up to the repo root) controls and the host loads before or without a trust
+    question: hooks, MCP servers and `env` keys of its Claude settings files and `.mcp.json`, and hidden Unicode in CLAUDE.md, AGENTS.md and the rules files.
+    Names, counts and line numbers only: never a value, a command, a URL or a line of the repository, because the SessionStart text goes to the model. Display
+    only: a hook cannot stop what loads before the hooks run (docs/05 T19)."""
+    if cwd is None:
+        try:
+            cwd = Path.cwd()
+        except OSError:
+            return []
+    dirs = _project_dirs(cwd)
+    if not dirs:
+        return []
+    root = dirs[-1]
+
+    def label(f: Path, last: str | None = None) -> str:
+        """A path as it may be shown: every segment is a plain name (`_repo_name`), else `(unusual name)`, because a directory or file name is repository text.
+        `last` replaces the final segment (a rules file is shown by its number, not by its name)."""
+        try:
+            parts = list(f.relative_to(root).parts)
+        except ValueError:
+            parts = [f.name]
+        return "/".join([_repo_name(p) for p in parts[:-1]] + [last if last is not None else _repo_name(parts[-1])] if parts else [last or "."])
+
+    out: list[tuple[str, str]] = []
+    for f in project_settings_files(cwd):
+        text, problem = _bounded_text(f)
+        if problem:
+            out.append(("unreadable", f"{label(f)}: {problem}"))
+        if text is None:
+            continue
+        try:
+            data = json.loads(text) if text.strip() else {}
+        except ValueError:
+            out.append(("unreadable", f"{label(f)}: is not valid JSON, so JADE cannot say what it sets"))
+            continue
+        if not isinstance(data, dict):
+            out.append(("unreadable", f"{label(f)}: does not hold a JSON object, so JADE cannot say what it sets"))
+            continue
+        out += _settings_findings(label(f), data)
+    for d in dirs:
+        text, problem = _bounded_text(d / ".mcp.json")
+        if problem:
+            out.append(("unreadable", f"{label(d / '.mcp.json')}: {problem}"))
+        elif text is not None:
+            try:
+                servers = (json.loads(text) if text.strip() else {}).get("mcpServers")
+            except (ValueError, AttributeError):
+                out.append(("unreadable", f"{label(d / '.mcp.json')}: is not valid JSON, so JADE cannot say which MCP servers it starts"))
+                continue
+            if isinstance(servers, dict) and servers:
+                out.append(("mcp", f"{label(d / '.mcp.json')}: {len(servers)} MCP server(s): {_repo_names(servers)}"))
+    for d in dirs:
+        rules_dir = d / ".claude" / "rules"
+        try:
+            rules = sorted(itertools.islice(rules_dir.rglob("*.md"), _MAX_RULE_ENUM))
+        except OSError:
+            rules = []
+        named = [(d / n, None) for n in _INSTRUCTION_FILES] + [(f, f"(file {k})") for k, f in enumerate(rules[:_MAX_RULE_FILES], 1)]
+        if len(rules) > _MAX_RULE_FILES:   # the host loads every rules file, so a file left out is a gap in the report
+            out.append(("unreadable", f"{label(rules_dir)}: {len(rules) - _MAX_RULE_FILES}{' or more' if len(rules) >= _MAX_RULE_ENUM else ''} more rules files were "
+                                      "not scanned for hidden Unicode"))
+        spent = 0
+        for f, shown in named:
+            if shown and spent >= _MAX_RULE_BYTES:
+                out.append(("unreadable", f"{label(rules_dir)}: the scan of the rules files stopped at its total size limit; the rest were not scanned for hidden Unicode"))
+                break
+            text, problem = _bounded_text(f)
+            where = label(rules_dir / "_", shown) if shown else label(f)   # a rules file by its number, whatever directories lie between
+            if problem:
+                out.append(("unreadable", f"{where}: {problem} for hidden Unicode"))
+            if text is None:
+                continue
+            spent += len(text) if shown else 0
+            counts, first = hidden_unicode(text)
+            if counts:
+                out.append(("unicode", f"{where}: hidden Unicode ({', '.join(f'{n} {k}' for k, n in sorted(counts.items()))}; first at line {first})"))
+    return out
+
+
+def _repo_config_row() -> tuple[str, bool | None, str]:
+    """WARN (never FAIL) when the repository controls hooks, MCP servers, env keys or hides Unicode in the instruction files: JADE tells the owner and stops nothing."""
+    try:
+        scanned = str(Path.cwd())
+    except OSError:
+        scanned = "(no current directory)"
+    try:
+        found = repo_config_findings()
+    except Exception:  # noqa: BLE001 - a health probe reports every failure
+        return ("repo config", None, "the repository config could not be scanned; look at .claude/settings*.json, .mcp.json, CLAUDE.md and AGENTS.md by hand")
+    if not found:
+        return ("repo config", True, f"no repository-controlled hooks, MCP servers or env keys, and no hidden Unicode in CLAUDE.md, AGENTS.md or the rules, under {scanned} up to its "
+                "repo root (run `jade check` from the project you work in to scan that one)")
+    lines = [line for _kind, line in found]
+    more = f"; and {len(lines) - 8} more" if len(lines) > 8 else ""
+    return ("repo config", None, "display only, JADE cannot stop what the host loads before its trust dialog: " + "; ".join(lines[:8]) + more)
+
+
 def _gate_mode_row() -> tuple[str, bool, str]:
     effective, raw = paths.gate_mode(), os.environ.get("JADE_GATE_MODE")
     cfg = paths.config().get("gate_mode")
@@ -1636,7 +1869,7 @@ def _overrides_row() -> tuple[str, bool, str]:
     if weak:
         return ("gate overrides", False, "weakening: " + ", ".join(f"{o.var} [{o.why}]" for o in weak) + ". Unset them; `JADE_ACK_OVERRIDES=VAR,...` only silences "
                 "this row for a deliberate override in this shell, never one in the Claude settings `env` block")
-    return ("gate overrides", True, shown or "none (JADE_GATE_MODE, JADE_POLICY_DIR, JADE_CONFIG, JADE_HOME, JADE_APPROVER_ANCHOR all default)")
+    return ("gate overrides", True, shown or "none (JADE_GATE_MODE, JADE_POLICY_DIR, JADE_CONFIG, JADE_HOME, JADE_APPROVER_ANCHOR, JADE_SESSION_ID all default or unset)")
 
 
 def overlay_problems() -> list[str]:
@@ -1937,6 +2170,7 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
         scanned = "(no current directory)"
     rows.append(("settings shadowing", not shadow, f"no managed or plugin settings file, and no project settings file under {scanned} up to its repo root, disables or shadows the hooks "
                  "(run `jade check` from the project you work in to scan that one)" if not shadow else "; ".join(shadow)))
+    rows.append(_repo_config_row())
     gaps = pretool_matcher_gaps()
     if gaps is not None:
         rows.append(("pretool matcher", not gaps, "covers every gated tool" if not gaps else f"does not cover {', '.join(gaps)}: re-run `jade hooks install` in a terminal"))

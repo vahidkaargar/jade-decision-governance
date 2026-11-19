@@ -107,6 +107,8 @@ def _gui_pause(event: dict, tool: str):
 def failsafe_reason(event: dict) -> str | None:
     """Why a gated call must be blocked when the policy cannot be consulted, or None when it is clearly harmless: a read-only command,
     a file write outside the protected locations, a tool whose name says it only reads."""
+    if (bad := malformed_reason(event)) is not None:
+        return bad
     tool = str(event.get("tool_name") or "")
     if not policy.is_gated(tool):
         return None
@@ -124,6 +126,13 @@ def failsafe_reason(event: dict) -> str | None:
             if _SEAL_KEY_TEXT.search(t) or _SEAL_KEY_TEXT.search(policy.real(os.path.expanduser(t))) or policy.is_seal_key_dir(policy.real(os.path.expanduser(t))):
                 return f"{tool} names {t[:120]!r}, which may be the permit seal key"
         return None
+    if policy.is_mcp(tool):   # V6-18 c: an MCP file reader or search that names the seal key, or a directory that may hold it
+        if policy.mcp_targets_overflow(tool, tin):
+            return f"{tool} names more paths, or a longer one, than the gate reads, so the permit seal key may be among them"
+        _kind, targets, globs = policy.mcp_read_targets(tool, tin)
+        for t in (*targets, *globs):
+            if _SEAL_KEY_TEXT.search(t) or _SEAL_KEY_TEXT.search(policy.real(os.path.expanduser(t))) or policy.is_seal_key_dir(policy.real(os.path.expanduser(t))):
+                return f"{tool} names {t[:120]!r}, which may be the permit seal key"
     cmd = tin.get("command") if tool in policy.SHELL_TOOLS else next((tin[k] for k in ("command", "cmd", "script") if isinstance(tin.get(k), str)), None)
     if cmd is not None or tool in policy.SHELL_TOOLS:
         text = str(cmd or "").strip()
@@ -408,12 +417,29 @@ def _policy_failure(mode: str, event: dict, tool: str, tool_input: dict, cwd: st
     return _fail_closed(mode, f"the policy could not be loaded or applied ({type(exc).__name__}: {str(exc)[:200]}), and {why}.")
 
 
+def malformed_reason(event: dict) -> str | None:
+    """Why a PreToolUse event is not the shape the host sends, when that could hide a gated call (V6-18 d, F11, N26); None when it is well formed or is no tool
+    call at all (no `tool_name`). A `tool_name` that is not a string cannot be matched to the gated list, and the text of a list `command` is not what the
+    shell would run, so neither is read as harmless. A `tool_input` that is not an object is handled by `failsafe_reason` (it blocks a gated tool)."""
+    if "tool_name" not in event:
+        return None
+    tool = event["tool_name"]
+    if not isinstance(tool, str):
+        return f"the event has a tool_name that is not a string ({type(tool).__name__})"
+    tin = event.get("tool_input")
+    if tool in policy.SHELL_TOOLS and isinstance(tin, dict) and tin.get("command") is not None and not isinstance(tin["command"], str):
+        return f"the {tool} command is not a string ({type(tin['command']).__name__})"
+    return None
+
+
 def pretool(event: dict, permit=None) -> HookResult:
     global _STARTED
     _STARTED = time.monotonic()   # Jev in the hook (proxy.step) is given what is left of BUDGET_S
     mode = paths.gate_mode()
     if mode == "off":
         return HookResult()
+    if (bad := malformed_reason(event)) is not None:
+        return _fail_closed(mode, bad + ".")
     tool = event.get("tool_name", "")
     if tool == "AskUserQuestion":
         from . import askchat
@@ -886,6 +912,36 @@ def _shadow_notice(db, event: dict) -> list[str]:
     return [f"JADE: settings of this project disable or shadow the JADE hooks ({'; '.join(found[:3])}); `jade check` lists every one. Remove the setting unless a human set it on purpose."]
 
 
+_REPO_CONFIG_ORDER = {"unicode": 0, "env": 1, "hooks": 2, "mcp": 3, "unreadable": 4}
+
+
+def _repo_config_notice(db, event: dict) -> list[str]:
+    """What the project of this session controls and the host loads before its trust question: hooks, MCP servers, env keys, hidden Unicode in CLAUDE.md and
+    AGENTS.md (V6-18 e, BS-01, BS-02). One line, shown and journaled once per session (event `repo_config`). Names, counts and line numbers only, never a value or a
+    line of the repository. Display only: it never blocks, and a failure here changes nothing."""
+    cwd = event.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        return []
+    try:
+        from . import ops
+
+        found = sorted(ops.repo_config_findings(cwd), key=lambda f: _REPO_CONFIG_ORDER.get(f[0], 9))
+    except Exception:  # noqa: BLE001 - a scanner failure must never change the hook's answer
+        return []
+    if not found:
+        return []
+    lines = [line for _kind, line in found]
+    digest = hashlib.sha1("\n".join(lines).encode("utf-8", "replace")).hexdigest()[:12]   # noqa: S324 - an idempotency key, not security
+    try:
+        db.event("gate", "repo_config", guard="; ".join(lines)[:500], actor="hook", key=f"repo_config:{event.get('session_id') or '-'}:{digest}",
+                 detail={"session": event.get("session_id"), "cwd": cwd, "findings": lines[:10]})
+    except Exception:  # noqa: BLE001, S110 - journaling must never change the hook's answer
+        pass
+    more = f"; and {len(lines) - 3} more" if len(lines) > 3 else ""
+    return [f"JADE: this project carries config that loads before the trust question and that JADE cannot gate ({'; '.join(lines[:3])[:400]}{more}). "
+            "`jade check` row `repo config` lists it. Display only: look at it before you trust the project."]
+
+
 def _ready_notice(db, rows: list[dict], shown: set, room: int) -> list[str]:
     """Open items whose dependencies are all done, told once each (W-51): the event key names the item and what it waited on, so a later session does not
     repeat it. An item is journaled only when its line fits in the briefing, so one that was cut is told next time. Never blocks."""
@@ -987,7 +1043,7 @@ def session_start(event: dict) -> HookResult:
     try:
         decide.sweep(db)
         permits.sweep(db)
-        out = _override_notice(db, event) + _shadow_notice(db, event)
+        out = _override_notice(db, event) + _shadow_notice(db, event) + _repo_config_notice(db, event)
         src = event.get("source")
         reshow = isinstance(src, str) and src in RESHOW_SOURCES
         out += _held_notice(db, reshow) + _expired_twice_notice(db, reshow)   # V6-27: held decisions come first (docs/14-v6/07 section 6.3), then pending permits
@@ -1067,6 +1123,11 @@ def main(name: str) -> int:
         event = {}
     if not isinstance(event, dict):
         event = {}
+    if name not in HANDLERS:   # V6-18 d, N26: a typo in the wiring must not leave a gate that silently passes everything (the gate mode `off` keeps its meaning: nothing runs)
+        if paths.gate_mode() == "off":
+            return 0
+        print(f"JADE gate: unknown hook name {name!r}; the hooks are {', '.join(HANDLERS)}. Run `jade check` and `jade hooks install` in a terminal.", file=sys.stderr)
+        return 2
     try:
         if name == "pretool":
             _arm(BUDGET_S)

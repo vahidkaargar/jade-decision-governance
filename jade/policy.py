@@ -821,6 +821,67 @@ def _assess_read(tool: str, tool_input: dict, cwd: str) -> Assessment:
 
 def _reads_the_seal_key(inv: dict, tool: str, tool_input: dict, cwd: str) -> bool:
     targets, globs = read_targets(tool, tool_input)
+    return _seal_key_reached(inv, tool, targets, globs, cwd)
+
+
+# Argument names of an MCP file reader or file search (Desktop Commander: `path`, `paths`, `pattern`, `filePattern`, `searchType`; other servers: the same
+# ideas under other spellings). V6-18 c, N22 (W-73): SI-10 reads these like the Read, Grep and Glob tools do.
+_MCP_PATH_KEYS = frozenset({*WRITE_KEYS, *PATH_KEYS, "paths", "files", "file_paths", "filepaths", "uri", "root", "cwd"})
+_MCP_GLOB_KEYS = frozenset({"glob", "filepattern", "file_pattern", "include"})
+_MCP_MAX_TARGETS = 256
+_MCP_MAX_STRING = 4096
+
+
+def _mcp_strings(v) -> list[str]:
+    """The non-empty strings of a value that is a string or a list of strings (one level of list), short enough to be a path. A list or a string over the
+    limits is cut here and counted as reaching the key by `mcp_targets_overflow`."""
+    items = v if isinstance(v, (list, tuple)) else [v]
+    return [x for x in items[:_MCP_MAX_TARGETS] if isinstance(x, str) and x.strip() and len(x) <= _MCP_MAX_STRING]
+
+
+def mcp_read_targets(tool: str, tool_input: dict) -> tuple[str, list[str], list[str]]:
+    """(kind, paths, globs) an MCP call with no command names. `kind` is "Grep" for a content search (a recursive search of a directory reads every file in
+    it) and "Read" otherwise. A `pattern` is a path glob, except in a content search, where it is a regular expression over file content and never a target
+    (as the Grep tool: a search for the text `permit-seal.key` in the docs reads no key)."""
+    if not isinstance(tool_input, dict):
+        return "Read", [], []
+    content = str(tool_input.get("searchType", "")).lower() == "content" or "grep" in tool.lower()
+    paths_, globs = [], []
+    for k, v in tool_input.items():
+        lk = str(k).lower()
+        if lk in _MCP_PATH_KEYS:
+            paths_ += _mcp_strings(v)
+        elif lk in _MCP_GLOB_KEYS or (lk == "pattern" and not content):
+            globs += _mcp_strings(v)
+    return ("Grep" if content else "Read"), paths_, globs
+
+
+def mcp_targets_overflow(tool: str, tool_input: dict) -> bool:
+    """Does a path or glob argument of an MCP call hold more than `_MCP_MAX_TARGETS` entries, or a string longer than a path can be? `mcp_read_targets` keeps
+    only the first entries, so the key could hide behind decoys (`read_multiple_files` with 256 other paths first). Such a call counts as reaching the key."""
+    if not isinstance(tool_input, dict):
+        return False
+    content = str(tool_input.get("searchType", "")).lower() == "content" or "grep" in tool.lower()
+    for k, v in tool_input.items():
+        lk = str(k).lower()
+        if lk in _MCP_PATH_KEYS or lk in _MCP_GLOB_KEYS or (lk == "pattern" and not content):
+            items = v if isinstance(v, (list, tuple)) else [v]
+            if len(items) > _MCP_MAX_TARGETS or any(isinstance(x, str) and len(x) > _MCP_MAX_STRING for x in items):
+                return True
+    return False
+
+
+def _mcp_reads_the_seal_key(tool: str, tool_input: dict, cwd: str) -> bool:
+    inv = next((i for i in safety()["invariants"] if i["id"] == "SI-10"), None)
+    if inv is None:
+        return False
+    if mcp_targets_overflow(tool, tool_input):   # fail closed: what the scan below would leave out could be the key
+        return True
+    kind, targets, globs = mcp_read_targets(tool, tool_input)
+    return (bool(targets) or bool(globs)) and _seal_key_reached(inv, kind, targets, globs, cwd)
+
+
+def _seal_key_reached(inv: dict, tool: str, targets: list[str], globs: list[str], cwd: str) -> bool:
     names = list(inv.get("block_globs", []))
     rx = inv.get("_re")
     # the file name in the text of a path or a glob (not in a Grep pattern), also behind quoting and `..` segments
@@ -939,7 +1000,7 @@ _STATE_LITERAL = re.compile(r"\.config/jade(?![\w.-])|\.local/share/jade(?![\w.-
 _INSTALL_CMD = re.compile(r"\b(?:uv\s+tool\s+(?:install|upgrade|reinstall)|uv\s+pip\s+install|pip3?\s+install|pipx\s+(?:install|upgrade|reinstall)|python3?\s+-m\s+pip\s+install)\b")
 _UV_TOOL_JADE = re.compile(r"\buv\s+tool\s+(?:uninstall|upgrade|reinstall|install)\b[^;&|]*\bjade|\buv\s+tool\s+(?:uninstall|upgrade|reinstall)\b[^;&|]*--all\b")   # R-13: changes or removes the installed JADE tool itself, whatever it installs from
 _SETTINGS_FILE = re.compile(r"(?:^|/)\.claude/settings(?:\.local)?\.json$")
-_SETTINGS_DISABLE = re.compile(r"disableAllHooks|allowManagedHooksOnly|JADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME|REGISTRY_DIR)|\"hooks\"\s*:\s*(?:\{\s*\}|null)", re.I)
+_SETTINGS_DISABLE = re.compile(r"disableAllHooks|allowManagedHooksOnly|JADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME|REGISTRY_DIR|SESSION_ID)|CLAUDE_CODE_SESSION_ID|\"hooks\"\s*:\s*(?:\{\s*\}|null)", re.I)
 TERMINAL_TOOLS = frozenset({"mcp__terminal__run_in_terminal"})
 
 
@@ -1591,6 +1652,9 @@ def _assess_tool(tool: str, tool_input: dict, cwd: str) -> Assessment:
         for ident in sorted(humanonly.tool_classes(tool) | (humanonly.tool_classes(f"{tool}__{tool_input['action']}") if isinstance(tool_input.get("action"), str)
                                                               and re.fullmatch(r"[\w-]{1,40}", tool_input["action"]) else set())):
             _ho_add(a, ident)
+    if is_mcp(tool) and _mcp_reads_the_seal_key(tool, tool_input, cwd):   # V6-18 c: an MCP file reader or search that can reach the permit seal key (SI-10)
+        _raise_to(a, Assessment(level="critical", rule_id="SI-10", rationale="MCP call that can read the permit seal key", reversibility="irreversible",
+                                blast_radius="service", data_sensitivity="secret", blocked=["SI-10"]))
     if rule.get("paths"):
         _si12_tool_paths(a, list(_path_args(tool_input)), cwd)
         _ho_tool_paths(a, tool_input, list(_path_args(tool_input)), cwd)
