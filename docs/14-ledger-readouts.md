@@ -77,7 +77,7 @@ A label can say three different things. They are never merged.
 
 One call holds one kind. `evals.set_label` refuses to change a call to another kind (it raises `LabelTypeConflict`). Every reader that fits or reports (`evals.labeled`, `evals.choice_rows`, the canary check in `jade/improve.py`) takes only `claim_true` rows. The table has one row per call, so a second kind on the same call needs a new table. That is a later step (d06 section 8.2) and is not built here.
 
-`sample_prob` is the stored chance that the call was drawn for an audit (more than 0 and at most 1). Nothing draws audits yet; the draw is V6-29. `audit_source` is a short code: `random_audit`, `adjudication`, `owner_mark` or `ci_file`. It is never free text.
+`sample_prob` is the stored chance that the call was drawn for an audit (more than 0 and at most 1). The audit draw (stage 1) is V6-29: see `docs/17-memory-audit.md`. `audit_source` is a short code: `random_audit`, `adjudication`, `owner_mark` or `ci_file`. It is never free text.
 
 **DI-8, the goal check.** An outcome says who saw that the goal was reached.
 
@@ -116,4 +116,4 @@ The migration is additive. Three columns on `labels` (old rows stay NULL), and t
 - The numbers from the real ledger (U-10, the baseline). The owner runs `jade ledger stats --json` and `jade check --json`.
 - The friction and autonomy targets. The owner writes them after the baseline (LD-21). V6-29 does not start without them.
 - A producer for `independent`.
-- The audit draw and `sample_prob` values (V6-29).
+- The audit draw and `sample_prob` values: built in V6-29 (stage 1), see `docs/17-memory-audit.md`.

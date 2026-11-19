@@ -306,8 +306,9 @@ def replay_past_answers(past) -> list[dict]:
     return out
 
 
-def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: float | None = None):
-    """The Jev branch of the gate: a HookResult that lets the call run, or None (the owner is asked as before)."""
+def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: float | None = None, audit_held: bool = False):
+    """The Jev branch of the gate: a HookResult that lets the call run, or None (the owner is asked as before). `audit_held` (V6-29): the audit of silent runs is why this
+    call is asked about (its scope is paused, a limit was reached, no key): Jev must not let it run in the owner's place, which would be a silent run with no audit."""
     from . import askchat, hooks, permits, state_machine
     from .hooks import HookResult
 
@@ -317,6 +318,8 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: 
         return None
     if not jev_on(db):
         return None   # V6-28: before any state is built, so nothing goes to a model, shadow included
+    if audit_held and level != "high" and deny_gate(db)["ok"]:
+        return None   # Jev would decide here: the audit says the owner is asked (until the deny gate is met, or at level high, Jev only records and decides nothing)
     tin = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
     if skip_reason(a, tool, tin, level) or permits.make_context(tool, a, event, cwd=cwd).get("redacted"):
         return None

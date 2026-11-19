@@ -660,9 +660,10 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit, hold_
             return res
         from . import askchat, memory, proxy
 
-        if (res := memory.step(db, mode, a, tool, event, fp, cwd)) is not None:   # docs/12: a call the human confirmed earlier runs without a question (levels low and medium)
+        held: dict = {}   # V6-29: memory.step says here when the audit (a paused scope, a limit, no key) is why the call is asked about
+        if (res := memory.step(db, mode, a, tool, event, fp, cwd, held)) is not None:   # docs/12: a call the human confirmed earlier runs without a question (levels low and medium)
             return res
-        if (res := proxy.step(db, mode, a, tool, event, fp, cwd, _STARTED)) is not None:   # docs/12: Jev decides in the owner's place, inside its band (levels low and medium)
+        if (res := proxy.step(db, mode, a, tool, event, fp, cwd, _STARTED, audit_held=bool(held))) is not None:   # docs/12: Jev decides in the owner's place, inside its band (levels low and medium)
             return res
         if (res := askchat.step(db, mode, a, tool, event, fp, cwd)) is not None:   # docs/12: the human answers in the chat (consumes a grant, or asks)
             return res

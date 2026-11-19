@@ -905,7 +905,7 @@ def review(since_s: float | None = None) -> str:
     window = "all time" if since_s is None else f"last {int(since_s // 3600)}h" if since_s >= 3600 else f"last {int(since_s // 60)}m"
     db = ledger.open(timeout=5)
     try:
-        extra = review_lines(db, since_s) + friction_review_lines(db, since_s, window)
+        extra = review_lines(db, since_s) + friction_review_lines(db, since_s, window) + audit_review_lines(db, since_s)
     finally:
         db.close()
     if not rows:
@@ -955,6 +955,13 @@ def friction_review_lines(db, since_s: float | None, window: str) -> list[str]:
     since = readouts.since_seconds(since_s)
     marks = _latest_marks(db, since)
     return readouts.friction_lines(db, since, window, len(marks), sum(1 for m in marks.values() if m == "wrong"), readouts.label_coverage(db, since)["fit_labelled"])
+
+
+def audit_review_lines(db, since_s: float | None) -> list[str]:
+    """V6-29: the audit of calls that ran without asking, with the false-allow rate only when it can be shown honestly (`audit.lines`)."""
+    from . import audit
+
+    return audit.lines(db, ts(now() - timedelta(seconds=since_s)) if since_s is not None else "", _shown_line)
 
 
 def review_lines(db, since_s: float | None) -> list[str]:
@@ -1041,6 +1048,10 @@ def review_mark(decision_id: str, mark: str, stdin_isatty: bool | None = None) -
                                      (memory.exact_key(a["hold_key"], a["fingerprints_json"]),)).fetchall() if a else []
         with db.tx():
             db.event(decision_id, "review_mark", guard=f"jade review mark {mark}", actor=f"human:{user()}", detail={"mark": mark, "answer_ids": [r["answer_id"] for r in answers if r["answer_id"]]})
+            if ask.get("channel") == "memory":   # V6-29: a call that ran from a standing answer: evidence for it (right), or its scope is paused (wrong)
+                from . import audit
+
+                audit.on_mark(db, decision_id, mark, [r["answer_id"] for r in answers if r["answer_id"]])
             retired = sum(db.retire_answers(r["exact_key"], r["class_key"], r["scope_key"] if "scope_key" in r.keys() else None) for r in answers) if mark == "wrong" else 0
             if mark == "wrong" and ask.get("channel") == "jev":
                 from . import proxy
@@ -1050,6 +1061,31 @@ def review_mark(decision_id: str, mark: str, stdin_isatty: bool | None = None) -
     finally:
         db.close()
     return f"marked {decision_id} {mark}" + (f"; {retired} answer(s) retired, JADE asks again" if mark == "wrong" else "")
+
+
+def review_audit_walk(stdin_isatty: bool | None = None, *, ask=input, say=print) -> int:
+    """`jade review mark` with no arguments (human terminal): the calls that ran without asking you and wait for your check, oldest first, up to the weekly count.
+    For each: right, wrong or skip. A wrong one retires the answer behind it and pauses its scope. Returns how many were marked."""
+    from . import audit
+
+    _require_human("jade review mark", stdin_isatty)
+    db = ledger.open(timeout=5)
+    try:
+        rows = audit.pending(db, audit.settings().weekly_count)
+    finally:
+        db.close()
+    if not rows:
+        say("no calls wait for your check")
+        return 0
+    say(f"{len(rows)} call(s) ran without asking you and wait for your check. Was each one right to run? [r]ight / [w]rong / [s]kip")
+    done = 0
+    for r in rows:
+        say(f"{r['decision_id']}  [{r['rule_id']}]  {audit.describe(r, _shown_line)}")
+        verdict = {"r": "right", "right": "right", "w": "wrong", "wrong": "wrong"}.get(ask("  right, wrong or skip? [r/w/S] ").strip().lower())
+        if verdict:
+            say(review_mark(r["decision_id"], verdict, stdin_isatty=True))
+            done += 1
+    return done
 
 
 def _pending_hints(db) -> list:
@@ -1078,9 +1114,21 @@ def _scope_lines(r) -> list[str]:
     return lines
 
 
+CONFIRM_MAX_GROUPS = 10   # V6-29: groups that become standing in one sitting; the rest wait for the next one (a long list is answered by habit)
+
+
+def _rule_is_high(rule_id: str) -> bool:
+    """High or critical, or unknown: `--all` never takes such a group (V6-29). An unknown rule counts as high, so a missing rule only adds a question."""
+    from . import policy
+
+    level = next((r.get("level") for r in policy.risk().get("rules", []) if r.get("id") == rule_id), None)
+    return level in (None, "high", "critical")
+
+
 def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, all_: bool = False) -> int:
     """`jade review confirm`: the human turns the allow answers they gave in the chat or in a dialog into standing answers, in a terminal. Groups of the same kind of
-    call are shown with their rule id; each group can be dropped (or all taken with `--all`); a typed `yes` after the list of what becomes standing seals it."""
+    call are shown with their rule id; each group can be dropped (`--all` takes the groups of a rule below high risk and still asks about every high one, V6-29); at
+    most `CONFIRM_MAX_GROUPS` groups become standing in one sitting; a typed `yes` after the list of what becomes standing seals it."""
     from . import memory
 
     _require_human("jade review confirm", stdin_isatty)
@@ -1094,7 +1142,11 @@ def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, al
         for r in rows:
             groups.setdefault(_confirm_group(r), []).append(r)
         chosen: list = []
-        for (rule, _, is_class, scope_key), rs in groups.items():
+        taken = 0
+        for n_seen, ((rule, _, is_class, scope_key), rs) in enumerate(groups.items()):
+            if taken >= CONFIRM_MAX_GROUPS:
+                say(f"{len(groups) - n_seen} more group(s) wait: run `jade review confirm` again after this sitting")
+                break
             if scope_key:
                 say(f"{_shown_line(rs[-1]['label']) or '(no text kept)'}  [{rule}]  allowed {len(rs)}x")
                 for line in _scope_lines(rs[-1]):
@@ -1104,8 +1156,9 @@ def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, al
                 say(f"{_shown_line(rs[-1]['label']) or '(no text kept)'}  [{rule}]  allowed {len(rs)}x  ->  would be standing for {kind}")
             if rule in memory.NEVER_RULES:
                 say("   (rule is always asked; confirming it changes nothing)")
-            if all_ or ask("  stand for this? [y/N] ").strip().lower() in ("y", "yes"):
+            if (all_ and not _rule_is_high(rule)) or ask("  stand for this? [y/N] ").strip().lower() in ("y", "yes"):
                 chosen += rs
+                taken += 1
         if not chosen:
             say("nothing confirmed")
             return 0
@@ -1116,8 +1169,12 @@ def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, al
         if ask("Type yes to confirm: ").strip() != "yes":
             say("cancelled; nothing changed")
             return 0
+        from . import audit
+
         with db.tx():
             n = db.confirm_answers([r["answer_id"] for r in chosen])
+            for sid in {audit.scope_id(r) for r in chosen}:   # a paused scope starts again, at 0 runs, because the human confirmed an answer of it (never a hint)
+                audit.resume(db, sid)
         say(f"{n} answer(s) confirmed")
         return n
     finally:
@@ -1126,7 +1183,7 @@ def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, al
 
 def knows_list() -> str:
     """`jade knows list` (read-only): the standing answers, with when each stops deciding."""
-    from . import memory
+    from . import audit, memory
 
     db = ledger.open(timeout=5)
     try:
@@ -1142,8 +1199,12 @@ def knows_list() -> str:
         last = max(filter(None, [r["confirmed_ts"], r["last_used_ts"]]))
         use_end = (parse_ts(last) + timedelta(days=memory.USE_DAYS)) if last else None
         cap_end = parse_ts(r["confirmed_ts"]) + timedelta(days=memory.CAP_DAYS)
-        end = min(x for x in (use_end, cap_end) if x)
+        runs = r["silent_runs"] or 0
+        evid = parse_ts(r["evidence_ts"] or r["confirmed_ts"]) + timedelta(days=audit.settings().age_days) if runs else None   # V6-29: a row that has run silently needs evidence
+        end = min(x for x in (use_end, cap_end, evid) if x)
         note = "  (near its 180-day end: confirm again to keep it)" if (cap_end - now()) <= timedelta(days=memory.NEAR_CAP_DAYS) else ""
+        if runs:
+            note += f"  ({runs} silent run(s) since its last mark; it stops after {audit.settings().age_runs} with no mark: jade review mark)"
         scope = f"  scope  {_shown_line(r['scope_label'])}" if r["scope_label"] else ""
         out.append(f"{r['answer_id']}  [{r['rule_id']}]  {'kind' if r['class_key'] else 'exact'}  {_shown_line(r['label'])}{scope}  stops deciding {ts(end)[:10]}{note}")
     return "\n".join(out) or "no standing answers"
