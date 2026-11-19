@@ -65,6 +65,7 @@ HO_TEXT: dict[str, str] = {
     "HO-mod": "can change a mod of the app",
     "HO-R17": "can switch off the guard on the main branch",
     "HO-terminal": "can run a script in your terminal",
+    "HO-shell-startup": "can change your shell start-up files and so what every command runs",
 }
 
 

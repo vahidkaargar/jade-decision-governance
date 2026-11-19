@@ -174,7 +174,7 @@ def test_every_class_phrase_is_short_and_the_line_keeps_the_rule_text_for_a_high
 
 def test_every_human_only_class_has_a_phrase():
     from jade import humanonly
-    for ho in (*humanonly.ALL, "HO-wiring", "HO-checkout-install", "HO-settings-shadow", "HO-state-path", "HO-mod", "HO-R17", "HO-terminal"):
+    for ho in (*humanonly.ALL, "HO-wiring", "HO-checkout-install", "HO-settings-shadow", "HO-state-path", "HO-mod", "HO-R17", "HO-terminal", "HO-shell-startup"):
         assert ho in askplain.HO_TEXT, ho
 
 
