@@ -154,7 +154,8 @@ def test_the_timing_gap_is_not_replayed_by_the_parallel_default_run():
 @pytest.mark.timing
 def test_the_null_redirect_digit_run_classifies_in_linear_time():
     """V6-08 (WT W-104): eight times the digits take at most 24 times as long, and 16000 of them fit one second (the hook budget is 6 s)."""
-    assert [r["class"] for r in map(json.loads, (ROOT / "evals" / "performance" / "timing.jsonl").read_text().splitlines())] == ["null_redirect_digit_run_is_linear"]
+    assert [r["class"] for r in map(json.loads, (ROOT / "evals" / "performance" / "timing.jsonl").read_text().splitlines())] == [
+        "null_redirect_digit_run_is_linear", "nested_variable_command_is_bounded"]
     assert _runner().main([str(ROOT / "evals" / "performance" / "timing.jsonl")]) == 0
 
 

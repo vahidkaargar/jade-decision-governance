@@ -27,7 +27,9 @@ from . import blind, interp
 MAX_DEPTH = 8
 MAX_NEST = 60
 BUDGET = 4_000_000     # characters the scanner may read across all nested levels; past it the rest is searched as plain text
-HERE_ALLOWANCE = 6_000_000   # characters more that the here-strings of a chain may be read for: a text that the budget charged already comes back once per level
+VARIABLE_WORK = 1500  # characters of nested stages (and one for each flat stage) that may be read again with the values of the variable that is their command word, for the whole text (V6-08 review)
+_NESTED_OPEN = re.compile(r"\$\(|`|[<>]\(")   # a stage that holds one of these holds another text that is read, and may hold a stage of this kind again
+HERE_ALLOWANCE = 6_000_000  # characters more that the here-strings of a chain may be read for: a text that the budget charged already comes back once per level
 UNSAFE_MARK = "@unsafe!"   # prefix of the copy of a stage whose verb can write or run something, so rules see its resolved operands
 UNSAFE_GIT = "git:unsafe-config "
 TEXT_MARK = "@text!"   # prefix of a line the scanner extracted from a program (`import jade.cli`): words for the invariants to read, no operands to resolve
@@ -64,6 +66,9 @@ CODE_FLAG = re.compile(r"-[a-zA-Z]*[ceEr]|--eval|--print|--command")
 AWK_NAMES = {"awk", "gawk", "mawk", "nawk"}
 SHELL_NAME = re.compile(r"^(?:ba|z|da|k|a|fi|c|tc)?sh$")
 PLAIN = re.compile(r"[^\\'\"$`<\n;(){}&|#]+")
+# Characters that Python calls white space and that the shell does not split a word at (bash and zsh split at a space, a tab and a newline): `a<U+2003>b` is one word. They are
+# written as the encoded blank, so a later `split()` of the text keeps the word whole (V6-08 review, N19).
+_SPACELIKE = re.compile("[\x0b\x0c\x1c-\x1f\x85\xa0  -     　]")
 _INERT = re.compile(r"[;&|<>(){}`]")   # characters a quoted word may hold that the splitter and the redirect check would read as syntax
 
 HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|(\\?)([^\s;&|<>()'\"\\`$]+))")
@@ -208,9 +213,18 @@ def _leaves_stdin(s: str, at: int) -> bool:
     return bool((m and m.group(1) != "0") or re.match(r"<&0(?!\d)", s[at:at + 4]))
 
 
+# The text of a stage up to the first separator the reader below stops at, with a backslash-newline counted as part of it (V6-08 review, N18): the length of the stage, not of the rest of the line.
+_STAGE_EXTENT = re.compile(r"(?:[^\n\\;&|()<>]|\\\r?\n|\\.)*", re.S)
+_CONTINUATION = re.compile(r"\\\r?\n")
+
+
 def _next_stage_kind(s: str, j: int) -> str | None:
     """What the stage that starts at s[j] does with its stdin: the language it reads as code, or None. A stage whose stdin is redirected from a heredoc, a
-    here-string or a file does not read the pipe at all (`curl .. | python3 - <<'PY'`)."""
+    here-string or a file does not read the pipe at all (`curl .. | python3 - <<'PY'`). A backslash-newline is no text to the shell, so it is taken out first:
+    `sh \\<NL># x` is `sh` and a comment, `| \\<NL>  sh` is `| sh` (V6-08 review, N18)."""
+    chunk = s[j:_STAGE_EXTENT.match(s, j).end() + 8]
+    if "\\\n" in chunk or "\\\r\n" in chunk:
+        s, j = _CONTINUATION.sub("", chunk), 0
     m = NEXT_STAGE.match(s, j)
     if not m:
         return None
@@ -225,6 +239,8 @@ def _next_stage_kind(s: str, j: int) -> str | None:
 
 def _rest_of_line_pipes_to_code(s: str, j: int) -> str | None:
     e = s.find("\n", j)
+    while 0 < e and (s[e - 1] == "\\" or s[e - 2:e] == "\\\r") and e + 1 < len(s):   # a continuation does not end the line (V6-08 review, N18)
+        e = s.find("\n", e + 1)
     line = s[j:len(s) if e < 0 else e]
     for m in PIPE_REST.finditer(line):
         kind = _next_stage_kind(line, m.end())
@@ -939,14 +955,23 @@ class _Scan:
                 if val not in known and len(known) < 4:
                     known.append(val)
 
-    def _variable_command(self, raw: str) -> list[str]:
+    def _variable_command(self, raw: str, deferred: list[str]) -> list[str]:
         """The stage with its command word, a variable set earlier in this text (`$g`, `${g}`), written as each value it was given: `g=git; $g push origin main` is
-        also read as `git push origin main`. The stage as written is read as before, so this only adds readings."""
+        also read as `git push origin main`. The stage as written is read as before, so this only adds readings.
+        The work is counted for the whole text (`VARIABLE_WORK`): a stage that holds a nested `$g $(...)` is read again once for every value at every level, which
+        doubles the work (or more) per level (V6-08 review). A stage with a nested substitution costs its length for each value, a flat stage costs one for each value.
+        Past the count the stage is not read with its values and the text carries the `eval-var` mark: a variable the gate could not read, recorded (R-31), never a silent pass."""
         lead = raw.lstrip()
         bare = PREFIX.sub("", lead, count=1)
         m = re.match(r'"?\$(?:\{(\w+)\}|(\w+))"?', bare)   # `"$g"` expands as `$g` does (a single-quoted `'$g'` does not)
         if not m or not (values := self.assigns.get(m.group(1) or m.group(2))):
             return []
+        if len(self.budget) > 5:
+            cost = len(values) * (len(raw) if _NESTED_OPEN.search(raw) else 1)
+            if self.budget[5] < cost:
+                deferred.append(blind.BLIND_MARK + "eval-var")
+                return []
+            self.budget[5] -= cost
         head = lead[:len(lead) - len(bare)]
         return [head + v + bare[m.end():] for v in values]
 
@@ -1236,11 +1261,14 @@ class _Scan:
             raw = s[raw_at:sep_at]
             if raw.strip():
                 self._stage(raw, deferred)
-                if self.assigns:
-                    deferred.extend(self._sub(t) for t in self._variable_command(raw))   # `g=git; $g push origin main`
+                variants = self._variable_command(raw, deferred) if self.assigns else []   # `g=git; $g push origin main`
+                deferred.extend(self._sub(t) for t in variants)
                 self._note_assignments(raw)
+            else:
+                variants = []
             if pipe:
                 chain.append(raw)
+                chain.extend(variants)   # `g=curl; $g URL | sh`: the stage that fetches is read with the value of its variable too
                 whole.append(s[whole_at:sep_at])
                 if kind := _next_stage_kind(s, resume):
                     done, done_whole = fed.get(kind, (0, 0))   # `a | sh | sh | ...` hands each stage to a shell once, not once per shell
@@ -1287,7 +1315,7 @@ class _Scan:
                 i += 1
                 break
             if m := PLAIN.match(s, i):
-                emit(m.group())
+                emit(_SPACELIKE.sub("\x01", m.group()))
                 i = m.end()
             elif c == "\\":
                 if i + 1 >= n:
@@ -1448,7 +1476,7 @@ class _Scan:
         if raw.strip():
             self._stage(raw, deferred)
             if self.assigns:
-                deferred.extend(self._sub(t) for t in self._variable_command(raw))
+                deferred.extend(self._sub(t) for t in self._variable_command(raw, deferred))
         self.nest -= 1
         text = _readings("".join(out), braced, escaped)
         return text + "".join(f" ; {d} ; " for d in dict.fromkeys(deferred)), i   # a text produced for several pipes is written once
@@ -1501,8 +1529,9 @@ def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None, li
 
 
 def _skeleton(command: str, _depth: int, _budget: list[int] | None, literal_end: int = 0, legacy: bool = False, ssh: bool = True) -> str:
-    # `legacy` and `ssh` ride in the budget, which every nested scan shares: origin/main's reading of a quoted `${NAME}` (`$X`, see `_Scan`) and the reading of an ssh remote command, at every depth
-    budget = _budget if _budget is not None else [BUDGET, HERE_ALLOWANCE, {}, legacy, ssh]
+    # `legacy` and `ssh` ride in the budget, which every nested scan shares: origin/main's reading of a quoted `${NAME}` (`$X`, see `_Scan`) and the reading of an ssh remote command, at every depth.
+    # The last slot is the work left for reading variable commands with their values (`VARIABLE_WORK`).
+    budget = _budget if _budget is not None else [BUDGET, HERE_ALLOWANCE, {}, legacy, ssh, VARIABLE_WORK]
     budget[0] -= len(command)
     command = _MARK_CHARS.sub("\x06", command)   # a byte that is one of the marks stays a word
     if _depth > MAX_DEPTH or budget[0] < 0:

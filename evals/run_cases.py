@@ -134,14 +134,18 @@ def run_case(c: dict) -> list[str]:
 
 def _run_classify_time(c: dict) -> list[str]:
     """V6-03 timing kind: `command_prefix` + `digit_run` digits + `command_suffix` (the long input is built here, so no case file holds it) is
-    classified by `policy.assess` at n and at `scale` * n digits (default 4). The larger run must fit `budget_s`, and `scale` times the input must
+    classified by `policy.assess` at n and at `scale` * n digits (default 4). A row with `nest_open` builds `depth` levels of `nest_open` ... `nest_close` around
+    `nest_core` instead, and the larger input has `scale` times the levels (V6-08 review: work that doubles at each level gives a ratio of 2 to the power of the levels added). The larger run must fit `budget_s`, and `scale` times the input must
     not take more than `max_ratio` times as long: at scale 8, linear work gives about 8 and quadratic about 64 (WT W-104, the NULL_REDIRECT case),
     whatever the speed of the machine. Wall-clock cases live in evals/known_gaps/timing.jsonl, outside the default run: only the serial `timing`
     test job replays them, so load from parallel workers cannot flip the verdict."""
     from jade import policy
 
     def took(n: int) -> float:   # the best of two runs, so a cold cache or a busy moment does not decide the ratio
-        cmd = c.get("command_prefix", "") + "1" * n + c.get("command_suffix", "")
+        if "nest_open" in c:   # `depth` levels of `nest_open ... nest_close` around `nest_core`: the cost of nesting (V6-08 review)
+            cmd = c["nest_open"] * n + c.get("nest_core", "echo x") + c.get("nest_close", ")") * n
+        else:
+            cmd = c.get("command_prefix", "") + "1" * n + c.get("command_suffix", "")
         best = float("inf")
         for _ in range(2):
             for mod in (policy, policy.shellnorm):   # the classifier memoises per command text: time the work, not a cache hit
@@ -154,11 +158,12 @@ def _run_classify_time(c: dict) -> list[str]:
             best = min(best, time.perf_counter() - t)
         return best
 
-    n, k = int(c["digit_run"]), int(c.get("scale", 4))
+    n, k = int(c["depth"] if "nest_open" in c else c["digit_run"]), int(c.get("scale", 4))
+    what = "levels" if "nest_open" in c else "digits"
     small, large = took(n), took(k * n)
     problems = []
     if large > c["budget_s"]:
-        problems.append(f"classified {k * n} digits in {large:.2f} s, budget {c['budget_s']} s")
+        problems.append(f"classified {k * n} {what} in {large:.2f} s, budget {c['budget_s']} s")
     if large > c["max_ratio"] * max(small, 1e-3):
         problems.append(f"time ratio {large / max(small, 1e-3):.1f} for {k} times the input, at most {c['max_ratio']} allowed")
     return problems
