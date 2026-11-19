@@ -135,6 +135,80 @@ def test_a_pr_merge_is_never_a_kind():
     assert memory.eligibility(assessed(cmd), "Bash", {"command": cmd}, {}) != "class"
 
 
+# ------------------------------------------------------------------ V6-06: memory never covers a critical call, and a kind keeps its target
+
+CRITICAL = "kubectl apply -f x.yaml"
+KIND = "docker compose up -d"   # R-12, high: an ordinary call that may be remembered as a kind
+
+
+def assessed_in(cmd, cwd):
+    return policy.assess("Bash", {"command": cmd}, cwd)
+
+
+@pytest.mark.parametrize("cmd", [CRITICAL, "terraform apply -auto-approve", "sudo pfctl -f /etc/pf.conf"])
+def test_n7_a_critical_call_is_never_remembered(cmd):
+    a = assessed(cmd)
+    assert a.level == "critical", (cmd, a.level)
+    assert memory.eligibility(a, "Bash", {"command": cmd}, {}) == "never"
+    assert memory.keys(a, "Bash", {"command": cmd}, {})[1] is None
+
+
+@pytest.mark.parametrize("cmd,rule", [("echo x >> ~/.claude/CLAUDE.md", "R-13"), ("touch ~/.claude/skills/x/SKILL.md", "R-18")])
+def test_n7_a_shell_write_to_the_files_that_guard_the_agent_is_never_remembered(cmd, rule):
+    a = assessed(cmd)
+    assert a.rule_id == rule, (cmd, a.rule_id)
+    assert memory.eligibility(a, "Bash", {"command": cmd}, {}) == "never"
+
+
+@pytest.mark.parametrize("other", ["DOCKER_HOST=ssh://prod " + KIND, "env DOCKER_HOST=ssh://prod " + KIND, "export DOCKER_HOST=ssh://prod; " + KIND,
+                                   "DOCKER_CONTEXT=prod " + KIND, "cd /srv/prod && " + KIND, "sudo " + KIND])
+def test_n8_a_target_selecting_prefix_gives_another_kind(other):
+    plain, prefixed = assessed(KIND), assessed(other)
+    assert plain.seg_keys == prefixed.seg_keys and memory.eligibility(prefixed, "Bash", {"command": other}, {}) == "class", (other, prefixed.seg_keys)
+    assert memory.class_key(plain) != memory.class_key(prefixed)
+
+
+def test_n8_another_directory_gives_another_kind():
+    assert memory.class_key(assessed_in(KIND, "/srv/a")) != memory.class_key(assessed_in(KIND, "/srv/b"))
+
+
+def test_n8_the_same_call_in_the_same_place_keeps_its_kind():
+    cmd = "DOCKER_HOST=ssh://prod " + KIND
+    assert memory.class_key(assessed_in(cmd, "/srv/a")) == memory.class_key(assessed_in(cmd, "/srv/a"))
+
+
+def test_n8_the_any_project_key_follows_the_target_and_not_the_directory():
+    cmd = "DOCKER_HOST=ssh://prod " + KIND
+    assert memory.any_project_key(assessed_in(cmd, "/srv/a")) == memory.any_project_key(assessed_in(cmd, "/srv/b"))
+    assert memory.any_project_key(assessed_in(cmd, "/srv/a")) != memory.any_project_key(assessed_in(KIND, "/srv/a"))
+
+
+def test_n9_a_confirmed_answer_for_a_critical_call_covers_nothing():
+    stored(CRITICAL)
+    assert lookup(CRITICAL) is None
+
+
+def test_n9_confirming_a_critical_answer_does_not_let_the_call_run_unasked(medium):
+    ask_and_allow(CRITICAL)
+    confirm_all()
+    r = hooks.pretool(call(CRITICAL, OTHER))
+    assert r.exit_code == 2 and "confirmed answer" not in r.stderr
+
+
+def test_a_confirmed_answer_for_a_prefixed_call_does_not_cover_the_plain_call(medium):
+    ask_and_allow("DOCKER_HOST=ssh://prod " + KIND)
+    assert confirm_all() == 1
+    r = hooks.pretool(call(KIND, OTHER))
+    assert r.exit_code == 2 and "confirmed answer" not in r.stderr
+
+
+def test_an_ordinary_call_is_still_remembered_in_its_own_place(medium):
+    ask_and_allow(KIND)
+    assert confirm_all() == 1
+    r = hooks.pretool(call(KIND, OTHER))
+    assert r.exit_code == 0 and "confirmed answer" in r.stderr
+
+
 def test_a_write_is_remembered_only_as_that_exact_call():
     a = policy.assess("Write", {"file_path": "/tmp/x/.claude/settings.json", "content": "{}"}, "/tmp")
     assert memory.eligibility(a, "Write", {"file_path": "/tmp/x/.claude/settings.json", "content": "{}"}, {}) in ("exact", "never")

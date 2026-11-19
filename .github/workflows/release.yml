@@ -2,6 +2,8 @@ name: release
 # A push of a tag v<version> tests the tagged commit, builds the wheel and sdist, installs the wheel in an isolated directory and runs it
 # (scripts/verify_install.sh), then creates or updates the GitHub release for that tag with the wheel, the sdist and SHA256SUMS attached.
 # `jade upgrade` installs from this release. Cut one with: git tag -a vX.Y.Z -m "X.Y.Z" && git push origin vX.Y.Z (docs/08, release).
+# The first job refuses a tag that is not on origin/main (a tag on a side branch) and a tag with no CHANGELOG.md section (scripts/check_release_tag.sh).
+# Every other job waits for it. Actions are pinned by commit sha; Dependabot updates them.
 on:
   push:
     tags: ["v*"]
@@ -10,12 +12,25 @@ permissions:
   contents: read
 
 jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Fetch origin/main
+        run: git fetch --quiet --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+      - name: The tag is on origin/main and CHANGELOG.md has its section
+        run: sh scripts/check_release_tag.sh "$GITHUB_REF_NAME"
+
   test:
+    needs: guard
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: "3.13"
       - name: Install uv (pinned)
@@ -36,8 +51,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: "3.13"
       - name: Install uv (pinned)
@@ -72,8 +87,9 @@ jobs:
           tag="$GITHUB_REF_NAME"
           notes=$(mktemp)
           # The notes are the CHANGELOG section of this version; the release is a prerelease when the version is not X.Y.Z.
+          # The guard job has already checked that the section exists and is not empty; there is no fallback text.
           awk -v v="${tag#v}" 'index($0, "## [" v "]") == 1 { on = 1; next } on && /^## \[/ { exit } on { print }' CHANGELOG.md > "$notes"
-          [ -s "$notes" ] || echo "Release $tag. See CHANGELOG.md." > "$notes"
+          [ -n "$(tr -d '[:space:]' < "$notes")" ] || { echo "no CHANGELOG.md section for ${tag#v}" >&2; exit 1; }
           pre=""
           printf '%s' "${tag#v}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || pre="--prerelease"
           if gh release view "$tag" > /dev/null 2>&1; then

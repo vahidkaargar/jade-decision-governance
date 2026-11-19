@@ -166,7 +166,7 @@ def test_suggest_any_records_the_kind_any_scope_and_suggest_project_the_project_
     q = ask(CLASS_CMD, repo)
     hooks.posttool(answer_event(q, askchat.SUGGEST_ANY))
     r = rows("SELECT * FROM human_answers")[0]
-    assert r["scope_kind"] == "kind_any" and r["class_key"] == r["scope_key"]
+    assert r["scope_kind"] == "kind_any" and r["class_key"] and r["scope_key"] and r["class_key"] != r["scope_key"]
     other = ask("git reset --hard HEAD~2", repo)
     hooks.posttool(answer_event(other, askchat.SUGGEST_PROJECT))
     r = rows("SELECT * FROM human_answers ORDER BY ts, rowid")[-1]

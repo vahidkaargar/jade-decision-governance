@@ -160,6 +160,26 @@ def level() -> str | None:
     return v if isinstance(v, str) and v in LEVEL_VALUES else None
 
 
+JEV_VALUES = ("on", "off")
+
+
+def jev(recorded=None) -> str:
+    """Whether a model may be asked at all (V6-28): `on` or `off`. `recorded` is the value of the last `jev` ledger event (None: no event, or `unset`; any other
+    value that is not `on` or `off` is a record that cannot be believed). The rule, from the file and the record together, and failing closed:
+    a bad value reads `off`; `on` needs both the key and the human's record of `on`, so deleting the key or writing `on` behind the command never raises autonomy;
+    no key and no record is the default, `on` at level low or medium (an upgrade changes nothing) and `off` at every other level. It is read from the config
+    file and the ledger only: no environment variable moves it."""
+    cfg = config()
+    if "jev" in cfg:
+        v = cfg["jev"]
+        if not isinstance(v, str) or v not in JEV_VALUES or v == "off":
+            return "off"
+        return "on" if recorded == "on" else "off"
+    if recorded is not None:
+        return "off"   # a record exists and the key is gone: the file was changed, not the human
+    return "on" if level() in ("low", "medium") else "off"
+
+
 class Override(NamedTuple):
     var: str
     value: str
@@ -197,6 +217,8 @@ def gate_overrides(env: Mapping[str, str] | None = None, source: str = "environm
     if env.get("JADE_APPROVER_ANCHOR"):   # W-89: where the approver public key is read from; the default path is the only one a root-owned file protects
         from . import signing
         add("JADE_APPROVER_ANCHOR", not _same(env["JADE_APPROVER_ANCHOR"], signing.DEFAULT_ANCHOR), "reads the approver public key from another file than the root-owned default")
+    if env.get("JADE_SESSION_ID"):   # V6-18 a: names the session whose SI-07 hold `jade decide outcome` releases and whose answers `jade ack` clears; a persisted old id lifts a hold that is not its own
+        add("JADE_SESSION_ID", True, "fixes the session id the CLI uses, so an old id could release an SI-07 hold or acknowledge answers of another session")
     if env.get("JADE_SOURCE") == "test":   # W-72: tags every row, so a persisted tag hides gated calls from the statistics and the pending-permit notice
         add("JADE_SOURCE", True, "tags every ledger row `test`, which leaves its gated calls out of `jade ledger stats` and out of the pending-permit notice")
     for var in ("JADE_REGISTRY_DIR", "JADE_CLAUDE_SETTINGS", "JADE_BIN"):

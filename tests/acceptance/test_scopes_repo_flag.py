@@ -170,6 +170,7 @@ def test_a_per_worktree_config_gives_no_scope(short):
     assert merge_keys(MERGE, cwd) == []
 
 
+@pytest.mark.timing
 def test_a_fifo_repo_config_gives_no_scope_and_does_not_block(short):
     root = short / "r"
     (root / ".git").mkdir(parents=True)
@@ -185,6 +186,7 @@ def test_a_repo_config_that_is_not_utf8_gives_no_scope(short):
     assert merge_keys(MERGE, cwd) == []
 
 
+@pytest.mark.timing
 def test_keys_for_is_fast(repo):
     a = policy.assess("Bash", {"command": MERGE}, repo)
     t = time.perf_counter()

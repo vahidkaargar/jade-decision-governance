@@ -14,10 +14,13 @@ from dataclasses import dataclass, field
 from policies.loader import RoutingError
 
 from . import adapter, ledger, ops, paths, questions, redact, route, thresholds
-from .util import LEVELS, canonical, session_id, sha256, state_language
+from .util import LEVELS, canonical, normalise_obj, session_id, sha256, state_language
 
 STATE_CAP = 32 * 1024
 DAILY_BUDGET = 500
+# V6-24 (H16): `jade ask --no-cache` (a human or a test run) may ask the provider again for the same claim and evidence this many times in all, the first answer
+# included. After that the stored answer comes back and no provider call is made. The number is a first guess: SP-1 (evals/spikes.py) measures the noise.
+NO_CACHE_SAMPLES = 3
 
 
 @dataclass
@@ -114,7 +117,9 @@ def prepare(specs: list[Spec], state: dict) -> tuple[dict, int, bool, bool]:
 
 
 def run(specs: list[Spec], state: dict, *, risk: str = "low", session: str | None = None, decision_id: str | None = None,
-        provider=None, model: str | None = None, db: ledger.Ledger | None = None, use_cache: bool = True) -> AskResult:
+        provider=None, model: str | None = None, db: ledger.Ledger | None = None, use_cache: bool = True, resample_cap: int | None = None) -> AskResult:
+    """`use_cache=False` asks the provider even for a repeat. `resample_cap` (only the `--no-cache` path sets it) bounds those fresh samples per claim and
+    evidence, journals each one, and makes a fresh answer never looser than the first one on the same text. The human proxy sets neither."""
     session = session or session_id()
     model = resolve_model(model)
     warnings: list[str] = []
@@ -141,7 +146,7 @@ def run(specs: list[Spec], state: dict, *, risk: str = "low", session: str | Non
         warnings.append(f"ledger unavailable ({type(e).__name__}); this call is not journaled")
     try:
         return _run(specs, items, state, hits, warnings, risk=risk, session=session, decision_id=decision_id, provider=provider, model=model,
-                    db=db, use_cache=use_cache)
+                    db=db, use_cache=use_cache, resample_cap=resample_cap)
     except Exception as e:  # noqa: BLE001 - fail closed: whatever broke, no row stays EVALUATING and the answer is exit 5, never a yes or a traceback
         for it in items:
             it.answer, it.verdict, it.cached, it.exit_code, it.error_kind = None, None, False, 5, "INTERNAL"
@@ -157,9 +162,19 @@ def run(specs: list[Spec], state: dict, *, risk: str = "low", session: str | Non
 
 
 def _run(specs: list[Spec], items: list[Item], state: dict, hits: int, warnings: list[str], *, risk: str, session: str, decision_id: str | None,
-         provider, model: str, db: ledger.Ledger | None, use_cache: bool) -> AskResult:
-    state_text, state_hash = canonical(state), sha256(canonical(state))
-    origs: dict[int, object] = {}
+         provider, model: str, db: ledger.Ledger | None, use_cache: bool, resample_cap: int | None = None) -> AskResult:
+    state_text, state_hash = canonical(state), hash_state(state)
+    origs: dict[int, object] = {}       # the stored answers that are served again
+    anchors: dict[int, object] = {}     # every answered original a repeat points at, served or not
+    priors: dict[int, object] = {}      # the first provider answer of ANY source (live or test tag): it holds a fresh sample to the first verdict and counts the cap
+    reasons: dict[int, str] = {}        # why a call is a repeat (DI-3a): exact, whitespace, no_cache, cap_hit
+    if db and decision_id:
+        risk, why = effective_risk(db, decision_id, risk)   # DI-4: the stricter of the caller's risk and the decision's
+        if why:
+            warnings.append(why)
+        capped = revision_cap_result(db, decision_id, items, hits, warnings)   # DI-5: no provider call once the revisions are used up
+        if capped is not None:
+            return capped
     if db:
         for i, it in enumerate(items):
             s = it.spec
@@ -168,12 +183,32 @@ def _run(specs: list[Spec], items: list[Item], state: dict, hits: int, warnings:
                                        state_bytes=len(state_text.encode()), state_text=state_text, risk=risk, redactions=hits, language=state_language(state),
                                        question_text=str(s.payload.get("instructions", ""))[:2000] + (" | " + str(state.get("claim", ""))[:500] if state.get("claim") else ""))
             row = db.get_call(it.call_id)
-            if use_cache and row.dedup_of:
+            if use_cache or resample_cap is not None:   # the human proxy path (neither) stays unconstrained
+                prior = db.find_first_answer(s.question_id, s.version, state_hash, claim_hash(s, state), session)
+                if prior is not None and prior.call_id != it.call_id and prior.answers_json and adapter.check_answer(json.loads(prior.answers_json), s.payload) is None:
+                    priors[i] = prior
+            if row.dedup_of:
                 orig = db.get_call(row.dedup_of)
                 if orig and orig.state == "DONE" and orig.answers_json and orig.exit_code in (0, 3, 4):
                     answer = json.loads(orig.answers_json)
                     if adapter.check_answer(answer, s.payload) is None:   # a stored answer is held to the same shape as a live one
-                        it.answer, it.cached, origs[i] = answer, True, orig
+                        anchors[i] = orig
+                        if use_cache:
+                            it.answer, it.cached, origs[i] = answer, True, orig
+                            reasons[i] = "exact" if (orig.state_text or "") == state_text[:ledger.STATE_CAP] else "whitespace"
+                        elif resample_cap is not None:
+                            if samples_of(db, priors.get(i) or orig) >= resample_cap:
+                                it.answer, it.cached, origs[i], reasons[i] = answer, True, orig, "cap_hit"
+                                warnings.append(f"--no-cache cap reached ({resample_cap} provider answers for this claim and evidence in this session); the stored answer is returned and nothing was sent")
+                            else:
+                                reasons[i] = "no_cache"
+            elif i in priors and resample_cap is not None and not use_cache:
+                # No anchor of this source, but the first answer is from another source (a run under `JADE_SOURCE=test` next to a live one): the same cap counts it.
+                if samples_of(db, priors[i]) >= resample_cap:
+                    it.answer, it.cached, origs[i], reasons[i] = json.loads(priors[i].answers_json), True, priors[i], "cap_hit"
+                    warnings.append(f"--no-cache cap reached ({resample_cap} provider answers for this claim and evidence in this session); the stored answer is returned and nothing was sent")
+                else:
+                    reasons[i] = "no_cache"
         today = db.one("SELECT COUNT(*) AS n FROM jev_calls WHERE ts >= strftime('%Y-%m-%dT00:00:00Z','now')").n
         if today > DAILY_BUDGET:
             warnings.append(f"daily call budget exceeded ({today} > {DAILY_BUDGET})")
@@ -197,6 +232,9 @@ def _run(specs: list[Spec], items: list[Item], state: dict, hits: int, warnings:
     for i, it in enumerate(items):
         s = it.spec
         orig = origs.get(i)
+        # A fresh answer is held to the first non-yes answer of this claim and evidence, from any source: the test tag does not start the claim over.
+        cands = [c for c in (orig, anchors.get(i) if resample_cap is not None else None, priors.get(i)) if c is not None]
+        first = next((c for c in cands if c.exit_code in (3, 4)), cands[0] if cands else None)
         if orig is not None:
             resolved = orig.resolved_model   # a repeat is judged in the group of the call that produced the answer
         else:
@@ -220,10 +258,10 @@ def _run(specs: list[Spec], items: list[Item], state: dict, hits: int, warnings:
             if db and it.call_id:
                 db.finish_call(it.call_id, error_kind="MALFORMED", exit_code=5, state="DONE")
             continue
-        if orig is not None and it.verdict.exit_code == 0 and orig.exit_code in (3, 4):
-            # A repeat is never looser than the first answer: a changed calibration or a lower risk cannot turn an abstain into a yes.
+        if first is not None and it.verdict.exit_code == 0 and first.exit_code in (3, 4):
+            # A repeat is never looser than the first answer: a changed calibration or a lower risk cannot turn an abstain into a yes, and neither can a fresh sample.
             v = it.verdict
-            it.verdict = thresholds.Verdict(orig.verdict or "ABSTAIN", orig.exit_code, v.value, v.accept, v.reject, v.group, f"repeat of an answered call: the first verdict ({orig.verdict}) stands")
+            it.verdict = thresholds.Verdict(first.verdict or "ABSTAIN", first.exit_code, v.value, v.accept, v.reject, v.group, f"repeat of an answered call: the first verdict ({first.verdict}) stands")
         it.exit_code = it.verdict.exit_code
         if db and it.call_id:
             db.finish_call(it.call_id, answers_json=it.answer, p=it.verdict.value, verdict=it.verdict.verdict, exit_code=it.exit_code,
@@ -232,6 +270,8 @@ def _run(specs: list[Spec], items: list[Item], state: dict, hits: int, warnings:
                            latency_ms=res.latency_ms if (res and not it.cached) else 0.0, input_tokens=res.input_tokens if (res and not it.cached) else None,
                            output_tokens=res.output_tokens if (res and not it.cached) else None,
                            cost_usd=(res.cost_usd or 0.0) / max(1, len(todo)) if (res and not it.cached) else 0.0)
+            if i == 0 and i in reasons:   # one event for the ask, not one for each question in its batch
+                journal_repeat(db, it.call_id, reasons[i], first_call=(first.call_id if first is not None else None))
     primary = items[0]
     result.exit_code = primary.exit_code
     if primary.cached:
@@ -247,9 +287,9 @@ def _run(specs: list[Spec], items: list[Item], state: dict, hits: int, warnings:
             elif it.verdict.verdict == "REJECT":
                 result.exit_code = 3
                 result.note = f"{it.spec.question_id} rejected (P={it.verdict.value:.2f}): the evidence looks like a summary; attach raw output"
-    if res and res.ok and res.resolved_model:
+    if res and res.ok and res.resolved_model and db:   # the note goes to the ledger this call uses, never to the JADE home by default (V6-11); no ledger, no note
         try:
-            ops.check_drift(None, res.resolved_model, ops.expected_models())
+            ops.check_drift(None, res.resolved_model, ops.expected_models(), db=db)
         except Exception as e:  # noqa: BLE001 - drift bookkeeping is informational
             warnings.append(f"drift check skipped ({type(e).__name__})")
     try:
@@ -267,8 +307,83 @@ def _run(specs: list[Spec], items: list[Item], state: dict, hits: int, warnings:
     return result
 
 
+def open_verify_decision(claim: str) -> str | None:
+    """V6-23: the decision a `jade ask verify` call with no `--decision` is attached to, so that its answer is linked and labels can join it later (165 decisions had
+    no call attached, and verify calls had no decision). It is always a new decision of this session: a decision the caller did not name is never advanced, and a
+    decision of another session is never touched. Returns None when the ledger cannot be opened or written: the call then runs, unlinked, as before."""
+    from . import decide
+
+    try:
+        db = ledger.open()
+        try:
+            return decide.open_decision(db, f"Verify claim: {claim}", route="JEV")["decision_id"]
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - linking is a bonus: it never stops the question
+        return None
+
+
+def hash_state(state: dict) -> str:
+    """The repeat key of a state (DI-3a): the hash of its text with colour codes, CRLF and trailing space and blank lines left out (`util.normalise_text`) and nothing
+    else. A text with none of those hashes as it always did, so stored anchors still match. What is sent and stored is the original text."""
+    return sha256(canonical(normalise_obj(state)))
+
+
 def claim_hash(spec: Spec, state: dict) -> str:
-    return sha256(canonical({"q": spec.payload, "claim": state.get("claim")}))
+    return sha256(canonical(normalise_obj({"q": spec.payload, "claim": state.get("claim")})))
+
+
+def effective_risk(db: ledger.Ledger, decision_id: str, risk: str) -> tuple[str, str]:
+    """DI-4: the stricter of the risk the caller gave (`--risk`, default low) and the risk recorded for the decision it names. Returns (risk, a sentence when the
+    decision raised it). An unknown decision or one with no readable level leaves the risk as given. The link only binds when `--decision` is given."""
+    row = db.one("SELECT risk_level FROM decisions WHERE decision_id=?", (decision_id,))
+    level = row.risk_level if row else None
+    if level in LEVELS and LEVELS[level] > LEVELS.get(risk, 0):
+        return level, f"risk raised from {risk} to {level}: decision {decision_id} is rated {level}, so the answer is judged at {level}"
+    return risk, ""
+
+
+def samples_of(db: ledger.Ledger, anchor) -> int:
+    """How many times the provider answered this claim on this evidence: the original (`anchor`, an answered ledger row) and every fresh sample after it with the same
+    key, from any source (a `JADE_SOURCE=test` run does not get a second cap), not the answers served from the ledger. It reads by the index `calls_session` (session, question, state hash), as the repeat lookup does."""
+    return int(db.one("SELECT COUNT(*) AS n FROM jev_calls WHERE session_id=? AND question_id=? AND state_hash=? AND COALESCE(claim_hash,'')=COALESCE(?, '') AND ts>=? "
+                      "AND state='DONE' AND exit_code IN (0,3,4) AND COALESCE(provider,'')<>'cache'",
+                      (anchor.session_id, anchor.question_id, anchor.state_hash, anchor.claim_hash, anchor.ts)).n)
+
+
+def journal_repeat(db: ledger.Ledger, entity_id: str, reason: str, **detail) -> None:
+    """V6-24: one `ask_repeat` event for each ask that was a repeat (`exact`, `whitespace`, `no_cache`) or that was stopped (`cap_hit`), so `jade ledger stats` can
+    split `repeat_share` by reason. Never raises: a journal failure must not change an answer."""
+    try:
+        db.event(entity_id, "ask_repeat", guard=reason, detail={k: v for k, v in detail.items() if v is not None})
+    except Exception:  # noqa: BLE001, S110 - bookkeeping only
+        pass
+
+
+def revision_cap_result(db: ledger.Ledger, decision_id: str, items: list[Item], hits: int, warnings: list[str]) -> AskResult | None:
+    """DI-5: a decision that waits for evidence (ABSTAINED or NEEDS_EVIDENCE) with every revision used cannot take another one, so asking the provider again can
+    only buy a sample. No call is made and none is journaled as a call: the result is an abstain (exit 3, not a yes) that says to escalate or report the claim as
+    unverified. Anything else returns None and `run` goes on."""
+    from . import state_machine
+
+    row = db.one("SELECT status, revision_count, doc_json FROM decisions WHERE decision_id=?", (decision_id,))
+    if row is None or row.status not in ("ABSTAINED", "NEEDS_EVIDENCE") or row.revision_count < state_machine.MAX_REVISIONS:
+        return None
+    refs = json.loads(row.doc_json).get("evaluation_refs") or []
+    last = db.get_call(refs[-1]) if refs else None
+    note = (f"revision cap: decision {decision_id} used all {state_machine.MAX_REVISIONS} revisions and is still {row.status}; nothing was sent. "
+            "Escalate to the human, or report the claim as unverified")
+    for it in items:
+        it.exit_code, it.error_kind = 3, "REVISION_CAP"
+    p = items[0]
+    p.verdict = thresholds.Verdict("ABSTAIN", 3, last.p if last else None, None, None, "", f"the last verdict stands ({row.status})")
+    if last and last.answers_json and last.question_id == p.spec.question_id:
+        try:
+            p.answer = json.loads(last.answers_json)
+        except ValueError:
+            p.answer = None
+    journal_repeat(db, decision_id, "cap_hit", revision_count=row.revision_count, status=row.status)
+    return AskResult(items, 3, note, redactions=hits, warnings=warnings)
 
 
 def find_repeat(db: ledger.Ledger, question_id: str, state: dict, *, options=None, session: str | None = None):
@@ -276,7 +391,7 @@ def find_repeat(db: ledger.Ledger, question_id: str, state: dict, *, options=Non
     does, after the same redaction and cap, so a hit here is a hit there."""
     spec = registry_spec(question_id, options=options)
     prepared, _, _, _ = prepare([spec], dict(state))
-    return db.find_repeat(spec.question_id, spec.version, sha256(canonical(prepared)), claim_hash(spec, prepared), session or session_id())
+    return db.find_repeat(spec.question_id, spec.version, hash_state(prepared), claim_hash(spec, prepared), session or session_id())
 
 
 # ---- rendering -------------------------------------------------------------------------------------
@@ -299,7 +414,9 @@ def explain(result: AskResult) -> list[str]:
     out = [f"jade: warning: {w}" for w in result.warnings]
     it = result.primary
     cid = f" call={it.call_id}" if it.call_id else ""
-    if result.exit_code == 3:
+    if result.exit_code == 3 and it.error_kind == "REVISION_CAP":
+        out.append(f"jade: ABSTAIN, exit 3 ({result.note}). Not a yes: do not ask again; more evidence will not be sent.")
+    elif result.exit_code == 3:
         why = result.note or (it.verdict.reason if it.verdict else "")
         out.append(f"jade: ABSTAIN, exit 3 ({why}). Not a yes: add raw evidence and re-ask, or tell the user it is unverified.{cid}")
     elif result.exit_code == 4:

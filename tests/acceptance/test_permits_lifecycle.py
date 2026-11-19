@@ -1,6 +1,7 @@
 """Review cluster B: permits and the decision lifecycle (F06-F13, F16, G08).
 
 Each test reproduces one finding against the real hook, CLI or module with an isolated home (tests/conftest.py) and no network."""
+# ruff: noqa: F811   (the `approver` fixture is imported from the signed-approval tests and then named as a test argument)
 import json
 import os
 import sqlite3
@@ -9,6 +10,7 @@ import subprocess
 import pytest
 
 from jade import cli, decide, hooks, ledger, paths, permits, policy, state_machine, util
+from tests.acceptance.test_signed_approval_w89 import approver, put_doc, row_doc  # noqa: F401
 
 REAL_ANCESTOR = util.agent_ancestor  # tests/conftest.py replaces util.agent_ancestor for every test; this is the real one
 PUSH = "git push origin v1-feat-x"
@@ -553,7 +555,7 @@ def test_f12_auto_label_does_not_trust_a_succeeded_status_without_an_observed_ou
     db.con.execute("UPDATE decisions SET status='SUCCEEDED' WHERE decision_id=?", (d["decision_id"],))  # a stray write, no outcome row
     assert evals.auto_label(db)["observed"] == 0
     db.con.execute("INSERT INTO outcomes(outcome_id, decision_id, doc_json, ts) VALUES('out_aaaaaaaaaaaa', ?, ?, '2026-11-09T00:00:00Z')",
-                   (d["decision_id"], json.dumps({"observation_type": "observed", "success": True})))
+                   (d["decision_id"], json.dumps({"observation_type": "observed", "success": True, "measurements": {"goal_check": "human"}})))   # DI-8
     assert evals.auto_label(db)["observed"] == 1
 
 
@@ -575,3 +577,117 @@ def test_ledger_tx_is_re_entrant_and_rolls_back_as_a_whole():
             pass  # the inner savepoint is rolled back, the outer carries on
         raise ValueError("then the outer fails too")
     assert db.meta_get("c") is None and db.meta_get("d") is None
+
+
+# ---- V6-17: N15 to N17 of the v6 plan (docs/14-v6/05 section 9.2): a forged row, an agent as principal, a replay ----------------------
+# N15 on the signed backend uses the approver fixture of the signed-approval tests (a throw-away key and anchor, no sudo, no terminal).
+
+
+def _forge_issued(db, p, *, reference, reseal):
+    """A row flipped to ISSUED with SQL, with the fields of a human approval. `reseal` is an attacker who read the seal key (W-41)."""
+    _, doc = row_doc(db, p.permit_id)
+    doc.update(state="ISSUED", principal="human:attacker", approval_reference=reference, issued_at=util.ts(), expires_at=util.ts_in(1800))
+    with db.tx() as con:
+        con.execute("UPDATE permits SET state='ISSUED', issued_at=?, expires_at=? WHERE permit_id=?", (doc["issued_at"], doc["expires_at"], p.permit_id))
+    put_doc(db, p.permit_id, doc, reseal=reseal)
+
+
+def test_n15_tty_backend_a_forged_row_that_is_not_resealed_is_refused(human_env):
+    db = ledger.open()
+    assert hooks.pretool(call(PUSH)).exit_code == 2
+    p = pending(db)
+    _forge_issued(db, p, reference="tty:attacker@" + util.ts(), reseal=False)
+    assert hooks.pretool(call(PUSH)).exit_code == 2
+    why = permits.try_consume(db, p.permit_id, p.plan_hash, level="high", session="sess-aaaaaaaa")
+    assert why is not None and "seal" in why   # the seal stops a casual or injected edit
+
+
+def test_n15_tty_backend_a_forged_row_resealed_with_the_key_is_accepted_and_this_documents_the_weakness(human_env):
+    """Not a pass of the design: on the tty backend the seal key is a same-user file (docs/05 T19, W-41), so a process that can read it can forge a human approval.
+    The signed backend (next test) is the answer. If this test ever fails, the tty backend got stronger: say so in docs/05 and turn it into a refusal test."""
+    db = ledger.open()
+    assert hooks.pretool(call(PUSH)).exit_code == 2
+    _forge_issued(db, pending(db), reference="tty:attacker@" + util.ts(), reseal=True)
+    assert hooks.pretool(call(PUSH)).exit_code == 0
+
+
+def test_n15_signed_backend_a_forged_row_resealed_with_the_key_is_refused(approver):
+    db = ledger.open()
+    assert hooks.pretool(call(PUSH)).exit_code == 2
+    p = pending(db)
+    _forge_issued(db, p, reference="sig:attacker@" + util.ts(), reseal=True)
+    assert hooks.pretool(call(PUSH)).exit_code == 2
+    why = permits.try_consume(db, p.permit_id, p.plan_hash, level="high", session="sess-aaaaaaaa")
+    assert why is not None and "signature" in why
+    assert permits.get(db, p.permit_id).state == "ISSUED"   # refused, not used
+
+
+def test_n15_signed_backend_a_tty_style_reference_resealed_with_the_key_is_refused(approver):
+    db = ledger.open()
+    assert hooks.pretool(call(PUSH)).exit_code == 2
+    _forge_issued(db, pending(db), reference="tty:attacker@" + util.ts(), reseal=True)
+    assert hooks.pretool(call(PUSH)).exit_code == 2
+
+
+@pytest.mark.parametrize("risk", ["high", "critical"])
+def test_n16_an_agent_cannot_issue_a_high_or_critical_permit(risk, human_env):
+    db = ledger.open()
+    with pytest.raises(permits.PermitError, match="never issued directly"):
+        permits.issue(db, "git.push", "f" * 64, risk=risk)
+    assert permits.listing(db, ("PENDING", "ISSUED")) == []
+
+
+def test_n16_a_permit_the_agent_issued_does_not_cover_a_high_command_even_with_a_rewritten_risk(human_env):
+    db = ledger.open()
+    a = policy.assess("Bash", {"command": PUSH}, "/tmp/x")
+    p = permits.issue(db, "git.push", a.plan_hash, risk="medium")   # the principal is `agent:<user>`
+    assert hooks.pretool(call(PUSH)).exit_code == 2
+    db.con.execute("UPDATE permits SET risk_level='high' WHERE permit_id=?", (p.permit_id,))
+    assert hooks.pretool(call(PUSH)).exit_code == 2
+    assert permits.get(db, p.permit_id).state == "ISSUED"
+
+
+@pytest.mark.parametrize("var", ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CURSOR_AGENT", "CODEX_SANDBOX", "AI_AGENT"])
+def test_n16_an_agent_cannot_approve_a_high_permit_from_a_session_that_names_a_harness(var, monkeypatch, human_env):
+    db = ledger.open()
+    assert hooks.pretool(call(PUSH)).exit_code == 2
+    p = pending(db)
+    monkeypatch.setenv(var, "1")
+    with pytest.raises(permits.ApprovalRefused, match="agent harness"):
+        permits.approve(db, p.permit_id, stdin_isatty=True)   # a pty does not change it
+    assert permits.get(db, p.permit_id).state == "PENDING" and hooks.pretool(call(PUSH)).exit_code == 2
+
+
+def test_n16_the_cli_refuses_an_agent_too_and_the_permit_stays_pending(monkeypatch, capsys, human_env):
+    db = ledger.open()
+    assert hooks.pretool(call(PUSH)).exit_code == 2
+    p = pending(db)
+    monkeypatch.setenv("CLAUDECODE", "1")
+    monkeypatch.setattr("builtins.input", lambda prompt="": p.plan_hash[:6])
+    assert cli.main(["permit", "approve", p.permit_id]) == 1
+    assert "agent" in capsys.readouterr().err and permits.get(db, p.permit_id).state == "PENDING"
+
+
+def test_n17_a_consumed_permit_is_not_used_again_by_the_same_session(human_env):
+    db, p = executed(PUSH, session="sess-aaaaaaaa")
+    assert permits.get(db, p.permit_id).state == "CONSUMED"
+    assert hooks.pretool(call(PUSH, session="sess-aaaaaaaa")).exit_code == 2
+    assert permits.try_consume(db, p.permit_id, p.plan_hash, level="high", session="sess-aaaaaaaa") == "the permit is CONSUMED"
+
+
+def test_n17_a_consumed_permit_is_not_replayed_from_a_second_session(human_env):
+    db, p = executed(PUSH, session="sess-aaaaaaaa")
+    r = hooks.pretool(call(PUSH, session="sess-bbbbbbbb"))
+    assert r.exit_code == 2 and permits.get(db, p.permit_id).state == "CONSUMED"
+    assert permits.try_consume(db, p.permit_id, p.plan_hash, level="high", session="sess-bbbbbbbb") == "the permit is CONSUMED"
+
+
+def test_n17_a_consumed_permit_reset_to_issued_with_sql_is_still_not_replayed_from_a_second_session(human_env):
+    """The state and the use counter are columns, not part of the seal. The consume event in the ledger and the session binding still refuse the replay."""
+    db, p = executed(PUSH, session="sess-aaaaaaaa")
+    db.con.execute("UPDATE permits SET state='ISSUED', uses=0 WHERE permit_id=?", (p.permit_id,))
+    for session in ("sess-bbbbbbbb", "sess-aaaaaaaa"):
+        r = hooks.pretool(call(PUSH, session=session))
+        assert r.exit_code == 2, (session, r.stderr[:200])
+    why = permits.try_consume(db, p.permit_id, p.plan_hash, level="high", session="sess-bbbbbbbb")
+    assert why is not None, why

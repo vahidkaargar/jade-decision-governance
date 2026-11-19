@@ -1,6 +1,6 @@
 """`jade setup`: the human-only, idempotent first-run wizard (REL-2, docs/08 section 2).
 
-It walks the steps a person otherwise types one by one: check the prerequisites, start in advisory mode, install the hooks, replace the Jev section of
+It walks the steps a person otherwise types one by one: check the prerequisites, start in advisory mode, record an explicit `jev off` when the key is unset, install the hooks, replace the Jev section of
 CLAUDE.md, install the skill, write and load the daily maintenance job (macOS), then run `jade check` and say what is active. Every change goes through
 the function that already does it (`ops.set_gate_mode`, `ops.hooks_install`, `ops.claude_md_apply`, `ops.launchd_plist`), so the same guards, backups and
 atomic writes apply. Each step is shown first with the exact change and its undo, asks y/N, and is skipped when it is already done, so a second run
@@ -162,6 +162,20 @@ def _gate_mode_setting() -> str | None:
     return cfg.get("gate_mode") if isinstance(cfg, dict) else None
 
 
+def _jev_state() -> State:
+    """The `jev` key (V6-28, Q-07, ADR-v6-03 point 6): a new install records an explicit `off`, so no model is asked until the owner runs `jade jev on`. A key that
+    is already set (on or off) is the owner's and is never changed; a value that is neither is refused, as the gate step refuses a broken file."""
+    if problem := _config_problem():
+        return State("conflict", f"{problem}; setup never rewrites it (fix or move it yourself, then run `jade setup` again)")
+    cfg = paths.config()
+    value = cfg.get("jev") if isinstance(cfg, dict) else None
+    if value in ("on", "off"):
+        return State("done", f"jev is {value} in the configuration")
+    if value is None:
+        return State("todo", "jev is not set (at level low or medium that means on)")
+    return State("conflict", "the jev value in the configuration is neither on nor off (it reads off); run `jade jev unset` or `jade jev off` yourself")
+
+
 def _gate_state() -> State:
     if problem := _config_problem():
         return State("conflict", f"{problem}; setup never rewrites it (fix or move it yourself, then run `jade setup` again)")
@@ -270,6 +284,10 @@ def _make_actions(stdin_isatty: bool | None) -> list[Action]:
         ops.set_gate_mode("advisory", stdin_isatty)
         return "gate mode advisory"
 
+    def jev_apply() -> str:
+        ops.set_jev("off", stdin_isatty)
+        return "jev off (no model is asked)"
+
     def hooks_apply() -> str:
         backup = ops.hooks_install(stdin_isatty)
         return f"hooks installed in {_tilde(ops.settings_path())} ({f'backup {_tilde(backup)}' if backup else 'no earlier file, no backup'})"
@@ -319,6 +337,9 @@ def _make_actions(stdin_isatty: bool | None) -> list[Action]:
         Action("gate", 2, "gate mode", _gate_state,
                lambda: f'set "gate_mode": "advisory" in {_tilde(paths.config_dir() / "config.json")} (other keys stay). Advisory records would_block (or safety_block) events and never blocks',
                lambda: "jade gate enforce (or jade gate off), run by you in a terminal", gate_apply),
+        Action("jev", 2, "jev setting", _jev_state,
+               lambda: f'set "jev": "off" in {_tilde(paths.config_dir() / "config.json")} (other keys stay) and record it in the ledger. With off, JADE asks no model and sends nothing to openrouter.ai, not even in shadow',
+               lambda: "jade jev on (to allow Jev) or jade jev unset (back to the level's default), run by you in a terminal", jev_apply),
         Action("hooks", 3, "Claude Code hooks", _hooks_state, _hooks_change,
                lambda: "jade hooks uninstall (removes only JADE's own entries, keeps a backup)", hooks_apply),
         Action("claude-md", 4, "CLAUDE.md Jev section", _claude_md_state,

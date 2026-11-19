@@ -125,7 +125,7 @@ def test_auto_label_joins_only_the_call_that_gated_the_decision(tmp_path):
     refs = decide.get(db, did)["evaluation_refs"]
     assert refs == [gate.primary.call_id]
     db.con.execute("UPDATE decisions SET status='SUCCEEDED' WHERE decision_id=?", (did,))
-    db.con.execute("INSERT INTO outcomes(outcome_id, decision_id, doc_json, ts) VALUES('o1', ?, ?, ?)", (did, json.dumps({"observation_type": "observed", "success": 1}), ts()))
+    db.con.execute("INSERT INTO outcomes(outcome_id, decision_id, doc_json, ts) VALUES('o1', ?, ?, ?)", (did, json.dumps({"observation_type": "observed", "success": 1, "measurements": {"goal_check": "human"}}), ts()))   # DI-8
     assert evals.auto_label(db)["observed"] == 1
     labelled = {r.call_id: r.label for r in db.all("SELECT call_id, label FROM labels")}
     assert labelled == {gate.primary.call_id: 1}      # not the rejected call on another claim, not the evidence_is_raw companion
@@ -264,6 +264,7 @@ def _body():
     return json.dumps({"answers": {"q": {"type": "noul", "noul": 0.9}}, "model": "typesafe/jev-1.14-20261014", "id": "r"}).encode()
 
 
+@pytest.mark.timing
 def test_a_slow_drip_body_cannot_hold_the_caller_past_the_deadline(monkeypatch, tmp_path):
     class Drip(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
@@ -562,6 +563,7 @@ def test_a_canary_needs_a_human_or_the_standing_opt_in(tmp_path, agent_env, monk
         improve.start_canary(db, c.candidate_id)
 
 
+@pytest.mark.timing
 def test_shadow_work_never_slows_ask_run(tmp_path, monkeypatch):
     """The improvement plane is not on the hot path: with every evaluator stubbed to sleep, `ask.run` is as fast as without."""
     for fn in ("shadow", "replay_threshold", "protected_check", "evaluate", "start_canary"):

@@ -261,8 +261,9 @@ def test_t5_an_agent_cannot_walk_a_high_risk_decision_to_authorized_on_a_model_a
     db = ledger.open()
     doc = decide.open_decision(db, "push the feature branch", command=PUSH, session="sess-tttttttt")
     assert doc["risk"]["level"] == "high"
-    for ev in ("route", "jev_result_accept"):
-        assert cli.main(["decide", "event", doc["decision_id"], ev]) == 0
+    assert cli.main(["decide", "event", doc["decision_id"], "route"]) == 0
+    assert cli.main(["decide", "event", doc["decision_id"], "jev_result_accept"]) == 1   # V6-24 (H17): an agent no longer sends a Jev result at all
+    decide.step(db, doc["decision_id"], "jev_result_accept")                              # the model's answer, as `jade ask` records it
     assert cli.main(["decide", "event", doc["decision_id"], "authorize"]) == 1
     assert decide.get(db, doc["decision_id"])["status"] == "ACCEPTED"
 
@@ -379,6 +380,7 @@ def test_an_ambiguous_prefix_inside_a_slug_is_not_a_token(text):
     assert redact_mod.redact(text) == (text, 0) and not redact_mod.residual(text)
 
 
+@pytest.mark.timing
 def test_redaction_of_glued_text_stays_linear():
     import time
     text = ("xsk-" + "ab" * 20 + "_") * 4000 + "ghp_" * 4000

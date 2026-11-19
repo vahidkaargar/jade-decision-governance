@@ -115,6 +115,7 @@ def test_the_reading_of_origin_main_is_not_capped():
         assert shellnorm._base_skeleton(command) == shellnorm_base.skeleton(command)
 
 
+@pytest.mark.timing
 def test_a_long_prefix_costs_a_few_times_what_origin_main_cost():
     command = PAD + "\n<&- echo git push origin main | sh"
     shellnorm._skeleton_both_top.cache_clear()

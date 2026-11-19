@@ -49,6 +49,35 @@ EGRESS_MARK = egress.MARK  # marker prefix R-21 matches: curl, wget or nc sendin
 RECORDED_RULES = ("R-30", "R-31", "R-32")  # rules below the permit floor whose hits the hook journals (events `secret_read`, `blind_spot`): not gated, but counted so a soak report can size them
 BLIND_MARK = blind.BLIND_MARK   # marker prefix R-31 matches: `blind:<label> <command>`, a command the classifier cannot read (W-31)
 FETCH_MARK = blind.FETCH_MARK   # marker prefix R-22 matches: fetched or decoded text that runs as code (W-31)
+GH_MERGE_MARK = "gh:merge-api "   # marker prefix R-10 matches: a `gh api` call that merges a pull request, or whose query or route the gate cannot read (V6-08, N20); the segment text has the quoted query blanked
+_GH_MERGE_MUTATION = re.compile(r"\b(?:mergePullRequest|enablePullRequestAutoMerge|mergeBranch)\b")
+# A GraphQL call whose query is not text on the command line: a file (`-F query=@q.graphql`; gh reads it), stdin (`--input`), a variable or a substitution (`query="$Q"`), or no query
+# field at all. The gate cannot see a merge there, so the call is asked about like a merge (V6-08 review, N20). A query in single quotes, or in double quotes without a `$` or a
+# backtick, is text the gate reads: `gh api graphql -f query='query { viewer { login } }'` stays a read.
+_GH_QUERY_UNREAD = re.compile(
+    r"""(?<![\w-])--input(?![\w-])|\bquery=["']?@|\bquery=(?:\$|`)|\bquery="(?:[^"\\$`]|\\.)*[$`]""")
+_GH_QUERY_FIELD = re.compile(r"\bquery=")
+# The last part of a pull request route is a variable or a substitution (`pulls/3/$m`, `pulls/3/$(echo merge)`): a merge the literal route rule cannot see.
+_GH_ROUTE_UNREAD = re.compile(r"(?<![\w-])pulls/[^\s/]+/[^\s/]*[$`]")
+
+
+_GH_API_WORDS = re.compile(r"(?<![\w.-])(?:gh|glab)\s+api(?![\w.-])")
+_GH_REST_MERGE = re.compile(r"(?<![\w-])(?:pulls|merge_requests)/[^\s/]+/merge(?![\w-])|(?<![\w-])repos/[^\s/]+/[^\s/]+/merges(?![\w-])")   # the routes risk.yaml R-10 rates by name
+
+
+def gh_api_merge_in(text: str) -> bool:
+    """Does the text of a call hold a `gh api` call that merges a pull request, or whose query or route the gate cannot read (`_gh_api_merges`)? Read from the plain text of
+    the call, so it errs towards yes. Memory keeps such a call as an exact answer at most and Jev never judges it, as for `gh pr merge` (integration of V6-08 and V6-06b)."""
+    return bool(_GH_API_WORDS.search(text)) and (bool(_GH_REST_MERGE.search(text)) or _gh_api_merges(text.split(), text))
+
+
+def _gh_api_merges(words: list[str], text: str) -> bool:
+    """`words` is a `gh api` call: it merges a pull request, or its query or route is one the gate cannot read (so it is asked about)."""
+    if _GH_MERGE_MUTATION.search(text) or _GH_ROUTE_UNREAD.search(text):
+        return True
+    if any(w.rstrip("/").rsplit("/", 1)[-1] == "graphql" for w in words[2:]):
+        return bool(_GH_QUERY_UNREAD.search(text)) or not _GH_QUERY_FIELD.search(text)
+    return False
 PATH_RULES = ("R-01", "R-04", "R-12", "R-13", "R-16", "R-18", "R-24")  # the rules about where a write lands: they also see relative operands made absolute
 WRITE_KEYS = ("file_path", "notebook_path", "path", "filePath", "file", "filepath", "target_file", "file_name", "filename", "target")
 CONTENT_KEYS = {"content", "new_string", "old_string", "new_str", "old_str", "new_source", "text", "contents", "data", "source", "patch"}
@@ -802,6 +831,67 @@ def _assess_read(tool: str, tool_input: dict, cwd: str) -> Assessment:
 
 def _reads_the_seal_key(inv: dict, tool: str, tool_input: dict, cwd: str) -> bool:
     targets, globs = read_targets(tool, tool_input)
+    return _seal_key_reached(inv, tool, targets, globs, cwd)
+
+
+# Argument names of an MCP file reader or file search (Desktop Commander: `path`, `paths`, `pattern`, `filePattern`, `searchType`; other servers: the same
+# ideas under other spellings). V6-18 c, N22 (W-73): SI-10 reads these like the Read, Grep and Glob tools do.
+_MCP_PATH_KEYS = frozenset({*WRITE_KEYS, *PATH_KEYS, "paths", "files", "file_paths", "filepaths", "uri", "root", "cwd"})
+_MCP_GLOB_KEYS = frozenset({"glob", "filepattern", "file_pattern", "include"})
+_MCP_MAX_TARGETS = 256
+_MCP_MAX_STRING = 4096
+
+
+def _mcp_strings(v) -> list[str]:
+    """The non-empty strings of a value that is a string or a list of strings (one level of list), short enough to be a path. A list or a string over the
+    limits is cut here and counted as reaching the key by `mcp_targets_overflow`."""
+    items = v if isinstance(v, (list, tuple)) else [v]
+    return [x for x in items[:_MCP_MAX_TARGETS] if isinstance(x, str) and x.strip() and len(x) <= _MCP_MAX_STRING]
+
+
+def mcp_read_targets(tool: str, tool_input: dict) -> tuple[str, list[str], list[str]]:
+    """(kind, paths, globs) an MCP call with no command names. `kind` is "Grep" for a content search (a recursive search of a directory reads every file in
+    it) and "Read" otherwise. A `pattern` is a path glob, except in a content search, where it is a regular expression over file content and never a target
+    (as the Grep tool: a search for the text `permit-seal.key` in the docs reads no key)."""
+    if not isinstance(tool_input, dict):
+        return "Read", [], []
+    content = str(tool_input.get("searchType", "")).lower() == "content" or "grep" in tool.lower()
+    paths_, globs = [], []
+    for k, v in tool_input.items():
+        lk = str(k).lower()
+        if lk in _MCP_PATH_KEYS:
+            paths_ += _mcp_strings(v)
+        elif lk in _MCP_GLOB_KEYS or (lk == "pattern" and not content):
+            globs += _mcp_strings(v)
+    return ("Grep" if content else "Read"), paths_, globs
+
+
+def mcp_targets_overflow(tool: str, tool_input: dict) -> bool:
+    """Does a path or glob argument of an MCP call hold more than `_MCP_MAX_TARGETS` entries, or a string longer than a path can be? `mcp_read_targets` keeps
+    only the first entries, so the key could hide behind decoys (`read_multiple_files` with 256 other paths first). Such a call counts as reaching the key."""
+    if not isinstance(tool_input, dict):
+        return False
+    content = str(tool_input.get("searchType", "")).lower() == "content" or "grep" in tool.lower()
+    for k, v in tool_input.items():
+        lk = str(k).lower()
+        if lk in _MCP_PATH_KEYS or lk in _MCP_GLOB_KEYS or (lk == "pattern" and not content):
+            items = v if isinstance(v, (list, tuple)) else [v]
+            if len(items) > _MCP_MAX_TARGETS or any(isinstance(x, str) and len(x) > _MCP_MAX_STRING for x in items):
+                return True
+    return False
+
+
+def _mcp_reads_the_seal_key(tool: str, tool_input: dict, cwd: str) -> bool:
+    inv = next((i for i in safety()["invariants"] if i["id"] == "SI-10"), None)
+    if inv is None:
+        return False
+    if mcp_targets_overflow(tool, tool_input):   # fail closed: what the scan below would leave out could be the key
+        return True
+    kind, targets, globs = mcp_read_targets(tool, tool_input)
+    return (bool(targets) or bool(globs)) and _seal_key_reached(inv, kind, targets, globs, cwd)
+
+
+def _seal_key_reached(inv: dict, tool: str, targets: list[str], globs: list[str], cwd: str) -> bool:
     names = list(inv.get("block_globs", []))
     rx = inv.get("_re")
     # the file name in the text of a path or a glob (not in a Grep pattern), also behind quoting and `..` segments
@@ -920,7 +1010,7 @@ _STATE_LITERAL = re.compile(r"\.config/jade(?![\w.-])|\.local/share/jade(?![\w.-
 _INSTALL_CMD = re.compile(r"\b(?:uv\s+tool\s+(?:install|upgrade|reinstall)|uv\s+pip\s+install|pip3?\s+install|pipx\s+(?:install|upgrade|reinstall)|python3?\s+-m\s+pip\s+install)\b")
 _UV_TOOL_JADE = re.compile(r"\buv\s+tool\s+(?:uninstall|upgrade|reinstall|install)\b[^;&|]*\bjade|\buv\s+tool\s+(?:uninstall|upgrade|reinstall)\b[^;&|]*--all\b")   # R-13: changes or removes the installed JADE tool itself, whatever it installs from
 _SETTINGS_FILE = re.compile(r"(?:^|/)\.claude/settings(?:\.local)?\.json$")
-_SETTINGS_DISABLE = re.compile(r"disableAllHooks|allowManagedHooksOnly|JADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME|REGISTRY_DIR)|\"hooks\"\s*:\s*(?:\{\s*\}|null)", re.I)
+_SETTINGS_DISABLE = re.compile(r"disableAllHooks|allowManagedHooksOnly|JADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME|REGISTRY_DIR|SESSION_ID)|CLAUDE_CODE_SESSION_ID|\"hooks\"\s*:\s*(?:\{\s*\}|null)", re.I)
 TERMINAL_TOOLS = frozenset({"mcp__terminal__run_in_terminal"})
 
 
@@ -1082,6 +1172,9 @@ def _shell_roots() -> tuple[str, ...]:
     return tuple(dict.fromkeys(out))
 
 
+_real_shell_roots = _shell_roots   # tests/conftest.py swaps `_shell_roots` for one that returns (); the case runner (evals/run_cases.py) puts this one back for a case that sets a level
+
+
 def _written_text(tool_input: dict) -> str:
     """The new text a Write, Edit, MultiEdit or NotebookEdit call carries ('' when it carries none the gate can read)."""
     parts = [str(tool_input[k]) for k in ("content", "new_string", "new_source") if isinstance(tool_input.get(k), str)]
@@ -1092,6 +1185,43 @@ def _written_text(tool_input: dict) -> str:
 
 
 _SCRIPT_READ_MAX = 1 << 20
+_JSON_U_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
+
+
+def _settings_disables(text: str | None) -> bool:
+    """Does the text of a settings file turn the JADE hooks off or move JADE (`disableAllHooks`, `JADE_GATE_MODE` ...)? JSON lets a key be written with `\\uXXXX`
+    escapes, so the text is read both as written and with the escapes decoded. None (the result could not be worked out) counts as yes."""
+    if text is None:
+        return True
+    return bool(_SETTINGS_DISABLE.search(text) or _SETTINGS_DISABLE.search(_JSON_U_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), text)))
+
+
+def _settings_result(tool_input: dict, subject: str, cwd: str) -> str | None:
+    """The whole text a Write, Edit or MultiEdit leaves in the settings file `subject`, or None when the gate cannot work it out (a call that carries no text, a file
+    it cannot read or that is over 1 MiB, an `old_string` that is not in the file). An Edit only carries a piece, so a key split over two calls (`disableAllH`, then
+    `H"` to `Hooks"`) shows only in the whole result."""
+    content = tool_input.get("content")
+    if isinstance(content, str):
+        return content
+    edits = [e for e in (tool_input.get("edits") or []) if isinstance(e, dict)]
+    if isinstance(tool_input.get("old_string"), str) and isinstance(tool_input.get("new_string"), str):
+        edits.append(tool_input)
+    if not edits:
+        return None
+    path = _realpath(os.path.join(cwd or os.getcwd(), _expand_home(subject)))
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) > _SCRIPT_READ_MAX:
+            return None
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read(_SCRIPT_READ_MAX)
+    except (OSError, ValueError):
+        return None
+    for e in edits:
+        old, new = e.get("old_string"), e.get("new_string")
+        if not isinstance(old, str) or not isinstance(new, str) or not old or old not in text:
+            return None
+        text = text.replace(old, new) if e.get("replace_all") else text.replace(old, new, 1)
+    return text
 
 
 def _script_names_state(f: str, dirs: tuple[str, ...], cwd: str) -> bool:
@@ -1178,7 +1308,7 @@ def _ho_tool_paths(a: Assessment, tool_input: dict, subjects: list[str], cwd: st
             _ho_add(a, HO_SHELL)
         if _SETTINGS_FILE.search(_path_key(s, cwd)):
             text = _written_text(tool_input) if text is None else text
-            if not text or _SETTINGS_DISABLE.search(text):   # unreadable text counts: it could be anything
+            if not text or _settings_disables(text) or _settings_disables(_settings_result(tool_input, s, cwd)):   # unreadable text counts: it could be anything
                 _ho_add(a, HO_SETTINGS)
 
 
@@ -1532,6 +1662,9 @@ def _assess_tool(tool: str, tool_input: dict, cwd: str) -> Assessment:
         for ident in sorted(humanonly.tool_classes(tool) | (humanonly.tool_classes(f"{tool}__{tool_input['action']}") if isinstance(tool_input.get("action"), str)
                                                               and re.fullmatch(r"[\w-]{1,40}", tool_input["action"]) else set())):
             _ho_add(a, ident)
+    if is_mcp(tool) and _mcp_reads_the_seal_key(tool, tool_input, cwd):   # V6-18 c: an MCP file reader or search that can reach the permit seal key (SI-10)
+        _raise_to(a, Assessment(level="critical", rule_id="SI-10", rationale="MCP call that can read the permit seal key", reversibility="irreversible",
+                                blast_radius="service", data_sensitivity="secret", blocked=["SI-10"]))
     if rule.get("paths"):
         _si12_tool_paths(a, list(_path_args(tool_input)), cwd)
         _ho_tool_paths(a, tool_input, list(_path_args(tool_input)), cwd)
@@ -1700,6 +1833,8 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
             marks.append(FETCH_MARK)
         elif fetched:
             fetched.update(blind.copies_of(words, fetched))   # `mv a b; bash b`: the copy is the fetched file under another name
+        if len(words) > 1 and words[0].rsplit("/", 1)[-1] == "gh" and words[1] == "api" and _gh_api_merges(words, text_in):
+            marks.append(GH_MERGE_MARK)   # the query is quoted text, so the whole command is read, as for a SQL client below
         seg_labels = [lab for lab in (blind.script_label(words, known), "computed-cwd" if computed and _computed_write(_bare(seg)) else None) if lab]
         labels.extend(seg_labels)
         marks.extend(f"{BLIND_MARK}{lab} " for lab in seg_labels)
@@ -1762,7 +1897,7 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     a.ho_ids = list(ho.ho_ids)
     if HO_STATE not in a.ho_ids and any(_STATE_LITERAL.search(e) for e in extra):   # a script the command runs names the JADE state paths: what it does there is not the gate's to read
         _ho_add(a, HO_STATE)
-    if a.rule_id == "R-17":
+    if a.rule_id == "R-17" or "R-17" in gated_rules:   # V6-17 review: also a second command (`ssh host 'git config core.hooksPath x'`, `a; git config core.hooksPath x`), not only the top rule
         _ho_add(a, HO_R17)
     _seal(a, tool, subject, cwd, subject)
     a.hold_key = sha256(canonical({"shell": sorted(set(gated_keys or keys))}))

@@ -27,12 +27,18 @@ from . import blind, interp
 MAX_DEPTH = 8
 MAX_NEST = 60
 BUDGET = 4_000_000     # characters the scanner may read across all nested levels; past it the rest is searched as plain text
-HERE_ALLOWANCE = 6_000_000   # characters more that the here-strings of a chain may be read for: a text that the budget charged already comes back once per level
+VARIABLE_WORK = 1500  # characters of nested stages (and one for each flat stage) that may be read again with the values of the variable that is their command word, for the whole text (V6-08 review)
+_NESTED_OPEN = re.compile(r"\$\(|`|[<>]\(")   # a stage that holds one of these holds another text that is read, and may hold a stage of this kind again
+HERE_ALLOWANCE = 6_000_000  # characters more that the here-strings of a chain may be read for: a text that the budget charged already comes back once per level
 UNSAFE_MARK = "@unsafe!"   # prefix of the copy of a stage whose verb can write or run something, so rules see its resolved operands
 UNSAFE_GIT = "git:unsafe-config "
+VAR_CAP = "cap:var-readings "   # marker prefix R-10 matches: the work allowance for reading variable commands with their values ran out (VARIABLE_WORK)
 TEXT_MARK = "@text!"   # prefix of a line the scanner extracted from a program (`import jade.cli`): words for the invariants to read, no operands to resolve
 
-NULL_REDIRECT = re.compile(r"(\d*>&\d+|&>>?\s*/dev/null|\d*>>?\s*/dev/null|\d*<\s*/dev/null)")
+# Same matches as the frozen copy's pattern, in linear time (V6-08, WT W-104): a descriptor only starts at the start of a run of digits. Without `(?<!\d)` the engine tried every
+# start inside a long run of digits and read the rest of the run again each time, so eight times the digits took about 55 times as long.
+NULL_REDIRECT = re.compile(r"((?:(?<!\d)\d+)?>&\d+|&>>?\s*/dev/null|(?:(?<!\d)\d+)?>>?\s*/dev/null|(?:(?<!\d)\d+)?<\s*/dev/null)")
+NULL_REDIRECT_OLD = r"(\d*>&\d+|&>>?\s*/dev/null|\d*>>?\s*/dev/null|\d*<\s*/dev/null)"   # the pattern as it was, kept for the test that the two match alike
 # A redirect as the shell reads it, wherever it stands in the command: an optional descriptor that starts a word (`2>log`; in `a2>log` the 2 is part of `a2`), the
 # operator (`&>`, `&>>`, `>>`, `>&`, `>|`, `>`, `<<<`, `<<HEREDOC` as the scanner spells a heredoc, `<&`, `<>`, `<`), and the target word, which may follow after blanks (`>&-main` closes a descriptor and then names the word `main`: a `-` right after `>&` or `<&` is the whole target).
 REDIRECT = re.compile(r"(?P<fd>(?<!\S)\d+)?(?P<op><<HEREDOC|(?:&>>?|>>?&?)[|!]?|<<<|<&|<>|<)(?:(?<!HEREDOC)[ \t]*(?P<tgt>(?<=[<>]&)-|[^\s<>&|]*))?")   # `[|!]`: zsh `>|`, `>!`, `>>|`, `>&!`, `&>>|` ...
@@ -41,10 +47,15 @@ SPLIT = re.compile(r"\n|;|&&|\|\||(?<!>)(?<!>&)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\
 _RUN_OPT = r"(?:(?:-w|-p|--with|--with-requirements|--with-editable|--python|--project|--directory|--package|--group|--env-file|--extra|--from|--index|--index-url)\s+\S+|--?[A-Za-z][\w-]*(?:=\S+)?)"
 _RUNNER = (r"(?:uv(?:\s+tool)?\s+run|uvx|poetry\s+run|pdm\s+run|pipenv\s+run|rye\s+run|hatch\s+run|pipx\s+run|conda\s+run|npx|bunx|pnpm\s+(?:exec|dlx)"
            rf"|yarn\s+(?:exec|dlx)|npm\s+exec)(?:\s+(?:{_RUN_OPT}|--))*")
-PREFIX = re.compile(
-    r"^(?:(?:" + _RUNNER + r"|[A-Za-z_]\w*=\S*|sudo(?:\s+(?:-[ugphCDrtUT]\s+\S+|-[A-Za-z-]+))*|command(?!\s+-[A-Za-z]*[vV]\b)|builtin|nohup|time|exec|noglob|nocorrect|do|then|else|if|while|until|!"
-    r"|env(?:\s+-[A-Za-z-]+)*|g?timeout(?:\s+-\S+)*\s+\d+[smhd]?|nice(?:\s+-n?\s*\d+)?|caffeinate(?:\s+-\w+)*"
-    r"|xargs(?:\s+-(?:I\s*\S+|n\s*\d+|P\s*\d+|[0a-zA-Z]+))*)\s+)+")
+# The programs that only start the next word as a program. V6-17 review: each may be spelled with its directory (`/usr/bin/env`, `/usr/bin/sudo`), and `arch`, `watch`,
+# `script` (the macOS form `script -q /dev/null CMD`; not `-c`, which takes a command text) and `corepack` start the next program too. A command run through one of them is the
+# same call for the floor: `/usr/bin/env npm publish` is `npm publish`.
+_LAUNCHER = (r"(?:" + _RUNNER + r"|sudo(?:\s+(?:-[ugphCDrtUT]\s+\S+|-[A-Za-z-]+))*|command(?!\s+-[A-Za-z]*[vV]\b)|builtin|nohup|time(?:\s+-[A-Za-z]+)*"
+             r"|exec(?:\s+(?:-a\s+\S+|-[cl]+))*|noglob|nocorrect"
+             r"|env(?:\s+-[A-Za-z-]+)*|g?timeout(?:\s+-\S+)*\s+\d+[smhd]?|nice(?:\s+-n?\s*\d+)?|caffeinate(?:\s+-\w+(?:\s+\d+)?)*"
+             r"|xargs(?:\s+-(?:I\s*\S+|n\s*\d+|P\s*\d+|[0a-zA-Z]+))*"
+             r"|arch(?:\s+-\S+)*|watch(?:\s+-[A-Za-z-]+(?:=\S+)?(?:\s+\d+(?:\.\d+)?)?)*|script(?!(?:\s+-[A-Za-z-]+)*\s+(?:-[A-Za-z]*c(?![A-Za-z])|--command))(?:\s+-[abd-zA-Z]+)*\s+\S+|corepack(?=\s+(?:npm|npx|pnpm|pnpx|yarn)\b))")
+PREFIX = re.compile(r"^(?:(?:(?:(?:/[\w.+-]+)*/)?" + _LAUNCHER + r"|[A-Za-z_]\w*=\S*|do|then|else|if|while|until|!)\s+)+")
 
 ALIAS_TAIL = re.compile(r"\s-c\s+alias\.[^\s=]*=$")
 GIT_VALUE = re.compile(r"(?:^|[\s(;&|])(?:\S*/)?git(?:\s+\S+)*?\s+-[Cc]\s+$|--(?:git-dir|work-tree|namespace)=$|--(?:git-dir|work-tree|namespace)\s+$")
@@ -56,12 +67,17 @@ CODE_FLAG = re.compile(r"-[a-zA-Z]*[ceEr]|--eval|--print|--command")
 AWK_NAMES = {"awk", "gawk", "mawk", "nawk"}
 SHELL_NAME = re.compile(r"^(?:ba|z|da|k|a|fi|c|tc)?sh$")
 PLAIN = re.compile(r"[^\\'\"$`<\n;(){}&|#]+")
+# Characters that Python calls white space and that the shell does not split a word at (bash and zsh split at a space, a tab and a newline): `a<U+2003>b` is one word. They are
+# written as the encoded blank, so a later `split()` of the text keeps the word whole (V6-08 review, N19).
+_SPACELIKE = re.compile("[\x0b\x0c\x1c-\x1f\x85\xa0  -     　]")
 _INERT = re.compile(r"[;&|<>(){}`]")   # characters a quoted word may hold that the splitter and the redirect check would read as syntax
 
 HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|(\\?)([^\s;&|<>()'\"\\`$]+))")
 HEREDOC_AT = re.compile(r"(?<!<)" + HEREDOC_OP.pattern + r"(?!<)")   # a heredoc operator, not the end of `<<<`
+# A word that starts with `#` ends the stage: the shell ignores it and the rest of the line (V6-08, N18). Before, ` # x` after `| sh` read as two arguments
+# and hid that the stage reads its pipe as code.
 NEXT_STAGE = re.compile(
-    r"[ \t]*(?:\w+=\S*[ \t]+)*(?:(?:sudo|env|command|exec|nohup|time|xargs)(?:[ \t]+-[ugphCDrtUT][ \t]+\S+|[ \t]+-\S+(?:[ \t]+\d+)?)*[ \t]+)*[\\'\"]?(?P<w>[\w./+-]+)['\"]?(?P<a>(?:[ \t]+(?!\d+[<>])[^\s;&|()<>`$]+)*)(?:[ \t]+\d+(?=[<>]))*[ \t]*(?=$|[;&|()\n<>])")
+    r"[ \t]*(?:\w+=\S*[ \t]+)*(?:(?:sudo|env|command|exec|nohup|time|xargs)(?:[ \t]+-[ugphCDrtUT][ \t]+\S+|[ \t]+-\S+(?:[ \t]+\d+)?)*[ \t]+)*[\\'\"]?(?P<w>[\w./+-]+)['\"]?(?P<a>(?:[ \t]+(?!\d+[<>])(?!#)[^\s;&|()<>`$]+)*)(?:[ \t]+\d+(?=[<>]))*(?:[ \t]+(?=#)|[ \t]*(?=$|[;&|()\n<>]))")
 PIPE_REST = re.compile(r"\|(?!\|)")
 PRODUCER = re.compile(r"^\s*(?:echo|printf|print|cat|yes)\b(?:\s+-[a-zA-Z]+)*")
 PRINTER = re.compile(r"^\s*\\?(?:\S*/)?(?P<name>echo|printf|print|cat|yes)\b(?:\s+-[a-zA-Z]+)*")   # the program that prints, after `time`, `env`, `command`, `!`, `\echo`, `/bin/echo`
@@ -198,9 +214,18 @@ def _leaves_stdin(s: str, at: int) -> bool:
     return bool((m and m.group(1) != "0") or re.match(r"<&0(?!\d)", s[at:at + 4]))
 
 
+# The text of a stage up to the first separator the reader below stops at, with a backslash-newline counted as part of it (V6-08 review, N18): the length of the stage, not of the rest of the line.
+_STAGE_EXTENT = re.compile(r"(?:[^\n\\;&|()<>]|\\\r?\n|\\.)*", re.S)
+_CONTINUATION = re.compile(r"\\\r?\n")
+
+
 def _next_stage_kind(s: str, j: int) -> str | None:
     """What the stage that starts at s[j] does with its stdin: the language it reads as code, or None. A stage whose stdin is redirected from a heredoc, a
-    here-string or a file does not read the pipe at all (`curl .. | python3 - <<'PY'`)."""
+    here-string or a file does not read the pipe at all (`curl .. | python3 - <<'PY'`). A backslash-newline is no text to the shell, so it is taken out first:
+    `sh \\<NL># x` is `sh` and a comment, `| \\<NL>  sh` is `| sh` (V6-08 review, N18)."""
+    chunk = s[j:_STAGE_EXTENT.match(s, j).end() + 8]
+    if "\\\n" in chunk or "\\\r\n" in chunk:
+        s, j = _CONTINUATION.sub("", chunk), 0
     m = NEXT_STAGE.match(s, j)
     if not m:
         return None
@@ -215,6 +240,8 @@ def _next_stage_kind(s: str, j: int) -> str | None:
 
 def _rest_of_line_pipes_to_code(s: str, j: int) -> str | None:
     e = s.find("\n", j)
+    while 0 < e and (s[e - 1] == "\\" or s[e - 2:e] == "\\\r") and e + 1 < len(s):   # a continuation does not end the line (V6-08 review, N18)
+        e = s.find("\n", e + 1)
     line = s[j:len(s) if e < 0 else e]
     for m in PIPE_REST.finditer(line):
         kind = _next_stage_kind(line, m.end())
@@ -838,6 +865,29 @@ def shell_script(args: list[str]) -> tuple[str, list[str]] | None:
     return None
 
 
+_SSH_VALUE_OPTS = frozenset("BbcDEeFIiJLlmOopQRSWw")   # ssh options whose value is the next word (`-p 22`, `-i key`, `-o Opt=v`, `-J jump`)
+
+
+def ssh_remote(args: list[str]) -> str | None:
+    """The command text of `ssh [options] host command...` (decoded words, joined by a blank as ssh does), or None when no command is given (an interactive login)."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            i += 1
+            break
+        if not a.startswith("-") or a == "-":
+            break
+        if len(a) == 2 and a[1] in _SSH_VALUE_OPTS:
+            i += 2
+        elif re.fullmatch(r"-[A-Za-z]+", a) and a[-1] in _SSH_VALUE_OPTS and not any(c in _SSH_VALUE_OPTS for c in a[1:-1]):
+            i += 2   # `-fp 22`, `-Ni key`: flags, and the last one takes the next word (`-p22` and `-oOpt=v` carry their value and take one word)
+        else:
+            i += 1
+    rest = args[i + 1:] if i < len(args) else []   # args[i] is the host
+    return " ".join(rest) if rest else None
+
+
 def interp_code(args: list[str]) -> str | None:
     """The program text of `python -c`, `perl -e`, `node -p`, `ruby -e`, `php -r` ... (decoded), else None."""
     prev_flag = False
@@ -882,6 +932,50 @@ class _Scan:
         # expanded, so `'$X'` there stays a live expansion (security review PRE2-1).
         self.literal_end = literal_end if depth == 0 else 0
         self.legacy = len(budget) > 3 and budget[3]   # origin/main's reading of `"${NAME}"` (`$X`): the third reading of `_skeleton_both_top`
+        self.ssh = not (len(budget) > 4 and budget[4] is False)   # False: `ssh host 'cmd'` is one word list, `cmd` is not read as a command (the scope check, jade/scopes.py)
+        self.assigns: dict[str, list[str]] = {}   # `g=git` earlier in this text: the literal values a variable was given (V6-08, N19)
+
+    def _note_assignments(self, raw: str) -> None:
+        """A stage that is only `NAME=value` words (or `export NAME=value`) gives a shell variable a value. Every plain literal value a name was given is kept,
+        wherever the assignment stood (a subshell, a branch, before a later one): `_variable_command` reads a command named by that variable once for each of them.
+        A reading is only added, never taken away, so a guess about the scope of an assignment can cost an extra ask and never hides a command."""
+        if "=" not in raw or len(raw) > 400:
+            return
+        ws = words_of(raw)
+        while ws and ws[0] in ("then", "do", "else", "if", "while", "until", "!", "time"):   # `if x; then g=git; fi`
+            ws = ws[1:]
+        if ws and ws[0] in EXPORTISH:
+            ws = [w for w in ws[1:] if not w.startswith("-")]
+        if not ws or not all(ENV_ASSIGN.match(w) for w in ws):
+            return
+        for w in ws:
+            name, val = ENV_ASSIGN.match(w).groups()
+            val = _dec(val)
+            if val and re.fullmatch(r"[\w./+:=@%,~ -]+", val):
+                known = self.assigns.setdefault(name, [])
+                if val not in known and len(known) < 4:
+                    known.append(val)
+
+    def _variable_command(self, raw: str, deferred: list[str]) -> list[str]:
+        """The stage with its command word, a variable set earlier in this text (`$g`, `${g}`), written as each value it was given: `g=git; $g push origin main` is
+        also read as `git push origin main`. The stage as written is read as before, so this only adds readings.
+        The work is counted for the whole text (`VARIABLE_WORK`): a stage that holds a nested `$g $(...)` is read again once for every value at every level, which
+        doubles the work (or more) per level (V6-08 review). A stage with a nested substitution costs its length for each value, a flat stage costs one for each value.
+        Past the count the stage is not read with its values and the text carries the `cap:var-readings` mark, which risk.yaml rates R-10 (high): a text that long is asked about, so that
+        padding in front of a `$g push origin main` cannot switch the reading off (integration review of the V6-08 cap; a recorded-only mark would be looser than uncapped)."""
+        lead = raw.lstrip()
+        bare = PREFIX.sub("", lead, count=1)
+        m = re.match(r'"?\$(?:\{(\w+)\}|(\w+))"?', bare)   # `"$g"` expands as `$g` does (a single-quoted `'$g'` does not)
+        if not m or not (values := self.assigns.get(m.group(1) or m.group(2))):
+            return []
+        if len(self.budget) > 5:
+            cost = len(values) * (len(raw) if _NESTED_OPEN.search(raw) else 1)
+            if self.budget[5] < cost:
+                deferred.append(VAR_CAP + "...")   # rated R-10 (asked about), not R-31: a cap that only records would let padding switch the reading off (integration review)
+                return []
+            self.budget[5] -= cost
+        head = lead[:len(lead) - len(bare)]
+        return [head + v + bare[m.end():] for v in values]
 
     def _sub(self, text: str, step: float = 1) -> str:
         """The skeleton of a nested text. A text that is read again at the same depth (the stages of a pipeline are produced once per `|`, a text is read for every
@@ -1060,6 +1154,15 @@ class _Scan:
                 self._script(script, deferred)
                 if extras and (alt := _positional_args(script, extras)) != script:
                     self._script(alt, deferred)
+        elif cmd == "ssh":   # V6-17 review: `ssh host 'cmd'` runs `cmd` in a shell on the host: the floor reads it like `sh -c 'cmd'`
+            if self.ssh and (remote := ssh_remote(adec)):
+                self._script(remote, deferred)
+        elif cmd == "script":   # `script -qc 'cmd' /dev/null` (the Linux form): the text after -c is a shell command
+            for k, a in enumerate(adec):
+                if (a == "--command" or re.fullmatch(r"-[A-Za-z]*c", a)) and k + 1 < len(adec):
+                    self._script(adec[k + 1], deferred)
+                elif a.startswith("--command="):
+                    self._script(a.split("=", 1)[1], deferred)
         elif cmd == "su":
             for k, a in enumerate(adec):
                 if a in ("-c", "--command") and k + 1 < len(adec):
@@ -1160,8 +1263,14 @@ class _Scan:
             raw = s[raw_at:sep_at]
             if raw.strip():
                 self._stage(raw, deferred)
+                variants = self._variable_command(raw, deferred) if self.assigns else []   # `g=git; $g push origin main`
+                deferred.extend(self._sub(t) for t in variants)
+                self._note_assignments(raw)
+            else:
+                variants = []
             if pipe:
                 chain.append(raw)
+                chain.extend(variants)   # `g=curl; $g URL | sh`: the stage that fetches is read with the value of its variable too
                 whole.append(s[whole_at:sep_at])
                 if kind := _next_stage_kind(s, resume):
                     done, done_whole = fed.get(kind, (0, 0))   # `a | sh | sh | ...` hands each stage to a shell once, not once per shell
@@ -1208,7 +1317,7 @@ class _Scan:
                 i += 1
                 break
             if m := PLAIN.match(s, i):
-                emit(m.group())
+                emit(_SPACELIKE.sub("\x01", m.group()))
                 i = m.end()
             elif c == "\\":
                 if i + 1 >= n:
@@ -1222,6 +1331,8 @@ class _Scan:
                 else:
                     if d.isalnum() or d in ORDINARY_ESCAPE:
                         emit(d)
+                    elif d in " \t":
+                        emit(_enc(d))   # `my\ repo` is one word with a space in it, as `'my repo'` is (V6-08, N19): `git -C my\ repo push` read `my\` as the path and `repo` as the verb
                     elif _INERT.fullmatch(d):
                         emit(ESCAPED + d)   # `a\&>log`: a word `a&` and a `>` in one reading, a backslash and an operator in the other (`_readings`)
                         escaped = True
@@ -1366,6 +1477,8 @@ class _Scan:
         raw = s[raw_at:stop]
         if raw.strip():
             self._stage(raw, deferred)
+            if self.assigns:
+                deferred.extend(self._sub(t) for t in self._variable_command(raw, deferred))
         self.nest -= 1
         text = _readings("".join(out), braced, escaped)
         return text + "".join(f" ; {d} ; " for d in dict.fromkeys(deferred)), i   # a text produced for several pipes is written once
@@ -1397,26 +1510,30 @@ class _Scan:
 
 
 @functools.lru_cache(maxsize=16)
-def _skeleton_top(command: str, literal_end: int, legacy: bool = False) -> str:
-    return _skeleton(command, 0, None, literal_end, legacy)
+def _skeleton_top(command: str, literal_end: int, legacy: bool = False, ssh: bool = True) -> str:
+    return _skeleton(command, 0, None, literal_end, legacy, ssh)
 
 
-def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None, literal_end: int | None = None) -> str:
+def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None, literal_end: int | None = None, ssh: bool = True) -> str:
     """The command with quoting, escapes, comments, heredoc bodies and expansions resolved; separators are left for SPLIT.
 
     `literal_end`: single quotes before this index are literal (default: the whole text). A caller that appends text the command runs without writing
     it on the command line (a script it writes, an alias expansion) passes the length of the command, so the appended text keeps `'$X'` live.
 
     The top-level call is pure on a string, and one assessment asks for the same text several times (views, segments, masks),
-    so it is memoised: a 2 MB command is scanned once, not once per caller."""
+    so it is memoised: a 2 MB command is scanned once, not once per caller.
+
+    `ssh` False: the remote command of `ssh host 'cmd'` is not read as a command of its own (V6-17 review: by default it is, like `sh -c 'cmd'`). Only the check that
+    asks whether a call is one simple command (jade/scopes.py) passes False."""
     if _depth == 0 and _budget is None:
-        return _skeleton_top(command, len(command) if literal_end is None else literal_end)
+        return _skeleton_top(command, len(command) if literal_end is None else literal_end, False, ssh)
     return _skeleton(command, _depth, _budget)
 
 
-def _skeleton(command: str, _depth: int, _budget: list[int] | None, literal_end: int = 0, legacy: bool = False) -> str:
-    # `legacy` rides in the budget, which every nested scan shares: origin/main's reading of a quoted `${NAME}` (`$X`, see `_Scan`) at every depth
-    budget = _budget if _budget is not None else [BUDGET, HERE_ALLOWANCE, {}, legacy]
+def _skeleton(command: str, _depth: int, _budget: list[int] | None, literal_end: int = 0, legacy: bool = False, ssh: bool = True) -> str:
+    # `legacy` and `ssh` ride in the budget, which every nested scan shares: origin/main's reading of a quoted `${NAME}` (`$X`, see `_Scan`) and the reading of an ssh remote command, at every depth.
+    # The last slot is the work left for reading variable commands with their values (`VARIABLE_WORK`).
+    budget = _budget if _budget is not None else [BUDGET, HERE_ALLOWANCE, {}, legacy, ssh, VARIABLE_WORK]
     budget[0] -= len(command)
     command = _MARK_CHARS.sub("\x06", command)   # a byte that is one of the marks stays a word
     if _depth > MAX_DEPTH or budget[0] < 0:
@@ -1640,11 +1757,9 @@ _NOCORRECT = re.compile(r"(?<![\w./$-])nocorrect(?![\w./-])")
 
 
 def _base_skeleton(command: str) -> str:
-    from . import shellnorm_base
-
     # origin/main's own reading with its own budget (`BUDGET`, 4 000 000 characters): never cut earlier than it cut itself, so no command is read as less than main read it.
     # Its cost is main's cost too (a chain of pipelines nested six deep took 24 s there).
-    return _NOCORRECT.sub("nocorrect\x06", shellnorm_base.skeleton(command))
+    return _NOCORRECT.sub("nocorrect\x06", _base().skeleton(command))
 
 
 def _parts(command: str, literal_end: int | None = None) -> list[tuple[str, re.Pattern, re.Pattern]]:
@@ -1656,6 +1771,10 @@ def _parts(command: str, literal_end: int | None = None) -> list[tuple[str, re.P
 def _base():
     from . import shellnorm_base
 
+    if shellnorm_base.NULL_REDIRECT is not NULL_REDIRECT:
+        # The frozen copy is not edited (its hash is pinned), but its pattern for `2>&1` and `>/dev/null` took quadratic time on a long run of digits (V6-08, WT W-104). The
+        # linear pattern matches the same text (tests/test_null_redirect_linear.py), so main's reading is the same and only its cost changes.
+        shellnorm_base.NULL_REDIRECT = NULL_REDIRECT
     return shellnorm_base
 
 

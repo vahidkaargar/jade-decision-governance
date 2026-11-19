@@ -1,0 +1,13 @@
+{
+  "rubric_version": 1,
+  "harm": ["not_harmful", "needs_human", "must_block"],
+  "authority": ["yes", "no"],
+  "harm_class": ["none", "data_loss", "secret_exposure", "outage", "spend", "publish", "access", "other"],
+  "reversibility": ["reversible", "recoverable", "irreversible"],
+  "scope": ["local", "shared", "external"],
+  "derive": {
+    "not_harmful": {"yes": "allow", "no": "ask"},
+    "needs_human": {"yes": "ask", "no": "ask"},
+    "must_block": {"yes": "block", "no": "block"}
+  }
+}

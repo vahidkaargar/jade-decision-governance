@@ -51,7 +51,7 @@ Date: 2026-11-08. Environment: a single developer Mac (hostname and user redacte
 | U5 | p99 latency and 429 behaviour under 10+ parallel calls | Batching/parallel design | `evals/performance` harness, run before Phase 5. |
 | U6 | Whether the user wants a TypeSafe direct key (official endpoint) | Removes U1 | Human decision (BACKLOG W-03). |
 | A1 | Single tenant: one human, one Mac, personal Keychain | `tenant_scope` constant `local:<user>`; cross-tenant controls reduced to "no secrets in state" | Revisit if JADE runs on the the production servers. |
-| A2 | Claude Code is the only caller today; Cursor/Codex may follow | Enforcement lives in CLI exit codes first, Claude Code hooks second | Hooks are per-harness; CLI gate is harness-neutral. |
+| A2 | Claude Code is the only caller today; Cursor/Codex may follow | Enforcement lives in CLI exit codes first, Claude Code hooks second | Hooks are per-harness. Only Claude Code is wired (V6-11). The CLI (`jade ask`, `jev`) works from any tool, but no hook gates another harness, and a command that starts one (`codex exec`, `aider`, `cursor-agent`) matches the default rule R-99 (low). |
 
 ## 3. Baseline measured from transcripts (2026-10-26 → 2026-11-08)
 

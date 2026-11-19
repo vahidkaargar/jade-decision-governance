@@ -1,6 +1,6 @@
 # 06 — Roadmap, acceptance tests, rollout and rollback
 
-Completion states (plan §16): **DESIGN_READY** → **IMPLEMENTED** → **VALIDATED** → **PRODUCTION_APPROVED**. Status 2026-11-09: **IMPLEMENTED** and running live in advisory mode on the reference machine (hooks, CLAUDE.md section, skill, daily job, pre-push guard and remote ruleset installed by the human); not VALIDATED. Phases 1–5 are built and their acceptance tests pass; **VALIDATED** needs calendar time and real data (section "Implementation status" below); the harness wiring in `docs/08` is a human step.
+Completion states (plan §16): **DESIGN_READY** → **IMPLEMENTED** → **VALIDATED** → **PRODUCTION_APPROVED**. Status 2026-11-09: **IMPLEMENTED** and running live in advisory mode on the author's machine (hooks, CLAUDE.md section, skill, daily job, pre-push guard and remote ruleset installed by the human); not VALIDATED. Phases 1–5 are built and their acceptance tests pass; **VALIDATED** needs calendar time and real data (section "Implementation status" below); the harness wiring in `docs/08` is a human step.
 
 ## Phase 0 — Discover (done 2026-11-08)
 Inventory, live API probes, baseline mining, ADRs, contracts, policies, threat model, this roadmap. Evidence: `docs/00`, `evals/baseline/summary-2026-11-08.json`, `adapters/jev/probe_openrouter.py` output recorded in `docs/00` S1–S12.

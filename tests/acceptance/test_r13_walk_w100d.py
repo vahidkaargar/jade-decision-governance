@@ -72,7 +72,13 @@ TABLE = {
         (W(HOME / ".claude/settings.json"), LIVE), (W(HOME / ".claude/settings.local.json"), LIVE), (W(HOME / ".claude/hooks/x.sh"), LIVE),
         (W(HOME / ".claude/CLAUDE.md"), PLAIN)],
     r"\bAGENTS\.md\b": [(W(HOME / "AGENTS.md"), PLAIN), (W("/tmp/repo/AGENTS.md"), PLAIN)],
-    r"\.cursor/rules": [(W(HOME / ".cursor/rules/x.mdc"), PLAIN)],
+    r"\.cursor/(?:rules|mcp\.json)": [(W(HOME / ".cursor/rules/x.mdc"), PLAIN), (W(HOME / ".cursor/mcp.json"), PLAIN)],
+    # V6-08 (N23): agent instruction and configuration files, and the login keys file. A chat Allow may settle them: they are R-13 (never remembered), not live JADE wiring.
+    r"\.ssh/authorized_keys2?(?![\w.-])": [(W(HOME / ".ssh/authorized_keys"), PLAIN)],
+    r"(?<![\w.-])CLAUDE(?:\.local)?\.md(?![\w.-])": [(W("/tmp/repo/CLAUDE.md"), PLAIN), (W("/tmp/repo/CLAUDE.local.md"), PLAIN)],
+    r"(?<![\w.-])\.mcp\.json(?![\w-])": [(W("/tmp/repo/.mcp.json"), PLAIN)],
+    r"\.vscode/(?:settings|tasks)\.json": [(W("/tmp/repo/.vscode/settings.json"), PLAIN), (W("/tmp/repo/.vscode/tasks.json"), PLAIN)],
+    r"\.codex/config\.toml": [(W(HOME / ".codex/config.toml"), PLAIN)],
     r"\.ai/rules\.md": [(W("/tmp/repo/.ai/rules.md"), PLAIN)],
     r"policies/(?:[\w-]+\.(?:yaml|py)|local/)": [
         (W("/tmp/repo/policies/risk.yaml"), PLAIN), (W("/tmp/repo/policies/local/x.yaml"), PLAIN),

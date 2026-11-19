@@ -7,9 +7,11 @@ The owner reads simple English: short sentences, one idea each, at most 20 words
 
 from __future__ import annotations
 
+import dataclasses
 import re
 
 from . import policy, shellnorm
+from .util import show_safely
 
 # One plain sentence per rule id of policies/risk.yaml (tests check that none is missing and that none is longer than 20 words).
 RISK_TEXT: dict[str, str] = {
@@ -309,6 +311,11 @@ def _merge_notes(key: str) -> list[str]:
         notes.append("delete its branch (" + ("--remove-source-branch" if "--remove-source-branch" in flags else "-d") + ")")
     if gh and "--auto" in flags:
         notes.append("wait for the checks, then merge it (--auto)")
+    if not gh:   # glab: `--auto-merge` and `--when-pipeline-succeeds` merge later, when the pipeline passes (a `=false` value turns it off, so it is not a note)
+        for name in ("--auto-merge", "--when-pipeline-succeeds"):
+            if any(w == name or (w.startswith(name + "=") and w.split("=", 1)[1].lower() != "false") for w in words[3:]):
+                notes.append(f"wait for the pipeline, then merge it ({name})")
+                break
     if _NOT_PLAIN.search(key):
         notes.append("maybe more, because some words are not plain")
     return notes
@@ -326,14 +333,156 @@ def _merge_line(key: str, line: str) -> str:
     return f"{head}, " + ", ".join(notes[:-1]) + f", and {notes[-1]}."
 
 
+# V6-26: the line of every other family names what a flag lets the call do besides its base line, with the flag as written. A word that is not plain (`$X`, a glob) can be any
+# flag, so the line says that. Each rule reads the words of the canonical key and returns (tails, ands): a tail goes straight after the base sentence ("for every repository"),
+# an "and" clause is joined with "and" ("and delete the volumes"). A flag a rule does not know changes nothing here: only a flag that is known to widen the call is named.
+_UNPLAIN = re.compile(r"[$`*?\[\x06]")   # like _NOT_PLAIN, but `~` is a path here, not a flag
+_Rule = tuple[list[str], list[str]]
+
+
+def _flags(words: list[str]) -> set[str]:
+    return {w.split("=", 1)[0] for w in words if w.startswith("-")}
+
+
+def _letter(words: list[str], letter: str) -> bool:
+    """Is `letter` inside a cluster of short flags (`-fdx`)? A long flag (`--delete`) never counts."""
+    return any(_SHORT_FLAGS.fullmatch(w) and letter in w[1:] for w in words)
+
+
+def _clean(words: list[str]) -> _Rule:
+    ands = []
+    if _letter(words, "d"):
+        ands.append("also delete folders (-d)")
+    if _letter(words, "x"):
+        ands.append("also delete files that git ignores (-x)")
+    if _letter(words, "X"):
+        ands.append("also delete files that git ignores (-X)")
+    return [], ands
+
+
+def _config(words: list[str]) -> _Rule:
+    flags = _flags(words)
+    return [f"for {who} ({flag})" for flag, who in (("--global", "every repository of this user"), ("--system", "every user of this Mac")) if flag in flags], []
+
+
+def _rsync(words: list[str]) -> _Rule:
+    flags = _flags(words)
+    ands = []
+    if (dels := sorted(f for f in flags if f.startswith("--del") and f != "--delay-updates")):
+        ands.append(f"delete files at the target that are not in the source ({dels[0]})")
+    if "--remove-source-files" in flags:
+        ands.append("delete the source files after the copy (--remove-source-files)")
+    return [], ands
+
+
+def _docker_rm(words: list[str]) -> _Rule:
+    if len(words) < 3 or not ({"down", "rm"} & set(words[1:3])):   # `docker compose up`, `docker run`: no volume flag is read
+        return [], []
+    flags = _flags(words)
+    ands = []
+    if "--volumes" in flags or _letter(words, "v"):
+        ands.append("delete the volumes, which hold data (" + ("--volumes" if "--volumes" in flags else "-v") + ")")
+    if "--rmi" in flags:
+        ands.append("delete images (--rmi)")
+    if "--remove-orphans" in flags:
+        ands.append("remove other containers of the project (--remove-orphans)")
+    return [], ands
+
+
+def _live(words: list[str]) -> _Rule:
+    """kubectl, helm, terraform and the other tools that change a live server or app."""
+    flags = _flags(words)
+    ands = []
+    if "--all" in flags:
+        ands.append("act on every matching object (--all)")
+    if "-A" in flags or "--all-namespaces" in flags:
+        ands.append("act in every namespace (" + ("--all-namespaces" if "--all-namespaces" in flags else "-A") + ")")
+    if "--force" in flags:
+        ands.append("force it (--force)")
+    if "--prune" in flags:
+        ands.append("delete objects that are no longer in the files (--prune)")
+    if "-auto-approve" in flags or "--auto-approve" in flags:
+        ands.append("not ask you again (" + ("-auto-approve" if "-auto-approve" in flags else "--auto-approve") + ")")
+    return [], ands
+
+
+def _docker_push(words: list[str]) -> _Rule:
+    flags = _flags(words)
+    return [], (["push every tag of the image (" + ("--all-tags" if "--all-tags" in flags else "-a") + ")"] if "--all-tags" in flags or "-a" in flags else [])
+
+
+def _crontab(words: list[str]) -> _Rule:
+    return [], (["delete all of them (-r)"] if _letter(words, "r") else [])
+
+
+def _gist(words: list[str]) -> _Rule:
+    return [], (["let anyone read it (--public)"] if "--public" in _flags(words) else [])
+
+
+def _npm(words: list[str]) -> _Rule:
+    public = "--access=public" in words or any(a == "--access" and b == "public" for a, b in zip(words, words[1:], strict=False))
+    return [], (["let anyone read the package (--access public)"] if public else [])
+
+
+_SUDO = r"(?:sudo(?: -\S+)*\s+)?"
+_WIDEN: list[tuple[re.Pattern, object]] = [(re.compile(p), f) for p, f in (
+    (r"^" + _SUDO + r"git clean\b", _clean),
+    (r"^" + _SUDO + r"git config\b", _config),
+    (r"^" + _SUDO + r"rsync\b", _rsync),
+    (r"^" + _SUDO + r"docker(?: compose)? (?:up|down|rm)\b", _docker_rm),
+    (r"^" + _SUDO + r"(?:kubectl|helm|terraform|ansible-playbook|fly deploy|vercel)\b", _live),
+    (r"^" + _SUDO + r"docker push\b", _docker_push),
+    (r"^" + _SUDO + r"crontab\b", _crontab),
+    (r"^" + _SUDO + r"gh gist\b", _gist),
+    (r"^" + _SUDO + r"npm publish\b", _npm),
+)]
+
+
+def _compose(head: str, tails: list[str], ands: list[str]) -> str:
+    text = head[:-1] if head.endswith(".") else head
+    text += "".join(" " + t for t in tails)
+    if len(ands) == 1:
+        text += f" and {ands[0]}"
+    elif len(ands) == 2:
+        text += f", {ands[0]} and {ands[1]}"
+    elif ands:
+        text += ", " + ", ".join(ands[:-1]) + f", and {ands[-1]}"
+    return text + "."
+
+
+def _widen_line(key: str, line: str) -> str:
+    """The base line of a family, and what a flag of the call lets it do besides that (V6-26). Nothing is added to a plain call."""
+    words = key.split()
+    for rx, rule in _WIDEN:
+        if rx.match(key):
+            tails, ands = rule(words)
+            if _UNPLAIN.search(key):
+                ands.append("maybe more, because some words are not plain")
+            return _compose(line, tails, ands) if tails or ands else line
+    return line
+
+
+def _branch_line(key: str, line: str) -> str:
+    """`git branch -D a b c` deletes three branches, not one."""
+    words = key.split()
+    names = [w for w in words[2:] if not w.startswith("-")]
+    if len(names) >= 2:
+        line = f"Delete {len(names)} local branches."
+    return line[:-1] + ", maybe more, because some words are not plain." if _UNPLAIN.search(key) else line
+
+
 def _render(key: str) -> str:
     if key == "git push" or key.startswith("git push "):
         return _push_line(key)
     for rx, text in SEGMENT_TEXT:
         if m := rx.search(key):
             line = m.expand(text)
-            return _merge_line(key, line) if _MERGE_KEY.match(key) else line
-    return "Run: " + key[:FALLBACK_CHARS]
+            if _MERGE_KEY.match(key):
+                return _merge_line(key, line)
+            if key.startswith("git branch "):
+                return _branch_line(key, line)
+            return _widen_line(key, line)
+    return "Run: " + show_safely(key[:FALLBACK_CHARS], one_line=True)
 
 
 def _plain_push_call(subject: str) -> bool:
@@ -358,13 +507,13 @@ def what_line(a, tool: str) -> str:
         plain = _plain_push_call(getattr(a, "subject", "") or "")
         return " ".join(dict.fromkeys(_WORST_PUSH if not plain and (k == "git push" or k.startswith("git push ")) else _render(k) for k in keys))
     if tool.startswith("mcp__"):
-        parts = tool.split("__")
-        return f"Use {parts[1]}: {parts[-1].replace('_', ' ')}." if len(parts) > 2 else f"Use the tool {tool}."
+        parts = show_safely(tool, one_line=True).split("__")
+        return f"Use {parts[1]}: {parts[-1].replace('_', ' ')}." if len(parts) > 2 else f"Use the tool {show_safely(tool, one_line=True)}."
     if tool in ("Write", "MultiEdit", "NotebookEdit"):
         return "Write a file."
     if tool == "Edit":
         return "Edit a file."
-    return "Run a shell command." if tool in ("Bash", "PowerShell") else f"Use the tool {tool}."
+    return "Run a shell command." if tool in ("Bash", "PowerShell") else f"Use the tool {show_safely(tool, one_line=True)}."
 
 
 def other_count(a) -> int:
@@ -396,3 +545,99 @@ def header(a, tool: str) -> list[str]:
     if risky >= 2:
         lines.append(f"This call joins {risky} risky commands. Ask the agent to send them one by one.")
     return lines
+
+
+# ---- V6-26: one builder for the three places a human answers (chat question, macOS dialog, terminal permit screen) ----------------------------------------------------
+@dataclasses.dataclass(frozen=True)
+class Channel:
+    """What one place of answering does with an answer and with none. The caller reads the numbers from its own constants when it asks (`askchat.channel()`,
+    `askdialog.channel()`, `permits.channel(ttl_s)`), so a changed constant changes the text and no sentence promises a time that is no longer true."""
+    name: str                    # "chat", "dialog" or "permit"
+    wait_s: int                  # how long the question waits for an answer
+    allow_s: int | None = None   # how long an Allow can be used (the chat grant; the permit's own time)
+    deny_s: int | None = None    # after a Deny the same call is not asked again for this long
+    again_s: int | None = None   # after no answer the same call is not shown again for this long (the dialog)
+    deny_cap: int | None = None  # this many Denies of the same call end asking for good (the chat)
+
+
+@dataclasses.dataclass
+class Parts:
+    """The pieces of one question. `fields` are the five that policies/escalation.yaml promises. Each channel puts `head`, `where` and `closing` in its own order."""
+    fields: dict
+    head: list[str]
+    where: list[str]
+    closing: list[str]
+    options: list[dict]
+
+    @property
+    def lines(self) -> list[str]:
+        return [*self.where, *self.closing]
+
+
+def duration(seconds: int) -> str:
+    """600 -> '10 minutes', 90 -> '90 seconds', 3600 -> '1 hour'."""
+    n = int(seconds)
+    if n >= 3600 and n % 3600 == 0:
+        k, unit = n // 3600, "hour"
+    elif n >= 60 and n % 60 == 0:
+        k, unit = n // 60, "minute"
+    else:
+        k, unit = n, "second"
+    return f"{k} {unit}" + ("" if k == 1 else "s")
+
+
+def _no_answer(ch: Channel) -> str:
+    if ch.name == "dialog":
+        again = f" It is not shown again for {duration(ch.again_s)}." if ch.again_s else ""
+        return (f"If you do not answer in {duration(ch.wait_s)}, the dialog closes and the call stays blocked. "
+                f"It then needs a permit that you approve in a terminal.{again}")
+    if ch.name == "permit":
+        return f"If you do not approve it, the call stays blocked. This request expires after {duration(ch.wait_s)}."
+    return f"If you do not answer, the call stays blocked. This question expires after {duration(ch.wait_s)}."
+
+
+def _deny(ch: Channel) -> str:
+    if ch.name == "dialog":
+        return "Deny: the call does not run." + (f" It is not asked again for {duration(ch.deny_s)}." if ch.deny_s else "")
+    if ch.name == "permit":
+        return "Type n to refuse this request now. It is revoked and the agent is told when it asks again. A refusal is not a Deny. Type deny to record a Deny."
+    text = "Deny: the call does not run and the agent is told."
+    if ch.deny_s:
+        text += f" The same call is not asked again for {duration(ch.deny_s)}."
+    if ch.deny_cap:
+        text += f" After {ch.deny_cap} Denies of the same call it is not asked again."
+    return text
+
+
+def _allow(ch: Channel) -> str:
+    if ch.name == "permit":
+        return f"Approving allows exactly this call once within {duration(ch.allow_s or ch.wait_s)}."
+    if ch.name == "dialog":
+        return "Allow this one call? Single use, this session only."
+    return ("Allow this one call? It covers exactly this text, this tool, this folder and any run settings shown above. "
+            f"Single use, {duration(ch.allow_s or ch.wait_s)}, this session only. A changed text, prefix or folder asks again.")
+
+
+def build(a, tool: str, ch: Channel, *, folder: str, who: str) -> Parts:
+    """The text that every channel shares: the plain first lines, where the call runs and who asks, what Allow, Deny and no answer do, and the five fields of
+    policies/escalation.yaml (W-83). It states facts only: no advice, no history of earlier answers, no claim that a call can be undone. `folder` and `who` are written out
+    safely here. The command itself is not built here: each channel shows it in its own way."""
+    from . import thresholds
+
+    folder = show_safely(folder, one_line=True) if folder else "(not given)"   # one line: a folder name with a line break must not forge an "Asked by" or "Allow" line
+    who = show_safely(who, one_line=True)[:80]
+    head = header(a, tool)
+    where = [f"Folder: {folder}", f"Asked by: {who}"]
+    if ch.name == "permit":
+        options = [{"label": "Allow", "description": f"Approve it: the call can run once within {duration(ch.allow_s or ch.wait_s)}."},
+                   {"label": "Deny", "description": "Refuse it: type n to revoke the request, or deny to record a Deny."}]
+    else:
+        options = [{"label": "Allow", "description": "Run this one call once. It is not remembered."},
+                   {"label": "Deny", "description": "Do not run it. The agent is told you said no." + (f" It is not asked again for {duration(ch.deny_s)}." if ch.deny_s else "")}]
+    fields = {"context": "\n".join(where), "impact": "\n".join(head), "options": options,
+              "recommended_default": "With no answer, the call stays blocked.", "consequence_of_no_answer": _no_answer(ch)}
+    missing = [k for k in thresholds.escalation().get("human_question", {}).get("each_question_includes", []) if k not in fields]
+    if missing:
+        raise ValueError("policies/escalation.yaml asks every question to include " + ", ".join(missing) + ", which the question builder does not make")
+    closing = [_allow(ch), _deny(ch), fields["consequence_of_no_answer"]]
+    return Parts(fields=fields, head=head, where=where, closing=closing, options=options)

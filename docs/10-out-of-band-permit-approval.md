@@ -47,7 +47,7 @@ Enforce mode is only as strong as the approval. This is why W-38 is a preconditi
 ### 4.2 Flow
 
 1. The gate blocks a high call and creates a PENDING permit (unchanged).
-2. The agent reports the permit id. The human runs `jade permit approve prm_xxx` in their own terminal: the existing review and typed code, then sudo asks for their login password and the helper shows the message and asks for its code.
+2. The agent reports the permit id. The human runs `jade permit approve prm_xxx` in their own terminal: the review, then a typed code. With the signed backend, the code on that screen is the code of the message the helper signs (`signing.code_of`, V6-26), so the same code is typed twice: once on the screen, once at the helper. The screen fixes the end time of the approval before the code is shown, because the end time is part of the signed message. Then sudo asks for their login password and the helper shows the message and asks for its code. On the screen, `n` refuses the request now (the permit is revoked, the event `permit_refused` is journaled, no Deny is stored) and the word `deny` records a Deny. Anything else leaves the permit waiting.
 3. `jade permit approve` verifies the returned signature itself, then issues the permit with `approval_reference` `sig:<user>@<time>`.
 4. The agent retries the command. The hook rebuilds the message, verifies the signature against the root-owned anchor and consumes the permit once.
 
@@ -72,7 +72,7 @@ An independent adversarial review of the verifier, the helper and the install sc
 
 ## 5. Open points that need the maintainer
 
-1. **Create the approver account** (needs the admin password; the agent cannot, and should not): is a dedicated standard user acceptable on the Mac mini? The cost is one `sysadminctl` call and one sudoers drop-in, both in an install script the human reads and runs.
+1. **Create the approver account** (needs the admin password; the agent cannot, and should not): is a dedicated standard user acceptable on this machine? The cost is one `sysadminctl` call and one sudoers drop-in, both in an install script the human reads and runs.
 2. **Ledger write path (resolved in the implementation).** The approver account never touches the ledger: `jade permit approve` pipes the message to the helper and receives the signature on stdout, so no `attach` command exists and the ledger stays owned by one user. The signature is self-authenticating: the hook checks it, not who stored it.
 3. **Hardware key.** If you own a FIDO2 key and want touch-per-approval, say so: option C replaces the key, not the design.
 4. **Rollout rule (decided 2026-11-13).** `jade gate enforce` refuses to start while the backend is `tty` and the last 7 days show gated calls with no host prompt, unless the human passes `--allow-unsigned`, which is journaled as event `enforce_unsigned_override`.

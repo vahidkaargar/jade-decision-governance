@@ -199,6 +199,7 @@ def _cost(command: str) -> float:
     return time.process_time() - t
 
 
+@pytest.mark.timing
 def test_a_here_string_into_a_reader_that_runs_nothing_is_read_once():
     small = _cost("git commit -F - <<< '" + "the quick brown fox; (x) {y} " * 100 + "' | tail -1")
     big = _cost("git commit -F - <<< '" + "the quick brown fox; (x) {y} " * 3500 + "' | tail -1")   # 100 kB
@@ -206,6 +207,7 @@ def test_a_here_string_into_a_reader_that_runs_nothing_is_read_once():
     assert big < max(small, 0.005) * 100, (small, big)   # 35 times the text, nowhere near 35 squared
 
 
+@pytest.mark.timing
 def test_a_long_pipeline_of_here_string_stages_is_linear():
     def pipe(n: int) -> str:
         return " | ".join(f'grep -v x{i} <<< "$v"' for i in range(n))
@@ -214,12 +216,14 @@ def test_a_long_pipeline_of_here_string_stages_is_linear():
     assert big < max(small, 0.01) * 12, (small, big)   # 4 times the stages
 
 
+@pytest.mark.timing
 def test_a_long_pipeline_into_shells_with_a_descriptor_redirect_is_linear():
     small, big = _cost("a | sh 2>&1 " * 500), _cost("a | sh 2>&1 " * 2000)
     assert big < 6.0, big
     assert big < max(small, 0.02) * 12, (small, big)
 
 
+@pytest.mark.timing
 def test_nested_here_strings_in_substitutions_cost_the_same_at_every_depth():
     def nest(depth: int, inner: str) -> str:
         for _ in range(depth):
@@ -231,6 +235,7 @@ def test_nested_here_strings_in_substitutions_cost_the_same_at_every_depth():
     assert si08(deep)
 
 
+@pytest.mark.timing
 def test_many_cd_lines_with_an_unbalanced_paren_cost_a_few_times_the_plain_ones(tmp_path):
     (tmp_path / "sub").mkdir()
     odd = "cd sub || exit ; : \\) a{b\n" * 150 + "git push"

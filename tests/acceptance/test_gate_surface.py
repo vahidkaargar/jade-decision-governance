@@ -45,7 +45,7 @@ WRITE_TARGETS = [
     "/work/jade/jade/hooks.py", "/work/jade/jade/ops.py", "/work/jade/jade/paths.py",
     "/work/jade/policies/risk.yaml", "/work/jade/policies/routing.yaml", "/work/jade/policies/escalation.yaml", "/work/jade/policies/safety.yaml",
     "/work/jade/policies/promotion.yaml", "/work/jade/policies/loader.py", "/work/jade/policies/local/risk.local.yaml",
-    "~/Library/LaunchAgents/com.mobogift.jade.maintain.plist",
+    "~/Library/LaunchAgents/com.example.jade.maintain.plist",
 ]
 
 
@@ -61,7 +61,7 @@ BASH_WRITES = [
     "echo x > ~/.local/share/jade/jade.sqlite-wal", "cp /tmp/x ~/.local/share/jade/calibration/current.json", "mv ~/.local/share/jade ~/gone",
     "rm -r ~/.local/share/jade", "rm ~/.local/share/jade/jade.sqlite-shm", "rm -rf ~/.config/jade", "rm ~/.local/bin/jade", "ln -sf /tmp/x ~/.local/bin/jade",
     "uv tool uninstall jade-decision-governance", "uv tool install --force /Users/x/projects/jade", "uv tool upgrade jade-decision-governance",
-    "launchctl bootout gui/501/com.mobogift.jade.maintain", "launchctl unload ~/Library/LaunchAgents/com.mobogift.jade.maintain.plist",
+    "launchctl bootout gui/501/com.example.jade.maintain", "launchctl unload ~/Library/LaunchAgents/com.example.jade.maintain.plist",
     "sed -i '' s/enforce/off/ ~/.config/jade/config.json", "printf x >> ~/.local/share/uv/tools/jade-decision-governance/lib/python3.13/site-packages/jade/policy.py",
     "cd ~/.local/share/jade && sqlite3 jade.sqlite \"UPDATE permits SET state='ISSUED'\"", "sqlite3 /tmp/other/jade.sqlite 'delete from permits'",
     "cd ~/.config/jade && cp /tmp/x config.json", "cd ~/.claude && cp /tmp/x settings.json", "cd ~/.local/share/jade && rm pins.json",

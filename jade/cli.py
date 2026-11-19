@@ -99,7 +99,14 @@ def ask_main(argv: list[str], prog: str = "jade ask", provider=None) -> int:
         print(f"jade: dry run: {hits} redaction(s){', state truncated to 32 KiB' if cut else ''}; "
               f"{'a secret-shaped string survived redaction, a real call would be refused (exit 6)' if leaked else 'no secret-shaped string left'}", file=sys.stderr)
         return 0
-    result = ask.run(specs, state, risk=a.risk, decision_id=a.decision, provider=provider, model=a.model, use_cache=not a.no_cache)
+    decision = a.decision or (ask.open_verify_decision(a.text) if a.cmd == "verify" else None)   # V6-23: a verify call with no decision named gets its own, so it is linked
+    use_cache, resample_cap = True, None
+    if a.no_cache:   # H16: a fresh sample of the same text is for a human or a test run, and it is capped; an agent gets the stored answer
+        if is_human_tty() or paths.row_source() == "test":
+            use_cache, resample_cap = False, ask.NO_CACHE_SAMPLES
+        else:
+            print("jade: warning: --no-cache is for a human terminal or a test run; the stored answer is used when there is one", file=sys.stderr)
+    result = ask.run(specs, state, risk=a.risk, decision_id=decision, provider=provider, model=a.model, use_cache=use_cache, resample_cap=resample_cap)
     return ask.emit(result, raw=a.raw, as_json=a.json)
 
 
@@ -119,7 +126,10 @@ def _ask_stats(db, days: int) -> dict | None:
     arg = (f"-{days} days",)
     since = "strftime('%Y-%m-%dT%H:%M:%SZ','now',?)"
     live = ledger.live()
-    gated = db.one(f"SELECT COUNT(*) AS n FROM events WHERE kind='gated' AND ts>={since} AND {live}", arg).n  # noqa: S608 - constant fragments
+    from . import readouts
+
+    load = readouts.load_counts(db, readouts.since_days(days))   # V6-23: the one definition of a gated call, shared with `jade check`
+    gated = load["calls"]
     terminal = db.one(f"SELECT COUNT(*) AS n FROM events WHERE kind='permit_approved' AND ts>={since} AND {live}", arg).n  # noqa: S608
     answers: dict[str, dict[str, int]] = {}
     for r in db.all(f"SELECT channel, answer, COUNT(*) AS n FROM human_answers WHERE ts>={since} AND {live} GROUP BY channel, answer", arg):  # noqa: S608
@@ -135,7 +145,7 @@ def _ask_stats(db, days: int) -> dict | None:
     if gated:
         count = lambda ch: sum(answers.get(ch, {}).values())  # noqa: E731
         per = {"chat": round(100 * count("chat") / gated, 1), "dialog": round(100 * count("dialog") / gated, 1), "terminal": round(100 * terminal / gated, 1)}
-    return {"gated_calls": gated, "answers": answers, "terminal_approvals": terminal, "per_100_gated": per, "by_rule": by_rule}
+    return {"gated_calls": gated, "gated_events": load["gated_events"], "answers": answers, "terminal_approvals": terminal, "per_100_gated": per, "by_rule": by_rule}
 
 
 def _stats(a) -> int:
@@ -165,7 +175,19 @@ def _stats(a) -> int:
                     "events": {x.kind: x.n for x in db.all("SELECT kind, COUNT(*) AS n FROM events WHERE kind IN ('BYPASS','MODEL_DRIFT','INVALID_QUESTION','would_block','safety_block','secret_read','blind_spot') AND " + ledger.live() + " GROUP BY kind")}})
     if (asks := _ask_stats(db, a.days)) is not None:
         out["asks"] = asks
-    print(json.dumps(out, indent=1))
+    from . import readouts
+
+    since_ts = readouts.since_days(a.days)   # V6-23: the readouts that the plan's baseline needs; present in every output, empty ledgers show zeros and "not measured"
+    out["repeat_reasons"] = {x.guard: x.n for x in db.all("SELECT guard, COUNT(*) AS n FROM events WHERE kind='ask_repeat' AND ts>=? AND " + ledger.live() + " GROUP BY guard", (since_ts,))}   # V6-24: why asks were repeats (exact, whitespace, no_cache, cap_hit)
+    out["load"] = readouts.load_counts(db, since_ts)
+    out["friction"] = readouts.ask_load(db, since_ts)
+    out["verify_links"] = readouts.verify_links(db, since_ts)
+    out["label_coverage"] = readouts.label_coverage(db, since_ts)
+    out["shadow_agreement"] = readouts.shadow_agreement(db, since_ts)
+    if getattr(a, "json", False):   # one line, sorted keys, so a script or a diff reads it the same way every time
+        print(json.dumps(out, sort_keys=True, separators=(",", ":")))
+    else:
+        print(json.dumps(out, indent=1))
     return 0
 
 
@@ -216,13 +238,20 @@ def _permit(a) -> int:
         if a.yes:
             raise permits.PermitError("-y is not accepted: read the command, then type the code shown")
         print(permits.review_raw(db, p))  # raises instead of showing a command that was cut or does not match the plan hash; shows a secret only from the raw call W-43 keeps
-        code = permits.confirm_code(p)
-        if input(f"Type {code} to approve, anything else to refuse: ").strip().lower() != code:
-            print("not approved")
+        until = permits.approval_valid_until(p)   # V6-26: the screen shows the code it accepts; with the signed backend that is the code of the message the helper signs
+        code = permits.approval_code(db, p, until)
+        typed = input(f"Type {code} to approve, n to refuse it now, deny to record a Deny, anything else to leave it waiting: ").strip().lower()
+        if typed == code.lower():
+            p = permits.approve(db, a.permit_id, valid_until=until)
+            print(f"ISSUED until {p.expires_at}. The agent can now retry the identical call.")
+            return 0
+        if typed in ("n", "deny"):
+            permits.refuse(db, a.permit_id, deny=typed == "deny")
+            print("refused: the permit is revoked and the agent is told when it asks again. This is not a Deny." if typed == "n"
+                  else "refused: the permit is revoked and your Deny is recorded. The agent is told when it asks again.")
             return 1
-        p = permits.approve(db, a.permit_id)
-        print(f"ISSUED until {p.expires_at}. The agent can now retry the identical call.")
-        return 0
+        print("not approved; the permit is still waiting")
+        return 1
     except (permits.ApprovalRefused, permits.PermitError) as e:
         print(f"jade: {e}", file=sys.stderr)
         return 1
@@ -275,7 +304,8 @@ def _decide(a) -> int:
                       f"need an interactive human terminal ({why})", file=sys.stderr)
                 return 1
         elif not state_machine.agent_may(event, row.status, row.risk_level):
-            print(f"jade: refused: '{event}' is not an event an agent session may send. Evaluation results, evidence, escalation and cancel are; "
+            print(f"jade: refused: '{event}' is not an event an agent session may send. Fast and deep results, evidence, escalation and cancel are; "
+                  "a Jev result (jev_result_*) is written only by `jade ask --decision`, which names the call; "
                   "execution is the hook's job (with a permit at risk >= high), and verified/failed/unknown follow only from `jade decide outcome`.", file=sys.stderr)
             return 1
         res = decide.step(db, a.decision_id, event, guard=a.note or "", actor="human" if human else "agent", caller_session=session_id())
@@ -367,6 +397,20 @@ def _fast(a) -> int:
 
 
 def _work(a) -> int:
+    """Every action but `list` reads, changes and saves the work file: it does all three under one lock, so two parallel `jade work` commands lose no item (V6-27)."""
+    from . import work
+
+    if a.action == "list" or not Path(a.file).resolve().parent.is_dir():   # no directory: nothing to lock, and `load` says so in its own words
+        return _work_run(a)
+    try:
+        with work.locked(Path(a.file)):
+            return _work_run(a)
+    except TimeoutError as e:
+        print(f"jade: {e}", file=sys.stderr)
+        return 1
+
+
+def _work_run(a) -> int:
     from . import work
 
     src = Path(a.file)
@@ -569,9 +613,12 @@ def _ops(a) -> int:
             if a.action == "confirm":
                 ops.review_confirm(all_=a.all)
             elif a.action == "mark":
-                if len(a.rest) != 2:
-                    raise SystemExit("usage: jade review mark DECISION_ID right|wrong")
-                print(ops.review_mark(a.rest[0], a.rest[1]))
+                if not a.rest:
+                    ops.review_audit_walk()   # V6-29: the calls that ran without asking you and wait for your check
+                elif len(a.rest) != 2:
+                    raise SystemExit("usage: jade review mark [DECISION_ID right|wrong]   (no arguments: check the calls that wait for you, one by one)")
+                else:
+                    print(ops.review_mark(a.rest[0], a.rest[1]))
             else:
                 print(ops.review(ops.parse_since(a.since) if a.since else None))
         elif a.cmd == "knows":
@@ -584,9 +631,23 @@ def _ops(a) -> int:
         elif a.cmd == "level":
             if a.value is None:
                 print(paths.level() or "unset")
+                if paths.level() == "off":
+                    print(ops.OFF_MEANS, file=sys.stderr)   # V6-16: stdout keeps the bare value for scripts; the words go to the terminal
             else:
                 ops.set_level(a.value)
                 print(f"level {a.value}")
+                if a.value == "off":
+                    print(ops.OFF_MEANS, file=sys.stderr)
+            if paths.level() not in (None, "off"):   # V6-28: a display name for the pair, on stderr so stdout keeps the bare value for scripts
+                eff = ops.jev_effective()
+                print(f"label {ops.autonomy_label(paths.level(), eff)} (level {paths.level()}, jev {eff}; `jade jev` shows or sets the model key)", file=sys.stderr)
+        elif a.cmd == "jev":
+            if a.value is None:
+                print(ops.jev_effective())
+                print(ops._jev_row()[2], file=sys.stderr)
+            else:
+                ops.set_jev(a.value)
+                print(f"jev {a.value}")
         elif a.cmd == "claude-md":
             if a.action == "show":
                 print(ops.claude_md_section())
@@ -610,8 +671,64 @@ def _git_hook(a) -> int:
     return 0 if guarded else 1
 
 
+def _learn(a) -> int:
+    """`jade learn blockers|policy|cases` (V6-32): reports for a human to read. Read-only: no policy, threshold, memory, label or case file is written."""
+    from . import learn, readouts
+
+    db = ledger.open()
+    since = readouts.since_days(a.days) if getattr(a, "days", 0) else ""   # `cases` has no window: every wrong mark counts
+    try:
+        if a.action == "blockers":
+            r = learn.blocker_classes(db, since)
+            sample = learn.blocker_sample(db, since, a.sample) if a.sample else None
+            if a.json:
+                print(json.dumps({**r, **({"sample": sample} if sample is not None else {})}, sort_keys=True, separators=(",", ":")))
+            else:
+                print(learn.render_blockers(r, sample))
+            return 0
+        if a.action == "policy":
+            table = learn.policy_table(db, since)
+            print(json.dumps(table, sort_keys=True, separators=(",", ":")) if a.json else learn.render_table(table))
+            return 0
+        cases_file = Path(paths.shipped_policy_dir()).parent / learn.CASES_REL   # the checkout's case file: an installed wheel has none
+        if not cases_file.is_file():
+            print(f"jade: {learn.CASES_REL} not found next to the installed policies: run `jade learn cases` from a checkout of the repository", file=sys.stderr)
+            return 2
+        records = learn.error_records(db) + (learn.read_records(a.records) if a.records else [])
+        text = cases_file.read_text(encoding="utf-8")
+        out = learn.case_proposals(records, [json.loads(x) for x in text.split("\n") if x.strip()])
+        diff = learn.case_diff(text, out["cases"])
+        print(f"jade: {len(out['cases'])} case(s) proposed, {len(out['skipped'])} record(s) skipped. A case with `twin: unverified` has no human-written harmless look-alike. "
+              f"Run `uv run python evals/case_ratchet.py check` on the proposal before you merge it: a case must fail on the version that erred.", file=sys.stderr)
+        for s in out["skipped"]:
+            print(f"jade: skipped {s['kind']} {s['decision_id'] or ''} (rule {s['rule_id']}): {s['why']}", file=sys.stderr)
+        if a.out and diff:
+            print(f"wrote {learn.write_out(a.out, diff)}")
+        elif diff:
+            print(diff, end="")
+        return 0
+    except (OSError, ValueError, learn.WriteRefused) as e:
+        print(f"jade: {e}", file=sys.stderr)
+        return 2
+
+
+def _purge_dry_run(days: int) -> int:
+    """What the retention purge would clear, per table, with and without the chat-question and label text. Changes nothing."""
+    from . import ops
+
+    db = ledger.open()
+    base = ops.purge_report(db, days, dry_run=True)
+    full = ops.purge_report(db, days, ask_text=True, dry_run=True)
+    print(f"jade: dry run, rows older than {days} d that the purge would clear (nothing was changed):")
+    for t in ops.PURGE_TABLES:
+        print(f"  {t:14} {base[t]:6} now   {full[t] - base[t]:6} more with --ask-text")
+    print("jade: --ask-text clears the chat question and the labels `jade review confirm` and `jade knows` show; a standing answer keeps its label while it decides.")
+    return 0
+
+
 def _maintain(a) -> int:
-    """Daily job: expiries, retention, drift canary, miner. Prints one JSON line for the log."""
+    """Daily job: expiries, retention, drift canary, miner. Prints one JSON line for the log. It never clears the chat-question and label text (`ask_text`): that
+    is the owner's yes (docs/05 T15), asked by a human with `jade ledger purge --ask-text`. It leaves a last-run stamp that `jade check` reads."""
     from . import decide, improve, ops, permits
 
     db = ledger.open()
@@ -620,6 +737,7 @@ def _maintain(a) -> int:
     rows = ops.check(live=not a.offline)
     out["check_failed"] = [n for n, ok, _ in rows if ops.check_failed(ok)]   # a WARN row (None) is not a failure
     out["mined"] = [] if improve.frozen(paths.home()) else improve.mine(db)
+    db.meta_set("last_maintain_ts", out["at"])   # written last: a run that stopped part way leaves the old stamp
     print(json.dumps(out))
     return 1 if out["check_failed"] else 0
 
@@ -656,13 +774,17 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("ledger").add_subparsers(dest="action", required=True)
     st = s.add_parser("stats")
     st.add_argument("--days", type=int, default=14)
+    st.add_argument("--json", action="store_true", help="the same figures on one line with sorted keys, for a script (the default is the same data, indented)")
     pg = s.add_parser("purge")
     pg.add_argument("--older-than", type=_days, default=90, metavar="DAYS", help="retention window in days: 90 or 90d (default 90)")
     pg.add_argument("--test-rows", action="store_true", help="instead of the retention purge, remove the rows a run under JADE_SOURCE=test left in the ledger")
     pg.add_argument("--id", action="append", default=[], metavar="ID", help="with --test-rows: a permit or decision id written before the tag existed (repeatable)")
+    pg.add_argument("--dry-run", action="store_true", help="count the rows the purge would clear, per table, and change nothing (needs no terminal)")
+    pg.add_argument("--ask-text", action="store_true", help="also clear the chat question and the labels of ended asks and of answers (the owner's yes, docs/05 T15); the daily job never does")
 
     c = sub.add_parser("check", help="probe ledger, policies, registry, hooks, shim and the provider; non-zero on any failure")
     c.add_argument("--offline", action="store_true")
+    c.add_argument("--json", action="store_true", help="the rows as JSON (ok is true, false, or null for a warning) and the load counters; the exit code is the same")
 
     pm = sub.add_parser("permit").add_subparsers(dest="action", required=True)
     pm.add_parser("list").add_argument("--all", action="store_true")
@@ -775,20 +897,35 @@ def build_parser() -> argparse.ArgumentParser:
     pgate = sub.add_parser("gate")
     pgate.add_argument("action", choices=("status", "enforce", "advisory", "off"))
     pgate.add_argument("--allow-unsigned", action="store_true", help="enforce without the signed approval backend (docs/10); journaled")
-    preview = sub.add_parser("review", help="what you answered to JADE's asks (counts by rule and channel); `review confirm` (human terminal) makes allow answers standing; `review mark ID right|wrong` is your verdict on a call")
+    preview = sub.add_parser("review", help="what you answered to JADE's asks (counts by rule and channel); `review confirm` (human terminal) makes allow answers standing; `review mark ID right|wrong` is your verdict on a call; `review mark` alone checks, one by one, the calls that ran without asking you")
     preview.add_argument("action", nargs="?", choices=("confirm", "mark"))
     preview.add_argument("rest", nargs="*", help="with mark: DECISION_ID right|wrong")
     preview.add_argument("--since", help="a window such as 90m, 24h or 7d (default: all time)")
-    preview.add_argument("--all", action="store_true", help="with confirm: take every group, then one typed yes")
+    preview.add_argument("--all", action="store_true", help="with confirm: take every group of a rule below high risk (a high one is still asked), at most 10 groups, then one typed yes")
     pknows = sub.add_parser("knows", help="the answers JADE remembers (docs/12): list (read-only); rm and edit need a human terminal")
     pknows.add_argument("action", choices=("list", "rm", "edit"))
     pknows.add_argument("id", nargs="?")
     plevel = sub.add_parser("level", help="human only: show or set the autonomy level (docs/12): unset, off, low, medium or high; no argument prints it")
     plevel.add_argument("value", nargs="?", choices=("unset", "off", "low", "medium", "high"))
+    pjev = sub.add_parser("jev", help="human only: show or set whether a model may be asked at all (on or off, or unset for the default); no argument prints it")
+    pjev.add_argument("value", nargs="?", choices=("unset", "on", "off"))
     sub.add_parser("claude-md").add_argument("action", choices=("show", "apply"))
-    gh = sub.add_parser("git-hook", help="the standalone pre-push guard for the default branch (SI-08): `script` prints it, `check <repo>` says whether a repository runs it").add_subparsers(dest="action", required=True)
+    gh =sub.add_parser("git-hook", help="the standalone pre-push guard for the default branch (SI-08): `script` prints it, `check <repo>` says whether a repository runs it").add_subparsers(dest="action", required=True)
     gh.add_parser("script", help="print the self-contained POSIX sh pre-push hook (installs nothing; install it yourself, docs/08 section 2.7)")
     gh.add_parser("check", help="report whether the pre-push hook git runs for REPO is the JADE guard; exit 1 when it is not").add_argument("repo")
+    pl = sub.add_parser("learn", help="reports for you to read, never applied (V6-32): what stopped calls, a regression case for each call you marked wrong, a table of asks and errors per rule").add_subparsers(dest="action", required=True)
+    for name, text in (("blockers", "what stopped calls, by safety invariant id and rule id; --sample N lists a fixed sample for your precision check"),
+                       ("policy", "per rule: asks, answers and wrong marks side by side, with a word of advice; changes nothing"),
+                       ("cases", "a diff that adds a regression case for each call you marked wrong (and for each record of --records FILE); applies nothing")):
+        pn = pl.add_parser(name, help=text)
+        if name != "cases":   # `cases` has no window: a call marked wrong is a case however long ago
+            pn.add_argument("--days", type=int, default=30, help="the window in days (default 30; 0 is all time)" + ("; wrong marks and human-only asks always count all time" if name == "policy" else ""))
+            pn.add_argument("--json", action="store_true", help="one line of JSON with sorted keys")
+        if name == "blockers":
+            pn.add_argument("--sample", type=int, default=0, help="also list N blocker rows, fixed by a seed, ids only")
+        if name == "cases":
+            pn.add_argument("--records", help="a JSONL file of audit false allows or counterfactual false rejects (kind, command, optional rule_id, tool, twin_command)")
+            pn.add_argument("--out", help="write the diff to this new file instead of printing it (never inside the checkout, the policies or the config)")
     sub.add_parser("maintain").add_argument("--offline", action="store_true")
     sub.add_parser("version", help="print the code version, commit, ledger schema version and policy_version").add_argument("--json", action="store_true")
     up = sub.add_parser("upgrade", help="human only: install a release of jade-decision-governance with uv, then run jade check from it; --check only looks")
@@ -801,6 +938,8 @@ def build_parser() -> argparse.ArgumentParser:
     sg.add_argument("--status", action="store_true", help="read-only: what is done and what is missing")
     lp = sub.add_parser("launchd-plist")
     lp.add_argument("--label", default="com.jade.maintain")
+    ms = sub.add_parser("maintain-schedule", help="print a cron line or systemd units that run `jade maintain` daily, for a machine without launchd; installs nothing")
+    ms.add_argument("--format", choices=("cron", "systemd"), default="cron")
     return p
 
 
@@ -821,6 +960,11 @@ def main(argv: list[str] | None = None) -> int:
         if a.id and not a.test_rows:
             print("jade: --id is only used with --test-rows", file=sys.stderr)
             return 2
+        if a.dry_run and (a.test_rows or a.id):
+            print("jade: --dry-run counts the retention purge; it does not combine with --test-rows", file=sys.stderr)
+            return 2
+        if a.dry_run:
+            return _purge_dry_run(a.older_than)
         if not is_human_tty():
             print("jade: a purge outside the daily job is run by a human at a terminal", file=sys.stderr)
             return 1
@@ -832,11 +976,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             print(f"removed {sum(n.values())} test row(s): " + ", ".join(f"{k} {v}" for k, v in n.items()))
             return 0
-        print(f"purged state text from {ops.purge(ledger.open(), a.older_than)} row(s)")
+        print(f"purged state text from {ops.purge(ledger.open(), a.older_than, ask_text=a.ask_text)} row(s)")
         return 0
     if a.cmd == "check":
         from . import ops
 
+        if a.json:
+            return ops.print_check_json(ops.check(live=not a.offline))
         return ops.print_check(ops.check(live=not a.offline))
     if a.cmd in ("version", "upgrade"):
         from . import upgrade
@@ -851,8 +997,13 @@ def main(argv: list[str] | None = None) -> int:
 
         print(ops.launchd_plist(a.label), end="")
         return 0
+    if a.cmd == "maintain-schedule":
+        from . import ops
+
+        print(ops.maintain_schedule(a.format), end="")
+        return 0
     table = {"permit": _permit, "decide": _decide, "ack": _ack, "question": _question, "route": _route, "fast": _fast, "work": _work,
-             "label": _label, "eval": _eval, "improve": _improve, "hooks": _ops, "gate": _ops, "review": _ops, "knows": _ops, "level": _ops, "claude-md": _ops, "maintain": _maintain, "git-hook": _git_hook}
+             "label": _label, "eval": _eval, "improve": _improve, "hooks": _ops, "gate": _ops, "review": _ops, "knows": _ops, "level": _ops, "jev": _ops, "claude-md": _ops, "maintain": _maintain, "git-hook": _git_hook, "learn": _learn}
     return table[a.cmd](a)
 
 

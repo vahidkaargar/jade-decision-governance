@@ -53,6 +53,13 @@ CREATE TABLE IF NOT EXISTS asks(
 CREATE TABLE IF NOT EXISTS human_answers(
   answer_id TEXT PRIMARY KEY, ts TEXT NOT NULL, session_id TEXT, decision_id TEXT, rule_id TEXT NOT NULL, class_key TEXT, exact_key TEXT NOT NULL,
   answer TEXT NOT NULL, channel TEXT NOT NULL, strength TEXT NOT NULL DEFAULT 'hint', confirmed_ts TEXT, source TEXT);
+-- V6-29: the audit of calls that ran without a question. One row per drawn call (the draw is made in the hook, `jade/audit.py`); `seal` is an HMAC over the row.
+CREATE TABLE IF NOT EXISTS audit_queue(
+  audit_id TEXT PRIMARY KEY, decision_id TEXT NOT NULL UNIQUE, answer_id TEXT NOT NULL, scope_id TEXT NOT NULL, rule_id TEXT NOT NULL, stage INTEGER NOT NULL,
+  sample_prob REAL NOT NULL, status TEXT NOT NULL, session_id TEXT, drawn_ts TEXT NOT NULL, resolved_ts TEXT, seal TEXT NOT NULL, source TEXT);
+CREATE TABLE IF NOT EXISTS audit_scopes(
+  scope_id TEXT PRIMARY KEY, stage INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'active', runs INTEGER NOT NULL DEFAULT 0, since_ts TEXT NOT NULL,
+  suspended_ts TEXT, updated_ts TEXT NOT NULL, source TEXT);
 """
 # Indexes created after the migrations: some name a column added after the first release (hold_key, source), which an older file lacks until `_migrate`
 # has run. Each serves a query that every gated call or every Stop hook runs, measured at 100k rows in evals/performance/ledger_load.py (W-58); the
@@ -74,10 +81,17 @@ CREATE INDEX IF NOT EXISTS human_answers_scope ON human_answers(scope_key, stren
 CREATE INDEX IF NOT EXISTS human_answers_class ON human_answers(class_key, strength);
 CREATE INDEX IF NOT EXISTS human_answers_ts ON human_answers(ts);
 CREATE INDEX IF NOT EXISTS asks_call ON asks(session_id, hold_key, status);
+CREATE INDEX IF NOT EXISTS asks_created ON asks(created_ts);
+CREATE INDEX IF NOT EXISTS decisions_created ON decisions(created_at);
+CREATE INDEX IF NOT EXISTS calls_decision ON jev_calls(decision_id);
+CREATE INDEX IF NOT EXISTS audit_queue_scope ON audit_queue(scope_id, drawn_ts);
+CREATE INDEX IF NOT EXISTS audit_queue_drawn ON audit_queue(drawn_ts);
 """
 MIGRATIONS = {"jev_calls": [("language", "TEXT"), ("source", "TEXT")], "decisions": [("hold_key", "TEXT"), ("source", "TEXT")],
               "permits": [("source", "TEXT")], "events": [("source", "TEXT")], "asks": [("class_key", "TEXT"), ("label", "TEXT"), ("ho", "INTEGER"), ("scopes_json", "TEXT")],
-              "human_answers": [("last_used_ts", "TEXT"), ("label", "TEXT"), ("ho", "INTEGER"), ("scope_kind", "TEXT"), ("scope_key", "TEXT"), ("scope_label", "TEXT"), ("family_key", "TEXT")]}   # columns added after the first release: (name, type)
+              "audit_queue": [("subject", "TEXT"), ("cwd", "TEXT")],   # V6-29: the call that ran and where, sealed with the row
+              "labels": [("label_type", "TEXT"), ("sample_prob", "REAL"), ("audit_source", "TEXT")],   # V6-23: old rows keep NULL, which reads as a `claim_true` label
+              "human_answers": [("last_used_ts", "TEXT"), ("label", "TEXT"), ("ho", "INTEGER"), ("scope_kind", "TEXT"), ("scope_key", "TEXT"), ("scope_label", "TEXT"), ("family_key", "TEXT"), ("silent_runs", "INTEGER"), ("evidence_ts", "TEXT")]}   # columns added after the first release: (name, type)
 # PRAGMA user_version of a file once SCHEMA, the migrations and INDEXES have been applied to it; a file already at this value skips all three (W-58). It is a
 # digest of those three, so changing any of them changes the version and every file is brought up to date once: nobody has to remember to bump a number.
 SCHEMA_VERSION = zlib.crc32(json.dumps([SCHEMA, INDEXES, MIGRATIONS], sort_keys=True).encode()) & 0x7FFFFFFF
@@ -87,6 +101,24 @@ LIVE = "COALESCE({a}source,'')<>'test'"   # rows a verification run wrote under 
 def live(alias: str = "") -> str:
     """SQL condition that leaves rows tagged `test` out. `alias` is a table alias such as `c` (no dot)."""
     return LIVE.format(a=f"{alias}." if alias else "")
+
+
+UNREADABLE_RECORD = "unreadable"   # what `last_setting` returns for a newest event that holds no value it can read: no setting is read from it
+
+
+def last_setting(db, kind: str, key: str):
+    """The value the newest `kind` event (written by a human command such as `jade jev`) recorded under `key`: None when there is no such event or it recorded
+    `unset`, UNREADABLE_RECORD when the event exists but its detail does not hold the key. The query uses the `events_kind_ts` index."""
+    row = db.con.execute("SELECT detail_json FROM events WHERE kind=? ORDER BY id DESC LIMIT 1", (kind,)).fetchone()
+    if row is None:
+        return None
+    try:
+        detail = json.loads(row[0]) if row[0] else None
+    except ValueError:
+        return UNREADABLE_RECORD
+    if not isinstance(detail, dict) or key not in detail:
+        return UNREADABLE_RECORD
+    return detail[key]
 
 
 def dedup_ttl_s() -> int:
@@ -264,6 +296,18 @@ class Ledger:
     def find_repeat(self, question_id: str, version: int, state_hash: str, claim_hash: str | None, session: str):
         """Read-only form of the lookup `begin_call` does: the answered call that a new ask of this question on this state would repeat (PF-04)."""
         row = self._anchor(self.con, session, question_id, version, state_hash, claim_hash)
+        return self.get_call(row["call_id"]) if row else None
+
+    def find_first_answer(self, question_id: str, version: int, state_hash: str, claim_hash: str | None, session: str):
+        """The first answer the provider gave to this question on this state in this session, from ANY source (a live row or a `JADE_SOURCE=test` row), or None.
+        This is not an anchor and nothing points at it: it only holds a fresh sample to the first verdict (the never-looser rule) and counts the `--no-cache`
+        cap. A run under the test tag therefore cannot start over with no first answer. Cache rows are not answers of the provider. Read-only."""
+        ttl = dedup_ttl_s()
+        row = self.con.execute(
+            "SELECT call_id FROM jev_calls WHERE session_id=? AND question_id=? AND question_version=? "
+            "AND state_hash=? AND COALESCE(claim_hash,'')=COALESCE(?, '') AND ts>=? "
+            "AND state='DONE' AND exit_code IN (0,3,4) AND COALESCE(provider,'')<>'cache' ORDER BY rowid ASC LIMIT 1",
+            (session, question_id, version, state_hash, claim_hash, ts(now() - timedelta(seconds=ttl)))).fetchone()
         return self.get_call(row["call_id"]) if row else None
 
     def in_flight_batches(self, within_s: float, exclude: tuple[str, ...] = ()) -> int:

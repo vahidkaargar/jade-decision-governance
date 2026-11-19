@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 
 from . import paths, policy
-from .util import at_least, now, ts
+from .util import at_least, now, ts, ts_in
 
 _STARTED: float | None = None   # time.monotonic() when this PreToolUse call began
 BUDGET_S = 6.0          # whole PreToolUse handler; the dialog path (askdialog) raises its own alarm for the wait, the installed host timeout (ops.HOOKS) covers it
@@ -107,6 +107,8 @@ def _gui_pause(event: dict, tool: str):
 def failsafe_reason(event: dict) -> str | None:
     """Why a gated call must be blocked when the policy cannot be consulted, or None when it is clearly harmless: a read-only command,
     a file write outside the protected locations, a tool whose name says it only reads."""
+    if (bad := malformed_reason(event)) is not None:
+        return bad
     tool = str(event.get("tool_name") or "")
     if not policy.is_gated(tool):
         return None
@@ -124,6 +126,13 @@ def failsafe_reason(event: dict) -> str | None:
             if _SEAL_KEY_TEXT.search(t) or _SEAL_KEY_TEXT.search(policy.real(os.path.expanduser(t))) or policy.is_seal_key_dir(policy.real(os.path.expanduser(t))):
                 return f"{tool} names {t[:120]!r}, which may be the permit seal key"
         return None
+    if policy.is_mcp(tool):   # V6-18 c: an MCP file reader or search that names the seal key, or a directory that may hold it
+        if policy.mcp_targets_overflow(tool, tin):
+            return f"{tool} names more paths, or a longer one, than the gate reads, so the permit seal key may be among them"
+        _kind, targets, globs = policy.mcp_read_targets(tool, tin)
+        for t in (*targets, *globs):
+            if _SEAL_KEY_TEXT.search(t) or _SEAL_KEY_TEXT.search(policy.real(os.path.expanduser(t))) or policy.is_seal_key_dir(policy.real(os.path.expanduser(t))):
+                return f"{tool} names {t[:120]!r}, which may be the permit seal key"
     cmd = tin.get("command") if tool in policy.SHELL_TOOLS else next((tin[k] for k in ("command", "cmd", "script") if isinstance(tin.get(k), str)), None)
     if cmd is not None or tool in policy.SHELL_TOOLS:
         text = str(cmd or "").strip()
@@ -382,6 +391,8 @@ def _detail(event: dict, a: policy.Assessment | None = None, **more) -> dict:
          "agent_id": event.get("agent_id"), **more}
     if a is not None:
         d["plan_hash"] = a.plan_hash
+        if a.blocked:
+            d["invariants"] = list(a.blocked)   # V6-32 (W-74): which safety invariants fired, as ids only. The guard text keeps them too; `jade learn blockers` reads both
     return d
 
 
@@ -406,12 +417,29 @@ def _policy_failure(mode: str, event: dict, tool: str, tool_input: dict, cwd: st
     return _fail_closed(mode, f"the policy could not be loaded or applied ({type(exc).__name__}: {str(exc)[:200]}), and {why}.")
 
 
+def malformed_reason(event: dict) -> str | None:
+    """Why a PreToolUse event is not the shape the host sends, when that could hide a gated call (V6-18 d, F11, N26); None when it is well formed or is no tool
+    call at all (no `tool_name`). A `tool_name` that is not a string cannot be matched to the gated list, and the text of a list `command` is not what the
+    shell would run, so neither is read as harmless. A `tool_input` that is not an object is handled by `failsafe_reason` (it blocks a gated tool)."""
+    if "tool_name" not in event:
+        return None
+    tool = event["tool_name"]
+    if not isinstance(tool, str):
+        return f"the event has a tool_name that is not a string ({type(tool).__name__})"
+    tin = event.get("tool_input")
+    if tool in policy.SHELL_TOOLS and isinstance(tin, dict) and tin.get("command") is not None and not isinstance(tin["command"], str):
+        return f"the {tool} command is not a string ({type(tin['command']).__name__})"
+    return None
+
+
 def pretool(event: dict, permit=None) -> HookResult:
     global _STARTED
     _STARTED = time.monotonic()   # Jev in the hook (proxy.step) is given what is left of BUDGET_S
     mode = paths.gate_mode()
     if mode == "off":
         return HookResult()
+    if (bad := malformed_reason(event)) is not None:
+        return _fail_closed(mode, bad + ".")
     tool = event.get("tool_name", "")
     if tool == "AskUserQuestion":
         from . import askchat
@@ -439,6 +467,11 @@ def pretool(event: dict, permit=None) -> HookResult:
         _journal("gate", "safety_block", a, event)
         return _verdict(mode, f"JADE safety invariant {', '.join(a.blocked)} blocks this {tool} call. No permit can authorize it. "
                               f"Rule text: policies/safety.yaml. Do not rephrase the command to get around the invariant; ask the human.", a.blocked)
+    if mode == "enforce" and paths.level() == "off" and OFF_FLOOR_CLASSES & set(a.ho_ids):
+        _journal("gate", "safety_block", a, event)   # V6-16: at level `off` a write to JADE's own live wiring still blocks (the floor of "observe plus floor")
+        return HookResult(2, f"JADE floor: level off blocks this {tool} call. It writes to JADE's own live wiring ({', '.join(sorted(OFF_FLOOR_CLASSES & set(a.ho_ids)))}: "
+                             "the hook files, `~/.claude/settings.json`, the install, the JADE config or state). No permit can authorize it at this level. "
+                             "Do not rephrase the call to get around the floor; ask the human to do it in their own terminal.")
     if a.ho_ids and paths.level() in ("low", "medium", "high") and not at_least(a.level, "high"):
         a.level, a.elevated = "high", True   # docs/12: a human-only class (a mod file, the terminal panel ...) is high work once the human has set a level; `level` and `rule_id` stay the rule's
     if not at_least(a.level, policy.permit_floor()):
@@ -449,20 +482,28 @@ def pretool(event: dict, permit=None) -> HookResult:
                 _journal("gate", "secret_read", a, event)   # W-55: counted (rule, tool, session), never the path or the command; the read itself is not gated
         return HookResult()
     try:
-        return _gate("advisory" if paths.level() == "off" else mode, tool, a, event, permit)   # level off: JADE only watches (docs/12)
+        return _gate("advisory" if paths.level() == "off" else mode, tool, a, event, permit, hold_mode=mode)   # level off: JADE watches and keeps the floor (docs/12)
     except Exception as e:  # noqa: BLE001 - the ledger is unreadable, locked or full: no permit can be checked, so nothing high-risk runs
         return _fail_closed(mode, f"this {tool} call is {a.level} risk ({a.rule_id}) and the permit ledger failed ({type(e).__name__}: {str(e)[:160]}), "
                                   "so no permit can be checked.")
 
 
 GOVERNANCE_INVARIANTS = frozenset({"SI-09", "SI-10", "SI-11", "SI-12"})
+# V6-16: level `off` is "observe plus floor". At `off` (gate mode enforce) these two invariants block too, and so does a write to JADE's live wiring.
+OFF_FLOOR_INVARIANTS = frozenset({"SI-07", "SI-08"})
+# the running install and hook files, an install built from a checkout, a settings write that disables the hooks, and a script run that names the JADE state or config
+# (a script can set `gate_mode` to `advisory` in the config, and that turns the whole floor off)
+OFF_FLOOR_CLASSES = frozenset({policy.HO_WIRING, policy.HO_INSTALL, policy.HO_SETTINGS, policy.HO_STATE})
 
 
 def _verdict(mode: str, message: str, blocked: list[str] | tuple[str, ...] = ()) -> HookResult:
     """Exit 2, or an advisory exit 0. Once the human has set a level (docs/12) the governance invariants block whatever the gate mode, and any level at all
-    keeps them firm; the other invariants are advisory at level `off` ("JADE only watches") and in advisory gate mode."""
+    keeps them firm; at level `off` SI-07 and SI-08 are firm as well (V6-16, the floor); the other invariants are advisory at level `off` ("observe") and in
+    advisory gate mode."""
     level = paths.level()
     if level is not None and GOVERNANCE_INVARIANTS & set(blocked):
+        return HookResult(2, message)
+    if mode != "advisory" and level == "off" and OFF_FLOOR_INVARIANTS & set(blocked):
         return HookResult(2, message)
     if mode == "advisory" or (level == "off" and blocked):
         return HookResult(0, "[advisory, not blocked] " + message)
@@ -563,8 +604,11 @@ def fingerprints(subject: str, cwd: str) -> dict[str, str]:
     return {"git_head": ";".join(sorted(set(heads)))} if heads else {}
 
 
-def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> HookResult:
+def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit, hold_mode: str | None = None) -> HookResult:
+    """`mode` is the mode the risk gate runs in (advisory at level off); `hold_mode` is the gate mode in force, which SI-07 uses (it is firm at level off, V6-16)."""
     from . import decide, ledger, permits, state_machine
+
+    hold_mode = mode if hold_mode is None else hold_mode
 
     db = ledger.open(timeout=LEDGER_TIMEOUT_S)
     try:
@@ -589,13 +633,13 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
         hold = _si07_hold(db, a)
         if hold:
             did, reason = hold
-            if mode != "advisory":
-                db.event("gate", "safety_block", guard=f"{a.rule_id} {a.level} SI-07", actor="hook", detail=_detail(event, a, decision_id=did))
-            return _verdict(mode, f"JADE safety invariant SI-07 blocks this {tool} call. An earlier run of this exact command (decision {did}) {reason}"
+            if hold_mode != "advisory":
+                db.event("gate", "safety_block", guard=f"{a.rule_id} {a.level} SI-07", actor="hook", detail=_detail(event, a, decision_id=did, invariants=["SI-07"]))
+            return _verdict(hold_mode, f"JADE safety invariant SI-07 blocks this {tool} call. An earlier run of this exact command (decision {did}) {reason}"
                                   f"{' and still executing' if 'executing' in reason else ''}. It is not retried automatically and no permit is raised or used for it. "
                                   f"Read the real state, then record it: jade decide outcome {did} --type observed --success true|false --method \"how you checked\". "
-                                  "Do not rephrase the command to get around the invariant; ask the human.")
-        found = permit or permits.find_usable(db, a.plan_hash, level=a.level, fingerprints=fp, **who)
+                                  "Do not rephrase the command to get around the invariant; ask the human.", ("SI-07",))
+        found =permit or permits.find_usable(db, a.plan_hash, level=a.level, fingerprints=fp, **who)
         refusal = None
         if found is not None:
             try:
@@ -616,9 +660,10 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
             return res
         from . import askchat, memory, proxy
 
-        if (res := memory.step(db, mode, a, tool, event, fp, cwd)) is not None:   # docs/12: a call the human confirmed earlier runs without a question (levels low and medium)
+        held: dict = {}   # V6-29: memory.step says here when the audit (a paused scope, a limit, no key) is why the call is asked about
+        if (res := memory.step(db, mode, a, tool, event, fp, cwd, held)) is not None:   # docs/12: a call the human confirmed earlier runs without a question (levels low and medium)
             return res
-        if (res := proxy.step(db, mode, a, tool, event, fp, cwd, _STARTED)) is not None:   # docs/12: Jev decides in the owner's place, inside its band (levels low and medium)
+        if (res := proxy.step(db, mode, a, tool, event, fp, cwd, _STARTED, audit_held=bool(held))) is not None:   # docs/12: Jev decides in the owner's place, inside its band (levels low and medium)
             return res
         if (res := askchat.step(db, mode, a, tool, event, fp, cwd)) is not None:   # docs/12: the human answers in the chat (consumes a grant, or asks)
             return res
@@ -641,7 +686,7 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
                                       context=ctx, fingerprints=fp, environment=a.environment).permit_id
         else:
             pid = pending.permit_id
-        why = f" (Permit {found.permit_id} exists but cannot be used: {refusal}.)" if found is not None and refusal else ""
+        why = (f" (Permit {found.permit_id} exists but cannot be used: {refusal}.)" if found is not None and refusal else "") + permits.refusal_note(db, a.plan_hash)   # V6-26: a human refusal is told to the agent
         if ctx.get("redacted") and permits.keep_raw(db, pid, permits.raw_parts(tool, a, event)):   # W-43: the human allowed it, so the raw call is kept for their review only
             return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}). This {tool} call needs a human-approved permit, and the {ctx['redacted']} secret-shaped "
                                  f"value(s) in it are not stored in the ledger.{why}\n"
@@ -728,7 +773,7 @@ def _close_decision(event: dict, success: bool, method: str) -> HookResult:
             db.event(event.get("session_id") or "session", "BYPASS", guard="raw Decisions API call outside the adapter", actor="hook")
         did = _executing_decision(db, tool, tin, event, cwd)
         if did:
-            decide.record_outcome(db, did, "observed", success, method, attribution="indirect")
+            decide.record_outcome(db, did, "observed", success, method, attribution="indirect", goal_check="exit_only")   # the exit status is not the goal (DI-8)
     finally:
         db.close()
     return HookResult()
@@ -868,6 +913,36 @@ def _shadow_notice(db, event: dict) -> list[str]:
     return [f"JADE: settings of this project disable or shadow the JADE hooks ({'; '.join(found[:3])}); `jade check` lists every one. Remove the setting unless a human set it on purpose."]
 
 
+_REPO_CONFIG_ORDER = {"unicode": 0, "env": 1, "hooks": 2, "mcp": 3, "unreadable": 4}
+
+
+def _repo_config_notice(db, event: dict) -> list[str]:
+    """What the project of this session controls and the host loads before its trust question: hooks, MCP servers, env keys, hidden Unicode in CLAUDE.md and
+    AGENTS.md (V6-18 e, BS-01, BS-02). One line, shown and journaled once per session (event `repo_config`). Names, counts and line numbers only, never a value or a
+    line of the repository. Display only: it never blocks, and a failure here changes nothing."""
+    cwd = event.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        return []
+    try:
+        from . import ops
+
+        found = sorted(ops.repo_config_findings(cwd), key=lambda f: _REPO_CONFIG_ORDER.get(f[0], 9))
+    except Exception:  # noqa: BLE001 - a scanner failure must never change the hook's answer
+        return []
+    if not found:
+        return []
+    lines = [line for _kind, line in found]
+    digest = hashlib.sha1("\n".join(lines).encode("utf-8", "replace")).hexdigest()[:12]   # noqa: S324 - an idempotency key, not security
+    try:
+        db.event("gate", "repo_config", guard="; ".join(lines)[:500], actor="hook", key=f"repo_config:{event.get('session_id') or '-'}:{digest}",
+                 detail={"session": event.get("session_id"), "cwd": cwd, "findings": lines[:10]})
+    except Exception:  # noqa: BLE001, S110 - journaling must never change the hook's answer
+        pass
+    more = f"; and {len(lines) - 3} more" if len(lines) > 3 else ""
+    return [f"JADE: this project carries config that loads before the trust question and that JADE cannot gate ({'; '.join(lines[:3])[:400]}{more}). "
+            "`jade check` row `repo config` lists it. Display only: look at it before you trust the project."]
+
+
 def _ready_notice(db, rows: list[dict], shown: set, room: int) -> list[str]:
     """Open items whose dependencies are all done, told once each (W-51): the event key names the item and what it waited on, so a later session does not
     repeat it. An item is journaled only when its line fits in the briefing, so one that was cut is told next time. Never blocks."""
@@ -885,6 +960,83 @@ def _ready_notice(db, rows: list[dict], shown: set, room: int) -> list[str]:
     return lines
 
 
+RESHOW_SOURCES = ("compact", "resume")   # SessionStart `source` values after which the session has lost its context (V6-27): briefing lines told once are shown again
+
+
+def _once(db, kind: str, ids: list[str], reshow: bool) -> bool:
+    """True when a briefing line about `ids` is to be shown: always after a compact or resume, else once per distinct set of ids (a ledger event with a key)."""
+    if reshow:
+        return True
+    try:
+        digest = hashlib.sha1("\n".join(sorted(ids)).encode("utf-8", "replace")).hexdigest()[:12]   # noqa: S324 - an idempotency key, not security
+        return db.event("briefing", kind, guard=f"{len(ids)} item(s)", actor="hook", key=f"{kind}:{digest}")
+    except Exception:  # noqa: BLE001 - if the note cannot be written, show the line: telling twice is better than never
+        return True
+
+
+def _held_notice(db, reshow: bool) -> list[str]:
+    """How many decisions SI-07 holds now: an unknown outcome, or an irreversible call still executing (the same two cases as `_si07_hold`; a reversible one
+    that is still running is not held). The ledger keeps no project for a decision and a hold is by command, not by directory, so the count is for all projects
+    and the line says so. Told once per set of ids; shown again, with the ids, after a compact or resume. Never blocks."""
+    try:
+        from . import ledger
+
+        now_s = ts()
+        ids = []
+        for r in db.all("SELECT decision_id, status, expires_at, doc_json FROM decisions WHERE status IN ('OUTCOME_UNKNOWN','EXECUTING') AND " + ledger.live()):
+            if r.status == "OUTCOME_UNKNOWN" or r.expires_at <= now_s:
+                ids.append(r.decision_id)
+                continue
+            try:
+                irreversible = json.loads(r.doc_json)["risk"]["reversibility"] == "irreversible"
+            except (ValueError, KeyError, TypeError):
+                irreversible = True
+            if irreversible:
+                ids.append(r.decision_id)
+        if not ids or not _once(db, "held_notice", ids, reshow):
+            return []
+        shown = f" Ids: {', '.join(sorted(ids)[:5])}{' ...' if len(ids) > 5 else ''}." if reshow else ""
+        return [f"JADE: decisions held: {len(ids)} (all projects: the ledger does not record the project). A held command is not run again until a human or you record what really "
+                f"happened: jade decide outcome <id> --type observed --success true|false --method \"how you checked\".{shown}"]
+    except Exception:  # noqa: BLE001 - an announcement must never change the hook's answer
+        return []
+
+
+def _expired_twice_notice(db, reshow: bool) -> list[str]:
+    """Plans whose permit expired twice in the last day with no later use of that plan (V6-27). A permit that nobody approved in time, or that was approved and
+    not used, is `EXPIRED`; the plan hash groups them. Told once per set; shown again after a compact or resume. Never blocks."""
+    try:
+        from . import ledger
+
+        since = ts_in(-86400)
+        plans = []
+        keys = []   # plan hash + newest issue time of the set: the same command expiring twice again later is news again, the same pair is told once
+        for r in db.all("SELECT plan_hash, MAX(issued_at) AS last FROM permits WHERE state='EXPIRED' AND expires_at>=? AND " + ledger.live() +
+                        " GROUP BY plan_hash HAVING COUNT(*)>=2", (since,)):
+            later = db.one("SELECT 1 AS x FROM permits WHERE plan_hash=? AND state IN ('CONSUMED','ISSUED') AND issued_at>? LIMIT 1", (r.plan_hash, r.last))
+            if later is None:
+                plans.append(r.plan_hash)
+                keys.append(f"{r.plan_hash}@{r.last}")
+        if not plans or not _once(db, "expired_twice_notice", keys, reshow):
+            return []
+        shown = f" Plan hashes: {', '.join(sorted(p[:12] for p in plans)[:5])}." if reshow else ""
+        return [f"JADE: permits that expired twice: {len(plans)}. Nobody approved them in time, or the approved permit was not used. Ask the human before you request the same call again.{shown}"]
+    except Exception:  # noqa: BLE001 - an announcement must never change the hook's answer
+        return []
+
+
+def _open_ask_notice(db, session: str) -> list[str]:
+    """Open asks of this session, for a compact or resume: the session lost the ask id it was told. Another session's ask is not this agent's to answer."""
+    try:
+        from . import ledger
+
+        ids = [r.ask_id for r in db.all("SELECT ask_id FROM asks WHERE session_id=? AND status IN ('PENDING','SHOWN') AND expires_ts>? AND " + ledger.live() + " ORDER BY created_ts",
+                                       (session, ts()))]
+    except Exception:  # noqa: BLE001 - an announcement must never change the hook's answer
+        return []
+    return [f"JADE: open asks of this session: {', '.join(ids[:5])}{' ...' if len(ids) > 5 else ''}. The human answers them; do not run the call until they are answered."] if ids else []
+
+
 def session_start(event: dict) -> HookResult:
     from . import decide, ledger, permits
 
@@ -893,10 +1045,16 @@ def session_start(event: dict) -> HookResult:
         decide.sweep(db)
         permits.sweep(db)
         out = _override_notice(db, event) + _shadow_notice(db, event)
+        src = event.get("source")
+        reshow = isinstance(src, str) and src in RESHOW_SOURCES
+        out += _held_notice(db, reshow) + _expired_twice_notice(db, reshow)   # V6-27: held decisions come first (docs/14-v6/07 section 6.3), then pending permits
+        out += _repo_config_notice(db, event)   # the scan of a repository folder comes last: what the human must decide never waits behind it
         pending = permits.listing(db, ("PENDING",))
         pend = [p for p in pending if getattr(p, "source", None) != "test"]
         if pend:
             out.append(f"JADE: {len(pend)} permit(s) awaiting human approval: " + ", ".join(p.permit_id for p in pend[:5]))
+        if reshow:
+            out += _open_ask_notice(db, str(event.get("session_id") or ""))
         waiting = db.one("SELECT COUNT(*) AS n FROM decisions WHERE status='WAITING_HUMAN' AND " + ledger.live()).n
         if waiting:
             out.append(f"JADE: {waiting} decision(s) in WAITING_HUMAN (`jade decide list --status WAITING_HUMAN`).")
@@ -967,6 +1125,11 @@ def main(name: str) -> int:
         event = {}
     if not isinstance(event, dict):
         event = {}
+    if name not in HANDLERS:   # V6-18 d, N26: a typo in the wiring must not leave a gate that silently passes everything (the gate mode `off` keeps its meaning: nothing runs)
+        if paths.gate_mode() == "off":
+            return 0
+        print(f"JADE gate: unknown hook name {name!r}; the hooks are {', '.join(HANDLERS)}. Run `jade check` and `jade hooks install` in a terminal.", file=sys.stderr)
+        return 2
     try:
         if name == "pretool":
             _arm(BUDGET_S)

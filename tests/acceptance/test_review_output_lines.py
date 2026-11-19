@@ -50,7 +50,7 @@ def test_review_confirm_prints_clean_lines():
         db.close()
     out: list[str] = []
     ops.review_confirm(stdin_isatty=True, ask=lambda _="": "no", say=out.append, all_=True)
-    assert any("a [2Kb c d" in x for x in out)
+    assert any("a\\x1b[2Kb\\x07c d" in x for x in out)
     clean(out)
 
 
@@ -64,7 +64,7 @@ def test_knows_list_and_template_print_clean_lines():
     finally:
         db.close()
     listing = ops.knows_list()
-    assert "a [2Kb c d" in listing
+    assert "a\\x1b[2Kb\\x07c d" in listing
     clean(listing)
     tpl = ops.knows_template(rows)
     clean(tpl)
@@ -80,7 +80,7 @@ def test_review_lines_print_clean_lines():
         lines = ops.review_lines(db, None)
     finally:
         db.close()
-    assert any("a [2Kb c d" in x for x in lines)
+    assert any("a\\x1b[2Kb\\x07c d" in x for x in lines)
     clean(lines)
 
 
@@ -92,7 +92,8 @@ def test_confirm_summary_is_three_short_sentences():
     finally:
         db.close()
     out: list[str] = []
-    ops.review_confirm(stdin_isatty=True, ask=lambda _="": "no", say=out.append, all_=True)
+    # V6-29: `--all` no longer takes a group of a high-risk rule (R-11 is high): the group is asked about, the human says yes to it, and no to the last "Type yes"
+    ops.review_confirm(stdin_isatty=True, ask=lambda q="": "y" if "stand for this" in q else "no", say=out.append, all_=True)
     summary = [x for x in out if "will become standing." in x or "Undo one with" in x or "runs without a question" in x]
     assert len(summary) >= 3, out
     sentences = [s for line in summary for s in re.split(r"(?<=[.!?])\s+", line.strip())]
@@ -196,14 +197,22 @@ def test_knows_edit_a_hint_allow_never_appears():
     assert edit_and_read() == []
 
 
-@pytest.mark.parametrize("deny", ['cd "/a b" && git reset --hard HEAD~1', "cd /p; git reset --hard HEAD~1", "git -C /p reset --hard HEAD~1",
-                                  "VAR=1 git reset --hard HEAD~1", "/usr/bin/git reset --hard HEAD~1"])
+@pytest.mark.parametrize("deny", ["/usr/bin/git reset --hard HEAD~1", "git  reset   --hard HEAD~1", "cd /tmp/x && git reset --hard HEAD~1"])
 def test_knows_edit_a_deny_in_another_spelling_hides_the_allow_of_the_same_kind(deny):
     record_call("allow", "git reset --hard HEAD~1", confirm=True)
     assert len(edit_and_read()) == 1
     ops.preferences_path().unlink()
     record_call("deny", deny)
     assert edit_and_read() == []
+
+
+@pytest.mark.parametrize("deny", ['cd "/a b" && git reset --hard HEAD~1', "cd /p; git reset --hard HEAD~1", "git -C /p reset --hard HEAD~1", "VAR=1 git reset --hard HEAD~1"])
+def test_knows_edit_a_deny_of_another_place_or_target_leaves_the_allow(deny):
+    """V6-06: a kind has a target and a place. A deny of the same words in another directory, or with another env or `git -C`, is another kind."""
+    record_call("allow", "git reset --hard HEAD~1", confirm=True)
+    ops.preferences_path().unlink(missing_ok=True)
+    record_call("deny", deny)
+    assert len(edit_and_read()) == 1
 
 
 def test_knows_edit_a_deny_of_gh_pr_create_does_not_hide_gh_pr_merge():
@@ -221,3 +230,25 @@ def test_knows_edit_two_cd_allows_stay_two_lines():
 def test_knows_edit_a_cd_prefix_on_the_allow_still_prints_it():
     record_call("allow", "cd /p && gh pr merge 940 --squash", confirm=True)
     assert len(edit_and_read()) == 1
+
+
+BIDI = "git reset \u202e--hard\u2067 x\u200b"
+
+
+def test_review_and_knows_write_out_bidi_and_zero_width_characters():
+    """V6-09: a stored label with raw bidi or zero-width characters is shown with each one written out, on one line."""
+    db = ledger.open(timeout=5)
+    try:
+        with db.tx():
+            aid = add(db, label=BIDI)
+            db.confirm_answers([aid])
+            add(db, label=BIDI, scope=False, key="k9", rule="R-07")   # not yet confirmed: `review confirm` lists it
+            db.event(aid, "memory_allowed", detail={"decision_id": "dec_1", "channel": "memory"})
+        lines = ops.review_lines(db, None)
+    finally:
+        db.close()
+    out: list[str] = []
+    ops.review_confirm(stdin_isatty=True, ask=lambda _="": "no", say=out.append, all_=True)
+    for text in ("\n".join(lines), ops.knows_list(), "\n".join(out)):
+        assert "\\u202e" in text and "\\u2067" in text and "\\u200b" in text, text
+        assert not any(c in text for c in "\u202e\u2067\u200b")

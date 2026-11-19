@@ -3,49 +3,42 @@
 schema_version: 1.0.0
 defaults:
   noul: { accept: 0.70, reject: 0.30 }
-  choice: { accept_top_p: 0.70 }       # a choice whose top option is its no_match_option is ABSTAIN whatever its probability
-  score: { gates: false }
-  min_labeled_for_adjustment: 200
+  choice: { accept_top_p: 0.70 }       # a choice whose top option is its no_match_option is ABSTAIN whatever its probability. A score ranks and never gates (thresholds.judge)
+  min_labeled_for_adjustment: 200      # mirrors evals.MIN_LABELED; tests/test_escalation_policy_keys.py pins the two
   ci: wilson_95
 families:
   verify_claim:
     noul: { accept: 0.70, reject: 0.30 }
     by_risk:
       high:     { accept: 0.85 }
-      critical: { accept: 0.90, abstain_to: human }
-    abstain_to: deep
-    max_revisions: 3
+      critical: { accept: 0.90 }
   root_cause:
     choice: { accept_top_p: 0.60 }
-    abstain_to: deep
   strategy_choice:
     choice: { accept_top_p: 0.55 }     # several acceptable options may split probability (docs)
-    abstain_to: deep
     note: "Low confidence on a harmless preference choice is acceptable; record the margin"
   risk_triage:
     noul: { accept: 0.60, reject: 0.20 }   # asymmetric: false negatives cost more
-    abstain_to: human
   evidence_quality:
-    score: { gates: false }
     noul: { accept: 0.50, reject: 0.20 }   # companion `evidence_is_raw`: only a clear "this is a summary" counts against
   human_proxy:                         # Jev deciding in the owner's place (jade/proxy.py): the risk it is asked at is the band, so the owner's autonomy level sets how sure it must be
     noul: { accept: 0.70, reject: 0.30 }
     by_risk:
       medium:   { accept: 0.85 }
       high:     { accept: 0.85 }
-    abstain_to: human
   candidate_fit:
     noul: { accept: 0.70, reject: 0.30 }
-    abstain_to: fast
   routing:
     choice: { accept_top_p: 0.65 }
-    abstain_to: deep
-exit_codes:
+exit_codes:                            # mirrors thresholds.EXIT; tests/test_escalation_policy_keys.py pins the two
   accept: 0
   abstain: 3
   reject: 4
   provider_unavailable: 5
   invalid_question: 6
 human_question:                        # every escalation is its own question; none are grouped or delayed (W-35, docs/05 T14)
-  each_question_includes: ["context", "impact", "options", "recommended_default", "consequence_of_no_answer"]
-  deadline_default_h: 24
+  each_question_includes: ["context", "impact", "options", "recommended_default", "consequence_of_no_answer"]   # read by askplain.build (V6-26): it refuses to build a question without them
+# An abstain is exit code 3 and the agent decides what to do next: the file names no destination for it. The revision cap is the constant
+# state_machine.MAX_REVISIONS (3). Escalations are not grouped or delayed (W-35). A human question is built by jade/askplain.py from the gate's own reading of the
+# call; it shows what the call does, its risk, the options, and what no answer does (the call stays blocked). It shows no deadline.
+# Every key above is read by code or listed in tests/test_escalation_policy_keys.py, which fails on a key nothing reads (W-83, V6-11).

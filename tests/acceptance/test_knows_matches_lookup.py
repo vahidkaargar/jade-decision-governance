@@ -145,13 +145,19 @@ def test_kind_any_alone(p, q):
 def test_kind_any_then_deny_of_the_same_call(p, q):
     record(RESET, p, "allow", kind="kind_any", age=2)
     record(RESET, p, "deny", age=1)
-    assert not same([(RESET, p), (RESET, q)])
+    assert not same([(RESET, p)])   # V6-06: the deny is of this place; repoB (the other call) is a kind of its own and stays allowed
 
 
 def test_kind_any_then_deny_spelled_with_cd(p, q):
     record(RESET, p, "allow", kind="kind_any", age=2)
-    record(f"cd {p} && {RESET}", "/tmp", "deny", age=1)
-    assert not same([(RESET, p), (RESET, q)])
+    record(f"cd {p} && {RESET}", "/tmp", "deny", age=1)   # the same call in the same place: the leading cd is read
+    assert not same([(RESET, p)])
+
+
+def test_kind_any_then_deny_of_the_same_call_in_another_place_leaves_this_place(p, q):
+    record(RESET, p, "allow", kind="kind_any", age=2)
+    record(RESET, q, "deny", age=1)   # V6-06: a kind has a place; a deny in repoB does not take the allow out in repoA
+    assert same([(RESET, p)])
 
 
 def test_kind_any_then_deny_of_another_kind(p, q):
@@ -173,10 +179,10 @@ def test_kind_project_then_deny_of_the_same_call(p):
     assert not same([(RESET, p), (f"cd {p} && {RESET}", "/tmp")])
 
 
-def test_kind_project_then_deny_in_another_folder(p):
+def test_kind_project_then_deny_in_another_folder_leaves_the_project(p):
     record(RESET, p, "allow", kind="kind_project", age=2)
-    record(RESET, "/tmp", "deny", age=1)
-    assert not same([(RESET, p), (f"cd {p} && {RESET}", "/tmp")])
+    record(RESET, "/tmp", "deny", age=1)   # V6-06: another folder is another place
+    assert same([(RESET, p), (f"cd {p} && {RESET}", "/tmp")])
 
 
 # ---- merge_project (RR8-7 M1: a deny of one PR leaves the scope for the others)

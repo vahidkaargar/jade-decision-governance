@@ -6,3 +6,4 @@ __pycache__/
 policies/local/*.yaml
 !policies/local/*.example.yaml
 evals/performance/result.json
+*.jsonl.lock

@@ -1,22 +1,26 @@
 """Jev decides in the owner's place, inside the hook (docs/12, plan v3, PR-7).
 
+With the `jev` key off (`jade jev off`; the default at level high, V6-28) nothing here runs and nothing goes to a model, shadow included.
+
 At level low or medium a plain high call that neither a terminal permit nor a confirmed answer covers goes to Jev with the owner's written preferences, the
 confirmed answers they gave to calls of the same rule that still count, and their denies of that rule. An accept in the level's band lets the call run, through a decision walked to EXECUTING (so SI-07 still holds
 an unknown outcome). Everything else is the owner's question as before: an abstain, a reject, an unavailable or late provider, a call that is skipped. A verdict that is
 not an accept is never a yes.
 
-Bands come from `policies/escalation.yaml` (family `human_proxy`): the autonomy level sets the risk the question is judged at, so low accepts at 0.70 (egress at
-0.85) and medium at 0.85. Until the owner has answered `ops.JEV_BAND_ANSWERS` distinct plain-high calls Jev is shadow: it is asked and recorded and decides nothing. At
+Bands come from `policies/escalation.yaml` (family `human_proxy`): the autonomy level sets the risk the question is judged at, so low accepts at 0.70 and medium
+at 0.85. Until the deny gate (`deny_gate`) is met Jev is shadow: it is asked and recorded and decides nothing. The gate counts the owner's denies (at least 30 kinds of
+call from at least 3 rules, at least 100 completed shadow questions over at least 7 days, no false allow), not answers: a wall of allow clicks says nothing about a
+model. The shadow questions count from the first question asked under this version (the `jev_sample_start` event): an older answer of Jev cannot be checked against
+the owner's denies. Once the gate is met, Jev decides a plain high call inside its band at level low or medium while the `jev` key is on; `jade jev off` stops it. At
 level high it is shadow too and its advice is not shown.
 
 Never sent (always the owner's question):
-- a human-only class, a blocked call, a critical call (only level high calls are sent), fetch-and-exec (R-22) and writes to agent instruction files (R-13, R-18),
-  also when the rule sits in one segment of a longer command;
+- a human-only class, a blocked call, a critical call (only level high calls are sent), fetch-and-exec (R-22), egress (R-21, at every level, V6-28) and writes to
+  agent instruction files (R-13, R-18), also when the rule sits in one segment of a longer command;
 - a merge, a call the gate could not read (any segment), a secret-shaped value, text that redaction changed;
 - a program or a write over 4 KiB (the whole content of a write is shown to Jev, never a part), more than one inline program;
 - a call the owner denied before (that call, or a call of its kind), and a call Jev has already been asked about twice this hour in this session (a reworded comment is the same call);
 - a call with neither a preferences text nor a confirmed answer of its rule.
-Egress (R-21) is decided at level low only.
 
 The provider call runs in a daemon thread that the hook waits for at most `DEADLINE_S` (and never past the hook's own budget); a hung exchange leaves the thread behind,
 its row is closed, and the owner is asked. The answer is never taken from the dedup cache: every accept is a fresh sample of this call.
@@ -41,8 +45,7 @@ MAX_TEXT = 4096
 MAX_PAST = 8
 MAX_ATTEMPTS = 2          # questions to Jev about one call (by hold key) per session and hour: a comment added to the command does not make it a new call
 ATTEMPT_WINDOW_S = 3600
-NEVER_RULES = frozenset({"R-22", "R-13", "R-18"})   # R-13 and R-18: the files an agent reads its instructions from (AGENTS.md, CLAUDE.md, skills): a model judging them is the injection surface
-EGRESS = "R-21"
+NEVER_RULES = frozenset({"R-22", "R-13", "R-18", "R-21"})   # R-13 and R-18: the files an agent reads its instructions from (AGENTS.md, CLAUDE.md, skills): a model judging them is the injection surface. R-21 is egress, at every level (V6-28, H20: a tightening; before it Jev decided egress at level low at 0.85): where a call sends data is the owner's question
 
 
 def make_provider(deadline_s: float):
@@ -80,8 +83,63 @@ def _age_days(stamp: str | None) -> int | None:
 
 
 def owner_answers(db) -> int:
-    """Distinct plain-high calls the owner answered (human-only answers, retired answers and repeats of one call do not count): what the shadow band is measured by."""
+    """Distinct plain-high calls the owner answered (human-only answers, retired answers and repeats of one call do not count). It only reports how much the owner has
+    answered: since V6-28 it gates nothing, because a wall of allow clicks passed the old gate of 50 and an always-allow model would agree with all of them."""
     return db.con.execute("SELECT COUNT(DISTINCT exact_key) FROM human_answers WHERE COALESCE(ho,0)=0 AND strength<>'revoked' AND " + ledger.LIVE.format(a="")).fetchone()[0]
+
+
+# The deny gate (V6-28; Q-08, not yet answered by the owner: these are the numbers of the card). It counts what separates a model from a yes-sayer: the owner's denies.
+MIN_DENIES = 30          # distinct kinds of call the owner denied
+MIN_DENY_RULES = 3       # ... from at least this many rules
+MIN_SAMPLES = 100        # completed shadow questions to Jev ...
+MIN_SAMPLE_DAYS = 7      # ... that span at least this many days
+FALSE_ALLOWS_ALLOWED = 0
+WINDOW_EVENT = "jev_sample_start"   # written once, at the first question to Jev under this version: shadow questions before it have no `jev_accepted` link and do not count
+
+
+def false_allows(db) -> int:
+    """Calls where Jev said ACCEPT and the owner then denied that call or its kind, or marked the Jev yes wrong. Shadow or decided, both count: the
+    `jev_accepted` event is written at every accept, and `proxy.step` skips a call the owner denied earlier, so a match is a miss that Jev made first. A yes that Jev
+    decided before the `jev_accepted` event existed has a `jev_allowed` event with the same keys, so it is read too. One call with both events counts once. The keys
+    are kept by retention (`ops.purge`): the count must not fall to zero because 90 days passed."""
+    live = ledger.LIVE.format(a="e.")
+    return db.con.execute(
+        "SELECT COUNT(DISTINCT e.entity_id) FROM events e WHERE e.kind IN ('jev_accepted','jev_allowed') AND " + live + " AND ("   # noqa: S608 - fixed text
+        " EXISTS (SELECT 1 FROM asks a WHERE a.status='DENIED' AND a.session_id=json_extract(e.detail_json,'$.session') AND a.hold_key=json_extract(e.detail_json,'$.hold'))"
+        " OR EXISTS (SELECT 1 FROM human_answers h WHERE h.answer='deny' AND h.strength IN ('hint','strong') AND COALESCE(h.source,'')<>'test' AND ("
+        "   h.exact_key=json_extract(e.detail_json,'$.exact_key') OR (h.class_key IS NOT NULL AND h.class_key=json_extract(e.detail_json,'$.class_key'))))"
+        " OR EXISTS (SELECT 1 FROM events d WHERE d.kind='jev_distrust' AND d.entity_id IN (json_extract(e.detail_json,'$.exact_key'), json_extract(e.detail_json,'$.class_key'),"
+        "   json_extract(e.detail_json,'$.coarse_key'))))").fetchone()[0]
+
+
+def deny_gate(db) -> dict:
+    """Whether the owner's own record is enough for a model to be allowed to decide (V6-28). Counts, never answers: distinct kinds of call the owner denied, the rules
+    those denies come from, the completed shadow questions (asked since `WINDOW_EVENT`) and the days they span, and the false allows. `ok` is what lets Jev decide at level
+    low or medium while the `jev` key is on; no second human step follows it (a separate "decide" switch is an open owner choice, LD-08, V6-31). `recall_bound` is the 95% lower bound of Jev's share of the owner's denies
+    that it would also have denied when it missed none (0.05 ** (1 / denies): 30 denies bound it at about 90%, 100 at about 97%); None when there is a miss or no deny."""
+    live = ledger.LIVE.format(a="")
+    denied, rules = db.con.execute(f"SELECT COUNT(DISTINCT COALESCE(class_key, exact_key)), COUNT(DISTINCT rule_id) FROM human_answers WHERE {memory.DENY_SQL} "  # noqa: S608
+                                   f"AND COALESCE(ho,0)=0 AND {live}").fetchone()
+    samples, first = db.con.execute(f"SELECT COUNT(*), MIN(ts) FROM jev_calls WHERE question_id=? AND state='DONE' AND verdict IS NOT NULL AND dedup_of IS NULL "  # noqa: S608
+                                    f"AND error_kind IS NULL AND {live} AND ts>=(SELECT MIN(ts) FROM events WHERE kind=?)", (QID, WINDOW_EVENT)).fetchone()
+    try:
+        days = (now() - parse_ts(first)).total_seconds() / 86400 if first else 0.0
+    except (TypeError, ValueError):
+        days = 0.0
+    wrong = false_allows(db)
+    need = []
+    if denied < MIN_DENIES:
+        need.append(f"{denied} of {MIN_DENIES} owner denies")
+    if rules < MIN_DENY_RULES:
+        need.append(f"denies from {rules} of {MIN_DENY_RULES} rules")
+    if samples < MIN_SAMPLES:
+        need.append(f"{samples} of {MIN_SAMPLES} shadow questions")
+    if days < MIN_SAMPLE_DAYS:
+        need.append(f"shadow questions span {int(days)} of {MIN_SAMPLE_DAYS} days")
+    if wrong > FALSE_ALLOWS_ALLOWED:
+        need.append(f"{wrong} false allow(s) (Jev said yes to a call you denied or marked wrong)")
+    return {"ok": not need, "denies": denied, "rules": rules, "samples": samples, "days": days, "false_allows": wrong, "missing": need,
+            "recall_bound": (0.05 ** (1 / denied)) if denied and not wrong else None}
 
 
 def coarse_key(a, tool: str, tin: dict, el: str) -> str | None:
@@ -150,14 +208,12 @@ def skip_reason(a, tool: str, tin: dict, level: str) -> str | None:
     if a.level != "high":
         return "not a plain high call"
     if rules & NEVER_RULES:
-        return "fetch-and-exec, or a write to an agent instruction file"
-    if EGRESS in rules and level != "low":
-        return "egress outside level low"
+        return "fetch-and-exec, egress, or a write to an agent instruction file"
     if a.blind or getattr(a, "unread", None) or rules & {"R-31", "R-32"}:
         return "the gate could not read all of it"
-    if any(memory.MERGE.match(k) for k in getattr(a, "seg_keys", []) or []):
-        return "a merge"
     subject = a.subject or ""
+    if any(memory.MERGE.match(k) for k in getattr(a, "seg_keys", []) or []) or policy.gh_api_merge_in(subject):
+        return "a merge"
     if len(subject) > MAX_TEXT or len(_content(tool, tin)) > MAX_TEXT:
         return "over 4 KiB"
     if policy.runs_shell(tool, tin) and len(list(memory.INLINE.finditer(subject))) > 1:
@@ -178,10 +234,8 @@ def build_state(a, tool: str, tin: dict, prefs: str, past: list[dict], fp: dict)
 
 
 def _risk(level: str, a) -> str:
-    """The risk the question is judged at, which picks the band in `policies/escalation.yaml`."""
-    if level == "low":
-        return "high" if EGRESS in {a.rule_id, *(getattr(a, "seg_rules", None) or [])} else "low"
-    return "medium"
+    """The risk the question is judged at, which picks the band in `policies/escalation.yaml` (egress never gets here: it is in NEVER_RULES)."""
+    return "low" if level == "low" else "medium"
 
 
 def _deadline(started: float | None) -> float | None:
@@ -252,8 +306,9 @@ def replay_past_answers(past) -> list[dict]:
     return out
 
 
-def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: float | None = None):
-    """The Jev branch of the gate: a HookResult that lets the call run, or None (the owner is asked as before)."""
+def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: float | None = None, audit_held: bool = False):
+    """The Jev branch of the gate: a HookResult that lets the call run, or None (the owner is asked as before). `audit_held` (V6-29): the audit of silent runs is why this
+    call is asked about (its scope is paused, a limit was reached, no key): Jev must not let it run in the owner's place, which would be a silent run with no audit."""
     from . import askchat, hooks, permits, state_machine
     from .hooks import HookResult
 
@@ -261,6 +316,11 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: 
     session = event.get("session_id")
     if mode != "enforce" or level not in ("low", "medium", "high") or not session:
         return None
+    if not jev_on(db):
+        return None   # V6-28: before any state is built, so nothing goes to a model, shadow included
+    gate_ok = deny_gate(db)["ok"] if audit_held and level != "high" else None   # read once: the question to Jev below is itself a shadow sample and could meet the gate while it is answered
+    if gate_ok:
+        return None   # Jev would decide here: the audit says the owner is asked (until the deny gate is met, or at level high, Jev only records and decides nothing)
     tin = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
     if skip_reason(a, tool, tin, level) or permits.make_context(tool, a, event, cwd=cwd).get("redacted"):
         return None
@@ -282,6 +342,7 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: 
     deadline = _deadline(started)
     if deadline is None:
         return None
+    db.event("jev", WINDOW_EVENT, guard="first question to Jev", actor="hook", key=WINDOW_EVENT)   # once (the idempotency key): the shadow sample counts from here
     db.event(_attempt_key(session, hold), "jev_asked", guard=f"{a.rule_id} {a.level}", actor="hook")
     began = ts()
     result = _ask(spec, state, _risk(level, a), session, deadline)
@@ -289,9 +350,13 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: 
         _close_stranded(db, session, began)
         return None
     item = result.primary
+    if item.call_id:   # V6-23: the link from this pair to its call, so a readout never has to guess between the calls of one session (ids only, no text)
+        db.event(_attempt_key(session, hold), "jev_answered", guard=f"{a.rule_id} {a.level}", actor="hook", detail={"call_id": item.call_id})
     if result.exit_code != 0 or item.verdict is None or item.verdict.verdict != "ACCEPT" or not item.call_id:
         return None
-    if level == "high" or owner_answers(db) < _band_answers():
+    db.event(item.call_id, "jev_accepted", guard=f"{a.rule_id} {a.level}", actor="hook",
+             detail={"session": session, "hold": hold, "rule": a.rule_id, "exact_key": exact, "class_key": cls, "coarse_key": coarse})   # the link `false_allows` follows to the owner's later deny
+    if level == "high" or not (deny_gate(db)["ok"] if gate_ok is None else gate_ok):   # an audit hold decided at the top by the same reading: it stays shadow if it was shadow
         return None   # shadow: asked and recorded, decides nothing
     try:
         with db.tx():
@@ -308,10 +373,12 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: 
                          f"its target (it cannot be undone, and it also retires your own answers of that kind); `jade review` shows what Jev decided.")
 
 
-def _band_answers() -> int:
-    from . import ops
-
-    return ops.JEV_BAND_ANSWERS
+def jev_on(db) -> bool:
+    """The `jev` key in force (`paths.jev`: the config key and the newest `jev` event together, failing closed). A ledger that cannot be read reads `off`."""
+    try:
+        return paths.jev(ledger.last_setting(db, "jev", "jev")) == "on"
+    except Exception:  # noqa: BLE001 - `on` cannot be shown
+        return False
 
 
 def decide_label(a) -> str:

@@ -306,7 +306,7 @@ def _canary_false_accepts(db, qid: str, version: int, started: str, challenger: 
     version (`challenger`) or of every other version (the champion). An accept is exit 0; heuristic labels are not evidence."""
     row = db.one(f"SELECT COUNT(*) AS n, SUM(l.label=0) AS bad FROM jev_calls c JOIN labels l ON l.call_id=c.call_id WHERE c.question_id=? "  # noqa: S608 - constant fragment
                  f"AND c.question_version{'=' if challenger else '<>'}? AND c.ts>=? AND c.primitive='noul' AND c.exit_code=0 AND c.p IS NOT NULL "
-                 f"AND c.dedup_of IS NULL AND l.source<>'heuristic' AND {ledger.live('c')}", (qid, version, started))
+                 f"AND c.dedup_of IS NULL AND l.source<>'heuristic' AND (l.label_type IS NULL OR l.label_type='claim_true') AND {ledger.live('c')}", (qid, version, started))
     return int(row.bad or 0), int(row.n or 0)
 
 

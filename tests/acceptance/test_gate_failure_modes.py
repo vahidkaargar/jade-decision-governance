@@ -67,6 +67,7 @@ def test_corrupt_ledger_in_advisory_mode_reports_but_does_not_block(monkeypatch)
     assert r.exit_code == 0 and "advisory" in r.stderr
 
 
+@pytest.mark.timing
 def test_locked_ledger_fails_closed_within_the_hook_budget(monkeypatch):
     monkeypatch.setattr(hooks, "LEDGER_TIMEOUT_S", 0.3)
     db = ledger.open()
@@ -89,6 +90,7 @@ def test_internal_budget_is_safely_below_every_host_hook_timeout():
     assert hooks.GIT_TIMEOUT_S < hooks.BUDGET_S
 
 
+@pytest.mark.timing
 def test_ledger_open_takes_a_short_timeout_for_the_hook_path(tmp_path):
     t0 = time.monotonic()
     db = ledger.open(tmp_path / "x.sqlite", timeout=0.2)
@@ -105,6 +107,7 @@ def test_ledger_open_takes_a_short_timeout_for_the_hook_path(tmp_path):
     assert time.monotonic() - t0 < 3
 
 
+@pytest.mark.timing
 def test_pretool_total_time_is_bounded_when_the_handler_hangs(monkeypatch, capsys):
     """The alarm in main() turns a hang (ledger, git, a pathological regex) into the cheap fail-closed verdict before the host kills the hook."""
     monkeypatch.setattr(hooks, "BUDGET_S", 0.3)

@@ -61,11 +61,15 @@ def _adjusted(group: str) -> dict:
 def bands(primitive: str, family: str, risk: str = "low", group: str = "") -> tuple[float | None, float | None]:
     esc = escalation()
     fam = esc.get("families", {}).get(family, {})
-    base = {**esc["defaults"].get(primitive, {}), **fam.get(primitive, {})}
+    dflt, own = esc["defaults"].get(primitive, {}), fam.get(primitive, {})
+
+    def pick(key: str, fallback: float) -> float:  # family value wins over the default; only the key asked for is read
+        return own[key] if key in own else dflt.get(key, fallback)
+
     if primitive == "noul":
-        accept, reject = base.get("accept", 0.70), base.get("reject", 0.30)
+        accept, reject = pick("accept", 0.70), pick("reject", 0.30)
     elif primitive == "choice":
-        accept, reject = base.get("accept_top_p", 0.70), None
+        accept, reject = pick("accept_top_p", 0.70), None
     else:
         return None, None
     adj = _adjusted(group) if group else {}

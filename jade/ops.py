@@ -14,13 +14,14 @@ import stat
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import NamedTuple
 
 from . import ledger, memory, paths, policy, signing
-from .util import is_human_tty, now, one_line, parse_ts, ts, user
+from .util import is_human_tty, now, parse_ts, show_safely, ts, user
 
 
 def pretool_matcher() -> str:
@@ -152,12 +153,15 @@ def active_version(path, question_id: str, key: str | None = None) -> int | None
 
 
 # ---- drift ---------------------------------------------------------------------------------------
-def check_drift(path, resolved_model: str, expected: list[str]):
+def check_drift(path, resolved_model: str, expected: list[str], db: ledger.Ledger | None = None):
     """None when the resolved model is expected. Otherwise a MODEL_DRIFT finding, recorded once per new string.
-    Drift is informational (decision Q6): the new snapshot is a new calibration group at default thresholds."""
+    Drift is informational (decision Q6): the new snapshot is a new calibration group at default thresholds.
+    `db` is the ledger the call itself uses: it is written to and left open. Without it, `path` (None: the JADE home) is opened and closed here (V6-11: a run
+    with a ledger of its own must not write to the home)."""
     if resolved_model in expected:
         return None
-    db = ledger.open(_dir(path))
+    own = db is None
+    db = db or ledger.open(_dir(path))
     try:
         known = json.loads(db.meta_get("known_models", "[]"))
         first = resolved_model not in known
@@ -171,7 +175,8 @@ def check_drift(path, resolved_model: str, expected: list[str]):
             db.con.execute("INSERT OR REPLACE INTO work_items(id, status, doc_json, updated_at) VALUES(?,?,?,?)", (wid, "open", json.dumps(item), ts()))
         return SimpleNamespace(kind="MODEL_DRIFT", resolved_model=resolved_model, expected=list(expected), first_seen=first)
     finally:
-        db.close()
+        if own:
+            db.close()
 
 
 def check_question_drift(path=None, db: ledger.Ledger | None = None) -> list:
@@ -230,41 +235,90 @@ def expected_models(db: ledger.Ledger | None = None) -> list[str]:
 # ---- retention -----------------------------------------------------------------------------------
 PURGED = "[purged by retention]"
 OPEN_PERMIT = ("PENDING", "ISSUED")
+# Events whose detail is the record itself, not project text, so retention keeps it (V6-28 review): `jev` is the value the human set (cleared, `jade jev on` read `off`);
+# `jev_accepted` and `jev_allowed` hold only hashes, rule ids and session ids (the command text of a `jev_allowed` label is removed above), and they are what links a
+# Jev yes to the owner's later deny (cleared, a false allow vanished after 90 days and the deny gate opened by itself).
+KEPT_DETAIL = ("jev", "jev_accepted", "jev_allowed")
 
 
-def purge(db: ledger.Ledger, older_than_days: int = 90) -> int:
+PURGED_ASK = json.dumps({"purged": True})   # `asks.question_json` is NOT NULL and a reader parses it: a marker, not NULL
+PURGE_TABLES = ("jev_calls", "decisions", "permits", "events", "asks", "human_answers")
+
+
+class _DryRun(Exception):
+    """Raised inside the purge transaction of a dry run so that it rolls back."""
+
+
+def _purge_rows(con, cutoff: str, *, ask_text: bool) -> dict[str, int]:
+    """Clear the text, inside the caller's transaction, and count the rows cleared per table. One place, so a dry run and a purge cannot disagree."""
+    n = dict.fromkeys(PURGE_TABLES, 0)
+    n["jev_calls"] = con.execute("UPDATE jev_calls SET state_text=NULL, question_text=NULL WHERE ts<? AND (state_text IS NOT NULL OR question_text IS NOT NULL)",
+                                 (cutoff,)).rowcount
+    for r in con.execute("SELECT decision_id, doc_json FROM decisions WHERE updated_at<? AND json_extract(doc_json,'$.objective') IS NOT ?", (cutoff, PURGED)).fetchall():
+        doc = json.loads(r["doc_json"])
+        doc["objective"] = PURGED
+        doc["candidate_actions"] = [{**act, "description": PURGED} if isinstance(act, dict) else act for act in doc.get("candidate_actions", [])]
+        doc["constraints"], doc["assumptions"], doc["evidence_refs"] = [], [], []
+        con.execute("UPDATE decisions SET doc_json=? WHERE decision_id=?", (json.dumps(doc, ensure_ascii=False), r["decision_id"]))
+        n["decisions"] += 1
+    for r in con.execute("SELECT permit_id, scope FROM permits WHERE issued_at<? AND (state NOT IN ('PENDING','ISSUED') OR expires_at<=?) AND scope LIKE '{%'",
+                         (cutoff, ts())).fetchall():
+        try:
+            ctx = json.loads(r["scope"])
+        except ValueError:
+            continue
+        if isinstance(ctx, dict) and "subject" in ctx and ctx["subject"] != PURGED:
+            keep = {k: v for k, v in ctx.items() if k in ("tool", "length", "rule", "bound", "session_id", "agent_id", "permission_mode", "hash_cwd")}
+            con.execute("UPDATE permits SET scope=? WHERE permit_id=?", (json.dumps({**keep, "subject": PURGED, "purged": True}), r["permit_id"]))
+            n["permits"] += 1
+    n["events"] = con.execute("UPDATE events SET detail_json=json_remove(detail_json,'$.label') WHERE kind='jev_allowed' AND ts<? AND json_extract(detail_json,'$.label') IS NOT NULL",
+                              (cutoff,)).rowcount   # the label is command text; the keys beside it are hashes and stay (below)
+    n["events"] += con.execute("UPDATE events SET detail_json=NULL WHERE ts<? AND detail_json IS NOT NULL AND kind NOT IN ('purge', ?, ?, ?)", (cutoff, *KEPT_DETAIL)).rowcount
+    if ask_text:
+        # The chat question (it holds a "Command:" block), the one-line label and the scope labels of an ask that is over: never an ask still open.
+        n["asks"] = con.execute(
+            "UPDATE asks SET question_json=?, label=CASE WHEN label IS NULL THEN NULL ELSE ? END, scopes_json=CASE WHEN scopes_json IS NULL THEN NULL ELSE '[]' END "
+            "WHERE created_ts<? AND NOT (status IN ('PENDING','SHOWN') AND expires_ts>?) "
+            "AND (question_json<>? OR (label IS NOT NULL AND label<>?) OR (scopes_json IS NOT NULL AND scopes_json<>'[]'))",
+            (PURGED_ASK, PURGED, cutoff, ts(), PURGED_ASK, PURGED)).rowcount
+        # The label of an answer is what `jade review confirm` and `jade knows` print. A standing answer keeps it while it decides (30 days after its last use,
+        # 180 at most), and so does an allow the human has not confirmed yet (it can be confirmed for 180 days); the keys, the answer and the rule stay for good.
+        cap, use = memory.valid_since()
+        n["human_answers"] = con.execute(
+            "UPDATE human_answers SET label=CASE WHEN label IS NULL THEN NULL ELSE ? END, scope_label=CASE WHEN scope_label IS NULL THEN NULL ELSE ? END "
+            "WHERE ts<? AND ((label IS NOT NULL AND label<>?) OR (scope_label IS NOT NULL AND scope_label<>?)) "
+            "AND NOT (answer='allow' AND strength='strong' AND COALESCE(source,'')<>'test' AND confirmed_ts>=? AND COALESCE(last_used_ts, confirmed_ts)>=?) "
+            "AND NOT (answer='allow' AND strength='hint' AND ts>=?)",
+            (PURGED, PURGED, cutoff, PURGED, PURGED, cap, use, cap)).rowcount
+    return n
+
+
+def purge_report(db: ledger.Ledger, older_than_days: int = 90, *, ask_text: bool = False, dry_run: bool = False) -> dict[str, int]:
+    """The retention purge, with the rows cleared per table. `dry_run` runs the same statements and rolls them back, so the ledger, its audit event and its file
+    are as they were. `ask_text` also clears the chat question and the labels of ended asks and of answers (DX-H2); it is off until the owner says yes, so
+    `jade maintain` never turns it on."""
+    cutoff = ts(now() - timedelta(days=older_than_days))
+    out: dict[str, int] = {}
+    try:
+        with db.tx() as con:
+            out = _purge_rows(con, cutoff, ask_text=ask_text)
+            if dry_run:
+                raise _DryRun
+            if (total := sum(out.values())):
+                db.event("ledger", "purge", guard=f"older than {older_than_days} d", detail={"rows": total, "tables": {t: c for t, c in out.items() if c}}, con=con)
+    except _DryRun:
+        return out
+    if sum(out.values()):
+        db.scrub()   # the cleared text must not stay readable in the file's free pages or the write-ahead log
+    return out
+
+
+def purge(db: ledger.Ledger, older_than_days: int = 90, *, ask_text: bool = False) -> int:
     """Remove stored project text older than the retention window and keep every metric (decision Q7): the state and question text of Jev
     calls, the objective and command text of decisions, the command a permit carried (never one still open: PENDING or ISSUED and not yet expired) and the detail of
-    events. Statuses, hashes, risk levels, timings, costs and probabilities stay. Returns the number of rows cleared."""
-    cutoff = ts(now() - timedelta(days=older_than_days))
-    n = 0
-    with db.tx() as con:
-        n += con.execute("UPDATE jev_calls SET state_text=NULL, question_text=NULL WHERE ts<? AND (state_text IS NOT NULL OR question_text IS NOT NULL)",
-                         (cutoff,)).rowcount
-        for r in con.execute("SELECT decision_id, doc_json FROM decisions WHERE updated_at<? AND json_extract(doc_json,'$.objective') IS NOT ?",
-                             (cutoff, PURGED)).fetchall():
-            doc = json.loads(r["doc_json"])
-            doc["objective"] = PURGED
-            doc["candidate_actions"] = [{**act, "description": PURGED} if isinstance(act, dict) else act for act in doc.get("candidate_actions", [])]
-            doc["constraints"], doc["assumptions"], doc["evidence_refs"] = [], [], []
-            con.execute("UPDATE decisions SET doc_json=? WHERE decision_id=?", (json.dumps(doc, ensure_ascii=False), r["decision_id"]))
-            n += 1
-        for r in con.execute("SELECT permit_id, scope FROM permits WHERE issued_at<? AND (state NOT IN ('PENDING','ISSUED') OR expires_at<=?) AND scope LIKE '{%'",
-                             (cutoff, ts())).fetchall():
-            try:
-                ctx = json.loads(r["scope"])
-            except ValueError:
-                continue
-            if isinstance(ctx, dict) and "subject" in ctx and ctx["subject"] != PURGED:
-                keep = {k: v for k, v in ctx.items() if k in ("tool", "length", "rule", "bound", "session_id", "agent_id", "permission_mode", "hash_cwd")}
-                con.execute("UPDATE permits SET scope=? WHERE permit_id=?", (json.dumps({**keep, "subject": PURGED, "purged": True}), r["permit_id"]))
-                n += 1
-        n += con.execute("UPDATE events SET detail_json=NULL WHERE ts<? AND detail_json IS NOT NULL AND kind<>'purge'", (cutoff,)).rowcount
-        if n:
-            db.event("ledger", "purge", guard=f"older than {older_than_days} d", detail={"rows": n}, con=con)
-    if n:
-        db.scrub()   # the cleared text must not stay readable in the file's free pages or the write-ahead log
-    return n
+    events (not `KEPT_DETAIL`). Statuses, hashes, risk levels, timings, costs and probabilities stay. With `ask_text` (the owner's yes, DX-H2) the chat question and the labels of ended
+    asks and of answers go too. Returns the number of rows cleared."""
+    return sum(purge_report(db, older_than_days, ask_text=ask_text).values())
 
 
 TEST_ID = re.compile(r"(?:prm|dec)_[0-9a-f]{12}")
@@ -642,6 +696,95 @@ def set_level(value: str, stdin_isatty: bool | None = None) -> None:
     atomic_write(paths.config_dir() / "config.json", json.dumps(cfg, indent=1) + "\n")
 
 
+JEV_CHOICES = ("unset", "on", "off")
+
+
+def jev_effective(db: ledger.Ledger | None = None) -> str:
+    """`on` or `off` (V6-28): whether a model may be asked at all. The config key and the newest `jev` ledger event are read together and `paths.jev` fails
+    closed; a ledger that cannot be read leaves `on` unprovable, so it reads `off`. Pass the open ledger inside the hook to use its connection."""
+    own = db is None
+    try:
+        if own:
+            db = ledger.open(timeout=5)
+        recorded = ledger.last_setting(db, "jev", "jev")
+    except Exception:  # noqa: BLE001 - an unreadable ledger records nothing a person can be believed by
+        recorded = ledger.UNREADABLE_RECORD
+    finally:
+        if own and db is not None:
+            db.close()
+    return paths.jev(recorded)
+
+
+def set_jev(value: str, stdin_isatty: bool | None = None) -> None:
+    """`jade jev on|off|unset`: human terminal only (SI-09). The change is journaled as a `jev` event first, then the key is written, so the file always has a human
+    record behind it. `off` and `unset` are always allowed. `on` is refused when the config already holds a value that no `jade jev` command recorded (written
+    some other way): the human clears it with `unset` first."""
+    _require_human("jade jev", stdin_isatty)
+    if value not in JEV_CHOICES:
+        raise ValueError(f"jev must be one of {', '.join(JEV_CHOICES)}, not {value!r}")
+    cfg = paths.config()
+    db = ledger.open(timeout=5)
+    try:
+        if value == "on" and "jev" in cfg and cfg["jev"] != "off" and cfg["jev"] != ledger.last_setting(db, "jev", "jev"):
+            raise HumanOnly("the config holds a jev value that no `jade jev` command recorded (it was written some other way): run `jade jev unset`, check "
+                            "the config directory, then set it again")
+        db.event("jev", "jev", guard=f"jade jev {value}", actor=f"human:{user()}", detail={"jev": None if value == "unset" else value})
+    finally:
+        db.close()
+    if value == "unset":
+        cfg.pop("jev", None)
+    else:
+        cfg["jev"] = value
+    atomic_write(paths.config_dir() / "config.json", json.dumps(cfg, indent=1) + "\n")
+
+
+def autonomy_label(level: str | None, jev: str) -> str:
+    """The display name of a `(level, jev)` pair (V6-28). Never stored: a stored name beside the keys could drift, and drift is a quiet way to raise autonomy."""
+    if level is None:
+        return "legacy"
+    if level == "off":
+        return "observe"
+    return {("high", "off"): "MANUAL", ("medium", "off"): "ASSISTED", ("medium", "on"): "BALANCED", ("low", "on"): "FAST"}.get((level, jev), "custom")
+
+
+def _jev_row() -> tuple[str, bool | None, str]:
+    """`jade check` row `jev`: the value in force and where it comes from. A failure is a file that does not match the human's record; a warning is `on` with no
+    signed approval backend (V6-12)."""
+    cfg, lv = paths.config(), paths.level()
+    try:
+        db = ledger.open(timeout=5)
+        try:
+            recorded = ledger.last_setting(db, "jev", "jev")
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001
+        return ("jev", False, "off: the ledger cannot be read, so `on` cannot be shown to be the human's choice")
+    eff = paths.jev(recorded)
+    if "jev" in cfg:
+        raw = cfg["jev"]
+        if not isinstance(raw, str) or raw not in paths.JEV_VALUES:
+            return ("jev", False, f"off: the config value {raw!r} is not on or off, so it reads off; `jade jev unset` clears it")
+        if raw == "on" and recorded != "on":
+            return ("jev", False, "off: the config says on, but no `jade jev on` recorded it (written some other way?); run `jade jev unset`, look at the config directory, set it again")
+        if recorded is not None and recorded != raw:
+            return ("jev", False, f"{eff}: the config says {raw}, but the last `jade jev` event says {recorded!r}; run `jade jev unset`, look at the config directory, set it again")
+        where = "the last `jade jev` event, which the config matches" if recorded is not None else "the config (a new install writes off; no `jade jev` event)"
+    elif recorded is not None:
+        return ("jev", False, f"off: the last `jade jev` event says {recorded!r}, but the key is gone from the config; run `jade jev unset`, look at the config directory, set it again")
+    else:
+        where = f"the default (no key and no `jade jev` event; on at level low or medium, off at every other level; level {lv or 'unset'})"
+    label = autonomy_label(lv, eff)
+    base = f"{eff} ({label}) from {where}"
+    if eff == "on" and not signing.signed_backend():
+        return ("jev", None, base + "; a model may be asked, and there is no signed approval backend (docs/10), so a terminal approval can be forged by a same-user process; "
+                             "`jade jev off` stops every model call")
+    return ("jev", True, base)
+
+
+OFF_MEANS = ("off is observe plus floor: most rules only log, but SI-07, SI-08, SI-09 to SI-12 and writes to JADE's own wiring (HO-wiring, HO-checkout-install, "
+             "HO-settings-shadow, HO-state-path) block. Use `jade level high` to have JADE ask about high-risk calls.")
+
+
 def _level_row() -> tuple[str, bool, str]:
     raw, lv = paths.config().get("level"), paths.level()
     if raw is None:
@@ -650,8 +793,9 @@ def _level_row() -> tuple[str, bool, str]:
         return ("level", False, f"the config level {raw!r} is not off, low, medium or high, so it counts as unset; `jade level unset` clears it")
     if raw != _recorded_level():
         return ("level", False, f"{lv}, but no `jade level` command recorded it (written some other way?); run `jade level unset`, look at the config directory, set it again")
-    if lv == "off":   # V6-10: not a failure (the human chose it), but not "ok": most rules only log
-        return ("level", None, "off: JADE only watches; most rules only log (the row `what blocks` lists them)")
+    if lv == "off":   # V6-10: not a failure (the human chose it), but not "ok": most rules only log. V6-16: the floor blocks
+        return ("level", None, "off (observe plus floor): most rules only log; SI-07, SI-08 and writes to JADE's own wiring block, as do SI-09 to SI-12 "
+                               "(the row `what blocks` lists them)")
     return ("level", True, f"{lv}")
 
 
@@ -660,7 +804,8 @@ def blocking_summary(mode: str | None = None, level: str | None | bool = False) 
     True when every safety invariant blocks and every high or critical risk call waits for a human; None (a warning, never a failure) otherwise. It mirrors
     `hooks.pretool`, `hooks._verdict` and `hooks._gate`: gate off returns before any verdict; the governance invariants block once a level is set; level off
     and advisory gate mode make the other invariants and the risk gate log only; at level low and medium `memory.step` (a confirmed answer) and `proxy.step`
-    (Jev, plain high calls only, once its band has enough owner answers) may let a call run with no human; at level high Jev is shadow only. It does not
+    (Jev, plain high calls only, never egress, only with the `jev` key on and once the deny gate is met) may let a call run with no human; at level high Jev is shadow
+    only, and with the key off nothing is sent to a model at all. It does not
     look at the hooks: `_what_blocks_row` does."""
     from . import hooks
 
@@ -682,16 +827,43 @@ def blocking_summary(mode: str | None = None, level: str | None | bool = False) 
         return (None, "advisory gate mode, no level set: nothing blocks; every safety invariant (" + ", ".join(active) + ") and every risk rule only log" + unset)
     if mode == "advisory":
         return (None, "advisory gate mode: " + ", ".join(gov) + " block; " + ", ".join(soft) + " and every risk rule only log")
-    if level == "off":
-        return (None, "advisory: " + ", ".join(soft) + ", R-13, R-16 and all risk rules only log; " + ", ".join(gov) + " block (level off, docs/12)")
+    if level == "off":   # V6-16: observe plus floor; hooks._verdict and hooks.pretool
+        floor = sorted(hooks.OFF_FLOOR_INVARIANTS)
+        firm = sorted(set(floor) | set(gov))
+        return (None, "advisory: " + ", ".join(i for i in soft if i not in floor) + " and every risk rule (R-13 and R-16 too) only log; "
+                + ", ".join(firm) + " block, and so does a write to JADE's own wiring (" + ", ".join(sorted(hooks.OFF_FLOOR_CLASSES)) + ") (level off, observe plus floor, docs/12)")
     if level is None:
         return (True, "every active safety invariant (" + ", ".join(active) + ") blocks; a high or critical risk call is held for a human approval (docs/12)" + unset)
     if level in ("low", "medium"):   # hooks._gate: memory.step, then proxy.step, run before the human is asked
         return (None, "every safety invariant (" + ", ".join(ids) + f") blocks; at level {level} a high or critical risk call runs without a human when a "
                       "confirmed answer covers it (`jade knows list`), and a plain high call runs without a human when Jev accepts it inside its band "
-                      "(once enough owner answers exist); any other high or critical call is held for a human (docs/12)")
+                      "(only with the `jev` key on, never for egress, and only once the deny gate is met: `jade review` shows the count); any other high or critical call is "
+                      "held for a human (docs/12)")
     return (True, "every safety invariant (" + ", ".join(ids) + ") blocks; a high or critical risk call is held for a human approval (Jev decides nothing at "
                   "this level, docs/12)")
+
+
+def list_b() -> tuple[dict, dict]:
+    """List B of the floor (V6-17): what is advisory by design, for gate mode `off` and gate mode `advisory`, as `{"mode", "firm", "advisory"}` of safety invariant ids.
+    The R rules and the HO classes are advisory in both modes and are not listed one by one. `jade check` prints it (`_list_b_row`) and the floor tests assert it."""
+    from . import hooks
+
+    every = sorted(str(i["id"]) for i in policy.safety()["invariants"])
+    gov = sorted(hooks.GOVERNANCE_INVARIANTS)
+    return ({"mode": "off", "firm": [], "advisory": every},
+            {"mode": "advisory", "firm": gov, "advisory": [i for i in every if i not in gov]})
+
+
+def _list_b_row() -> tuple[str, bool, str]:
+    """What the owner chose to leave advisory by design (List B of the floor). Never a warning: it says what gate mode `off` and `advisory` mean, whatever is set now."""
+    try:
+        off, adv = list_b()
+    except Exception as e:  # noqa: BLE001 - the `policies load` row reports the failure
+        return ("advisory by design", True, f"unknown: the safety policy does not load ({type(e).__name__})")
+    return ("advisory by design", True,
+            f"gate mode off: nothing blocks ({', '.join(off['advisory'])}, every R rule and every HO class are skipped); "
+            f"gate mode advisory: {', '.join(adv['firm'])} block once a level is set, and {', '.join(adv['advisory'])}, every R rule and every HO class only log "
+            "(the floor of level `off` is another thing: it needs gate mode enforce)")
 
 
 def _what_blocks_row(pretool_ok: bool | None = None, wiring: list[str] | None = None) -> tuple[str, bool | None, str]:
@@ -717,6 +889,11 @@ def parse_since(value: str) -> float:
     return int(m.group(1)) * {"m": 60, "h": 3600, "d": 86400}[m.group(2)]
 
 
+def _shown_line(text: str | None) -> str:
+    """A stored label on one line, every control, bidi and zero-width character written out (V6-09)."""
+    return show_safely(text, one_line=True)
+
+
 def review(since_s: float | None = None) -> str:
     """What the human answered to JADE's asks (read-only): counts by answer, strength, rule and channel. Confirming answers is a later, human-only step."""
     db = ledger.open(timeout=5)
@@ -727,7 +904,7 @@ def review(since_s: float | None = None) -> str:
     window = "all time" if since_s is None else f"last {int(since_s // 3600)}h" if since_s >= 3600 else f"last {int(since_s // 60)}m"
     db = ledger.open(timeout=5)
     try:
-        extra = review_lines(db, since_s)
+        extra = review_lines(db, since_s) + friction_review_lines(db, since_s, window) + audit_review_lines(db, since_s)
     finally:
         db.close()
     if not rows:
@@ -746,9 +923,6 @@ def review(since_s: float | None = None) -> str:
     lines.append("by rule: " + ", ".join(f"{k} {a + d} ({a} allow, {d} deny)" for k, (a, d) in sorted(tally("rule_id").items())))
     lines.append("by channel: " + ", ".join(f"{k} {a + d}" for k, (a, d) in sorted(tally("channel").items())))
     return "\n".join(lines + extra)
-
-
-JEV_BAND_ANSWERS = 50   # owner-answered plain-high calls before a model may decide in the owner's place (plan v3)
 
 
 def wrong_rate_upper(wrong: int, n: int) -> float:
@@ -770,6 +944,23 @@ def _latest_marks(db, since: str) -> dict[str, str]:
         except (ValueError, KeyError, TypeError):
             continue
     return out
+
+
+def friction_review_lines(db, since_s: float | None, window: str) -> list[str]:
+    """V6-23: the effort side of the review, beside the correctness side: how often JADE asked, how long answers took, how many asks ran out, and what is known about
+    whether the answers were right (marked runs, checked labels), or the plain statement that correctness is not measured (d11 checklist item 17)."""
+    from . import readouts
+
+    since = readouts.since_seconds(since_s)
+    marks = _latest_marks(db, since)
+    return readouts.friction_lines(db, since, window, len(marks), sum(1 for m in marks.values() if m == "wrong"), readouts.label_coverage(db, since)["fit_labelled"])
+
+
+def audit_review_lines(db, since_s: float | None) -> list[str]:
+    """V6-29: the audit of calls that ran without asking, with the false-allow rate only when it can be shown honestly (`audit.lines`)."""
+    from . import audit
+
+    return audit.lines(db, ts(now() - timedelta(seconds=since_s)) if since_s is not None else "", _shown_line)
 
 
 def review_lines(db, since_s: float | None) -> list[str]:
@@ -796,13 +987,22 @@ def review_lines(db, since_s: float | None) -> list[str]:
     wrong = sum(1 for m in marked.values() if m == "wrong")
     by_jev = sum(1 for r in silent if r["kind"] == "jev_allowed")
     share = 100 * len(silent) // (len(silent) + asked) if len(silent) + asked else 0
-    who = f"silent runs from standing answers: {len(silent)}" if not by_jev else f"silent runs: {len(silent)} ({len(silent) - by_jev} from standing answers, {by_jev} by Jev)"
-    out = [f"{who}; questions answered: {asked}; silent share {share}% of plain-high calls"]
+    who = f"calls that ran from standing answers, without asking you: {len(silent)}" if not by_jev else \
+        f"calls that ran without asking you: {len(silent)} ({len(silent) - by_jev} from standing answers, {by_jev} by Jev)"
+    out = [f"{who}; questions you answered: {asked}; {share}% of the ordinary high-risk calls ran without asking you"]   # V6-23: plain words for "silent share of plain-high calls"
     if marked:
-        out.append(f"marked: {len(marked)} silent run(s), {len(marked) - wrong} right, {wrong} wrong; wrong runs are below {100 * wrong_rate_upper(wrong, len(marked)):.0f}% of such runs (95% bound)")
+        out.append(f"you marked {len(marked)} of these calls: {len(marked) - wrong} right, {wrong} wrong; we are 95% sure that no more than "
+                   f"{100 * wrong_rate_upper(wrong, len(marked)):.0f}% of such calls are wrong")
     elif silent:
-        out.append("none of the silent runs is marked yet: `jade review mark DECISION_ID right|wrong` in your terminal (wrong makes JADE ask that call, and its kind, again)")
-    out.append(f"owner-answered plain-high calls: {plain_all} of {JEV_BAND_ANSWERS} (a model deciding for you stays off until then)")
+        out.append("you have not marked any of these calls yet: `jade review mark DECISION_ID right|wrong` in your terminal (wrong makes JADE ask that call, and its kind, again)")
+    gate = proxy.deny_gate(db)
+    out.append(f"ordinary high-risk calls you have answered (each call counted once): {plain_all} (a count of answers gates nothing: an always-allow model would agree with all of them)")
+    out.append(f"Jev deny gate: {gate['denies']} of {proxy.MIN_DENIES} kinds of call you denied, from {gate['rules']} of {proxy.MIN_DENY_RULES} rules; {gate['samples']} of "
+               f"{proxy.MIN_SAMPLES} shadow questions over {int(gate['days'])} of {proxy.MIN_SAMPLE_DAYS} days; {gate['false_allows']} false allow(s) (Jev said yes to a call you denied "
+               f"or marked wrong)" + ("; met: with the jev key on at level low or medium, Jev now decides plain high calls inside its band; `jade jev off` stops it" if gate["ok"] else "; not met, so a model deciding for you stays off"))
+    if gate["ok"] and gate["recall_bound"] is not None:
+        out.append(f"no false allow among {gate['denies']} denies: the most that shows is a deny-recall of about {100 * gate['recall_bound']:.1f}% (95% lower bound, and only for "
+                   "denies that Jev was asked about)")
     if jev:
         allowed = sum(1 for r in silent if r["kind"] == "jev_allowed")
         lat = sorted(r["latency_ms"] or 0.0 for r in jev)
@@ -814,7 +1014,7 @@ def review_lines(db, since_s: float | None) -> list[str]:
             a = {"rule_id": det.get("rule"), "label": det.get("label")}
         else:
             a = db.con.execute("SELECT rule_id, label FROM human_answers WHERE answer_id=?", (r["entity_id"],)).fetchone()
-        out.append(f"  {did}  [{a['rule_id'] if a else '?'}]  {one_line(a['label'] if a else '')}  {('(marked ' + marks[did] + ')') if did in marks else ''}".rstrip())
+        out.append(f"  {did}  [{a['rule_id'] if a else '?'}]  {_shown_line(a['label'] if a else '')}  {('(marked ' + marks[did] + ')') if did in marks else ''}".rstrip())
     return out
 
 
@@ -847,6 +1047,10 @@ def review_mark(decision_id: str, mark: str, stdin_isatty: bool | None = None) -
                                      (memory.exact_key(a["hold_key"], a["fingerprints_json"]),)).fetchall() if a else []
         with db.tx():
             db.event(decision_id, "review_mark", guard=f"jade review mark {mark}", actor=f"human:{user()}", detail={"mark": mark, "answer_ids": [r["answer_id"] for r in answers if r["answer_id"]]})
+            if ask.get("channel") == "memory":   # V6-29: a call that ran from a standing answer: evidence for it (right), or its scope is paused (wrong)
+                from . import audit
+
+                audit.on_mark(db, decision_id, mark, [r["answer_id"] for r in answers if r["answer_id"]])
             retired = sum(db.retire_answers(r["exact_key"], r["class_key"], r["scope_key"] if "scope_key" in r.keys() else None) for r in answers) if mark == "wrong" else 0
             if mark == "wrong" and ask.get("channel") == "jev":
                 from . import proxy
@@ -856,6 +1060,31 @@ def review_mark(decision_id: str, mark: str, stdin_isatty: bool | None = None) -
     finally:
         db.close()
     return f"marked {decision_id} {mark}" + (f"; {retired} answer(s) retired, JADE asks again" if mark == "wrong" else "")
+
+
+def review_audit_walk(stdin_isatty: bool | None = None, *, ask=input, say=print) -> int:
+    """`jade review mark` with no arguments (human terminal): the calls that ran without asking you and wait for your check, oldest first, up to the weekly count.
+    For each: right, wrong or skip. A wrong one retires the answer behind it and pauses its scope. Returns how many were marked."""
+    from . import audit
+
+    _require_human("jade review mark", stdin_isatty)
+    db = ledger.open(timeout=5)
+    try:
+        rows = audit.pending(db, audit.settings().weekly_count)
+    finally:
+        db.close()
+    if not rows:
+        say("no calls wait for your check")
+        return 0
+    say(f"{len(rows)} call(s) ran without asking you and wait for your check. Was each one right to run? [r]ight / [w]rong / [s]kip")
+    done = 0
+    for r in rows:
+        say(f"{r['decision_id']}  [{r['rule_id']}]  {audit.describe(r, _shown_line)}")
+        verdict = {"r": "right", "right": "right", "w": "wrong", "wrong": "wrong"}.get(ask("  right, wrong or skip? [r/w/S] ").strip().lower())
+        if verdict:
+            say(review_mark(r["decision_id"], verdict, stdin_isatty=True))
+            done += 1
+    return done
 
 
 def _pending_hints(db) -> list:
@@ -875,7 +1104,7 @@ def _scope_lines(r) -> list[str]:
     how to undo it."""
     from . import memory, scopes
 
-    lines = [f"Would become standing for: {one_line(r['scope_label'])} ({memory.USE_DAYS} days after last use)"]
+    lines = [f"Would become standing for: {_shown_line(r['scope_label'])} ({memory.USE_DAYS} days after last use)"]
     covers = scopes.COVERS.get(r["scope_kind"])
     if covers:
         lines.append(covers)
@@ -884,9 +1113,21 @@ def _scope_lines(r) -> list[str]:
     return lines
 
 
+CONFIRM_MAX_GROUPS = 10   # V6-29: groups that become standing in one sitting; the rest wait for the next one (a long list is answered by habit)
+
+
+def _rule_is_high(rule_id: str) -> bool:
+    """High or critical, or unknown: `--all` never takes such a group (V6-29). An unknown rule counts as high, so a missing rule only adds a question."""
+    from . import policy
+
+    level = next((r.get("level") for r in policy.risk().get("rules", []) if r.get("id") == rule_id), None)
+    return level in (None, "high", "critical")
+
+
 def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, all_: bool = False) -> int:
     """`jade review confirm`: the human turns the allow answers they gave in the chat or in a dialog into standing answers, in a terminal. Groups of the same kind of
-    call are shown with their rule id; each group can be dropped (or all taken with `--all`); a typed `yes` after the list of what becomes standing seals it."""
+    call are shown with their rule id; each group can be dropped (`--all` takes the groups of a rule below high risk and still asks about every high one, V6-29); at
+    most `CONFIRM_MAX_GROUPS` groups become standing in one sitting; a typed `yes` after the list of what becomes standing seals it."""
     from . import memory
 
     _require_human("jade review confirm", stdin_isatty)
@@ -900,18 +1141,23 @@ def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, al
         for r in rows:
             groups.setdefault(_confirm_group(r), []).append(r)
         chosen: list = []
-        for (rule, _, is_class, scope_key), rs in groups.items():
+        taken = 0
+        for n_seen, ((rule, _, is_class, scope_key), rs) in enumerate(groups.items()):
+            if taken >= CONFIRM_MAX_GROUPS:
+                say(f"{len(groups) - n_seen} more group(s) wait: run `jade review confirm` again after this sitting")
+                break
             if scope_key:
-                say(f"{one_line(rs[-1]['label']) or '(no text kept)'}  [{rule}]  allowed {len(rs)}x")
+                say(f"{_shown_line(rs[-1]['label']) or '(no text kept)'}  [{rule}]  allowed {len(rs)}x")
                 for line in _scope_lines(rs[-1]):
                     say(f"   {line}")
             else:
                 kind = "this kind of call" if is_class else "this exact call only"
-                say(f"{one_line(rs[-1]['label']) or '(no text kept)'}  [{rule}]  allowed {len(rs)}x  ->  would be standing for {kind}")
+                say(f"{_shown_line(rs[-1]['label']) or '(no text kept)'}  [{rule}]  allowed {len(rs)}x  ->  would be standing for {kind}")
             if rule in memory.NEVER_RULES:
                 say("   (rule is always asked; confirming it changes nothing)")
-            if all_ or ask("  stand for this? [y/N] ").strip().lower() in ("y", "yes"):
+            if (all_ and not _rule_is_high(rule)) or ask("  stand for this? [y/N] ").strip().lower() in ("y", "yes"):
                 chosen += rs
+                taken += 1
         if not chosen:
             say("nothing confirmed")
             return 0
@@ -922,8 +1168,12 @@ def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, al
         if ask("Type yes to confirm: ").strip() != "yes":
             say("cancelled; nothing changed")
             return 0
+        from . import audit
+
         with db.tx():
             n = db.confirm_answers([r["answer_id"] for r in chosen])
+            for sid in {audit.scope_id(r) for r in chosen}:   # a paused scope starts again, at 0 runs, because the human confirmed an answer of it (never a hint)
+                audit.resume(db, sid)
         say(f"{n} answer(s) confirmed")
         return n
     finally:
@@ -932,7 +1182,7 @@ def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, al
 
 def knows_list() -> str:
     """`jade knows list` (read-only): the standing answers, with when each stops deciding."""
-    from . import memory
+    from . import audit, memory
 
     db = ledger.open(timeout=5)
     try:
@@ -948,10 +1198,14 @@ def knows_list() -> str:
         last = max(filter(None, [r["confirmed_ts"], r["last_used_ts"]]))
         use_end = (parse_ts(last) + timedelta(days=memory.USE_DAYS)) if last else None
         cap_end = parse_ts(r["confirmed_ts"]) + timedelta(days=memory.CAP_DAYS)
-        end = min(x for x in (use_end, cap_end) if x)
+        runs = r["silent_runs"] or 0
+        evid = parse_ts(r["evidence_ts"] or r["confirmed_ts"]) + timedelta(days=audit.settings().age_days) if runs else None   # V6-29: a row that has run silently needs evidence
+        end = min(x for x in (use_end, cap_end, evid) if x)
         note = "  (near its 180-day end: confirm again to keep it)" if (cap_end - now()) <= timedelta(days=memory.NEAR_CAP_DAYS) else ""
-        scope = f"  scope  {one_line(r['scope_label'])}" if r["scope_label"] else ""
-        out.append(f"{r['answer_id']}  [{r['rule_id']}]  {'kind' if r['class_key'] else 'exact'}  {one_line(r['label'])}{scope}  stops deciding {ts(end)[:10]}{note}")
+        if runs:
+            note += f"  ({runs} silent run(s) since its last mark; it stops after {audit.settings().age_runs} with no mark: jade review mark)"
+        scope = f"  scope  {_shown_line(r['scope_label'])}" if r["scope_label"] else ""
+        out.append(f"{r['answer_id']}  [{r['rule_id']}]  {'kind' if r['class_key'] else 'exact'}  {_shown_line(r['label'])}{scope}  stops deciding {ts(end)[:10]}{note}")
     return "\n".join(out) or "no standing answers"
 
 
@@ -1001,7 +1255,7 @@ def knows_template(rows, since: tuple[str, str] | None = None) -> str:
         key = (r["rule_id"], "scope", r["scope_key"]) if r["scope_key"] else (r["rule_id"], "class", r["class_key"]) if r["class_key"] else (r["rule_id"], "exact", r["exact_key"])
         if key in seen:
             continue
-        text = one_line(r["scope_label"] or r["label"]) or "(a call with no label stored)"
+        text = _shown_line(r["scope_label"] or r["label"]) or "(a call with no label stored)"
         if len(text) > KNOWS_LABEL_CHARS:
             text = text[:KNOWS_LABEL_CHARS - 3] + "..."
         seen[key] = f"# I am fine with: {text}  [{r['rule_id']}]  (risk: {askplain.risk_line(r['rule_id'])})"
@@ -1152,6 +1406,36 @@ def launchd_plist(label: str) -> str:
     return plistlib.dumps(doc, sort_keys=False).decode()
 
 
+def maintain_schedule(fmt: str = "cron") -> str:
+    """Where launchd does not exist: the line or the units that run `jade maintain` once a day at 09:15 (the time of the LaunchAgent). Printed only: nothing is
+    installed, the human does that. `cron` is one crontab line; `systemd` is a user service and its timer, each under a comment that names its path."""
+    if fmt not in ("cron", "systemd"):
+        raise ValueError(f"unknown format {fmt!r}: cron or systemd")
+    jade, log = jade_bin(), paths.home() / "maintain.log"
+    if fmt == "cron":
+        return f"15 9 * * * {shlex.quote(jade)} maintain >> {shlex.quote(str(log))} 2>&1\n".replace("%", "\\%")   # cron reads a bare % as a newline
+    quote = lambda s: '"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'   # noqa: E731 - systemd's own quoting; % is a specifier
+    return ("# ~/.config/systemd/user/jade-maintain.service\n[Unit]\nDescription=JADE daily maintenance (expiry sweeps, retention, drift canary, miner)\n\n"
+            f"[Service]\nType=oneshot\nExecStart={quote(jade)} maintain\n\n"
+            "# ~/.config/systemd/user/jade-maintain.timer\n[Unit]\nDescription=Run JADE maintenance daily\n\n"
+            "[Timer]\nOnCalendar=*-*-* 09:15:00\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n")
+
+
+MAINTAIN_STALE_DAYS = 3   # a job that runs daily and has not left its stamp for this long is not running
+
+
+def _last_maintain() -> str | None:
+    """When `jade maintain` last finished, from the stamp it leaves in the ledger; None when it never did or the ledger cannot be read."""
+    try:
+        db = ledger.open()
+        try:
+            return db.meta_get("last_maintain_ts")
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - a row of `jade check` must not crash the check
+        return None
+
+
 PROBE_SESSION = "jade-check-probe"
 
 
@@ -1254,9 +1538,8 @@ def managed_settings_path() -> Path:
     return Path(os.environ.get("JADE_MANAGED_SETTINGS") or _MANAGED_SETTINGS)
 
 
-def project_settings_files(cwd) -> list[Path]:
-    """The project `.claude/settings.json` and `settings.local.json` a session started in `cwd` can read: in `cwd` and each ancestor up to the
-    repository root (the nearest directory with `.git`; without one, `cwd` alone). The user's own two files are not listed: wiring_problems owns them."""
+def _project_dirs(cwd) -> list[Path]:
+    """`cwd` and each ancestor up to the repository root (the nearest directory with `.git`; without one, `cwd` alone)."""
     try:
         start = Path(cwd).resolve()
     except (OSError, RuntimeError, TypeError, ValueError):
@@ -1268,6 +1551,13 @@ def project_settings_files(cwd) -> list[Path]:
             break
     else:
         dirs = [start]
+    return dirs
+
+
+def project_settings_files(cwd) -> list[Path]:
+    """The project `.claude/settings.json` and `settings.local.json` a session started in `cwd` can read: in `cwd` and each ancestor up to the
+    repository root (the nearest directory with `.git`; without one, `cwd` alone). The user's own two files are not listed: wiring_problems owns them."""
+    dirs = _project_dirs(cwd)
     sp = settings_path()
     user = {os.path.realpath(sp), os.path.realpath(sp.with_name("settings.local.json"))}
     return [f for d in dirs for name in ("settings.json", "settings.local.json") if os.path.realpath(f := d / ".claude" / name) not in user]
@@ -1391,6 +1681,253 @@ def shadow_problems(cwd=None, *, managed: bool = True, plugins: bool = True) -> 
     return out
 
 
+# ---- what a repository controls before the trust dialog (V6-18 e, BS-01, BS-02; display only) ----------------------------
+_INSTRUCTION_FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".claude/CLAUDE.md")
+_MAX_RULE_FILES = 200       # rules files scanned; more are counted and reported, never dropped silently
+_MAX_RULE_ENUM = 5000       # rules files listed at most, so a repository with a million files cannot slow the scan
+_MAX_RULE_BYTES = 16 * 1024 * 1024   # all the rules files together
+_MAX_RULE_WALK = 20000      # directory entries looked at, so a `.claude/rules` full of folders and no `.md` file cannot hold up the session start
+
+
+def _rules_files(rules_dir: Path) -> tuple[list[Path], bool]:
+    """The `.md` files under `rules_dir`, at most `_MAX_RULE_ENUM`, from a walk that looks at no more than `_MAX_RULE_WALK` entries and follows no link. The flag says the
+    list is cut short (by either limit), so the report can say so."""
+    found: list[Path] = []
+    seen = 0
+    try:
+        for root, dirs, files in os.walk(rules_dir, followlinks=False):
+            dirs.sort()
+            for name in sorted(files):
+                seen += 1
+                if seen > _MAX_RULE_WALK:
+                    return sorted(found), True
+                if name.endswith(".md"):
+                    if len(found) >= _MAX_RULE_ENUM:
+                        return sorted(found), True
+                    found.append(Path(root, name))
+            seen += len(dirs)
+            if seen > _MAX_RULE_WALK:
+                return sorted(found), True
+    except OSError:
+        pass
+    return sorted(found), False
+_PLAIN_NAME = re.compile(r"[\w.-]{1,40}")
+_TAG_RANGES = ((0xE0000, 0xE007F), (0xE0100, 0xE01EF))   # tag characters and the variation selectors supplement: text no reader sees
+_BIDI_CONTROLS = frozenset({*range(0x202A, 0x202F), *range(0x2066, 0x206A)})   # embeddings, overrides and isolates (Trojan Source)
+_ALWAYS_HIDDEN = frozenset({0x200B, *range(0x2060, 0x2065), 0x00AD, 0x180E, 0x034F, 0xFEFF,
+                            *range(0xFE00, 0xFE0F),                 # variation selectors 1 to 15 (a text-smuggling channel); VS16 is the emoji selector, read below
+                            *range(0x206A, 0x2070),                 # deprecated format characters
+                            0x3164, 0x115F, 0x1160, 0xFFA0,         # Hangul fillers: blank, and not a letter
+                            0x2800,                                 # braille blank
+                            *range(0xFFF9, 0xFFFD),                 # interlinear annotation marks and the object replacement character
+                            *range(0x1D173, 0x1D17B)})              # musical format controls
+_VS16 = 0xFE0F                                                      # ordinary after an emoji; a run of them carries bits
+_JOINERS = frozenset({0x200C, 0x200D})
+_NEEDS_A_SCRIPT = frozenset({0x200C, 0x200D, 0x200E, 0x200F, 0x061C})   # ordinary in Persian and Arabic text and in emoji sequences, hidden anywhere else
+_JOINER_MIN, _JOINER_RATIO = 8, 6   # a line with this many joiners, and one in every six characters or more, hides bits in them
+
+
+def _repo_name(k) -> str:
+    """A key or server name of a repository file as it may be shown: plain word characters only, else a fixed placeholder (a name is repository text)."""
+    return k if isinstance(k, str) and _PLAIN_NAME.fullmatch(k) else "(unusual name)"
+
+
+def _repo_names(keys, limit: int = 8) -> str:
+    shown = sorted({_repo_name(k) for k in keys})
+    return ", ".join(shown[:limit]) + (f" and {len(shown) - limit} more" if len(shown) > limit else "")
+
+
+def _joins_text(c: str | None) -> bool:
+    """A neighbour that makes a joiner or a direction mark ordinary: a letter of an Arabic, Hebrew, Syriac, Thaana or Indic script, a symbol or a pictograph."""
+    if not c:
+        return False
+    o = ord(c)
+    return 0x0590 <= o <= 0x0DFF or 0xFB1D <= o <= 0xFDFF or 0xFE70 <= o <= 0xFEFC or o >= 0x1F000 or unicodedata.category(c) == "So" or c == "️"
+
+
+def hidden_unicode(text: str) -> tuple[dict[str, int], int]:
+    """({class: count}, line of the first hit) of the characters in `text` that a reader does not see but a model reads. Classes: `tag`, `bidi`, `zero-width`.
+    A byte order mark at the very start is not counted, and a joiner or direction mark next to Persian, Arabic or emoji text is ordinary writing, unless two
+    joiners touch, or a line holds many of them (`_JOINER_MIN`, `_JOINER_RATIO`: bits of a hidden message). Also counted as `zero-width`: variation selectors
+    (a run of the emoji selector too), Hangul fillers, the braille blank, the deprecated format characters, the interlinear and object marks, musical format controls."""
+    if text.isascii():
+        return {}, 0
+    counts: dict[str, int] = {}
+    first = 0
+    line = 1
+    line_len = ordinary_joiners = 0   # the joiners of this line that were exempt as ordinary writing; too many of them in a line are bits of a hidden message
+
+    def end_of_line() -> None:
+        nonlocal first
+        if ordinary_joiners >= _JOINER_MIN and ordinary_joiners * _JOINER_RATIO >= line_len:
+            counts["zero-width"] = counts.get("zero-width", 0) + ordinary_joiners
+            first = first or line
+
+    for i, c in enumerate(text):
+        o = ord(c)
+        if c == "\n":
+            end_of_line()
+            line += 1
+            line_len = ordinary_joiners = 0
+            continue
+        line_len += 1
+        if o < 0x80:
+            continue
+        prev, nxt = (ord(text[i - 1]) if i else 0), (ord(text[i + 1]) if i + 1 < len(text) else 0)
+        if any(a <= o <= b for a, b in _TAG_RANGES):
+            kind = "tag"
+        elif o in _BIDI_CONTROLS:
+            kind = "bidi"
+        elif o in _ALWAYS_HIDDEN and not (o == 0xFEFF and i == 0):
+            kind = "zero-width"
+        elif o == _VS16 and (0xFE00 <= prev <= _VS16 or 0xFE00 <= nxt <= _VS16):   # one after an emoji is ordinary; a run is not
+            kind = "zero-width"
+        elif o in _NEEDS_A_SCRIPT:
+            if (o in _JOINERS and (prev in _JOINERS or nxt in _JOINERS)) or not (_joins_text(text[i - 1] if i else None) or _joins_text(text[i + 1] if i + 1 < len(text) else None)):
+                kind = "zero-width"
+            else:
+                kind = None
+                ordinary_joiners += o in _JOINERS
+        else:
+            kind = None
+        if kind:
+            counts[kind] = counts.get(kind, 0) + 1
+            first = first or line
+    end_of_line()
+    return counts, first
+
+
+def _bounded_text(f: Path) -> tuple[str | None, str | None]:
+    """(text, problem) of a repository file, read as the host would (symlinks followed), at most MAX_SETTINGS_BYTES. (None, None) when it is no regular file."""
+    try:
+        st = os.stat(f)
+        if not stat.S_ISREG(st.st_mode):
+            return None, None
+        if st.st_size > MAX_SETTINGS_BYTES:
+            return None, f"too large ({st.st_size} bytes) to scan"
+        with open(f, "rb") as fh:
+            return fh.read(MAX_SETTINGS_BYTES + 1).decode("utf-8", "replace"), None
+    except FileNotFoundError:
+        return None, None
+    except OSError as e:
+        return None, f"cannot be read ({type(e).__name__})"
+
+
+def _settings_findings(label: str, data: dict) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    hooks_map = data.get("hooks")
+    n_hooks, events = 0, []
+    for event, groups in (hooks_map.items() if isinstance(hooks_map, dict) else ()):
+        n = sum(len(g["hooks"]) for g in (groups if isinstance(groups, list) else ()) if isinstance(g, dict) and isinstance(g.get("hooks"), list))
+        if n:
+            n_hooks += n
+            events.append(event)
+    if n_hooks:
+        out.append(("hooks", f"{label}: {n_hooks} hook(s) for {_repo_names(events)}"))
+    if data.get("enableAllProjectMcpServers"):
+        out.append(("mcp", f"{label}: enableAllProjectMcpServers is true (every server in .mcp.json starts without a question)"))
+    if isinstance(data.get("enabledMcpjsonServers"), list) and data["enabledMcpjsonServers"]:
+        out.append(("mcp", f"{label}: enabledMcpjsonServers names {len(data['enabledMcpjsonServers'])} server(s)"))
+    if isinstance(data.get("env"), dict) and data["env"]:
+        out.append(("env", f"{label}: env keys {_repo_names(data['env'])}"))
+    return out
+
+
+def repo_config_findings(cwd=None) -> list[tuple[str, str]]:
+    """(kind, line) for what the repository of `cwd` (and the directories above it up to the repo root) controls and the host loads before or without a trust
+    question: hooks, MCP servers and `env` keys of its Claude settings files and `.mcp.json`, and hidden Unicode in CLAUDE.md, AGENTS.md and the rules files.
+    Names, counts and line numbers only: never a value, a command, a URL or a line of the repository, because the SessionStart text goes to the model. Display
+    only: a hook cannot stop what loads before the hooks run (docs/05 T19)."""
+    if cwd is None:
+        try:
+            cwd = Path.cwd()
+        except OSError:
+            return []
+    dirs = _project_dirs(cwd)
+    if not dirs:
+        return []
+    root = dirs[-1]
+
+    def label(f: Path, last: str | None = None) -> str:
+        """A path as it may be shown: every segment is a plain name (`_repo_name`), else `(unusual name)`, because a directory or file name is repository text.
+        `last` replaces the final segment (a rules file is shown by its number, not by its name)."""
+        try:
+            parts = list(f.relative_to(root).parts)
+        except ValueError:
+            parts = [f.name]
+        return "/".join([_repo_name(p) for p in parts[:-1]] + [last if last is not None else _repo_name(parts[-1])] if parts else [last or "."])
+
+    out: list[tuple[str, str]] = []
+    for f in project_settings_files(cwd):
+        text, problem = _bounded_text(f)
+        if problem:
+            out.append(("unreadable", f"{label(f)}: {problem}"))
+        if text is None:
+            continue
+        try:
+            data = json.loads(text) if text.strip() else {}
+        except ValueError:
+            out.append(("unreadable", f"{label(f)}: is not valid JSON, so JADE cannot say what it sets"))
+            continue
+        if not isinstance(data, dict):
+            out.append(("unreadable", f"{label(f)}: does not hold a JSON object, so JADE cannot say what it sets"))
+            continue
+        out += _settings_findings(label(f), data)
+    for d in dirs:
+        text, problem = _bounded_text(d / ".mcp.json")
+        if problem:
+            out.append(("unreadable", f"{label(d / '.mcp.json')}: {problem}"))
+        elif text is not None:
+            try:
+                servers = (json.loads(text) if text.strip() else {}).get("mcpServers")
+            except (ValueError, AttributeError):
+                out.append(("unreadable", f"{label(d / '.mcp.json')}: is not valid JSON, so JADE cannot say which MCP servers it starts"))
+                continue
+            if isinstance(servers, dict) and servers:
+                out.append(("mcp", f"{label(d / '.mcp.json')}: {len(servers)} MCP server(s): {_repo_names(servers)}"))
+    for d in dirs:
+        rules_dir = d / ".claude" / "rules"
+        rules, cut = _rules_files(rules_dir)
+        named =[(d / n, None) for n in _INSTRUCTION_FILES] + [(f, f"(file {k})") for k, f in enumerate(rules[:_MAX_RULE_FILES], 1)]
+        if len(rules) > _MAX_RULE_FILES or cut:   # the host loads every rules file, so a file left out is a gap in the report
+            out.append(("unreadable", f"{label(rules_dir)}: {max(len(rules) - _MAX_RULE_FILES, 0)}{' or more' if cut else ''} more rules files were "
+                                      "not scanned for hidden Unicode"))
+        spent = 0
+        for f, shown in named:
+            if shown and spent >= _MAX_RULE_BYTES:
+                out.append(("unreadable", f"{label(rules_dir)}: the scan of the rules files stopped at its total size limit; the rest were not scanned for hidden Unicode"))
+                break
+            text, problem = _bounded_text(f)
+            where = label(rules_dir / "_", shown) if shown else label(f)   # a rules file by its number, whatever directories lie between
+            if problem:
+                out.append(("unreadable", f"{where}: {problem} for hidden Unicode"))
+            if text is None:
+                continue
+            spent += len(text) if shown else 0
+            counts, first = hidden_unicode(text)
+            if counts:
+                out.append(("unicode", f"{where}: hidden Unicode ({', '.join(f'{n} {k}' for k, n in sorted(counts.items()))}; first at line {first})"))
+    return out
+
+
+def _repo_config_row() -> tuple[str, bool | None, str]:
+    """WARN (never FAIL) when the repository controls hooks, MCP servers, env keys or hides Unicode in the instruction files: JADE tells the owner and stops nothing."""
+    try:
+        scanned = str(Path.cwd())
+    except OSError:
+        scanned = "(no current directory)"
+    try:
+        found = repo_config_findings()
+    except Exception:  # noqa: BLE001 - a health probe reports every failure
+        return ("repo config", None, "the repository config could not be scanned; look at .claude/settings*.json, .mcp.json, CLAUDE.md and AGENTS.md by hand")
+    if not found:
+        return ("repo config", True, f"no repository-controlled hooks, MCP servers or env keys, and no hidden Unicode in CLAUDE.md, AGENTS.md or the rules, under {scanned} up to its "
+                "repo root (run `jade check` from the project you work in to scan that one)")
+    lines = [line for _kind, line in found]
+    more = f"; and {len(lines) - 8} more" if len(lines) > 8 else ""
+    return ("repo config", None, "display only, JADE cannot stop what the host loads before its trust dialog: " + "; ".join(lines[:8]) + more)
+
+
 def _gate_mode_row() -> tuple[str, bool, str]:
     effective, raw = paths.gate_mode(), os.environ.get("JADE_GATE_MODE")
     cfg = paths.config().get("gate_mode")
@@ -1414,7 +1951,7 @@ def _overrides_row() -> tuple[str, bool, str]:
     if weak:
         return ("gate overrides", False, "weakening: " + ", ".join(f"{o.var} [{o.why}]" for o in weak) + ". Unset them; `JADE_ACK_OVERRIDES=VAR,...` only silences "
                 "this row for a deliberate override in this shell, never one in the Claude settings `env` block")
-    return ("gate overrides", True, shown or "none (JADE_GATE_MODE, JADE_POLICY_DIR, JADE_CONFIG, JADE_HOME, JADE_APPROVER_ANCHOR all default)")
+    return ("gate overrides", True, shown or "none (JADE_GATE_MODE, JADE_POLICY_DIR, JADE_CONFIG, JADE_HOME, JADE_APPROVER_ANCHOR, JADE_SESSION_ID all default or unset)")
 
 
 def overlay_problems() -> list[str]:
@@ -1490,8 +2027,17 @@ def maintain_jobs() -> list[tuple[Path, str, list]]:
 def _maintain_row() -> tuple[str, bool, str]:
     jobs = maintain_jobs()
     if not jobs:
+        last = _last_maintain()
+        try:
+            age = (now() - parse_ts(last)).total_seconds() / 86400 if last else None
+        except (ValueError, TypeError):   # a stamp that is not a time counts as no stamp
+            last, age = None, None
+        if age is not None and age <= MAINTAIN_STALE_DAYS:   # no LaunchAgent, but `jade maintain` ran lately: cron, a systemd timer or another scheduler runs it
+            return ("maintain job", True, f"`jade maintain` last ran {last} (no LaunchAgent: another scheduler runs it, JADE cannot tell which)")
+        since = f" It last ran {last}." if age is not None else " It has never left a last-run stamp."
         return ("maintain job", None, f"not installed: no `jade maintain` LaunchAgent in {launch_agents_dir()}, so retention, expiry sweeps, the drift canary and the "
-                "miner do not run unless something else schedules `jade maintain` (docs/08 2.4)")
+                "miner do not run unless something else schedules `jade maintain` (docs/08 2.4)." + since +
+                " Off macOS, `jade maintain-schedule` prints a cron line or a systemd timer for you to install")
     bad = []
     for f, label, args in jobs:
         if not (os.path.isfile(str(args[0])) and os.access(str(args[0]), os.X_OK)):
@@ -1706,12 +2252,15 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
         scanned = "(no current directory)"
     rows.append(("settings shadowing", not shadow, f"no managed or plugin settings file, and no project settings file under {scanned} up to its repo root, disables or shadows the hooks "
                  "(run `jade check` from the project you work in to scan that one)" if not shadow else "; ".join(shadow)))
+    rows.append(_repo_config_row())
     gaps = pretool_matcher_gaps()
     if gaps is not None:
         rows.append(("pretool matcher", not gaps, "covers every gated tool" if not gaps else f"does not cover {', '.join(gaps)}: re-run `jade hooks install` in a terminal"))
     rows.append(_gate_mode_row())
     rows.append(_level_row())
+    rows.append(_jev_row())
     rows.append(_what_blocks_row(st.get("PreToolUse", False), problems))
+    rows.append(_list_b_row())
     rows.append(pending_row())
     rows.append(_overrides_row())
     rows.append(_ack_audit_row())
@@ -1837,8 +2386,10 @@ def _permission_row() -> tuple[str, bool, str]:
         return ("host permission prompt", False, f"permissions.defaultMode is {mode} (the host never asks) and the gate is {gate} (JADE never blocks): nothing stops a call. "
                 "Set the gate to enforce or the host to a prompting mode. " + detail)
     if mode in PERMISSIVE_MODES and paths.level() == "off":   # V6-10: a warning, not a failure (blocking at level off is V6-16)
+        from . import hooks
+
         return ("host permission prompt", None, f"permissions.defaultMode is {mode} (the host never asks) and level off (JADE only logs most rules): only "
-                + ", ".join(sorted(_governance_ids())) + " stop a call. " + detail)
+                + ", ".join(sorted(_governance_ids() | hooks.OFF_FLOOR_INVARIANTS)) + " and a write to JADE's own wiring stop a call. " + detail)
     return ("host permission prompt", True, detail)
 
 
@@ -1874,13 +2425,14 @@ def unknown_rows() -> list[tuple[str, bool | None, str]]:
 
 
 def no_prompt_gated_calls(days: int = 7) -> tuple[int, int]:
-    """(gated calls seen, of those with no host prompt) in the last `days` days; (0, 0) when the ledger cannot be read."""
-    from . import hooks
+    """(gated calls seen, of those with no host prompt) in the last `days` days; (0, 0) when the ledger cannot be read. V6-23: counted as `jade ledger stats` counts
+    (`readouts.load_counts`): an SI-07 hold is one call, not two."""
+    from . import hooks, readouts
 
     try:
         db = ledger.open(timeout=2)
         try:
-            rows = db.all("SELECT detail_json FROM events WHERE kind IN ('gated','safety_block') AND " + ledger.live() + " AND ts>=?", (ts(now() - timedelta(days=days)),))
+            rows = readouts.gated_rows(db, readouts.since_days(days))
         finally:
             db.close()
     except Exception:  # noqa: BLE001 - informational and a pre-flight: an unreadable ledger is reported by its own check row
@@ -1948,4 +2500,25 @@ def print_check(rows) -> int:
     failed = [n for n, ok, _ in rows if check_failed(ok)]
     if failed:
         print(f"jade check: {len(failed)} failed ({', '.join(failed)})", file=sys.stderr)
+    return 1 if failed else 0
+
+
+def print_check_json(rows) -> int:
+    """`jade check --json` (V6-23): the same rows and the same exit code as `print_check`. `ok` is true, false (a failure) or null (a warning). `load_last_7_days` is the
+    gated-call count that `jade ledger stats` prints too, from one definition (`readouts.load_counts`), with how many of those calls had no host prompt."""
+    from . import readouts
+
+    failed = [n for n, ok, _ in rows if check_failed(ok)]
+    load = None
+    try:
+        db = ledger.open(timeout=2)
+        try:
+            load = readouts.load_counts(db, readouts.since_days(7))
+        finally:
+            db.close()
+        load["no_host_prompt"] = no_prompt_gated_calls()[1]
+    except Exception:  # noqa: BLE001 - an unreadable ledger is the ledger row's failure
+        load = None
+    print(json.dumps({"ok": not failed, "failed": failed, "rows": [{"name": n, "ok": None if ok is None else bool(ok), "detail": d} for n, ok, d in rows],
+                      "load_last_7_days": load}, sort_keys=True, separators=(",", ":")))
     return 1 if failed else 0
