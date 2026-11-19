@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+### Added
+- **"Never looser than main" check (V6-03).** `uv run python evals/never_looser.py <ref-a> <ref-b>` compares the gate on two versions of the code. It runs every command from the eval files, the test fixtures and the redirect tests through both, in three folders (no repository, a repository on `main`, a repository on a feature branch). It prints each command that the first version stops and the second lets through. Exit 0 and no output mean: not looser on these commands. Exit 1 means at least one command got looser. Exit 2 means the check could not run in full, so it is not an answer. The result is only as good as the command list, so it never says "not looser" in general. A new test checks that every rule of the first version is reached by at least one command.
+- **Known-gap list (V6-03).** `evals/known_gaps/` holds the holes both versions still have, as counted rows with an owner. They are listed, not hidden. A row joins the normal gate only after its fix is merged.
+
 ### Changed
 - **`jade check` and `jade hooks install` now say what is true (V6-10).** A row can be ok, FAIL or WARN. WARN means "not safe" or "not known". WARN never changes the exit code, so no default and no blocking behaviour changes. The "what blocks" row is computed from the gate mode and the level, and lists rule ids. At level `off` it says that most rules only log, and which ones still block. Level `off` and advisory gate mode are now WARN, not ok. Gate mode `off` no longer says every hook is inert, because the recording hooks still run. At level `low` and `medium` the row names the paths that let a call run with no human. "Version vs main" compares the running commit with `origin/main`. An equal version string is not enough. When it cannot tell, it says "unknown". The pre-push guard and the remote branch protection say "unknown: owner confirms". `jade hooks install` prints the gate mode, what blocks and the approval backend. `jade setup` counts the hooks from the code instead of saying "four". The troubleshooting table in `docs/09` matches.
 
