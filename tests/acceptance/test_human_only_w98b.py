@@ -45,6 +45,8 @@ DELETE = [
     "aws ec2 terminate-instances --instance-ids i-1", "gcloud compute instances delete vm1", "gh repo delete me/x --yes", "gh release delete v1.0.0",
     "curl -X DELETE https://api.example.com/items/1", "psql -c 'DROP TABLE users'", "mysql -e 'truncate table logs'", "redis-cli flushall",
     "sqlite3 db.sqlite 'delete from users'", "rsync -a --delete src/ dst/", "dropdb prod",
+    # V6-17 review: other spellings of the same action (an OpenShift client, a forced replace is a delete and a create)
+    "oc delete pod x", "oc -n x delete pod y", "kubectl replace --force -f x.yaml", "kubectl -n x replace -f x.yaml --force",
 ]
 DELETE_NOT = [
     "rm -rf node_modules", "rm -rf ./node_modules ./dist ./build", "rm -rf .venv", "rm -rf /tmp/scratch-1", "rm -rf /private/tmp/x/y", "rm -rf $TMPDIR/build",
@@ -54,6 +56,7 @@ DELETE_NOT = [
     "aws ec2 describe-instances", "gcloud compute instances list", "gh repo view me/x", "gh release list", "curl https://api.example.com/items/1", "curl -X GET https://x/y",
     "psql -c 'select 1'", "mysql -e 'select * from t'", "redis-cli get k", "sqlite3 db.sqlite 'delete from users where id = 1'", "rsync -a src/ dst/", "rsync -an --delete src/ dst/",
     "find . -name '*.py' -print", "find . -type f | wc -l", "echo rm -rf /", "grep -r 'rm -rf' docs", "ls -la",
+    "oc get pods", "oc describe pod x", "kubectl replace -f x.yaml",
 ]
 MONEY = [
     "stripe refunds create --charge ch_1 --live", "stripe charges create --amount 100 --currency usd --live", "stripe payouts create --amount 100 --live",
@@ -62,6 +65,7 @@ MONEY = [
     "curl -X POST https://api-m.paypal.com/v2/payments/captures/1/refund", "curl --request POST https://api.squareup.com/v2/payments", "wget --post-data=a=1 https://api.plaid.com/transfer/create",
     "bitcoin-cli sendtoaddress bc1q 0.1", "cast send 0xabc 'transfer(address,uint256)'", "solana transfer ADDR 1", "lncli sendpayment --pay_req=x",
     "aws ec2 purchase-reserved-instances-offering --reserved-instances-offering-id x", "aws savingsplans create-savings-plan --savings-plan-offering-id x",
+    "stripe refunds create --charge ch_1 --live=true", "stripe --live=true charges create --amount 100 --currency usd", "stripe payouts create --amount 1 --live=1",
 ]
 MONEY_NOT = [
     "stripe listen", "stripe logs tail", "stripe charges list", "stripe charges create --amount 100 --currency usd", "stripe trigger payment_intent.succeeded",
@@ -69,6 +73,7 @@ MONEY_NOT = [
     "curl https://api.stripe.com/v1/charges -H 'Authorization: Bearer x'", "curl -X GET https://api.stripe.com/v1/balance", "curl -X POST https://api.example.com/v1/refunds -d a=1",
     "curl -X POST https://api-m.sandbox.paypal.com/v1/payments", "bitcoin-cli getbalance", "cast call 0xabc 'balanceOf(address)'", "solana balance", "aws ec2 describe-reserved-instances",
     "aws savingsplans describe-savings-plans", "grep -r stripe src", "npm install stripe",
+    "stripe refunds create --charge ch_1 --live=false", "stripe charges create --amount 100 --live=0",
 ]
 RELEASE = [
     "npm publish", "npm publish --access public", "pnpm publish", "yarn publish", "cargo publish", "twine upload dist/*", "uv publish", "poetry publish", "gem push x.gem",
@@ -77,6 +82,11 @@ RELEASE = [
     "git push origin v0.5.0", "git push origin v1.2.3-rc1", "git push --tags", "git push origin --tags", "git push --follow-tags", "git push origin refs/tags/x",
     "git push origin :refs/tags/old", "vercel --prod", "netlify deploy --prod", "firebase deploy", "wrangler deploy", "wrangler publish", "serverless deploy --stage prod", "cdk deploy",
     "gh api -X POST repos/me/x/releases -f tag_name=v1", "npm unpublish x@1.0.0",
+    # V6-17 review: a workspace, prefix or filter option between the tool and the verb; the other spellings of the same action
+    "npm -w pkg publish", "npm --workspace pkg publish", "npm --workspace=pkg publish", "npm --prefix x publish", "npm -ws publish", "pnpm --filter x publish", "pnpm -r publish",
+    "pnpm -C pkg publish", "yarn --cwd x publish", "yarn npm publish", "yarn workspace x npm publish", "corepack npm publish", "corepack pnpm publish",
+    "docker image push me/app:1", "docker compose push", "docker compose -f x.yml push", "podman image push quay.io/me/x",
+    "git push origin v1.0", "git push origin v2.3-rc1", "python3 -m twine upload dist/x", "python -m twine upload dist/*", "python3 -m uv publish", "uv run twine upload dist/*",
 ]
 RELEASE_NOT = [
     "docker push localhost:5000/x", "docker push 127.0.0.1:5000/x", "docker push [::1]:5000/x", "npm publish --dry-run", "cargo publish --dry-run", "uv publish --dry-run",
@@ -84,6 +94,10 @@ RELEASE_NOT = [
     "gh release list", "gh release view v1", "gh release download v1", "gh pr create --fill", "gh pr merge 5 --merge", "npm run publish-docs", "npm install", "npm pack",
     "echo npm publish", "grep -r 'npm publish' docs", "vercel", "vercel --help", "netlify deploy", "firebase emulators:start", "docker build -t x .", "docker pull me/app:1",
     "git push origin release/1.2.3", "git log --tags",
+    "npm -w pkg test", "npm --prefix x install", "npm --workspace pkg run build", "npm -w pkg publish --dry-run", "pnpm --filter x build", "pnpm -r test", "pnpm -C pkg install",
+    "yarn --cwd x install", "yarn npm whoami", "yarn workspace x test", "corepack enable", "corepack npm install", "docker image ls", "docker image pull me/app:1",
+    "docker image push localhost:5000/x", "docker compose up -d", "docker compose pull", "docker compose push --dry-run", "git push origin release-1.0", "git push origin v1",
+    "python3 -m twine check dist/*", "python3 -m pytest", "python3 -m http.server", "python3 -m build",
 ]
 
 

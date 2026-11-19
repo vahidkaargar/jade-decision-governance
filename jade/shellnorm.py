@@ -41,10 +41,15 @@ SPLIT = re.compile(r"\n|;|&&|\|\||(?<!>)(?<!>&)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\
 _RUN_OPT = r"(?:(?:-w|-p|--with|--with-requirements|--with-editable|--python|--project|--directory|--package|--group|--env-file|--extra|--from|--index|--index-url)\s+\S+|--?[A-Za-z][\w-]*(?:=\S+)?)"
 _RUNNER = (r"(?:uv(?:\s+tool)?\s+run|uvx|poetry\s+run|pdm\s+run|pipenv\s+run|rye\s+run|hatch\s+run|pipx\s+run|conda\s+run|npx|bunx|pnpm\s+(?:exec|dlx)"
            rf"|yarn\s+(?:exec|dlx)|npm\s+exec)(?:\s+(?:{_RUN_OPT}|--))*")
-PREFIX = re.compile(
-    r"^(?:(?:" + _RUNNER + r"|[A-Za-z_]\w*=\S*|sudo(?:\s+(?:-[ugphCDrtUT]\s+\S+|-[A-Za-z-]+))*|command(?!\s+-[A-Za-z]*[vV]\b)|builtin|nohup|time|exec|noglob|nocorrect|do|then|else|if|while|until|!"
-    r"|env(?:\s+-[A-Za-z-]+)*|g?timeout(?:\s+-\S+)*\s+\d+[smhd]?|nice(?:\s+-n?\s*\d+)?|caffeinate(?:\s+-\w+)*"
-    r"|xargs(?:\s+-(?:I\s*\S+|n\s*\d+|P\s*\d+|[0a-zA-Z]+))*)\s+)+")
+# The programs that only start the next word as a program. V6-17 review: each may be spelled with its directory (`/usr/bin/env`, `/usr/bin/sudo`), and `arch`, `watch`,
+# `script` (the macOS form `script -q /dev/null CMD`; not `-c`, which takes a command text) and `corepack` start the next program too. A command run through one of them is the
+# same call for the floor: `/usr/bin/env npm publish` is `npm publish`.
+_LAUNCHER = (r"(?:" + _RUNNER + r"|sudo(?:\s+(?:-[ugphCDrtUT]\s+\S+|-[A-Za-z-]+))*|command(?!\s+-[A-Za-z]*[vV]\b)|builtin|nohup|time(?:\s+-[A-Za-z]+)*"
+             r"|exec(?:\s+(?:-a\s+\S+|-[cl]+))*|noglob|nocorrect"
+             r"|env(?:\s+-[A-Za-z-]+)*|g?timeout(?:\s+-\S+)*\s+\d+[smhd]?|nice(?:\s+-n?\s*\d+)?|caffeinate(?:\s+-\w+(?:\s+\d+)?)*"
+             r"|xargs(?:\s+-(?:I\s*\S+|n\s*\d+|P\s*\d+|[0a-zA-Z]+))*"
+             r"|arch(?:\s+-\S+)*|watch(?:\s+-[A-Za-z-]+(?:=\S+)?(?:\s+\d+(?:\.\d+)?)?)*|script(?:\s+-[abd-zA-Z]+)*\s+\S+|corepack(?=\s+(?:npm|npx|pnpm|pnpx|yarn)\b))")
+PREFIX = re.compile(r"^(?:(?:(?:(?:/[\w.+-]+)*/)?" + _LAUNCHER + r"|[A-Za-z_]\w*=\S*|do|then|else|if|while|until|!)\s+)+")
 
 ALIAS_TAIL = re.compile(r"\s-c\s+alias\.[^\s=]*=$")
 GIT_VALUE = re.compile(r"(?:^|[\s(;&|])(?:\S*/)?git(?:\s+\S+)*?\s+-[Cc]\s+$|--(?:git-dir|work-tree|namespace)=$|--(?:git-dir|work-tree|namespace)\s+$")
@@ -838,6 +843,29 @@ def shell_script(args: list[str]) -> tuple[str, list[str]] | None:
     return None
 
 
+_SSH_VALUE_OPTS = frozenset("BbcDEeFIiJLlmOopQRSWw")   # ssh options whose value is the next word (`-p 22`, `-i key`, `-o Opt=v`, `-J jump`)
+
+
+def ssh_remote(args: list[str]) -> str | None:
+    """The command text of `ssh [options] host command...` (decoded words, joined by a blank as ssh does), or None when no command is given (an interactive login)."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            i += 1
+            break
+        if not a.startswith("-") or a == "-":
+            break
+        if len(a) == 2 and a[1] in _SSH_VALUE_OPTS:
+            i += 2
+        elif re.fullmatch(r"-[A-Za-z]+", a) and a[-1] in _SSH_VALUE_OPTS and not any(c in _SSH_VALUE_OPTS for c in a[1:-1]):
+            i += 2   # `-fp 22`, `-Ni key`: flags, and the last one takes the next word (`-p22` and `-oOpt=v` carry their value and take one word)
+        else:
+            i += 1
+    rest = args[i + 1:] if i < len(args) else []   # args[i] is the host
+    return " ".join(rest) if rest else None
+
+
 def interp_code(args: list[str]) -> str | None:
     """The program text of `python -c`, `perl -e`, `node -p`, `ruby -e`, `php -r` ... (decoded), else None."""
     prev_flag = False
@@ -1060,6 +1088,15 @@ class _Scan:
                 self._script(script, deferred)
                 if extras and (alt := _positional_args(script, extras)) != script:
                     self._script(alt, deferred)
+        elif cmd == "ssh":   # V6-17 review: `ssh host 'cmd'` runs `cmd` in a shell on the host: the floor reads it like `sh -c 'cmd'`
+            if remote := ssh_remote(adec):
+                self._script(remote, deferred)
+        elif cmd == "script":   # `script -qc 'cmd' /dev/null` (the Linux form): the text after -c is a shell command
+            for k, a in enumerate(adec):
+                if (a == "--command" or re.fullmatch(r"-[A-Za-z]*c", a)) and k + 1 < len(adec):
+                    self._script(adec[k + 1], deferred)
+                elif a.startswith("--command="):
+                    self._script(a.split("=", 1)[1], deferred)
         elif cmd == "su":
             for k, a in enumerate(adec):
                 if a in ("-c", "--command") and k + 1 < len(adec):
