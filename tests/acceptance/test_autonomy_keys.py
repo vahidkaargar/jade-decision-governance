@@ -272,3 +272,45 @@ def test_n28_the_jev_verb_and_the_modules_are_si09(cmd):
 def test_n28_reading_the_value_and_naming_the_verb_is_not_blocked(cmd):
     a = policy.assess("Bash", {"command": cmd}, str(ROOT))
     assert "SI-09" not in a.blocked, (cmd, a.blocked)
+
+
+# ------------------------------------------------------------------ the retention job never erases the human's record (review of V6-28)
+
+def age_events(kind, days=100):
+    """Make every event of `kind` older than the retention window, as 90 days of real life would."""
+    from datetime import timedelta
+
+    from jade.util import now, ts
+    db = ledger.open(timeout=5)
+    try:
+        db.con.execute("UPDATE events SET ts=? WHERE kind=?", (ts(now() - timedelta(days=days)), kind))
+    finally:
+        db.close()
+
+
+def purge(days=90):
+    db = ledger.open(timeout=5)
+    try:
+        return ops.purge(db, days)
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("value, level, expected", [("on", "high", "on"), ("on", "medium", "on"), ("off", "medium", "off"), ("unset", "medium", "on"), ("unset", "high", "off")])
+def test_retention_purge_does_not_change_what_the_jev_key_reads(value, level, expected):
+    set_cfg(level=level)
+    ops.set_jev(value, stdin_isatty=True)
+    assert ops.jev_effective() == expected
+    age_events("jev")
+    purge()
+    assert ops.jev_effective() == expected   # before the fix: the record lost its value and `on` read `off`
+    assert "no `jade jev` command recorded it" not in ops._jev_row()[2]
+
+
+def test_retention_purge_does_not_lock_the_human_out_of_jade_jev_on():
+    set_cfg(level="high")
+    ops.set_jev("on", stdin_isatty=True)
+    age_events("jev")
+    purge()
+    ops.set_jev("on", stdin_isatty=True)   # before the fix: HumanOnly, because the last record read as unreadable
+    assert ops.jev_effective() == "on"

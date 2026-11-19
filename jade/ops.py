@@ -230,12 +230,16 @@ def expected_models(db: ledger.Ledger | None = None) -> list[str]:
 # ---- retention -----------------------------------------------------------------------------------
 PURGED = "[purged by retention]"
 OPEN_PERMIT = ("PENDING", "ISSUED")
+# Events whose detail is the record itself, not project text, so retention keeps it (V6-28 review): `jev` is the value the human set (cleared, `jade jev on` read `off`);
+# `jev_accepted` and `jev_allowed` hold only hashes, rule ids and session ids (the command text of a `jev_allowed` label is removed above), and they are what links a
+# Jev yes to the owner's later deny (cleared, a false allow vanished after 90 days and the deny gate opened by itself).
+KEPT_DETAIL = ("jev", "jev_accepted", "jev_allowed")
 
 
 def purge(db: ledger.Ledger, older_than_days: int = 90) -> int:
     """Remove stored project text older than the retention window and keep every metric (decision Q7): the state and question text of Jev
     calls, the objective and command text of decisions, the command a permit carried (never one still open: PENDING or ISSUED and not yet expired) and the detail of
-    events. Statuses, hashes, risk levels, timings, costs and probabilities stay. Returns the number of rows cleared."""
+    events (not `KEPT_DETAIL`). Statuses, hashes, risk levels, timings, costs and probabilities stay. Returns the number of rows cleared."""
     cutoff = ts(now() - timedelta(days=older_than_days))
     n = 0
     with db.tx() as con:
@@ -259,7 +263,9 @@ def purge(db: ledger.Ledger, older_than_days: int = 90) -> int:
                 keep = {k: v for k, v in ctx.items() if k in ("tool", "length", "rule", "bound", "session_id", "agent_id", "permission_mode", "hash_cwd")}
                 con.execute("UPDATE permits SET scope=? WHERE permit_id=?", (json.dumps({**keep, "subject": PURGED, "purged": True}), r["permit_id"]))
                 n += 1
-        n += con.execute("UPDATE events SET detail_json=NULL WHERE ts<? AND detail_json IS NOT NULL AND kind<>'purge'", (cutoff,)).rowcount
+        n += con.execute("UPDATE events SET detail_json=json_remove(detail_json,'$.label') WHERE kind='jev_allowed' AND ts<? AND json_extract(detail_json,'$.label') IS NOT NULL",
+                         (cutoff,)).rowcount   # the label is command text; the keys beside it are hashes and stay (below)
+        n += con.execute("UPDATE events SET detail_json=NULL WHERE ts<? AND detail_json IS NOT NULL AND kind NOT IN ('purge', ?, ?, ?)", (cutoff, *KEPT_DETAIL)).rowcount
         if n:
             db.event("ledger", "purge", guard=f"older than {older_than_days} d", detail={"rows": n}, con=con)
     if n:
@@ -921,7 +927,7 @@ def review_lines(db, since_s: float | None) -> list[str]:
     out.append(f"owner-answered plain-high calls: {plain_all} (a count of answers gates nothing: an always-allow model would agree with all of them)")
     out.append(f"Jev deny gate: {gate['denies']} of {proxy.MIN_DENIES} kinds of call you denied, from {gate['rules']} of {proxy.MIN_DENY_RULES} rules; {gate['samples']} of "
                f"{proxy.MIN_SAMPLES} shadow questions over {int(gate['days'])} of {proxy.MIN_SAMPLE_DAYS} days; {gate['false_allows']} false allow(s) (Jev said yes to a call you denied "
-               f"or marked wrong)" + ("; met, which is a minimum: a model deciding for you stays a separate choice of yours" if gate["ok"] else "; not met, so a model deciding for you stays off"))
+               f"or marked wrong)" + ("; met: with the jev key on at level low or medium, Jev now decides plain high calls inside its band; `jade jev off` stops it" if gate["ok"] else "; not met, so a model deciding for you stays off"))
     if gate["ok"] and gate["recall_bound"] is not None:
         out.append(f"no false allow among {gate['denies']} denies: the most that shows is a deny-recall of about {100 * gate['recall_bound']:.1f}% (95% lower bound, and only for "
                    "denies that Jev was asked about)")

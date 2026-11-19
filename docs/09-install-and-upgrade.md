@@ -69,7 +69,7 @@ When `jade upgrade` ends, it lists the failed rows of `jade check` and says whet
 
 A broken release is not deleted or moved. Fix forward with a new patch tag (`jade upgrade` takes the latest release), and say in the CHANGELOG which version is bad.
 
-**Owner steps when upgrading to a release with memory and Jev (0.6.0).** Back up `~/.local/share/jade`; `jade upgrade` and read the file list before typing `yes`; `jade hooks install` and open a new Claude Code session; `jade check`. Nothing changes until you set a level: `jade level high` first, then `jade review confirm`, `jade knows edit`, and `jade level medium` or `low` once `jade review` shows 50 answered plain-high calls. The whole page for the owner, with what you see when something fails, is `docs/12-jev-decides-phase1.md` section 10.
+**Owner steps when upgrading to a release with memory and Jev (0.6.0).** Back up `~/.local/share/jade`; `jade upgrade` and read the file list before typing `yes`; `jade hooks install` and open a new Claude Code session; `jade check`. Nothing changes until you set a level: `jade level high` first, then `jade review confirm`, `jade knows edit`, and `jade level medium` or `low` only when you want it. Run `jade jev off` first if you want memory without a model. `jade review` no longer counts answers: it shows the deny gate (V6-28), which Jev must meet before it decides anything, and once the gate is met Jev decides at `low` and `medium` while the `jev` key is on. The whole page for the owner, with what you see when something fails, is `docs/12-jev-decides-phase1.md` section 10.
 
 **Verify the attached files.** `jade upgrade` installs from the tag with uv. To install a file you downloaded, check it against `SHA256SUMS` first:
 

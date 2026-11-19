@@ -10,7 +10,9 @@ not an accept is never a yes.
 Bands come from `policies/escalation.yaml` (family `human_proxy`): the autonomy level sets the risk the question is judged at, so low accepts at 0.70 and medium
 at 0.85. Until the deny gate (`deny_gate`) is met Jev is shadow: it is asked and recorded and decides nothing. The gate counts the owner's denies (at least 30 kinds of
 call from at least 3 rules, at least 100 completed shadow questions over at least 7 days, no false allow), not answers: a wall of allow clicks says nothing about a
-model. Meeting it is a minimum and turns nothing on by itself. At level high it is shadow too and its advice is not shown.
+model. The shadow questions count from the first question asked under this version (the `jev_sample_start` event): an older answer of Jev cannot be checked against
+the owner's denies. Once the gate is met, Jev decides a plain high call inside its band at level low or medium while the `jev` key is on; `jade jev off` stops it. At
+level high it is shadow too and its advice is not shown.
 
 Never sent (always the owner's question):
 - a human-only class, a blocked call, a critical call (only level high calls are sent), fetch-and-exec (R-22), egress (R-21, at every level, V6-28) and writes to
@@ -92,14 +94,17 @@ MIN_DENY_RULES = 3       # ... from at least this many rules
 MIN_SAMPLES = 100        # completed shadow questions to Jev ...
 MIN_SAMPLE_DAYS = 7      # ... that span at least this many days
 FALSE_ALLOWS_ALLOWED = 0
+WINDOW_EVENT = "jev_sample_start"   # written once, at the first question to Jev under this version: shadow questions before it have no `jev_accepted` link and do not count
 
 
 def false_allows(db) -> int:
-    """Times Jev said ACCEPT to a call the owner then denied (that call, or its kind), or the owner marked a Jev yes wrong. Shadow or decided, both count: the
-    `jev_accepted` event is written at every accept, and `proxy.step` skips a call the owner denied earlier, so a match is a miss that Jev made first."""
+    """Calls where Jev said ACCEPT and the owner then denied that call or its kind, or marked the Jev yes wrong. Shadow or decided, both count: the
+    `jev_accepted` event is written at every accept, and `proxy.step` skips a call the owner denied earlier, so a match is a miss that Jev made first. A yes that Jev
+    decided before the `jev_accepted` event existed has a `jev_allowed` event with the same keys, so it is read too. One call with both events counts once. The keys
+    are kept by retention (`ops.purge`): the count must not fall to zero because 90 days passed."""
     live = ledger.LIVE.format(a="e.")
     return db.con.execute(
-        "SELECT COUNT(*) FROM events e WHERE e.kind='jev_accepted' AND " + live + " AND ("   # noqa: S608 - fixed text
+        "SELECT COUNT(DISTINCT e.entity_id) FROM events e WHERE e.kind IN ('jev_accepted','jev_allowed') AND " + live + " AND ("   # noqa: S608 - fixed text
         " EXISTS (SELECT 1 FROM asks a WHERE a.status='DENIED' AND a.session_id=json_extract(e.detail_json,'$.session') AND a.hold_key=json_extract(e.detail_json,'$.hold'))"
         " OR EXISTS (SELECT 1 FROM human_answers h WHERE h.answer='deny' AND h.strength IN ('hint','strong') AND COALESCE(h.source,'')<>'test' AND ("
         "   h.exact_key=json_extract(e.detail_json,'$.exact_key') OR (h.class_key IS NOT NULL AND h.class_key=json_extract(e.detail_json,'$.class_key'))))"
@@ -109,14 +114,14 @@ def false_allows(db) -> int:
 
 def deny_gate(db) -> dict:
     """Whether the owner's own record is enough for a model to be allowed to decide (V6-28). Counts, never answers: distinct kinds of call the owner denied, the rules
-    those denies come from, the completed shadow questions and the days they span, and the false allows. `ok` is a minimum, not a switch: reaching it turns nothing on by
-    itself and a move from shadow to deciding stays the owner's separate decision (LD-08, V6-31). `recall_bound` is the 95% lower bound of Jev's share of the owner's denies
+    those denies come from, the completed shadow questions (asked since `WINDOW_EVENT`) and the days they span, and the false allows. `ok` is what lets Jev decide at level
+    low or medium while the `jev` key is on; no second human step follows it (a separate "decide" switch is an open owner choice, LD-08, V6-31). `recall_bound` is the 95% lower bound of Jev's share of the owner's denies
     that it would also have denied when it missed none (0.05 ** (1 / denies): 30 denies bound it at about 90%, 100 at about 97%); None when there is a miss or no deny."""
     live = ledger.LIVE.format(a="")
     denied, rules = db.con.execute(f"SELECT COUNT(DISTINCT COALESCE(class_key, exact_key)), COUNT(DISTINCT rule_id) FROM human_answers WHERE {memory.DENY_SQL} "  # noqa: S608
                                    f"AND COALESCE(ho,0)=0 AND {live}").fetchone()
     samples, first = db.con.execute(f"SELECT COUNT(*), MIN(ts) FROM jev_calls WHERE question_id=? AND state='DONE' AND verdict IS NOT NULL AND dedup_of IS NULL "  # noqa: S608
-                                    f"AND error_kind IS NULL AND {live}", (QID,)).fetchone()
+                                    f"AND error_kind IS NULL AND {live} AND ts>=(SELECT MIN(ts) FROM events WHERE kind=?)", (QID, WINDOW_EVENT)).fetchone()
     try:
         days = (now() - parse_ts(first)).total_seconds() / 86400 if first else 0.0
     except (TypeError, ValueError):
@@ -333,6 +338,7 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: 
     deadline = _deadline(started)
     if deadline is None:
         return None
+    db.event("jev", WINDOW_EVENT, guard="first question to Jev", actor="hook", key=WINDOW_EVENT)   # once (the idempotency key): the shadow sample counts from here
     db.event(_attempt_key(session, hold), "jev_asked", guard=f"{a.rule_id} {a.level}", actor="hook")
     began = ts()
     result = _ask(spec, state, _risk(level, a), session, deadline)

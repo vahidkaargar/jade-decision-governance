@@ -58,9 +58,10 @@ def prefs(text="Resetting the working tree of a scratch repo is fine. Never push
 GATE_RULES = ("R-02", "R-03", "R-04", "R-05")   # never R-11: the rule of KIND, so `past_answers` and `denied_before` of the calls under test stay as they were
 
 
-def owner_answers(short=False, *, denies=proxy.MIN_DENIES, rules=proxy.MIN_DENY_RULES, samples=proxy.MIN_SAMPLES, days=proxy.MIN_SAMPLE_DAYS + 1, allows=0):
+def owner_answers(short=False, *, denies=proxy.MIN_DENIES, rules=proxy.MIN_DENY_RULES, samples=proxy.MIN_SAMPLES, days=proxy.MIN_SAMPLE_DAYS + 1, allows=0, window=True):
     """What the deny gate (V6-28) needs in the ledger: owner denies of other rules (kinds of call, `class_key` none), completed shadow questions that span the days, and
-    nothing else. `short` leaves the denies one short. The seeded shadow rows carry a `seed_` call id, so `calls()` leaves them out."""
+    nothing else. `short` leaves the denies one short. The seeded shadow rows carry a `seed_` call id, so `calls()` leaves them out. `window` writes the event that
+    starts the sample window at the first seeded row (the hook writes it at its first question to Jev; rows before it are not counted)."""
     denies = denies - 1 if short else denies
     d = m.db()
     try:
@@ -69,6 +70,8 @@ def owner_answers(short=False, *, denies=proxy.MIN_DENIES, rules=proxy.MIN_DENY_
         for i in range(allows):
             d.record_human_answer(session=SESSION, decision_id=None, rule_id="R-02", class_key=None, exact_key=f"a{i:063d}", answer="allow", channel="chat", label=f"a{i}")
         first = now() - timedelta(days=days)
+        if window:
+            d.con.execute("INSERT INTO events(entity_id, kind, actor, ts) VALUES('jev', ?, 'hook', ?)", (proxy.WINDOW_EVENT, ts(first)))
         for i in range(samples):
             d.con.execute("INSERT INTO jev_calls(call_id, question_id, state_hash, state, verdict, exit_code, ts, done_ts) VALUES(?,?,?,?,?,?,?,?)",
                           (f"seed_{i}", QID, f"h{i}", "DONE", "REJECT", 4, ts(first + timedelta(hours=i)), ts(first + timedelta(hours=i))))
@@ -673,7 +676,8 @@ def test_shadow_ends_by_denies_and_by_nothing_else(medium, prov):
 def test_jade_review_prints_the_gate_and_the_bound(ready):
     out = ops.review(None)
     assert "Jev deny gate: 30 of 30 kinds of call you denied, from 3 of 3 rules; 100 of 100 shadow questions over 8 of 7 days; 0 false allow(s)" in out
-    assert "met, which is a minimum" in out and "about 90.5%" in out
+    assert "met: with the jev key on at level low or medium, Jev now decides plain high calls inside its band; `jade jev off` stops it" in out and "about 90.5%" in out
+    assert "separate choice" not in out   # nothing enforces a second step, so the text must not promise one
 
 
 def test_jade_review_says_what_is_missing_when_the_gate_is_shut(medium):
@@ -681,3 +685,116 @@ def test_jade_review_says_what_is_missing_when_the_gate_is_shut(medium):
     out = ops.review(None)
     assert "29 of 30 kinds of call you denied" in out and "not met, so a model deciding for you stays off" in out and "bounds its deny-recall" not in out
 
+
+
+# ------------------------------------------------------------------ review of V6-28: what the gate can see
+
+def jev_allowed_event(call, exact, cls, coarse, label="git reset --hard HEAD~3"):
+    """An event as `proxy.step` wrote it for a call Jev decided, before the `jev_accepted` event existed."""
+    d = m.db()
+    try:
+        d.event(call, "jev_allowed", guard="R-11 high", actor="hook", detail={"decision_id": "dec_old", "rule": "R-11", "label": label, "exact_key": exact, "class_key": cls,
+                                                                              "coarse_key": coarse, "p": 0.9, "band": 0.85})
+    finally:
+        d.close()
+
+
+def age(kind, days=100):
+    d = m.db()
+    try:
+        d.con.execute("UPDATE events SET ts=? WHERE kind=?", (ts(now() - timedelta(days=days)), kind))
+    finally:
+        d.close()
+
+
+def purge(days=90):
+    d = m.db()
+    try:
+        return ops.purge(d, days)
+    finally:
+        d.close()
+
+
+def test_a_jev_yes_from_before_the_link_event_counts_when_the_owner_marks_it_wrong(medium):
+    owner_answers()
+    jev_allowed_event("call_old1", "a" * 64, "kind-old", "co-old")
+    d = m.db()
+    try:
+        proxy.distrust(d, "co-old")
+        proxy.distrust(d, "a" * 64)
+    finally:
+        d.close()
+    g = gate()
+    assert g["false_allows"] == 1 and not g["ok"], g   # before the fix: 0 and ok, the old event kind was not read
+
+
+@pytest.mark.parametrize("how", ["same_call", "same_kind"])
+def test_a_jev_yes_from_before_the_link_event_counts_when_the_owner_denies_it(medium, how):
+    owner_answers()
+    jev_allowed_event("call_old2", "b" * 64, "kind-old2", "co-old2")
+    deny("b" * 64 if how == "same_call" else "c" * 64, cls=None if how == "same_call" else "kind-old2")
+    assert gate()["false_allows"] == 1 and not gate()["ok"]
+
+
+def test_one_call_with_both_events_is_one_false_allow(medium):
+    owner_answers()
+    accepted_event(exact="e" * 64, call="call_both")
+    jev_allowed_event("call_both", "e" * 64, None, None)
+    deny("e" * 64)
+    assert gate()["false_allows"] == 1
+
+
+def test_shadow_questions_from_before_the_window_do_not_count(medium):
+    """Old shadow rows (made before the link event existed) cannot be checked against the owner's denies, so they are no sample: without the start event nothing counts."""
+    owner_answers(window=False)
+    g = gate()
+    assert g["samples"] == 0 and not g["ok"] and any("shadow questions" in s for s in g["missing"]), g
+    d = m.db()
+    try:
+        d.con.execute("INSERT INTO events(entity_id, kind, actor, ts) VALUES('jev', ?, 'hook', ?)", (proxy.WINDOW_EVENT, ts(now() - timedelta(hours=1))))
+        d.con.execute("INSERT INTO jev_calls(call_id, question_id, state_hash, state, verdict, exit_code, ts, done_ts) VALUES('seed_new', ?, 'n', 'DONE', 'REJECT', 4, ?, ?)",
+                      (QID, ts(), ts()))
+    finally:
+        d.close()
+    assert gate()["samples"] == 1   # only the row after the start
+
+
+def test_the_first_question_to_jev_starts_the_window_once(medium, prov):
+    prefs()
+    owner_answers(window=False)
+    assert asked(hooks.pretool(m.call(KIND)))
+    assert asked(hooks.pretool(m.call(KIND, OTHER)))
+    assert len(m.rows("SELECT 1 FROM events WHERE kind=?", (proxy.WINDOW_EVENT,))) == 1
+    assert gate()["samples"] == len(calls()) == 2
+
+
+def test_with_the_key_off_no_window_starts(medium, prov):
+    prefs()
+    ops.set_jev("off", stdin_isatty=True)
+    assert asked(hooks.pretool(m.call(KIND)))
+    assert m.rows("SELECT 1 FROM events WHERE kind=?", (proxy.WINDOW_EVENT,)) == []
+
+
+def test_retention_purge_keeps_the_false_allow_link(medium):
+    owner_answers()
+    accepted_event(exact="e" * 64)
+    deny("e" * 64)
+    assert gate()["false_allows"] == 1
+    age("jev_accepted")
+    purge()
+    g = gate()
+    assert g["false_allows"] == 1 and not g["ok"], g   # before the fix: 0 and ok after 90 days
+
+
+def test_retention_purge_keeps_the_keys_of_a_jev_yes_but_not_its_command_text(medium):
+    owner_answers()
+    jev_allowed_event("call_old3", "d" * 64, "kind-old3", "co-old3", label="curl-free secret text 123")
+    deny("d" * 64)
+    age("jev_allowed")
+    assert purge() >= 1
+    (row,) = m.rows("SELECT detail_json FROM events WHERE kind='jev_allowed'")
+    detail = json.loads(row["detail_json"])
+    assert "label" not in detail and "123" not in row["detail_json"]
+    assert detail["exact_key"] == "d" * 64 and detail["class_key"] == "kind-old3"
+    assert gate()["false_allows"] == 1
+    assert purge() == 0   # nothing left to clear: the job does not write a purge event every run
