@@ -162,13 +162,10 @@ def test_every_text_the_segment_key_loses_is_in_the_keys(one, two):
     assert not got["exact"] and not got["class"] and not got["any"], (one, two, got)
 
 
-@pytest.mark.parametrize("one,two", SYNTAX + SUBST + HEREDOC)
-def test_the_hole_is_real_the_hold_key_is_the_same(one, two):
-    """The premise for the text the segment key loses (not the swaps and the marks, which the key reads in part). If this fails, the segment key was fixed: re-read the finding."""
-    assert _same_keys(one, two)["hold"], (one, two)
-
-
-@pytest.mark.parametrize("one,two", [SUBST[0], SYNTAX[0], HEREDOC[0], SWAP[0], MARKS[0]])
+# (The premise test "the hold key is the same" is gone: on the integrated tree the scanner reads an ssh remote command as a command (V6-17 review) and the here-doc bodies,
+# so the hold key of some of these pairs already differs. The exact and kind keys are what this card pins, in the test above.)
+# A confirmed answer is stored only for a call memory may learn: an ssh call that deletes is `never` on the integrated tree, so its stand-in here is another swap.
+@pytest.mark.parametrize("one,two", [SUBST[0], SYNTAX[0], HEREDOC[0], SWAP[1], MARKS[0]])
 def test_a_confirmed_answer_does_not_cover_the_other_text(one, two):
     aid = m.stored(one)
     assert m.lookup(one)["answer_id"] == aid

@@ -211,9 +211,9 @@ def skip_reason(a, tool: str, tin: dict, level: str) -> str | None:
         return "fetch-and-exec, egress, or a write to an agent instruction file"
     if a.blind or getattr(a, "unread", None) or rules & {"R-31", "R-32"}:
         return "the gate could not read all of it"
-    if any(memory.MERGE.match(k) for k in getattr(a, "seg_keys", []) or []):
-        return "a merge"
     subject = a.subject or ""
+    if any(memory.MERGE.match(k) for k in getattr(a, "seg_keys", []) or []) or policy.gh_api_merge_in(subject):
+        return "a merge"
     if len(subject) > MAX_TEXT or len(_content(tool, tin)) > MAX_TEXT:
         return "over 4 KiB"
     if policy.runs_shell(tool, tin) and len(list(memory.INLINE.finditer(subject))) > 1:

@@ -8,7 +8,7 @@ Short version:
 
 - JADE has no analytics, no crash reports and no phone-home.
 - JADE sends text to one provider: `https://openrouter.ai/api/alpha/decisions`. The address is fixed in the code. No setting and no environment variable changes it.
-- The hook sends a call there only when the gate is in enforce mode, a level is set (`low`, `medium` or `high`) and a key exists. This includes level `high`, where the answer is only recorded and decides nothing.
+- The hook sends a call there only when the gate is in enforce mode, a level is set (`low`, `medium` or `high`), a key exists and the `jev` setting is on. The `jev` setting is on by default at `low` and `medium` and off by default at every other level (V6-28: `jade jev on|off`, human terminal only). So at level `high`, nothing is sent unless you ran `jade jev on`.
 - Ordinary source code and commands are not changed by redaction. Redaction hides secret shapes and email addresses. It does not hide private code.
 - A job on a timer can send text with no one at the keyboard: the daily job `jade maintain`, when it is installed and a key exists. It sends only two calls with a fixed text (see "Other commands that call the provider").
 - `jade upgrade` talks to GitHub. Nothing else does.
@@ -21,21 +21,24 @@ Short version:
 |---|---|---|---|
 | off or advisory | any | any | not sent |
 | enforce | unset, off | any | not sent |
-| enforce | low, medium, high | yes | sent |
+| enforce | low, medium | yes | sent |
+| enforce | high | yes | not sent |
 | enforce | low, medium, high | no | not sent |
+
+The `high` row is for the default: at level `high` the `jev` setting is off, so the hook sends nothing. If you ran `jade jev on`, the hook sends there too, and the answer is only recorded.
 
 A key is `OPENROUTER_API_KEY` in the macOS Keychain or in the environment of the shell that starts Claude Code. With no key, the provider call stops before any request is made.
 
 A call is sent only when all of these are true:
 
-1. The gate is in enforce mode, a level is set, a key exists, and the hook event carries a session id.
+1. The gate is in enforce mode, a level is set, a key exists, the `jev` setting is on, and the hook event carries a session id.
 2. The call is a plain high-risk call. Critical calls, human-only calls and blocked calls are never sent (next section).
 3. You wrote a preferences text (`preferences.md`) or you confirmed at least one allow answer for the same rule. A call with neither is your question as before.
 4. You did not deny this call or a call of its kind before, you did not mark it wrong (`jade review mark`), and Jev was not already asked about it twice in this session within the last hour.
 5. The question the hook asks is usable and the hook has time left. The call to the provider waits at most 3 seconds, and never past the hook's own limit of 6 seconds. One try, no retry.
 6. Redaction did not change the text. If it would hide something, the call is not sent.
 
-Shadow does not stop the sending. At level `high` the answer is not used, and at level `low` or `medium` it is not used until you have answered 50 distinct plain-high calls. In shadow the call is still sent, asked and recorded.
+Shadow does not stop the sending. At level `high` the answer is not used. At level `low` or `medium` it is not used until the deny gate is met: you have denied 30 kinds of call (from at least 3 rules), Jev has been asked 100 shadow questions over at least 7 days, and Jev never said yes to a call you denied or marked wrong (`jade review` shows the counts). In shadow the call is still sent, asked and recorded.
 
 ## What is in the request
 

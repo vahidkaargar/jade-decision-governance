@@ -61,6 +61,16 @@ _GH_QUERY_FIELD = re.compile(r"\bquery=")
 _GH_ROUTE_UNREAD = re.compile(r"(?<![\w-])pulls/[^\s/]+/[^\s/]*[$`]")
 
 
+_GH_API_WORDS = re.compile(r"(?<![\w.-])(?:gh|glab)\s+api(?![\w.-])")
+_GH_REST_MERGE = re.compile(r"(?<![\w-])(?:pulls|merge_requests)/[^\s/]+/merge(?![\w-])|(?<![\w-])repos/[^\s/]+/[^\s/]+/merges(?![\w-])")   # the routes risk.yaml R-10 rates by name
+
+
+def gh_api_merge_in(text: str) -> bool:
+    """Does the text of a call hold a `gh api` call that merges a pull request, or whose query or route the gate cannot read (`_gh_api_merges`)? Read from the plain text of
+    the call, so it errs towards yes. Memory keeps such a call as an exact answer at most and Jev never judges it, as for `gh pr merge` (integration of V6-08 and V6-06b)."""
+    return bool(_GH_API_WORDS.search(text)) and (bool(_GH_REST_MERGE.search(text)) or _gh_api_merges(text.split(), text))
+
+
 def _gh_api_merges(words: list[str], text: str) -> bool:
     """`words` is a `gh api` call: it merges a pull request, or its query or route is one the gate cannot read (so it is asked about)."""
     if _GH_MERGE_MUTATION.search(text) or _GH_ROUTE_UNREAD.search(text):

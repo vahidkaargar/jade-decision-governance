@@ -80,7 +80,7 @@ The first call can never be approved by anyone. What really stops a push to the 
 
 | Where | What | When |
 |---|---|---|
-| `openrouter.ai` | Redacted text of a call, your preferences, up to 8 past answers, a fixed question, your key in a header | The hook, only in enforce mode with level `low`, `medium` or `high` and a key: also at level `high`, where the answer is only recorded. And `jev`, `jade ask` and `jade check` when you run them. And the daily job `jade maintain`, when `jade setup` or you installed it and a key exists: two calls with a fixed text, with no one at the keyboard |
+| `openrouter.ai` | Redacted text of a call, your preferences, up to 8 past answers, a fixed question, your key in a header | The hook, only in enforce mode with level `low`, `medium` or `high`, a key and the `jev` setting on (on by default at `low` and `medium`, off at `high` unless you run `jade jev on`). And `jev`, `jade ask` and `jade check` when you run them. And the daily job `jade maintain`, when `jade setup` or you installed it and a key exists: two calls with a fixed text, with no one at the keyboard |
 | `github.com` and its release hosts | Release data and the install | `jade upgrade` and `jade upgrade --check` only |
 | Nowhere else | No analytics, no crash report, no phone-home | Never |
 

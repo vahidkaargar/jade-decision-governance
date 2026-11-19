@@ -219,7 +219,7 @@ def test_the_send_table_is_what_the_real_hook_sends(monkeypatch, mode, level, ke
 
 def test_what_is_sent_is_the_fields_the_page_names(monkeypatch):
     text = section(PRIVACY, "What is in the request")
-    (payload,) = hook_sends(monkeypatch, "enforce", "high", True)
+    (payload,) = hook_sends(monkeypatch, "enforce", "medium", True)
     assert set(payload) == {"model", "state", "questions"} and payload["model"] == adapter.DEFAULT_MODEL
     for key in ("model", "state", "questions"):
         assert f"`{key}`" in text, key
@@ -259,7 +259,7 @@ def test_the_numbers_on_the_page_are_the_numbers_in_the_code():
     text = PRIVACY
     default_days = inspect.signature(ops.purge).parameters["older_than_days"].default
     for needle in (f"at most {proxy.MAX_TEXT // 1024} KiB of the command", f"{ask.STATE_CAP // 1024} KiB", f"up to {proxy.MAX_PAST} past answers",
-                   f"{proxy.DEADLINE_S:g} seconds", f"{hooks.BUDGET_S:g} seconds", f"{ops.JEV_BAND_ANSWERS} ", f"{default_days} days", adapter.URL, adapter.DEFAULT_MODEL):
+                   f"{proxy.DEADLINE_S:g} seconds", f"{hooks.BUDGET_S:g} seconds", f"{proxy.MIN_DENIES} kinds of call", f"{proxy.MIN_SAMPLES} shadow questions", f"{default_days} days", adapter.URL, adapter.DEFAULT_MODEL):
         assert needle in text, f"the privacy page does not say '{needle}'"
 
 
@@ -308,7 +308,7 @@ def git_repo(tmp_path: Path) -> Path:
 
 def test_a_git_push_sends_the_repository_path_and_the_page_says_so(monkeypatch, tmp_path):
     repo = git_repo(tmp_path)
-    (payload,) = hook_sends(monkeypatch, "enforce", "medium", True, cmd="git push origin v1.0", cwd=str(repo))
+    (payload,) = hook_sends(monkeypatch, "enforce", "medium", True, cmd="git push origin v1", cwd=str(repo))   # V6-17: a push of `v1.0` is a release (HO-release), a human-only call that is never sent; `v1` is a plain high call
     heads = payload["state"]["fingerprints"]["git_head"]
     assert heads.startswith(str(repo.resolve())), "the fingerprint of a push holds the absolute repository path"
     text = section(PRIVACY, "What is in the request")
@@ -326,7 +326,7 @@ def test_a_call_that_is_not_a_push_does_not_send_the_folder(monkeypatch, tmp_pat
 
 def test_the_purge_keeps_the_working_folder_and_the_repository_path_and_the_page_says_so(monkeypatch, tmp_path):
     repo = git_repo(tmp_path)
-    r = hooks.pretool(m.call("git push origin v1.0", cwd=str(repo)))
+    r = hooks.pretool(m.call("git push origin v1", cwd=str(repo)))
     assert r.exit_code == 2, "enforce mode, no level: the push waits for a permit"
     d = m.db()
     try:

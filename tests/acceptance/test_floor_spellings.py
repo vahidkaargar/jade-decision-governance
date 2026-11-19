@@ -50,7 +50,6 @@ WRAPPERS = [
     ("sudo path", _prefix("/usr/bin/sudo ")), ("sudo then env path", _prefix("sudo /usr/bin/env ")), ("time path", _prefix("/usr/bin/time ")),
     ("nice path", _prefix("/usr/bin/nice -n 5 ")), ("exec -a", _prefix("exec -a x ")), ("command", _prefix("command ")), ("ssh", _ssh),
 ]
-CHAIN_GAP = {("R-13 shell", "ssh"), ("R-18", "ssh"), ("R-21 egress", "ssh"), ("R-22 fetch-and-exec", "ssh")}   # see the pin in the first test
 RUNTIME_WRAPPERS = [w for w in WRAPPERS if w[0] in {"env path", "arch arm64", "script", "watch", "ssh", "nohup path"}]
 BASH_ROWS = [(n, b) for n, b in LIST_A if b()[0] == "Bash"]
 
@@ -72,11 +71,9 @@ def test_a_wrapped_spelling_is_guarded_as_much_as_the_plain_call(label, wrap, na
     assert plain["ho"] <= wrapped["ho"], (where, "human-only classes lost", plain["ho"], wrapped["ho"])
     assert plain["blocked"] <= wrapped["blocked"], (where, "blocks lost", plain["blocked"], wrapped["blocked"])
     assert wrapped["rank"] >= plain["rank"], (where, "level fell")
-    if plain["eligibility"] == "never" and (name, label) in CHAIN_GAP:
-        # FOUND by V6-17 (test_never_learn_corpus.FOUND): `memory.eligibility` reads only the top rule of the call. With ssh the top rule is R-14 and the guarded rule is
-        # the second one, so memory may keep the exact call (`exact`, never a whole kind). Pinned: when jade/memory.py closes it, this row fails and the entry goes.
-        assert wrapped["eligibility"] == "exact", (where, "the documented chain gap changed: remove the entry from CHAIN_GAP", wrapped["eligibility"])
-    elif plain["eligibility"] == "never":
+    if plain["eligibility"] == "never":
+        # V6-17 found that an ssh-wrapped call was kept as an exact answer (memory read only the top rule, R-14). On the integrated tree (V6-06b memory keys) every wrapped
+        # spelling is `never` too; this row now holds that, so the old CHAIN_GAP pin is gone.
         assert wrapped["eligibility"] == "never", (where, "memory may remember it as", wrapped["eligibility"])
     for lv in LEVELS:
         if plain["skip"][lv]:

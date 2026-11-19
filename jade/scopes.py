@@ -59,6 +59,7 @@ _LEADING_CD = re.compile(
     r"""^[ \t]*cd[ \t]+(?:"(?P<dq>[^"$`\\]*)"|'(?P<sq>[^']*)'|(?P<bare>[^\s"'$`\\;&|()<>*?\[\]{}!#]+))[ \t]*&&[ \t]*""")
 _OTHER_CD = re.compile(r"(?:^|[\s;&|(`{])(?:cd|pushd|popd)(?=[\s;&|)`}]|$)")
 # Options that move a git command to another repository. The segment key drops them, so the working folder says nothing about where the call acts.
+_CD_WORD = re.compile(r"(?<![\w.-])(?:cd|pushd|popd)(?![\w.-])")
 _ELSEWHERE = re.compile(r"(?:^|\s)(?:-C|--git-dir|--work-tree)(?=[\s=]|$)|(?:^|[\s;&|(])(?:GIT_DIR|GIT_WORK_TREE)=")
 _DIGITS = re.compile(r"^[0-9]+$")
 # Non-ASCII text, or whitespace other than space, tab and newline. Python splits words on all of it; zsh and bash split only on space and tab, so a call written with
@@ -102,6 +103,8 @@ def project_of(subject: str, cwd: str) -> str | None:
     skeleton = shellnorm.skeleton(rest)
     if _OTHER_CD.search(skeleton) or _ELSEWHERE.search(shellnorm.skeleton(subject)):
         return None
+    if not m and _CD_WORD.search(subject) and any(ch.isspace() and ch not in " \t\n\r" for ch in subject):
+        return None   # `cd<NBSP>PATH`: the scanner no longer splits at a space-like character the shell keeps in the word (V6-08 N19), so no `cd` is seen above; a `cd` next to one is unreadable
     here = _real(base)
     if here is None or not os.path.isdir(here):
         return None

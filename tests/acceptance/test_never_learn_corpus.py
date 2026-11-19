@@ -188,6 +188,14 @@ PLAIN_HIGH = {
     "adversarial:A18": ("class", "BACKLOG W-190: `git push --all origin` can push the default branch"),
     "adversarial:A59": ("class", "BACKLOG W-190: R-16 sed -i on a JADE source file from the shell"),
     "regression:R16": ("class", "BACKLOG W-190: composio execute GMAIL_SEND_EMAIL"),
+    "adversarial:A244": ("class", "BACKLOG W-190: git send-pack to the default branch is blocked by SI-08 in a repository; with no repository it is the push rule's kind"),
+    # V6-08 N20 (gh api merges): a merge through the API is a merge: exact at most, never sent to Jev (`policy.gh_api_merge_in`, as `gh pr merge`)
+    "adversarial:A246": ("exact", "a merge through gh api: exact only"), "adversarial:A247": ("exact", "a merge through gh api: exact only"),
+    "adversarial:A274": ("exact", "a gh api graphql query the gate cannot read: exact only"), "adversarial:A275": ("exact", "a gh api route with a variable last part: exact only"),
+    # the shell start-up files are a human-only class (HO-shell-startup, V6-08 N23) only once a level is set, and the corpus runs with no level and no shell roots (conftest):
+    # the call is a plain one here, and the case rows A248 to A263 set `level: low` to see the class (tests/test_case_files.py)
+    "adversarial:A248": ("exact", "a shell start-up write with no level set: exact at most"), "adversarial:A249": ("exact", "a shell start-up write with no level set: exact at most"),
+    "adversarial:A250": ("exact", "a shell start-up write with no level set: exact at most"), "adversarial:A263": ("exact", "a shell start-up write with no level set: exact at most"),
 }
 
 

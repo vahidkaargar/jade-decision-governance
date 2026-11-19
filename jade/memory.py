@@ -73,8 +73,8 @@ def eligibility(a, tool: str, tool_input: dict | None, fp: dict | None) -> str:
         return "exact"
     if fp or INLINE.search(a.subject or ""):
         return "exact"
-    if any(MERGE.match(k) for k in getattr(a, "seg_keys", []) or []) or not getattr(a, "seg_keys", None):
-        return "exact"
+    if any(MERGE.match(k) for k in getattr(a, "seg_keys", []) or []) or not getattr(a, "seg_keys", None) or policy.gh_api_merge_in(a.subject or ""):
+        return "exact"   # a merge, also one made through `gh api` (V6-08 N20), is never remembered as a kind
     return "class"
 
 

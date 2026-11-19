@@ -122,6 +122,7 @@ def test_the_cli_entry_passes_an_unknown_name_through_to_the_same_exit(monkeypat
     ("Bash", {"command": "git push origin v1-feat-x"}, 2),            # not clearly read-only
     ("Bash", {"command": "ls -la"}, 0),
 ])
+@pytest.mark.timing
 def test_a_hook_that_runs_out_of_time_follows_the_degraded_rule_for_the_tool(tool, tool_input, want, monkeypatch, capsys):
     monkeypatch.setattr(hooks, "BUDGET_S", 0.3)
     monkeypatch.setitem(hooks.HANDLERS, "pretool", lambda e: time.sleep(5))
