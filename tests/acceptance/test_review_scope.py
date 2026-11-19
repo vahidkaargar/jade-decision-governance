@@ -16,7 +16,7 @@ from jade import ledger, memory, ops, policy, scopes, util
 
 REAL_REFUSAL = util.human_tty_refusal
 SESSION = "sess-review-scope-0001"
-MERGE = "gh pr merge 940 --squash"
+MERGE = "gh pr merge 940 --repo github.com/owner/repoA --squash"
 CLASS_CMD = "git reset --hard HEAD~1"   # a real `class` call (R-11)
 
 
@@ -72,7 +72,7 @@ def test_scope_hint_shows_label_lifetime_and_undo(repo):
     aid = hint(MERGE, repo, "merge_project")
     n, text = confirm(["y", "yes"])
     assert n == 1 and strength(aid) == "strong"
-    assert f"Would become standing for: gh pr merge * in {repo} ({memory.USE_DAYS} days after last use)" in text
+    assert f"Would become standing for: gh pr merge * --repo github.com/owner/repoa in {repo} ({memory.USE_DAYS} days after last use)" in text
     assert "jade knows rm" in text and str(memory.CAP_DAYS) in text
     assert "this exact call only" not in text and "this kind of call" not in text
     scope_lines = [ln.strip() for ln in text.splitlines() if ln.startswith("   ")]
@@ -99,7 +99,7 @@ def test_two_merge_scopes_in_two_projects_do_not_merge_into_one_group(repo):
     (Path(other) / ".git").mkdir(parents=True)
     (Path(other) / ".git" / "config").write_text('[remote "origin"]\n\turl = https://github.com/owner/repoB.git\n')
     hint(MERGE, repo, "merge_project")
-    hint("gh pr merge 12 --squash", other, "merge_project")
+    hint("gh pr merge 12 --repo github.com/owner/repoB --squash", other, "merge_project")
     _, text = confirm(["n", "n"])
     assert text.count("Would become standing for:") == 2
 
@@ -142,7 +142,7 @@ def test_knows_list_shows_the_scope_label_for_a_scoped_row(repo):
     hint(MERGE, repo, "merge_project")
     confirm(["y", "yes"])
     out = ops.knows_list()
-    assert f"gh pr merge * in {repo}" in out and "stops deciding" in out
+    assert f"gh pr merge * --repo github.com/owner/repoa in {repo}" in out and "stops deciding" in out
 
 
 def test_knows_list_without_scope_is_unchanged(repo):
@@ -157,7 +157,7 @@ def test_knows_list_without_scope_is_unchanged(repo):
 def test_two_merge_hints_of_one_scope_for_two_prs_are_one_group(repo):
     """Finding 5: one "y" makes the shared scope standing for every PR, so the hints of one scope are one question, not one per PR."""
     a = hint(MERGE, repo, "merge_project")
-    b = hint("gh pr merge 941 --rebase", repo, "merge_project")
+    b = hint("gh pr merge 941 --repo github.com/owner/repoA --rebase", repo, "merge_project")
     said, prompts = [], []
 
     def ask(prompt=""):

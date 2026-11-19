@@ -102,7 +102,7 @@ def test_a_call_with_two_risky_commands_says_so():
     head = askplain.header(a, "Bash")
     assert "This call joins 2 risky commands. Ask the agent to send them one by one." in head
     assert head[0].startswith("Merge pull request 940")
-    assert "Force push" in head[0]
+    assert "This push can force push, delete branches and tags, and include the main branch." in head[0]   # another command in the call: the worst push line
     q = askchat.question_for("0123456789ab", a, "Bash", {})["question"]
     assert "joins 2 risky commands" in q and "joins 2 risky commands" in askdialog.text_for(a, "Bash", {})
 
@@ -126,7 +126,11 @@ def test_what_line_renderers(cmd, start):
     if not a.seg_keys:   # a low call has no gated segment: build the key by hand so the renderer is still exercised
         a.seg_keys, a.seg_rules = [cmd], [a.rule_id]
     line = askplain.what_line(a, "Bash")
-    assert line.startswith(start) and words(line) <= 20 + 6   # the fallback may carry 60 characters of the command
+    assert line.startswith(start)
+    if start == "Run: ":   # the fallback row carries at most FALLBACK_CHARS characters of the command
+        assert len(line) <= len("Run: ") + askplain.FALLBACK_CHARS
+    else:
+        assert words(line) <= 20
 
 
 def test_what_line_for_other_tools():
@@ -182,7 +186,7 @@ def test_every_human_only_class_has_a_phrase():
     ("gh pr merge 940", "Merge pull request 940."),
     ("gh pr merge --squash 940", "Merge pull request 940."),
     ("gh pr merge", "Merge the pull request of this branch."),
-    ("gh pr merge --squash --delete-branch", "Merge the pull request of this branch."),
+    ("gh pr merge --squash --delete-branch", "Merge the pull request of this branch and delete its branch (--delete-branch)."),
     ("gh pr merge --body done --squash", "Merge a pull request."),
 ])
 def test_the_merge_sentence_names_the_real_target(cmd, line):
@@ -201,7 +205,7 @@ def test_the_merge_sentence_names_the_real_target(cmd, line):
     ("gh pr merge 940 --squash", "Merge pull request 940."),
     ("gh pr merge 940 --body 5", "Merge pull request 940."),
     ("gh pr merge --squash 940", "Merge pull request 940."),
-    ("gh pr merge --squash --delete-branch 940", "Merge pull request 940."),
+    ("gh pr merge --squash --delete-branch 940", "Merge pull request 940 and delete its branch (--delete-branch)."),
     ("gh pr merge --body=5 940", "Merge pull request 940."),
 ])
 def test_a_value_flag_before_the_number_does_not_name_a_pull_request(cmd, line):

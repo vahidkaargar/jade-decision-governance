@@ -194,20 +194,20 @@ def test_a_redirect_is_still_a_write():
 
 def test_quoted_and_escaped_operators_are_data():
     assert cur_segments("echo 'a>b' c") == ["echo a\x06b c"]
-    assert "git log --format=%h\x06x" in cur_segments("git log --format=%h\\>x")   # an escaped operator is data the way a quoted one is (W-96); the reading as syntax is kept too (W-113)
+    assert "git log --format=%h\x06x" in cur_segments("git log --format=%h\\>x")   # an escaped operator is data the way a quoted one is (W-117); the reading as syntax is kept too (W-134)
 
 
 def test_skeleton_puts_the_redirect_last_and_spells_it_one_way():
     assert cur_segments("git push origin feature &>log :main") == ["git push origin feature :main > log"]
     assert cur_segments("git push origin feature >&log :main") == ["git push origin feature :main > log"]
     assert cur_segments("git >|log push origin") == ["git push origin > log"]
-    assert cur_segments("git push >&- origin 2>&- feature") == ["git push origin feature >&- 2>&-"]   # a close names no file: it moves, as written (W-115)
+    assert cur_segments("git push >&- origin 2>&- feature") == ["git push origin feature >&- 2>&-"]   # a close names no file: it moves, as written (W-136)
     assert cur_segments("git push origin feature&>>log :main") == ["git push origin feature :main >> log"]
     assert cur_segments("echo a2>log b") == ["echo a2 b > log"]   # the 2 belongs to the word `a2`, not to the redirect
     assert cur_segments("git push 2>log origin") == ["git push origin 2> log"]
 
 
-# ---------------------------------------------------------------- an escaped operator is data, a real one after an escaped backslash is not (W-96)
+# ---------------------------------------------------------------- an escaped operator is data, a real one after an escaped backslash is not (W-117)
 #
 # `a\&>log` is the word `a&` and a redirect `>log`; `a\\&>log` is the word `a\` and a redirect `&>log`. The scanner decides which is which (an escaped
 # operator character becomes the inert mark, as a quoted one does), because no regex can tell an escaped backslash from an escape. The oracle below runs the
@@ -352,7 +352,7 @@ def test_backslashes_before_a_redirect_do_not_lower_the_rating(base, tail, escap
 def test_a_real_operator_after_an_escaped_backslash_is_still_hoisted():
     assert cur_segments("git push origin feature a\\\\&>log :main") == ["git push origin feature a\\\\ :main > log"]
     segs = cur_segments("git push origin feature a\\&>log :main")
-    assert segs[0] == "git push origin feature a\x06 :main > log"   # data first; the reading as syntax follows (W-113)
+    assert segs[0] == "git push origin feature a\x06 :main > log"   # data first; the reading as syntax follows (W-134)
     assert "git push origin feature a\\ :main > log" in segs
     assert cur_segments("git push origin feature a\\\\\\&>log :main")[0] == "git push origin feature a\\\\\x06 :main > log"
     assert cur_segments('git push origin feature "a\\&" :main') == ["git push origin feature a\\\x06 :main"]

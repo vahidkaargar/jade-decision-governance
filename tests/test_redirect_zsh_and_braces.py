@@ -1,13 +1,13 @@
-"""Review findings W-108 and W-109 on the redirect hoist (PR 47): zsh redirect spellings, a descriptor close with a word glued to it, and braces inside a word.
+"""Review findings W-129 and W-130 on the redirect hoist (PR 47): zsh redirect spellings, a descriptor close with a word glued to it, and braces inside a word.
 
 Every command here is also run in the real bash and zsh with a `git` function that records its arguments (`tests/test_redirect_anywhere.py`, `ran_git`): when
 either shell would push to the default branch, the gate must stop the command. The gate reads a command once and the two shells read some of it differently, so
 it has to be safe under both readings.
 
-* W-108: zsh has redirect operators bash has not: `>>&`, `>>|`, `&>|`, `&>>|`, `>>&|`, `>>&!`, `>!`, `>>!`, `>&|`, `>&!`. One missing from the operator list cut the push in two.
-* W-109a: `>&-` closes a descriptor in bash and the word glued to it (`-lg`) is an argument; zsh reads `-lg` as a file name. `git >&-lg push origin :main` is a push
+* W-129: zsh has redirect operators bash has not: `>>&`, `>>|`, `&>|`, `&>>|`, `>>&|`, `>>&!`, `>!`, `>>!`, `>&|`, `>&!`. One missing from the operator list cut the push in two.
+* W-130a: `>&-` closes a descriptor in bash and the word glued to it (`-lg`) is an argument; zsh reads `-lg` as a file name. `git >&-lg push origin :main` is a push
   in zsh only, `git push origin feature >&-main` a push to main in bash only. The skeleton carries both readings.
-* W-109b: a `{` or `}` that is not a word of its own, at the start of a command, is a literal in both shells; it must not cut the command in two.
+* W-130b: a `{` or `}` that is not a word of its own, at the start of a command, is a literal in both shells; it must not cut the command in two.
 """
 
 import shutil
@@ -37,7 +37,7 @@ ZSH_GLUED = [">>&log", ">>|log", "&>|log", "&>>|log", ">>&|log", ">>&!log", ">!l
 ZSH_SPACED = [">>& log", ">>| log", "&>| log", "&>>| log", ">>&| log", ">&| log"]
 
 
-# ---------------------------------------------------------------- W-108: zsh redirect operators
+# ---------------------------------------------------------------- W-129: zsh redirect operators
 
 @pytest.mark.parametrize("command", [f"git push origin feature {r} :main" for r in ZSH_GLUED + ZSH_SPACED])
 def test_zsh_redirect_in_a_push_to_main_is_blocked(command, tmp_path):
@@ -83,7 +83,7 @@ def test_a_zsh_redirect_is_still_a_write():
         assert (a.level, a.rule_id) == ("high", "R-13"), r
 
 
-# ---------------------------------------------------------------- W-109a: `>&-` and a word glued to it
+# ---------------------------------------------------------------- W-130a: `>&-` and a word glued to it
 
 CLOSE_WORDS = ["lg", "-", "x", "main", "-lg", "--mirror", "1"]
 
@@ -112,7 +112,7 @@ def test_descriptor_close_glued_to_any_word_never_hides_a_push_to_main(base, op,
 
 
 def test_a_closed_descriptor_alone_names_no_file():
-    assert cur_segments("git push >&- origin 2>&- feature") == ["git push origin feature >&- 2>&-"]   # it moves as written, as on main (W-115)
+    assert cur_segments("git push >&- origin 2>&- feature") == ["git push origin feature >&- 2>&-"]   # it moves as written, as on main (W-136)
     assert cur_segments("git push origin feature <&0 :main") == ["git push origin feature :main"]
 
 
@@ -122,7 +122,7 @@ def test_both_readings_of_a_close_with_a_glued_word_are_in_the_skeleton():
     assert "git lg push origin :main >&-" in got     # bash: the descriptor closes and the word is an argument
 
 
-# ---------------------------------------------------------------- W-109b: a brace inside a word is a literal
+# ---------------------------------------------------------------- W-130b: a brace inside a word is a literal
 
 BRACE_WORDS = ["a\\{b,c}", "a\\{lg,x}", "a\\{,}", "a{lg,x\\}", "a{", "a}", "{a", "}a", "a{b", "a}b", "a\\{", "a\\}", "a{}", "a{x}", "{}", "x={", "x=}"]
 
@@ -212,7 +212,7 @@ def test_the_oracle_itself_sees_global_options():
         shutil.rmtree(where, ignore_errors=True)
 
 
-# ---------------------------------------------------------------- W-109c: backslashes that the shell, a heredoc or `echo` halve before another shell reads the text
+# ---------------------------------------------------------------- W-130c: backslashes that the shell, a heredoc or `echo` halve before another shell reads the text
 #
 # `sh <<EOF` with an unquoted delimiter hands the program `\\` as `\`, and `echo` of zsh and sh does the same, so `a\\\>&log` reaches the second shell as `a\\>&log`:
 # the word `a\` and a redirect. The first shell's reading (an odd number of backslashes: an escaped `>`) is the other reading; the gate reads both.
@@ -244,7 +244,7 @@ def test_a_heredoc_and_echo_hand_the_program_the_halved_text():
     assert "git push origin feature a\\\\ :main > log" in cur_segments("echo 'git push origin feature a\\\\\\>&log :main' | zsh")
 
 
-# ---------------------------------------------------------------- round 2 of the review of d10abf9 (W-111): the fix must not lose what 3c7d2e9 and main blocked
+# ---------------------------------------------------------------- round 2 of the review of d10abf9 (W-132): the fix must not lose what 3c7d2e9 and main blocked
 #
 # Every command below is run in the real bash and zsh (a script file, a recording `git`); `really_pushes` says that at least one of them pushes to the default
 # branch, so a test cannot pass because the shell never ran the push, and the gate must stop it. The design is "fail closed": where the gate cannot tell whether a

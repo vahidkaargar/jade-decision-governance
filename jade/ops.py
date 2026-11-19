@@ -541,7 +541,7 @@ def _strip_jade_hooks(data: dict) -> int:
 
 
 def hooks_install(stdin_isatty: bool | None = None) -> Path | None:
-    """Add the four JADE hooks to the Claude settings file, keeping every other setting and hook. Returns the backup path (None when there was no file)."""
+    """Add every JADE hook of HOOKS to the Claude settings file, keeping every other setting and hook. Returns the backup path (None when there was no file)."""
     _require_human("jade hooks install", stdin_isatty)
     p = settings_path()
     data = _load_settings(p)
@@ -642,7 +642,63 @@ def _level_row() -> tuple[str, bool, str]:
         return ("level", False, f"the config level {raw!r} is not off, low, medium or high, so it counts as unset; `jade level unset` clears it")
     if raw != _recorded_level():
         return ("level", False, f"{lv}, but no `jade level` command recorded it (written some other way?); run `jade level unset`, look at the config directory, set it again")
+    if lv == "off":   # V6-10: not a failure (the human chose it), but not "ok": most rules only log
+        return ("level", None, "off: JADE only watches; most rules only log (the row `what blocks` lists them)")
     return ("level", True, f"{lv}")
+
+
+def blocking_summary(mode: str | None = None, level: str | None | bool = False) -> tuple[bool | None, str]:
+    """What the PreToolUse hook blocks for a gate mode and level pair (default: the ones in force), as rule ids only, never a command (V6-10).
+    True when every safety invariant blocks and every high or critical risk call waits for a human; None (a warning, never a failure) otherwise. It mirrors
+    `hooks.pretool`, `hooks._verdict` and `hooks._gate`: gate off returns before any verdict; the governance invariants block once a level is set; level off
+    and advisory gate mode make the other invariants and the risk gate log only; at level low and medium `memory.step` (a confirmed answer) and `proxy.step`
+    (Jev, plain high calls only, once its band has enough owner answers) may let a call run with no human; at level high Jev is shadow only. It does not
+    look at the hooks: `_what_blocks_row` does."""
+    from . import hooks
+
+    mode = paths.gate_mode() if mode is None else mode
+    level = paths.level() if level is False else level
+    gov = sorted(hooks.GOVERNANCE_INVARIANTS)
+    try:
+        ids = sorted({str(i["id"]) for i in policy.safety()["invariants"]} | set(gov))
+    except Exception:  # noqa: BLE001 - the `policies load` row reports the failure
+        ids = None
+    if mode == "off":
+        return (None, "gate mode off: nothing blocks; every safety invariant" + (f" ({', '.join(ids)})" if ids else "") + " and every risk rule is skipped, not even logged")
+    if ids is None:   # pretool goes to _policy_failure: the invariant set is not known
+        return (None, "unknown: the safety policy does not load (see the `policies load` row); the hook fails closed on calls that are not clearly harmless")
+    soft = [i for i in ids if i not in gov]
+    unset = "; SI-12 is active only once a level is set (until then R-13 rates those writes)"   # policy.py: SI-12 checks run only when paths.level() is set
+    active = [i for i in ids if i != "SI-12"]
+    if mode == "advisory" and level is None:
+        return (None, "advisory gate mode, no level set: nothing blocks; every safety invariant (" + ", ".join(active) + ") and every risk rule only log" + unset)
+    if mode == "advisory":
+        return (None, "advisory gate mode: " + ", ".join(gov) + " block; " + ", ".join(soft) + " and every risk rule only log")
+    if level == "off":
+        return (None, "advisory: " + ", ".join(soft) + ", R-13, R-16 and all risk rules only log; " + ", ".join(gov) + " block (level off, docs/12)")
+    if level is None:
+        return (True, "every active safety invariant (" + ", ".join(active) + ") blocks; a high or critical risk call is held for a human approval (docs/12)" + unset)
+    if level in ("low", "medium"):   # hooks._gate: memory.step, then proxy.step, run before the human is asked
+        return (None, "every safety invariant (" + ", ".join(ids) + f") blocks; at level {level} a high or critical risk call runs without a human when a "
+                      "confirmed answer covers it (`jade knows list`), and a plain high call runs without a human when Jev accepts it inside its band "
+                      "(once enough owner answers exist); any other high or critical call is held for a human (docs/12)")
+    return (True, "every safety invariant (" + ", ".join(ids) + ") blocks; a high or critical risk call is held for a human approval (Jev decides nothing at "
+                  "this level, docs/12)")
+
+
+def _what_blocks_row(pretool_ok: bool | None = None, wiring: list[str] | None = None) -> tuple[str, bool | None, str]:
+    """`blocking_summary` for the mode and level in force, unless the PreToolUse hook is missing or out of date (then nothing blocks) or the wiring has
+    problems (then it is not known). `check` passes what it already found, so the live wiring probe is not run twice."""
+    if pretool_ok is None:
+        pretool_ok = hooks_status().get("PreToolUse", False)
+    if not pretool_ok:
+        return ("what blocks", None, "nothing blocks: the PreToolUse hook is not installed or is out of date; run `jade hooks install` in a terminal")
+    if wiring is None:
+        wiring = wiring_problems()
+    ok, text = blocking_summary()
+    if wiring:
+        return ("what blocks", None, "unknown: the hook wiring has problems (see the `hook wiring` row), so the hook may not run; when it runs: " + text)
+    return ("what blocks", ok, text)
 
 
 def parse_since(value: str) -> float:
@@ -1313,11 +1369,12 @@ def _gate_mode_row() -> tuple[str, bool, str]:
     cfg = paths.config().get("gate_mode")
     configured = cfg if cfg in paths.GATE_MODES else "enforce"
     if effective == "off":
-        return ("gate mode", False, "off: every JADE hook is inert" + (" (JADE_GATE_MODE in this environment)" if raw else " (`jade gate off`)") + "; `jade gate enforce` restores it")
+        return ("gate mode", False, "off" + (" (JADE_GATE_MODE in this environment)" if raw else " (`jade gate off`)") + ": the PreToolUse and Stop hooks do nothing, so no "
+                "call is gated; PostToolUse, PostToolUseFailure and SessionStart still record and sweep; `jade gate enforce` restores it")
     if raw and raw != configured:
         return ("gate mode", False, f"JADE_GATE_MODE={raw} in this environment overrides the configured {configured}; unset it or change the config on purpose")
     if effective == "advisory":
-        return ("gate mode", True, "advisory: the gate records would_block and never blocks (the soak state of docs/08 2.1)")
+        return ("gate mode", None, "advisory: the gate records would_block and blocks only what the row `what blocks` lists (the soak state of docs/08 2.1)")
     return ("gate mode", True, effective)
 
 
@@ -1406,7 +1463,8 @@ def maintain_jobs() -> list[tuple[Path, str, list]]:
 def _maintain_row() -> tuple[str, bool, str]:
     jobs = maintain_jobs()
     if not jobs:
-        return ("maintain job", True, f"no `jade maintain` LaunchAgent in {launch_agents_dir()} (optional, docs/08 2.4)")
+        return ("maintain job", None, f"not installed: no `jade maintain` LaunchAgent in {launch_agents_dir()}, so retention, expiry sweeps, the drift canary and the "
+                "miner do not run unless something else schedules `jade maintain` (docs/08 2.4)")
     bad = []
     for f, label, args in jobs:
         if not (os.path.isfile(str(args[0])) and os.access(str(args[0]), os.X_OK)):
@@ -1448,6 +1506,85 @@ def _code_row() -> tuple[str, bool, str]:
     if a == b and head and commit != head:
         note += f", but its HEAD is {head} (informational: re-install to run it)"
     return ("code version", True, f"{detail}; {note}")
+
+
+MAIN_REF = "origin/main"
+
+
+def _git_out(checkout: Path, *args: str) -> str | None:
+    """stdout of `git -C checkout <args>` (local only, 5 s), or None when `checkout` is not a git checkout, git fails or is slow. Never raises."""
+    if not (Path(checkout) / ".git").exists():
+        return None
+    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY")}
+    try:
+        r = subprocess.run(["git", "-C", str(checkout), *args], capture_output=True, text=True, timeout=5, check=False, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def main_commit(checkout: Path) -> str | None:
+    """The short (12) commit of origin/main in `checkout`, as of its last fetch, or None. Never raises."""
+    out = _git_out(checkout, "rev-parse", "--verify", "--quiet", "--short=12", f"{MAIN_REF}^{{commit}}")
+    sha = (out or "").strip()
+    return sha if re.fullmatch(r"[0-9a-f]{12}", sha) else None
+
+
+def commits_behind_main(checkout: Path, commit: str) -> int | None:
+    """How many commits origin/main has that `commit` does not (`git rev-list --count commit..origin/main`), or None when either is unknown there."""
+    if not re.fullmatch(r"[0-9a-f]{7,40}", commit or ""):
+        return None
+    out = _git_out(checkout, "rev-list", "--count", f"{commit}..{MAIN_REF}")
+    return int(out.strip()) if out and out.strip().isdigit() else None
+
+
+def main_version(checkout: Path) -> str | None:
+    """The `project.version` of pyproject.toml at origin/main in `checkout`, as of its last fetch (local only: nothing is fetched). None when the ref or the
+    file is not there, git fails, or the text is not a version. Never raises."""
+    out = _git_out(checkout, "show", f"{MAIN_REF}:pyproject.toml")
+    if out is None:
+        return None
+    try:
+        import tomllib
+
+        v = str(tomllib.loads(out)["project"]["version"])
+    except (ValueError, KeyError, TypeError):
+        return None
+    return v if re.fullmatch(r"[0-9][0-9A-Za-z.+-]{0,40}", v) else None
+
+
+def _main_version_row() -> tuple[str, bool | None, str]:
+    """V6-10: the running version against origin/main of the named checkout. A warning when older, unknown when there is nothing to compare with; never a failure."""
+    import jade
+
+    co = paths.checkout_dir()
+    if co is None:
+        return ("version vs main", None, f"unknown: jade {jade.__version__} runs; no checkout named (JADE_CHECKOUT or config `checkout`), so it is not compared with {MAIN_REF}")
+    theirs = main_version(co)
+    if theirs is None:
+        return ("version vs main", None, f"unknown: jade {jade.__version__} runs; no readable {MAIN_REF}:pyproject.toml in {co} (run `git fetch` there)")
+    a, b = _version_tuple(jade.__version__), _version_tuple(theirs)
+    if a is None or b is None:
+        return ("version vs main", None, f"unknown: jade {jade.__version__} runs; {MAIN_REF} in {co} has version {theirs}, not comparable")
+    when = f"(in {co}, as of its last fetch)"
+    if a < b:
+        return ("version vs main", None, f"jade {jade.__version__} runs, older than {MAIN_REF} {theirs} {when}: fixes merged since are not running")
+    if a > b:
+        return ("version vs main", True, f"jade {jade.__version__} runs, newer than {MAIN_REF} {theirs} {when}")
+    # the same version string: main can carry merged fixes after a release tag without a version bump, so compare commits (V6-10 F2)
+    running, head = paths.code_commit(), main_commit(co)
+    if running is None:
+        return ("version vs main", None, f"unknown: installed package, commit not known; jade {jade.__version__} runs, the same version string as {MAIN_REF} {when}, "
+                                         "which may carry fixes merged after the release")
+    if head is None:
+        return ("version vs main", None, f"unknown: jade {jade.__version__} runs at commit {running}; the commit of {MAIN_REF} in {co} is not readable")
+    if running == head:
+        return ("version vs main", True, f"jade {jade.__version__} runs at commit {running}, same as {MAIN_REF} {when}")
+    behind = commits_behind_main(co, running)
+    if behind:
+        return ("version vs main", None, f"jade {jade.__version__} runs at commit {running}: same version string, {behind} commit(s) behind {MAIN_REF} {head} {when}; "
+                                         "fixes merged since are not running")
+    return ("version vs main", None, f"jade {jade.__version__} runs at commit {running}: same version string, but a different commit than {MAIN_REF} {head} {when}")
 
 
 # ---- ledger integrity ------------------------------------------------------------------------------
@@ -1530,7 +1667,8 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
         rows.append(("question registry", False, repr(e)))
     st = hooks_status()
     missing = [k for k, v in st.items() if not v]
-    rows.append(("hooks installed", not missing, "all four" if not missing else f"missing or out of date: {', '.join(missing)}: run `jade hooks install` in a terminal"))
+    rows.append(("hooks installed", not missing, f"all {len(HOOKS)}: {', '.join(HOOKS)}" if not missing else f"missing or out of date: {', '.join(missing)}: run `jade hooks install` in a terminal"))
+    problems = None
     if not missing:
         problems = wiring_problems()
         rows.append(("hook wiring", not problems, "binary runs, hooks enabled, a synthetic event is decided" if not problems else "; ".join(problems)))
@@ -1546,13 +1684,17 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
         rows.append(("pretool matcher", not gaps, "covers every gated tool" if not gaps else f"does not cover {', '.join(gaps)}: re-run `jade hooks install` in a terminal"))
     rows.append(_gate_mode_row())
     rows.append(_level_row())
+    rows.append(_what_blocks_row(st.get("PreToolUse", False), problems))
     rows.append(pending_row())
     rows.append(_overrides_row())
     rows.append(_ack_audit_row())
     rows.append(_permission_row())
+    rows.append(_host_bypass_row())
     rows.append(_approval_row())
     rows.append(tool_coverage_row())
     rows.append(_maintain_row())
+    rows.append(_main_version_row())
+    rows += unknown_rows()
     shim = _find_jev()
     is_shim = bool(shim) and "jade" in (Path(shim).read_text(errors="replace")[:600] if Path(shim).is_file() else "")
     rows.append(("jev shim", is_shim, shim or "jev not on PATH and not beside jade"))
@@ -1667,7 +1809,41 @@ def _permission_row() -> tuple[str, bool, str]:
     if mode in PERMISSIVE_MODES and gate != "enforce":
         return ("host permission prompt", False, f"permissions.defaultMode is {mode} (the host never asks) and the gate is {gate} (JADE never blocks): nothing stops a call. "
                 "Set the gate to enforce or the host to a prompting mode. " + detail)
+    if mode in PERMISSIVE_MODES and paths.level() == "off":   # V6-10: a warning, not a failure (blocking at level off is V6-16)
+        return ("host permission prompt", None, f"permissions.defaultMode is {mode} (the host never asks) and level off (JADE only logs most rules): only "
+                + ", ".join(sorted(_governance_ids())) + " stop a call. " + detail)
     return ("host permission prompt", True, detail)
+
+
+def _governance_ids() -> frozenset[str]:
+    from . import hooks
+
+    return hooks.GOVERNANCE_INVARIANTS
+
+
+def _host_bypass_row() -> tuple[str, bool | None, str]:
+    """V6-10: whether the host's own permission prompt backs JADE up. "JADE is the only gate" when the host never asks or the ledger shows gated calls with
+    no host prompt; unknown when the ledger shows no gated call (an unreadable ledger counts as none). Never a failure."""
+    mode = configured_permission_mode()
+    seen, no_prompt = no_prompt_gated_calls()
+    counts = f"; last 7 days: {no_prompt} of {seen} gated call(s) had no host prompt" if seen else ""
+    if mode in PERMISSIVE_MODES:
+        return ("host mode bypass", None, f"JADE is the only gate: permissions.defaultMode is {mode}, the host never asks{counts}")
+    if not seen:
+        return ("host mode bypass", None, "unknown: no gated call recorded in the last 7 days, so whether the host prompts is not known")
+    if no_prompt == seen:
+        return ("host mode bypass", None, f"JADE is the only gate: {no_prompt} of {seen} gated call(s) in the last 7 days ran with no host prompt")
+    if no_prompt:
+        return ("host mode bypass", None, f"JADE is the only gate for {no_prompt} of {seen} gated call(s) in the last 7 days (no host prompt)")
+    return ("host mode bypass", True, f"the host prompted on all {seen} gated call(s) of the last 7 days")
+
+
+def unknown_rows() -> list[tuple[str, bool | None, str]]:
+    """V6-10: what JADE cannot see from here reads "unknown: owner confirms" (V6-12 adds the owner's confirmation)."""
+    return [("pre-push guard", None, "unknown: owner confirms. JADE does not install the git pre-push guard (the structural half of SI-08); "
+             "`jade git-hook check <repo>` shows whether one repository runs it"),
+            ("remote branch protection", None, "unknown: owner confirms on the git host. JADE cannot see it, and it is the real boundary for a push to the "
+             "default branch (SI-08 in the hook is a text scan)")]
 
 
 def no_prompt_gated_calls(days: int = 7) -> tuple[int, int]:
@@ -1699,24 +1875,50 @@ def _permission_prompt_detail() -> str:
     return text
 
 
-def _approval_row() -> tuple[str, bool, str]:
-    """W-38 / W-89: which backend approves high and critical permits, and whether its trust anchor can be used."""
+def _approval_state() -> tuple[bool | None, str]:
+    """W-38 / W-89: which backend approves high and critical permits, and whether its trust anchor can be used. Reads no ledger (`jade hooks install` uses it).
+    V6-10: the signed backend is only "ok" while the risk gate asks for permits (gate enforce, level not off); a tty backend is never "ok"."""
     state, why = signing.anchor_state()
     if state == "untrusted":
-        return ("approval backend", False, f"signed, but the trust anchor is not usable, so no high or critical permit can be used: {why}")
+        return (False, f"signed, but the trust anchor is not usable, so no high or critical permit can be used: {why}")
     if state == "ok":
-        return ("approval backend", True, f"signed: high and critical permits need a signature from the approver account (anchor {signing.anchor_path()})")
+        text = f"signed: high and critical permits need a signature from the approver account (anchor {signing.anchor_path()})"
+        mode, level = paths.gate_mode(), paths.level()
+        if mode != "enforce" or level == "off":
+            return (None, text + f"; idle now: with {'level off' if mode == 'enforce' else f'gate mode {mode}'} no permit is asked for")
+        return (True, text)
     if paths.config().get("approval_backend") == "signed":
-        return ("approval backend", False, f"config asks for the signed backend but {why}: no high or critical permit can be used until the approver is installed (docs/10)")
-    seen, no_prompt = no_prompt_gated_calls()
-    note = f"; {no_prompt} of {seen} gated call(s) in the last 7 days had no host prompt" if seen else ""
-    return ("approval backend", True, f"tty: a terminal approves high and critical permits, which a same-user process can imitate (docs/05 T19, docs/10){note}")
+        return (False, f"config asks for the signed backend but {why}: no high or critical permit can be used until the approver is installed (docs/10)")
+    return (None, "tty: a terminal approves high and critical permits, which a same-user process can imitate (docs/05 T19, docs/10)")
+
+
+def _approval_row() -> tuple[str, bool | None, str]:
+    ok, text = _approval_state()
+    if text.startswith("tty"):
+        seen, no_prompt = no_prompt_gated_calls()
+        text += f"; {no_prompt} of {seen} gated call(s) in the last 7 days had no host prompt" if seen else ""
+    return ("approval backend", ok, text)
+
+
+def install_summary() -> list[str]:
+    """V6-10 (DX-H4): what `jade hooks install` leaves in force: the effective gate mode, what the hook blocks, and the approval backend. Reads the config,
+    the policy and the trust anchor only: nothing is written and no default changes."""
+    env = " (JADE_GATE_MODE in this environment)" if os.environ.get("JADE_GATE_MODE") else ""
+    return [f"gate mode: {paths.gate_mode()}{env}", f"what blocks: {blocking_summary()[1]}", f"approval backend: {_approval_state()[1]}"]
+
+
+CHECK_PREFIX = {True: "ok  ", False: "FAIL", None: "WARN"}   # V6-10: WARN is not safe or not known, and never changes the exit code
+
+
+def check_failed(ok) -> bool:
+    """A row fails on any false value except None (WARN)."""
+    return ok is not None and not ok
 
 
 def print_check(rows) -> int:
     for name, ok, detail in rows:
-        print(f"{'ok  ' if ok else 'FAIL'}  {name}: {detail}")
-    failed = [n for n, ok, _ in rows if not ok]
+        print(f"{CHECK_PREFIX[ok if ok is None else bool(ok)]}  {name}: {detail}")
+    failed = [n for n, ok, _ in rows if check_failed(ok)]
     if failed:
         print(f"jade check: {len(failed)} failed ({', '.join(failed)})", file=sys.stderr)
     return 1 if failed else 0

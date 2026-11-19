@@ -556,6 +556,7 @@ def _ops(a) -> int:
             if a.action == "install":
                 backup = ops.hooks_install()
                 print(f"hooks installed in {ops.settings_path()} ({f'backup {backup}' if backup else 'no earlier file, no backup'}). New sessions pick them up.")
+                print("\n".join(ops.install_summary()))
             else:
                 print(f"removed {ops.hooks_uninstall()} hook entr(ies)")
         elif a.cmd == "gate":
@@ -617,7 +618,7 @@ def _maintain(a) -> int:
     out = {"at": ts(), "decisions": decide.sweep(db), "permits_expired": permits.sweep(db),
            "purged": ops.purge(db, int(paths.config().get("retention_days", 90)))}
     rows = ops.check(live=not a.offline)
-    out["check_failed"] = [n for n, ok, _ in rows if not ok]
+    out["check_failed"] = [n for n, ok, _ in rows if ops.check_failed(ok)]   # a WARN row (None) is not a failure
     out["mined"] = [] if improve.frozen(paths.home()) else improve.mine(db)
     print(json.dumps(out))
     return 1 if out["check_failed"] else 0

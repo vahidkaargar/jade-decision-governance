@@ -60,7 +60,7 @@ def preferences() -> str:
 
 def past_answers(db, rule_id: str) -> list[dict]:
     """The confirmed (strong) allow answers the owner gave to plain calls of this rule, newest first. Unconfirmed hints and human-only answers are never sent."""
-    cap, use = memory._valid_since()
+    cap, use = memory.valid_since()
     rows = db.con.execute("SELECT rule_id, label FROM human_answers WHERE strength='strong' AND answer='allow' AND rule_id=? AND COALESCE(ho,0)=0 AND confirmed_ts>=? AND "
                           "COALESCE(last_used_ts, confirmed_ts)>=? AND COALESCE(source,'')<>'test' ORDER BY confirmed_ts DESC, rowid DESC LIMIT ?",
                           (rule_id, cap, use, MAX_PAST)).fetchall()
@@ -141,12 +141,12 @@ def skip_reason(a, tool: str, tin: dict, level: str) -> str | None:
         return "egress outside level low"
     if a.blind or getattr(a, "unread", None) or rules & {"R-31", "R-32"}:
         return "the gate could not read all of it"
-    if any(memory._MERGE.match(k) for k in getattr(a, "seg_keys", []) or []):
+    if any(memory.MERGE.match(k) for k in getattr(a, "seg_keys", []) or []):
         return "a merge"
     subject = a.subject or ""
     if len(subject) > MAX_TEXT or len(_content(tool, tin)) > MAX_TEXT:
         return "over 4 KiB"
-    if policy.runs_shell(tool, tin) and len(list(memory._INLINE.finditer(subject))) > 1:
+    if policy.runs_shell(tool, tin) and len(list(memory.INLINE.finditer(subject))) > 1:
         return "more than one inline program"
     return None
 

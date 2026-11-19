@@ -19,7 +19,7 @@ from jade import hooks, ledger, memory, ops, paths, policy, scopes, util
 from jade.util import now, ts
 
 SESSION = "sess-scope-mem-0001"
-MERGE = "gh pr merge 940 --squash"
+MERGE = "gh pr merge 940 --repo github.com/owner/repoA --squash"
 CLASS_CMD = "git reset --hard HEAD~1"   # `gh issue comment` is not gated at all; this is a real `class` call (R-11)
 
 
@@ -189,24 +189,24 @@ def test_record_human_answer_stores_the_scope_and_redacts_and_cuts_the_label():
 
 def test_confirmed_merge_scope_covers_another_pr_number_in_the_same_project(repo):
     aid = store(MERGE, repo, "merge_project")
-    assert lookup("gh pr merge 941 --squash", repo)["answer_id"] == aid
-    assert lookup("gh pr merge 940 --rebase", repo)["answer_id"] == aid   # an allowed flag is the same scope
-    assert lookup(f'cd "{repo}" && gh pr merge 12 -m', "/")["answer_id"] == aid   # the same project named by a leading cd
+    assert lookup("gh pr merge 941 --repo github.com/owner/repoA --squash", repo)["answer_id"] == aid
+    assert lookup("gh pr merge 940 --repo github.com/owner/repoA --rebase", repo)["answer_id"] == aid   # an allowed flag is the same scope
+    assert lookup(f'cd "{repo}" && gh pr merge 12 --repo github.com/owner/repoA -m', "/")["answer_id"] == aid   # the same project named by a leading cd
 
 
 def test_merge_scope_does_not_cover_another_project(repo, repo_b):
     store(MERGE, repo, "merge_project")
-    assert lookup("gh pr merge 941 --squash", repo_b) is None
+    assert lookup("gh pr merge 941 --repo github.com/owner/repoA --squash", repo_b) is None
 
 
 @pytest.mark.parametrize("flags", ["--delete-branch", "-d", "--admin", "--auto", "-R other/repo", "--repo other/repo", "--squash --delete-branch"])
 def test_merge_scope_does_not_cover_a_call_with_a_flag_outside_the_list(repo, flags):
     store(MERGE, repo, "merge_project")
-    assert lookup(f"gh pr merge 941 {flags}", repo) is None
+    assert lookup(f"gh pr merge 941 --repo github.com/owner/repoA {flags}", repo) is None
 
 
-@pytest.mark.parametrize("cmd", ["GH_REPO=other/repo gh pr merge 941 --squash", "gh pr merge 941 --squash && echo done", "cd /tmp && gh pr merge 941 --squash",
-                                 "gh pr merge 941 --squash; git push --force"])
+@pytest.mark.parametrize("cmd", ["GH_REPO=other/repo gh pr merge 941 --repo github.com/owner/repoA --squash", "gh pr merge 941 --repo github.com/owner/repoA --squash && echo done", "cd /tmp && gh pr merge 941 --repo github.com/owner/repoA --squash",
+                                 "gh pr merge 941 --repo github.com/owner/repoA --squash; git push --force"])
 def test_merge_scope_does_not_cover_a_call_that_is_not_one_plain_merge(repo, cmd):
     store(MERGE, repo, "merge_project")
     assert lookup(cmd, repo) is None
@@ -221,7 +221,7 @@ def test_a_merge_still_has_no_class_key_and_stays_exact_in_eligibility(repo):
 
 def test_a_hint_with_a_scope_decides_nothing(repo):
     store(MERGE, repo, "merge_project", strength="hint")
-    assert lookup("gh pr merge 941 --squash", repo) is None
+    assert lookup("gh pr merge 941 --repo github.com/owner/repoA --squash", repo) is None
     assert lookup(MERGE, repo) is None
 
 
@@ -236,19 +236,19 @@ def test_a_deny_with_a_scope_decides_nothing(repo):
             d.con.execute("UPDATE human_answers SET strength='strong', confirmed_ts=?", (ts(),))   # even a forced strong deny is not an allow
     finally:
         d.close()
-    assert lookup("gh pr merge 941 --squash", repo) is None
+    assert lookup("gh pr merge 941 --repo github.com/owner/repoA --squash", repo) is None
 
 
 def test_scope_row_expires_like_any_answer(repo):
     store(MERGE, repo, "merge_project", age_days=40, used_days=31)
-    assert lookup("gh pr merge 941 --squash", repo) is None
+    assert lookup("gh pr merge 941 --repo github.com/owner/repoA --squash", repo) is None
     store(MERGE, repo, "merge_project", age_days=40, used_days=29)
-    assert lookup("gh pr merge 941 --squash", repo) is not None
+    assert lookup("gh pr merge 941 --repo github.com/owner/repoA --squash", repo) is not None
 
 
 def test_scope_row_stops_a_hundred_and_eighty_days_after_the_confirm(repo):
     store(MERGE, repo, "merge_project", age_days=181, used_days=1)
-    assert lookup("gh pr merge 941 --squash", repo) is None
+    assert lookup("gh pr merge 941 --repo github.com/owner/repoA --squash", repo) is None
 
 
 def test_a_forgotten_scope_row_decides_nothing(repo):
@@ -258,7 +258,7 @@ def test_a_forgotten_scope_row_decides_nothing(repo):
         assert d.revoke_answer(aid) is True
     finally:
         d.close()
-    assert lookup("gh pr merge 941 --squash", repo) is None
+    assert lookup("gh pr merge 941 --repo github.com/owner/repoA --squash", repo) is None
 
 
 def test_a_row_made_in_a_test_run_decides_nothing(repo):
@@ -268,13 +268,13 @@ def test_a_row_made_in_a_test_run_decides_nothing(repo):
         d.con.execute("UPDATE human_answers SET source='test' WHERE answer_id=?", (aid,))
     finally:
         d.close()
-    assert lookup("gh pr merge 941 --squash", repo) is None
+    assert lookup("gh pr merge 941 --repo github.com/owner/repoA --squash", repo) is None
 
 
 def test_marking_a_call_wrong_retires_the_scope_row_that_covered_it(repo):
     """`review mark wrong` on a call that ran from the scope retires the scope row, even when the original answer was for another PR."""
     aid = store(MERGE, repo, "merge_project")
-    other = "gh pr merge 941 --squash"
+    other = "gh pr merge 941 --repo github.com/owner/repoA --squash"
     a = assessed(other, repo)
     exact, cls, _ = memory.keys(a, "Bash", {"command": other}, {})
     scope_key = first_scope(other, repo, "merge_project").key
@@ -306,7 +306,7 @@ def test_confirmed_kind_project_scope_covers_the_same_kind_in_the_same_project_o
 def test_a_project_scope_row_carries_no_class_key_so_it_cannot_match_in_every_project(repo):
     """The caller passes the class key of the call; a project-wide scope is narrower, so the ledger drops it. A `kind_any` row keeps it (its scope key is the class key)."""
     p = store(CLASS_CMD, repo, "kind_project")
-    m = store("gh pr merge 940", repo, "merge_project")
+    m = store("gh pr merge 940 --repo github.com/owner/repoA", repo, "merge_project")
     k = store(CLASS_CMD, repo, "kind_any")
     got = {r["answer_id"]: r["class_key"] for r in rows("SELECT answer_id, class_key FROM human_answers")}
     assert got[p] is None and got[m] is None and got[k] is not None
@@ -344,27 +344,27 @@ def test_the_gate_lets_a_second_merge_in_the_project_run_without_a_question(medi
     if first.exit_code == 0:
         pytest.skip("a merge is not gated at this level: nothing to remember")
     aid = store(MERGE, repo, "merge_project")
-    res = pre("gh pr merge 941 --rebase", repo)
+    res = pre("gh pr merge 941 --repo github.com/owner/repoA --rebase", repo)
     assert res.exit_code == 0 and aid in res.stderr, res
     assert rows("SELECT COUNT(*) AS n FROM events WHERE kind='memory_allowed' AND entity_id=?", (aid,))[0]["n"] == 1
 
 
 def test_the_gate_still_asks_for_a_merge_with_a_new_flag(medium, repo):
     store(MERGE, repo, "merge_project")
-    assert pre("gh pr merge 941 --squash --delete-branch", repo).exit_code == 2
+    assert pre("gh pr merge 941 --repo github.com/owner/repoA --squash --delete-branch", repo).exit_code == 2
 
 
 def test_the_gate_still_asks_in_another_project(medium, repo, repo_b):
     store(MERGE, repo, "merge_project")
-    assert pre("gh pr merge 941 --squash", repo_b).exit_code == 2
+    assert pre("gh pr merge 941 --repo github.com/owner/repoA --squash", repo_b).exit_code == 2
 
 
 def test_the_scope_review_path_makes_a_hint_with_a_scope_standing(medium, repo):
     """`jade review confirm` already turns hints into strong rows; the scope columns come along unchanged."""
     aid = store(MERGE, repo, "merge_project", strength="hint")
-    assert lookup("gh pr merge 941 --squash", repo) is None
+    assert lookup("gh pr merge 941 --repo github.com/owner/repoA --squash", repo) is None
     ops.review_confirm(stdin_isatty=True, ask=lambda _="": "yes", say=lambda *_: None)
-    got = lookup("gh pr merge 941 --squash", repo)
+    got = lookup("gh pr merge 941 --repo github.com/owner/repoA --squash", repo)
     assert got is not None and got["answer_id"] == aid and got["scope_kind"] == "merge_project"
 
 
@@ -372,7 +372,7 @@ def test_review_mark_wrong_on_a_call_that_ran_from_a_scope_retires_every_row_of_
     """Drives `ops.review_mark` for real. The call for PR 941 ran silently from the scope row of PR 940. A second confirmed row of the same scope (PR 942) shares only the
     scope key with it, so only the scope key can retire it. A confirmed row with no scope, and a row of the same scope in another project, are left alone."""
     first = store(MERGE, repo, "merge_project")
-    sibling = store("gh pr merge 942 --rebase", repo, "merge_project")
+    sibling = store("gh pr merge 942 --repo github.com/owner/repoA --rebase", repo, "merge_project")
     d = db()
     try:
         with d.tx():
@@ -380,7 +380,7 @@ def test_review_mark_wrong_on_a_call_that_ran_from_a_scope_retires_every_row_of_
             d.confirm_answers([plain])
     finally:
         d.close()
-    res = pre("gh pr merge 941 --squash", repo)
+    res = pre("gh pr merge 941 --repo github.com/owner/repoA --squash", repo)
     assert res.exit_code == 0 and (first in res.stderr or sibling in res.stderr), res   # the newest confirmed row decides: either covers PR 941
     memory_decisions = [r["decision_id"] for r in rows("SELECT decision_id, doc_json FROM decisions ORDER BY created_at, rowid")
                         if (json.loads(r["doc_json"]).get("ask") or {}).get("channel") == "memory"]
@@ -389,7 +389,7 @@ def test_review_mark_wrong_on_a_call_that_ran_from_a_scope_retires_every_row_of_
     strength = {r["answer_id"]: r["strength"] for r in rows("SELECT answer_id, strength FROM human_answers")}
     assert strength[first] == "revoked" and strength[sibling] == "revoked"
     assert strength[plain] == "strong"
-    assert lookup("gh pr merge 943 --squash", repo) is None
+    assert lookup("gh pr merge 943 --repo github.com/owner/repoA --squash", repo) is None
 
 
 def test_the_scope_lookup_does_not_scan_the_answers_table(repo):
@@ -399,7 +399,7 @@ def test_the_scope_lookup_does_not_scan_the_answers_table(repo):
     d = db()
     try:
         d.con.set_trace_callback(seen.append)
-        memory.lookup(d, assessed("gh pr merge 941 --squash", repo), "Bash", {"command": "gh pr merge 941 --squash"}, {}, repo)
+        memory.lookup(d, assessed("gh pr merge 941 --repo github.com/owner/repoA --squash", repo), "Bash", {"command": "gh pr merge 941 --repo github.com/owner/repoA --squash"}, {}, repo)
         d.con.set_trace_callback(None)
         sql = next(s for s in seen if "scope_key IN" in s)
         plan = " ".join(str(r[3]) for r in d.con.execute("EXPLAIN QUERY PLAN " + sql))
@@ -425,7 +425,7 @@ def test_record_human_answer_puts_the_scope_label_on_one_line():
 
 def test_review_mark_wrong_on_a_chat_answered_call_retires_the_sibling_scope_rows(repo):
     """Finding 8: the chat-ask branch of `review mark` read no scope key, so a wrong mark left the other rows of the same scope standing."""
-    sibling = store("gh pr merge 942 --rebase", repo, "merge_project")
+    sibling = store("gh pr merge 942 --repo github.com/owner/repoA --rebase", repo, "merge_project")
     hold = "hold-chat-ask-final-0001"
     exact = memory.exact_key(hold, "{}")
     scope = dataclasses.asdict(first_scope(MERGE, repo, "merge_project"))

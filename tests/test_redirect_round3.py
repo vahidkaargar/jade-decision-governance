@@ -1,4 +1,4 @@
-"""Round-3 review of PR 47 (W-113): what origin/main stopped and the redirect hoist let through, a brace mark made out of a decoded byte, and the cost of a brace group.
+"""Round-3 review of PR 47 (W-134): what origin/main stopped and the redirect hoist let through, a brace mark made out of a decoded byte, and the cost of a brace group.
 
 The merge bar for this PR is: fix the redirect that hid the rest of a push, never be weaker than origin/main on any command, and stay within about 3 times its cost.
 

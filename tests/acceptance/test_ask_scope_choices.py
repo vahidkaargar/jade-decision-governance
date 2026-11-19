@@ -16,7 +16,7 @@ from jade import askchat, hooks, ledger, paths
 
 SESSION = "sess-w101e-0001"
 CLASS_CMD = "git reset --hard HEAD~1"   # `gh issue comment` is not gated at all; this is a real `class` call (R-11)
-MERGE = "gh pr merge 940 --squash"
+MERGE = "gh pr merge 940 --repo github.com/owner/repoA --squash"
 
 
 @pytest.fixture(autouse=True)
@@ -177,7 +177,7 @@ def test_answer_suggest_decides_nothing_yet(repo):
     q = ask(MERGE, repo)
     hooks.posttool(answer_event(q, askchat.SUGGEST_PROJECT))
     assert hooks.pretool(call(MERGE, repo)).exit_code == 0   # the one allowed call runs and spends the grant
-    again = hooks.pretool(call("gh pr merge 941 --squash", repo))   # a hint is not a standing answer: another number asks again
+    again = hooks.pretool(call("gh pr merge 941 --repo github.com/owner/repoA --squash", repo))   # a hint is not a standing answer: another number asks again
     assert again.exit_code == 2 and "[jade:ask_" in again.stderr
     same = hooks.pretool(call(MERGE, repo))
     assert same.exit_code == 2   # held or asked: never run silently
