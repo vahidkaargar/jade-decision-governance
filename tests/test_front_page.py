@@ -99,7 +99,10 @@ def config_write(path: Path, content: str) -> dict:
     return {"tool_name": "Write", "tool_input": {"file_path": str(path), "content": content}, "session_id": "sess-front-cfg0", "cwd": "/tmp", "permission_mode": "auto"}
 
 
-def real_table(monkeypatch, mode, level):
+def real_table(monkeypatch, mode, level, home):
+    # `rm -rf ~/work` must be a folder that holds nothing of JADE. On the CI runner the checkout is `/home/runner/work/...`, so with the real HOME the
+    # call deletes a parent of JADE's own install and is stopped as a write to the wiring (HO-wiring): true, but not what this table is about.
+    monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("JADE_GATE_MODE", mode)
     if level:
         m.set_level(level)
@@ -122,9 +125,19 @@ def test_the_two_settings_table_covers_every_pair_once():
 
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("level", LEVELS)
-def test_the_two_settings_table_is_what_the_real_hook_does(monkeypatch, mode, level):
+def test_the_two_settings_table_is_what_the_real_hook_does(monkeypatch, tmp_path, mode, level):
     row = next(r for r in rows(section(README, "Two settings, read separately")) if r[0] == mode and level_of(r[1]) == level)
-    assert row[2:6] == real_table(monkeypatch, mode, level), f"README says {row[2:6]} for gate mode {mode}, level {level}"
+    assert row[2:6] == real_table(monkeypatch, mode, level, tmp_path), f"README says {row[2:6]} for gate mode {mode}, level {level}"
+
+
+def test_rm_rf_of_a_folder_that_holds_the_install_is_a_wiring_write_even_at_level_off(monkeypatch, tmp_path):
+    """The reason the table above uses its own HOME: with `~/work` a parent of the checkout (the CI runner), `rm -rf ~/work` deletes JADE's install."""
+    (tmp_path / "work").symlink_to(ROOT.parent)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("JADE_GATE_MODE", "enforce")
+    m.set_level("off")
+    r = hooks.pretool(m.call("rm -rf ~/work", session="sess-front-wire"))
+    assert r.exit_code == 2
 
 
 def test_the_readme_does_not_say_an_agent_cannot_change_the_settings():
