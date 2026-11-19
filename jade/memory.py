@@ -6,12 +6,12 @@ runs without a question, through a decision walked to EXECUTING (so SI-07 still 
 
 Two keys per answer:
 - `exact_key`: the call's hold key (the canonical gated segments, independent of quoting, prefixes and cwd) with the fingerprints the gate computes (git HEAD of a
-  push, the digest of written content). The same call in the same state.
+  push, the digest of written content), the target and the place, and the quoted words the hold key blanks. The same call in the same state.
 - `class_key`: the kind of call: the winning rule and the sorted set of gated segment keys, with the PR number of `gh pr <verb> N` dropped. Only a call that is
   safe to generalise has one; the rest is exact-only. `eligibility` is the whole decision.
 
-Never remembered (always asked): a human-only class (docs/12 section 4), the fetch-and-exec and egress rules (R-21, R-22), a call the gate blocks, and a call with a
-secret-shaped value in it. Exact-only: R-14, M-05, M-07, an inline program (`-c`, `-e`, heredoc, here-string, process substitution), a call the gate could not
+Never remembered (always asked): a human-only class (docs/12 section 4), the fetch-and-exec and egress rules (R-21, R-22) and the rules that guard the agent's files
+(R-13, R-18), as the top rule or as the rule of any segment, a call the gate blocks, and a call with a secret-shaped value in it. Exact-only: R-14, M-05, M-07, an inline program (`-c`, `-e`, heredoc, here-string, process substitution), a call the gate could not
 read (blind labels), a git push or merge (the fingerprint carries the head commit), a merge into the default branch, and every write or MCP call (content is part of the key).
 
 Lifetime: a row is valid while its last human confirm or its last use is within 30 days, and never more than 180 days after the confirm.
@@ -19,6 +19,7 @@ Lifetime: a row is valid while its last human confirm or its last use is within 
 
 from __future__ import annotations
 
+import functools
 import os
 import re
 from datetime import timedelta
@@ -30,6 +31,9 @@ CAP_DAYS = 180
 NEAR_CAP_DAYS = 14
 NEVER_RULES = frozenset({"R-21", "R-22", "R-13", "R-18"})   # R-13, R-18: what guards the agent and the files it reads its instructions from (as in proxy.NEVER_RULES)
 EXACT_ONLY_RULES = frozenset({"R-14", "M-05", "M-07"})
+_PLAIN_WORD = re.compile(r"[\w./:@=+,%-]*")   # a quoted word of these characters only is in the segment key as it is
+_QUOTE_MARK = re.compile(r"""[\\'"`#<]""")   # where `_quoted_words` stops: a backslash, a quote mark, a backtick, a comment, a possible here-doc
+_DQ_BODY = re.compile(r'[^"\\]*(?:\\.[^"\\]*)*', re.S)   # the text of a double-quoted word, up to its closing mark (a backslash takes the next character)
 _ENV_WORD = re.compile(r"(?<![\w.-])[A-Za-z_]\w*=\S*")   # a NAME=value word: an env prefix, `env X=1 cmd`, `export X=1;` (it may also match inside an argument: that only asks more)
 _CD_WORD = re.compile(r"(?:^|[;&|(`{]\s*)(?:cd|pushd|popd)(?=[\s;&|)`}]|$)\s*(\S*)")
 _LEADING_CD = re.compile(r"""^[ \t]*cd[ \t]+(?:"([^"$`\\]*)"|'([^']*)'|([^\s"'$`\\;&|()<>*?\[\]{}!#]+))[ \t]*(?:&&|;)[ \t]*""")
@@ -55,7 +59,7 @@ def eligibility(a, tool: str, tool_input: dict | None, fp: dict | None) -> str:
     """`never`, `exact` or `class`: how far an answer to this call may be generalised."""
     from . import policy
 
-    if a.ho_ids or a.blocked or a.rule_id in NEVER_RULES or a.level == "critical":
+    if a.ho_ids or a.blocked or a.level == "critical" or ({a.rule_id, *(getattr(a, "seg_rules", None) or [])} & NEVER_RULES):   # every segment rule, as `proxy.skip_reason` reads them (V6-06b)
         return "never"
     if not policy.runs_shell(tool, tool_input or {}):
         return "exact"
@@ -88,21 +92,80 @@ def _where(a) -> str:
     return f"{base}|{'|'.join(cds)}" if cds else base
 
 
+def _quoted_words(s: str) -> list[str] | None:
+    """The quoted words of a command text that the segment key may not show whole: the text between the quote marks, unless it is plain (letters, digits and `./:@=+,%-`),
+    because a plain word stays in the segment key as it is (`git 'reset'` is `git reset`). The mark (single or double) is not part of the text. None when the text is not
+    simple enough to read here (an unclosed quote, `$'..'`, a command substitution inside quotes, a here-doc, a comment): the caller then uses the whole text."""
+    out: list[str] = []
+    i, n = 0, len(s)
+    while m := _QUOTE_MARK.search(s, i):
+        i = m.start()
+        c = s[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "'":
+            j = s.find("'", i + 1)
+            if j < 0 or (i and s[i - 1] == "$"):
+                return None
+            body, i = s[i + 1:j], j + 1
+        elif c == '"':
+            j = _DQ_BODY.match(s, i + 1).end()
+            if j >= n or s[j] != '"':
+                return None
+            body, i = s[i + 1:j], j + 1
+            if "$(" in body or "`" in body:
+                return None
+        elif c == "`" or s.startswith("<<", i) or (c == "#" and (i == 0 or s[i - 1] in " \t\n;&|(")):
+            return None
+        else:
+            i += 1
+            continue
+        if not _PLAIN_WORD.fullmatch(body):
+            out.append(body)
+    return out
+
+
+def _quoted(a) -> str:
+    """A hash of the quoted-word text of the call, or "" when no gated segment key has a blanked word. The segment key (so the hold key) blanks a quoted word that has a
+    space in it, `ssh host 'cat /etc/passwd'` and `ssh host 'cat /etc/shadow'` are the same key, so the words are part of the exact key and of the kind (V6-06b). The same
+    words in other quote marks are the same text. A text that `_quoted_words` cannot read is hashed whole, spaces folded: more asks, never fewer."""
+    if not any('""' in k for k in getattr(a, "seg_keys", None) or []):
+        return ""
+    return _quoted_hash(a.subject or "")
+
+
+@functools.lru_cache(maxsize=16)
+def _quoted_hash(s: str) -> str:
+    """`_quoted` for one text, remembered: the keys of one call are made several times (the exact key, the kind, the scopes), and the text may be large."""
+    words = _quoted_words(s)
+    return sha256(canonical(words) if words is not None else " ".join(s.split()))[:16]
+
+
+def _with_quoted(a, key: dict) -> dict:
+    """`key` plus the quoted-word hash when there is one: a call with no blanked word keeps the key it always had, so answers stored before still match it."""
+    return {**key, "quoted": q} if (q := _quoted(a)) else key
+
+
 def class_key(a) -> str:
-    """The kind of call at its target and in its place: the rule, the segment keys, the target (`_target`) and the directory it runs in (`_where`). A confirmed
-    staging answer does not cover prod."""
-    return sha256(canonical({"rule": a.rule_id, "segments": sorted({normalise_segment(k) for k in a.seg_keys}), "target": _target(a), "where": _where(a)}))
+    """The kind of call at its target and in its place: the rule, the segment keys, the target (`_target`) and the directory it runs in (`_where`), and the quoted words
+    (`_quoted`). A confirmed staging answer does not cover prod."""
+    return sha256(canonical(_with_quoted(a, {"rule": a.rule_id, "segments": sorted({normalise_segment(k) for k in a.seg_keys}), "target": _target(a), "where": _where(a)})))
 
 
 def any_project_key(a) -> str:
     """The kind of call at its target in any directory (the `kind_any` scope): `class_key` without the directory."""
-    return sha256(canonical({"rule": a.rule_id, "segments": sorted({normalise_segment(k) for k in a.seg_keys}), "target": _target(a)}))
+    return sha256(canonical(_with_quoted(a, {"rule": a.rule_id, "segments": sorted({normalise_segment(k) for k in a.seg_keys}), "target": _target(a)})))
 
 
 def keyed_fp(a, fp: dict | None) -> dict:
-    """The fingerprints of the call with its target and place (`_target`, `_where`) added: what the exact key and the ask rows (`fingerprints_json`) are made from.
-    The hold key drops prefixes and the directory, so without this a staging answer would be the same exact call as the prod one."""
-    return {**(fp or {}), "_ctx": sha256(canonical({"target": _target(a), "where": _where(a)}))[:16]}
+    """The fingerprints of the call with its target and place (`_target`, `_where`) added, and its quoted words (`_quoted`) when a segment key blanks one: what the exact
+    key and the ask rows (`fingerprints_json`) are made from. The hold key drops prefixes, the directory and the quoted words, so without this a staging answer would be
+    the same exact call as the prod one, and `ssh host 'cat /etc/passwd'` the same as `ssh host 'cat /etc/shadow'`."""
+    out = {**(fp or {}), "_ctx": sha256(canonical({"target": _target(a), "where": _where(a)}))[:16]}
+    if q := _quoted(a):
+        out["_q"] = q
+    return out
 
 
 def keys(a, tool: str, tool_input: dict | None, fp: dict | None) -> tuple[str, str | None, str]:

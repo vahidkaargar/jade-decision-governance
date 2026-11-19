@@ -340,7 +340,7 @@ def _merge_project(a, tool: str, tool_input: dict | None, project: str | None) -
 
 def _kind_project_key(a, project: str) -> str:
     family = sorted({memory.normalise_segment(k) for k in a.seg_keys})
-    return memory.sha256(memory.canonical({"kind": "kind_project", "family": family, "project": project, "target": memory._target(a)}))
+    return memory.sha256(memory.canonical(memory._with_quoted(a, {"kind": "kind_project", "family": family, "project": project, "target": memory._target(a)})))
 
 
 def _label(command: str, where: str) -> str:
