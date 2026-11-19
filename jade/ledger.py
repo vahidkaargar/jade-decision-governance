@@ -89,6 +89,7 @@ CREATE INDEX IF NOT EXISTS audit_queue_drawn ON audit_queue(drawn_ts);
 """
 MIGRATIONS = {"jev_calls": [("language", "TEXT"), ("source", "TEXT")], "decisions": [("hold_key", "TEXT"), ("source", "TEXT")],
               "permits": [("source", "TEXT")], "events": [("source", "TEXT")], "asks": [("class_key", "TEXT"), ("label", "TEXT"), ("ho", "INTEGER"), ("scopes_json", "TEXT")],
+              "audit_queue": [("subject", "TEXT"), ("cwd", "TEXT")],   # V6-29: the call that ran and where, sealed with the row
               "labels": [("label_type", "TEXT"), ("sample_prob", "REAL"), ("audit_source", "TEXT")],   # V6-23: old rows keep NULL, which reads as a `claim_true` label
               "human_answers": [("last_used_ts", "TEXT"), ("label", "TEXT"), ("ho", "INTEGER"), ("scope_kind", "TEXT"), ("scope_key", "TEXT"), ("scope_label", "TEXT"), ("family_key", "TEXT"), ("silent_runs", "INTEGER"), ("evidence_ts", "TEXT")]}   # columns added after the first release: (name, type)
 # PRAGMA user_version of a file once SCHEMA, the migrations and INDEXES have been applied to it; a file already at this value skips all three (W-58). It is a

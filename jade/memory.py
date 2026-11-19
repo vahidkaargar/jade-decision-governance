@@ -341,8 +341,19 @@ def use(db, answer_id: str) -> None:
     db.con.execute("UPDATE human_answers SET last_used_ts=?, silent_runs=COALESCE(silent_runs,0)+1 WHERE answer_id=?", (ts(), answer_id))
 
 
-def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
-    """The memory branch of the gate: a HookResult that lets the call run on a confirmed answer, or None (ask as before)."""
+def audit_paused(db, a, tool: str, tool_input: dict | None, fp: dict | None, cwd: str) -> bool:
+    """Is this call inside a scope the audit has paused? Found by the keys of the call (exact, class, scope), not by an answer row: a wrong check retires the rows."""
+    from . import audit, scopes
+
+    exact, cls, el = keys(a, tool, tool_input, fp)
+    if el == "never":
+        return False
+    return audit.paused(db, [exact, cls, *scopes.keys_for(a, tool, tool_input, fp, cwd)])
+
+
+def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, held: dict | None = None):
+    """The memory branch of the gate: a HookResult that lets the call run on a confirmed answer, or None (ask as before). When the audit is why the call is asked about
+    (its scope is paused, or a limit or the key refused it), `held["audit"]` says why, and the caller must not let Jev decide it in the human's place."""
     from . import askchat, audit, paths, permits, state_machine
     from .hooks import HookResult
 
@@ -355,15 +366,19 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
         with db.tx():
             row = lookup(db, a, tool, tin if isinstance(tin, dict) else {}, fp, cwd)
             if row is None:
+                if held is not None and audit_paused(db, a, tool, tin if isinstance(tin, dict) else {}, fp, cwd):
+                    held["audit"] = "suspended"   # no row to match (a wrong check retired it), the scope is still paused: Jev must not decide it either
                 return None
             adm, why = audit.admit(db, row)   # V6-29: a call that cannot be audited (a paused scope, a limit reached, no key) is asked about
             if adm is None:
                 audit.refused(db, row, why)
+                if held is not None:
+                    held["audit"] = why
                 return None
             did = askchat.run_decision(db, a, tool, cwd, event["session_id"], row["answer_id"][-12:], "memory")
             use(db, row["answer_id"])
             db.event(row["answer_id"], "memory_allowed", guard=f"{a.rule_id} {a.level}", actor="hook", detail={"decision_id": did, "channel": row["channel"], "scope_id": adm.scope})
-            audit.record(db, adm, row, did, event["session_id"])   # the draw, in the same transaction: no row written, no silent run
+            audit.record(db, adm, row, did, event["session_id"], a.subject, cwd)   # the draw, in the same transaction: no row written, no silent run
     except state_machine.IllegalTransition:
         return None   # the decision could not advance: ask as before
     return HookResult(0, f"JADE: allowed from your confirmed answer {row['answer_id']} (rule {a.rule_id}). `jade knows list` shows what is remembered; `jade knows rm {row['answer_id']}` forgets it.")

@@ -981,7 +981,7 @@ def review_audit_walk(stdin_isatty: bool | None = None, *, ask=input, say=print)
     say(f"{len(rows)} call(s) ran without asking you and wait for your check. Was each one right to run? [r]ight / [w]rong / [s]kip")
     done = 0
     for r in rows:
-        say(f"{r['decision_id']}  [{r['rule_id']}]  {_shown_line(r['label'] or '(no text kept)')}")
+        say(f"{r['decision_id']}  [{r['rule_id']}]  {audit.describe(r, _shown_line)}")
         verdict = {"r": "right", "right": "right", "w": "wrong", "wrong": "wrong"}.get(ask("  right, wrong or skip? [r/w/S] ").strip().lower())
         if verdict:
             say(review_mark(r["decision_id"], verdict, stdin_isatty=True))

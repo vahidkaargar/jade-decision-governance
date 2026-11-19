@@ -16,6 +16,7 @@ import pytest
 from jade import audit, hooks, ledger, memory, ops, paths, permits, policy
 from jade.util import now, ts
 from tests.acceptance import test_memory_w101 as m
+from tests.acceptance.test_jev_proxy_w102 import prov, ready  # noqa: F401  (fixtures: Jev on, past the band of owner answers)
 from tests.acceptance.test_memory_w101 import CMD, OTHER, SESSION, enforce, medium, real_terminal_check  # noqa: F401  (fixtures)
 from tests.acceptance.test_review_marks_w103 import decision_ids, finish, mark
 
@@ -296,9 +297,10 @@ def seed_rows(spec):
         key = audit._key(d, create=True)
         with d.tx():
             for i, (p, status, session) in enumerate(spec):
-                r = {"audit_id": f"aud_{i:04d}", "decision_id": f"dec_{i:04d}", "answer_id": "ans_x", "scope_id": "sc", "stage": 1, "sample_prob": p, "drawn_ts": ts()}
-                d.con.execute("INSERT INTO audit_queue(audit_id, decision_id, answer_id, scope_id, rule_id, stage, sample_prob, status, session_id, drawn_ts, seal) "
-                              "VALUES(?,?,?,?,?,?,?,?,?,?,?)", (r["audit_id"], r["decision_id"], "ans_x", "sc", "R-11", 1, p, status, session, r["drawn_ts"], audit._seal(key, r)))
+                r = {"audit_id": f"aud_{i:04d}", "decision_id": f"dec_{i:04d}", "answer_id": "ans_x", "scope_id": "sc", "stage": 1, "sample_prob": p, "drawn_ts": ts(),
+                     "rule_id": "R-11", "session_id": session, "subject": CMD, "cwd": "/tmp", "status": status, "resolved_ts": None}
+                d.con.execute("INSERT INTO audit_queue(audit_id, decision_id, answer_id, scope_id, rule_id, stage, sample_prob, status, session_id, drawn_ts, subject, cwd, seal) "
+                              "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (r["audit_id"], r["decision_id"], "ans_x", "sc", "R-11", 1, p, status, session, r["drawn_ts"], CMD, "/tmp", audit._seal(key, r)))
     finally:
         d.close()
 
@@ -512,5 +514,104 @@ def test_the_hot_queries_of_the_audit_use_an_index(medium):
                         ("SELECT * FROM audit_scopes WHERE scope_id=?", ("x",))):
             plan = " ".join(str(tuple(r)) for r in d.con.execute("EXPLAIN QUERY PLAN " + q, args))
             assert "SEARCH" in plan and "USING" in plan and "SCAN" not in plan, plan
+    finally:
+        d.close()
+
+
+# ------------------------------------------------------------------ review fixes: Jev on, what the walk shows, what the seal covers
+
+def jev_standing(cwd="/tmp", kind="kind_any"):
+    from tests.acceptance import test_scope_memory as sm
+
+    return sm.store(CMD, cwd, kind)
+
+
+def test_with_jev_on_a_limit_of_the_audit_still_asks_and_jev_does_not_run_the_call(ready):
+    jev_standing()
+    set_audit(weekly_count=1)
+    assert run(1)[0].exit_code == 0                                 # from the standing answer, queued
+    r = hooks.pretool(m.call(CMD, "sess-v629-002"))
+    assert asked(r)
+    assert m.rows("SELECT * FROM events WHERE kind='jev_allowed'") == []
+    assert [e["guard"] for e in m.rows("SELECT guard FROM events WHERE kind='audit_refused'")] == ["weekly_count"]
+    assert ready.sent == []                                         # Jev was not even asked: it could only have said yes
+
+
+def test_with_jev_on_a_paused_scope_asks_about_every_call_and_the_mark_text_is_true(ready):
+    jev_standing()
+    _, did = run(1)
+    assert "JADE asks again" in mark(did, "wrong")
+    assert m.strong() == [] and next(iter(scopes().values()))["status"] == "suspended"
+    r = hooks.pretool(m.call(CMD, "sess-v629-002"))
+    assert asked(r) and m.rows("SELECT * FROM events WHERE kind='jev_allowed'") == []
+    assert hooks.pretool(m.call(CMD, "sess-v629-003", cwd="/tmp/other")).exit_code == 2   # kind_any: the pause holds in every directory
+
+
+def test_with_jev_on_a_call_outside_any_paused_scope_still_goes_to_jev(ready):
+    jev_standing()
+    _, did = run(1)
+    mark(did, "wrong")
+    r = hooks.pretool(m.call("git reset --hard HEAD~3", "sess-v629-004"))   # another kind of call: not in the paused scope
+    assert r.exit_code == 0 and "Jev" in r.stderr
+
+
+def test_the_walk_and_the_review_show_the_call_that_ran_and_where(medium, tmp_path):
+    here, there = tmp_path / "dev-a", tmp_path / "prod-b"
+    here.mkdir()
+    there.mkdir()
+    jev_standing(str(here))
+    r = hooks.pretool(m.call(CMD, "sess-adv-1", cwd=str(there)))     # a kind_any answer covers this other directory
+    assert r.exit_code == 0
+    [q] = queue()
+    assert (q["subject"], q["cwd"], q["session_id"]) == (CMD, str(there), "sess-adv-1")
+    said = []
+    ops.review_audit_walk(stdin_isatty=True, ask=lambda _="": "s", say=said.append)
+    assert any(CMD in s and "prod-b" in s and "sess-adv-1" in s for s in said), said
+    text = ops.review(None)
+    assert "prod-b" in text and CMD in text
+
+
+def test_the_text_shown_in_the_walk_is_stored_with_the_run_and_sealed(medium):
+    standing_call()
+    _, did = run(1)
+    sql("UPDATE audit_queue SET subject='ls', cwd='/tmp/elsewhere' WHERE decision_id=?", (did,))
+    d = m.db()
+    try:
+        assert audit.summary(d)["unsealed"] == 1 and audit.pending(d, 10) == []     # a changed text is a changed row
+    finally:
+        d.close()
+
+
+@pytest.mark.parametrize("edit", ["status='right'", "status='right', resolved_ts='2026-01-01T00:00:00Z'", "session_id='sess-forged'", "rule_id='R-01'", "subject='x'", "cwd='/x'"])
+def test_a_row_edited_in_any_field_with_sql_is_not_counted_as_a_clean_check(medium, edit):
+    standing_call()
+    for i in (1, 2, 3):
+        run(i)
+    sql(f"UPDATE audit_queue SET {edit}")  # noqa: S608
+    d = m.db()
+    try:
+        s = audit.summary(d)
+        assert s["unsealed"] == 3 and s["checked"] == 0 and s["wrong"] == 0
+    finally:
+        d.close()
+
+
+def test_a_real_mark_reseals_the_row_so_it_is_counted(medium):
+    standing_call()
+    _, did = run(1)
+    _, did2 = run(2)
+    mark(did, "right")
+    mark(did2, "wrong")
+    d = m.db()
+    try:
+        s = audit.summary(d)
+        assert s["unsealed"] == 0 and s["checked"] == 2 and s["wrong"] == 1
+    finally:
+        d.close()
+    sql("UPDATE audit_queue SET status='right' WHERE decision_id=?", (did2,))   # a wrong check turned into right with SQL
+    d = m.db()
+    try:
+        s = audit.summary(d)
+        assert s["unsealed"] == 1 and s["checked"] == 1 and s["wrong"] == 0
     finally:
         d.close()

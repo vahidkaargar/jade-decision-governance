@@ -11,10 +11,10 @@ A call that runs from a standing answer is never checked by anyone. Nobody can s
 | Part | What it does now |
 |---|---|
 | Audit draw | Every call that runs from a standing answer is drawn for your check. The draw is made inside the hook, in the same ledger transaction as the run. The chance of the draw (`sample_prob`) is stored with it. In stage 1 it is 1.0. |
-| Audit queue | Table `audit_queue`: one row per drawn call, with the scope, the stage, the chance, the status (`pending`, `right`, `wrong`) and a seal. |
+| Audit queue | Table `audit_queue`: one row per drawn call, with the scope, the stage, the chance, the call that ran (its text, its directory and its session), the status (`pending`, `right`, `wrong`) and a seal. |
 | Scopes | Table `audit_scopes`: for each scope (the scope key, else the kind key, else the exact call) the stage, the count of silent runs, and whether it is paused. |
-| Your check | `jade review mark` with no arguments, in your terminal, shows the waiting calls one by one: right, wrong or skip. `jade review mark DECISION_ID right\|wrong` still works for one call. |
-| A wrong check | Retires the answer and every answer of the same call or kind (as before), and pauses the scope. A paused scope asks about every call. |
+| Your check | `jade review mark` with no arguments, in your terminal, shows the waiting calls one by one, each with the call that ran, the directory it ran in and its session (stored with the run, not taken from the text of the standing answer, which can cover other directories): right, wrong or skip. `jade review mark DECISION_ID right\|wrong` still works for one call. |
+| A wrong check | Retires the answer and every answer of the same call or kind (as before), and pauses the scope. A paused scope asks about every call. Jev does not decide such a call either: `memory.step` tells `proxy.step` that the audit is why the call is asked about. |
 | End of a pause | Only `jade review confirm` in your terminal, for an answer of that scope. The count then starts again at 0. A hint (a click in the chat) never ends a pause. |
 | Aging by evidence | A standing answer that ran silently 60 times with no mark stops deciding. So does one that ran silently and has had no evidence for 90 days. Evidence is your confirm or a `right` mark. |
 | `--all` limit | `jade review confirm --all` takes only groups of a rule below high risk. A high group is still asked one by one. One sitting confirms at most 10 groups; the rest wait. |
@@ -37,7 +37,7 @@ So the audit never costs you more than 10 checks a week, and it stops being a so
 
 - The key is derived from the permit seal key (`permit-seal.key` in the JADE home) with a fixed label. That file is already guarded by SI-10: the Bash text that names it, and the Read, Grep and Glob tools, are blocked. No new file name and no new policy text.
 - No environment variable, config key or argument sets the chance, the key or the result of a draw. The module reads none. A planted `audit` config value is ignored unless it only lowers a limit (section 6).
-- The key is never stored in the ledger. Each drawn row is sealed with an HMAC. A row edited with SQL fails its seal, is not counted as a check, and is not offered to you.
+- The key is never stored in the ledger. Each drawn row is sealed with an HMAC over the draw fields, the rule, the session, the text and directory of the call, the status and the time of the check. A mark writes the new status and seals the row again. A row edited with SQL in any of these fields fails its seal, is not counted as a check, and is not offered to you. A row that is deleted is not detected: the seal is not a chain, and a missing row is just missing.
 - The commands that write verdicts (`jade review mark`, `jade review confirm`) are blocked for an agent by SI-09 and need a human terminal.
 - The limit, as for the permit seal (docs/05 T19): the key is a file of the same OS user. This raises the bar. It does not remove it. A script that the agent writes and runs is outside the text match.
 
@@ -81,7 +81,7 @@ To roll back: stop the draw by removing the call to `audit.admit` in `memory.ste
 ## 8. Not built here
 
 - Stage 2 (sampling with a chance below 1, a fixed weekly count). The function `audit.stage2_prob` and the `stage` column exist. Nothing sets the stage. Lifting the cap is V6-30, after 59 clean checks from 10 sessions and your written yes.
-- The audit of silent allows by Jev (`jev_allowed`). They are not drawn. V6-30 runs with `jev off`.
+- The audit of silent allows by Jev (`jev_allowed`). They are not drawn. (A call that the audit holds, because its scope is paused or a limit was reached, is not given to Jev: Jev can not run it in your place.) V6-30 runs with `jev off`.
 - The pause at an approve rate above 95% for the new asks. The plan marks a pause as a loosening. The approve rate of asks is shown by `jade review` (V6-23).
 - Honeypots (fake asks). Not built (LD-11).
 - The expiry of an unconfirmed hint older than 30 days.

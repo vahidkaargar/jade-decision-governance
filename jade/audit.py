@@ -15,7 +15,10 @@ The draw. It is made inside the hook, in the same transaction as the `memory_all
 from the permit seal key (`permit-seal.key`, mode 600, next to the ledger) with a fixed label, so it is protected by SI-10 as it is, with no new file name. The agent's
 own user can read a file of that user, so this raises the bar and does not remove it (docs/05 T19), as for the permit seal. There is no environment variable, config
 key or argument that sets the chance, the key or the outcome of a draw. If the key cannot be had, the call is asked about.
-Each drawn row is sealed (HMAC over its fields). The readout counts only rows whose seal holds, so a row edited with SQL is never counted as a clean check.
+Each drawn row is sealed (HMAC over its fields): the draw fields, the rule, the session, the call that ran (its text and its directory), its status and the time it was
+checked. A mark writes the new status and seals the row again. The readout counts only rows whose seal holds, so a row edited with SQL is never counted as a clean check.
+The seal cannot show that a row was deleted: a deleted row is simply missing (it is not a chain).
+A call that is asked about because of a limit or a pause is also kept from Jev (`memory.step` tells `proxy.step`): the audit is never a way round the question.
 
 Aging by evidence (`aged_out`, read by `memory.standing`, so lookup, `jade knows` and the proxy agree): a standing answer stops deciding after `age_runs` silent runs
 with no mark, or `age_days` days after its last evidence (its confirm, or a `right` mark) once it has run silently. A `right` mark resets the count; it never lengthens
@@ -102,9 +105,20 @@ def draw_value(key: bytes, scope: str, decision_id: str) -> float:
     return int.from_bytes(hmac.new(key, f"draw|{scope}|{decision_id}".encode(), sha256).digest()[:8], "big") / 2 ** 64
 
 
+SEALED = ("audit_id", "decision_id", "answer_id", "scope_id", "rule_id", "session_id", "subject", "cwd", "drawn_ts", "status", "resolved_ts")
+
+
+def _field(r, name):
+    try:
+        return r[name]
+    except (KeyError, IndexError):
+        return None
+
+
 def _seal(key: bytes, r) -> str:
-    fields = [r["audit_id"], r["decision_id"], r["answer_id"], r["scope_id"], int(r["stage"]), repr(float(r["sample_prob"])), r["drawn_ts"]]
-    return hmac.new(key, b"seal|" + canonical(fields).encode(), sha256).hexdigest()
+    """The seal of a row: every field that the readout or the walk relies on (`SEALED`, the stage and the chance). Only `seal` and `source` are outside it."""
+    fields = [*(_field(r, n) for n in SEALED[:5]), int(r["stage"]), repr(float(r["sample_prob"])), *(_field(r, n) for n in SEALED[5:])]
+    return hmac.new(key, b"seal2|" + canonical(fields).encode(), sha256).hexdigest()
 
 
 def scope_id(row) -> str:
@@ -174,16 +188,32 @@ def refused(db, row, why: str) -> None:
     db.event(scope_id(row), "audit_refused", guard=why, actor="hook", key=f"audit_refused:{scope_id(row)}:{why}:{day}", detail={"reason": why})
 
 
-def record(db, adm: Admission, row, decision_id: str, session: str | None) -> bool:
-    """After the call was let through (same transaction): count the run and, when the draw says so, queue it for review with its stored chance. True when drawn."""
+def paused(db, keys) -> bool:
+    """Is any of these keys (exact, class, scope keys of a call) the scope of a paused audit? A wrong check retires the answer, so a paused scope can have no row to match:
+    the call is found by its keys."""
+    ks = sorted({k for k in keys if k})
+    if not ks:
+        return False
+    return db.con.execute(f"SELECT 1 FROM audit_scopes WHERE status='suspended' AND scope_id IN ({','.join('?' * len(ks))}) LIMIT 1", ks).fetchone() is not None  # noqa: S608
+
+
+def record(db, adm: Admission, row, decision_id: str, session: str | None, subject: str = "", cwd: str = "") -> bool:
+    """After the call was let through (same transaction): count the run and, when the draw says so, queue it for review with its stored chance. True when drawn.
+    The text of the call, its directory and its session are stored with the row (secrets removed, cut at 300) and sealed: the human is shown what ran and where, not the
+    text of the standing answer, which can cover other directories."""
+    from . import decide
+
+    subject, cwd = str(decide.scrub(subject or ""))[:300], str(decide.scrub(cwd or ""))[:300]
     t = ts()
     db.con.execute("INSERT INTO audit_scopes(scope_id, stage, status, runs, since_ts, updated_ts, source) VALUES(?,?, 'active', 1, ?, ?, ?) "
                    "ON CONFLICT(scope_id) DO UPDATE SET runs=runs+1, updated_ts=excluded.updated_ts", (adm.scope, adm.stage, t, t, db.source))
     if draw_value(adm.key, adm.scope, decision_id) >= adm.p:
         return False
-    r = {"audit_id": new_id("aud"), "decision_id": decision_id, "answer_id": row["answer_id"], "scope_id": adm.scope, "stage": adm.stage, "sample_prob": adm.p, "drawn_ts": t}
-    db.con.execute("INSERT INTO audit_queue(audit_id, decision_id, answer_id, scope_id, rule_id, stage, sample_prob, status, session_id, drawn_ts, seal, source) VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?)",
-                   (r["audit_id"], decision_id, r["answer_id"], adm.scope, row["rule_id"], adm.stage, adm.p, session, t, _seal(adm.key, r), db.source))
+    r = {"audit_id": new_id("aud"), "decision_id": decision_id, "answer_id": row["answer_id"], "scope_id": adm.scope, "rule_id": row["rule_id"], "stage": adm.stage,
+         "sample_prob": adm.p, "session_id": session, "subject": subject, "cwd": cwd, "drawn_ts": t, "status": "pending", "resolved_ts": None}
+    db.con.execute("INSERT INTO audit_queue(audit_id, decision_id, answer_id, scope_id, rule_id, stage, sample_prob, status, session_id, subject, cwd, drawn_ts, seal, source) "
+                   "VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?,?,?)",
+                   (r["audit_id"], decision_id, r["answer_id"], adm.scope, r["rule_id"], adm.stage, adm.p, session, subject, cwd, t, _seal(adm.key, r), db.source))
     return True
 
 
@@ -229,6 +259,8 @@ def on_mark(db, decision_id: str, mark: str, answer_ids) -> dict:
         sealed = key is not None and hmac.compare_digest(q["seal"], _seal(key, q))
         if sealed and q["status"] != "wrong":
             db.con.execute("UPDATE audit_queue SET status=?, resolved_ts=? WHERE decision_id=?", (mark, ts(), decision_id))
+            db.con.execute("UPDATE audit_queue SET seal=? WHERE decision_id=?",   # the status and the time are sealed: the new row is sealed again, and only here
+                           (_seal(key, db.con.execute("SELECT * FROM audit_queue WHERE decision_id=?", (decision_id,)).fetchone()), decision_id))
             evals.set_label(db, decision_id, 1 if mark == "right" else 0, "adjudicated", f"audit of a silent run: {mark}", label_type="owner_would_allow",
                             sample_prob=q["sample_prob"], audit_source="random_audit")
         out["queued"] = True
@@ -312,17 +344,22 @@ def summary(db, since: str = "") -> dict:
 
 
 def pending(db, limit: int):
-    """The calls waiting for the human's check, oldest first, with the answer text they saw (a row whose seal fails is not offered)."""
+    """The calls waiting for the human's check, oldest first, each with the call that ran (its text, its directory and its session, all sealed). A row whose seal fails is not offered."""
     key = _read_key(db)
     if key is None:
         return []
     out = []
-    for r in db.con.execute("SELECT q.*, a.label AS label FROM audit_queue q LEFT JOIN human_answers a ON a.answer_id=q.answer_id WHERE q.status='pending' AND COALESCE(q.source,'')<>'test' ORDER BY q.drawn_ts, q.rowid"):
+    for r in db.con.execute("SELECT * FROM audit_queue WHERE status='pending' AND COALESCE(source,'')<>'test' ORDER BY drawn_ts, rowid"):
         if hmac.compare_digest(r["seal"], _seal(key, r)):
             out.append(r)
             if len(out) >= limit:
                 break
     return out
+
+
+def describe(r, show) -> str:
+    """One line for a waiting call: what ran, where, and in which session. `show` makes the stored text safe to print on one line."""
+    return f"{show(r['subject'] or '(no text kept)')}  in {show(r['cwd'] or '(directory not kept)')}  (session {show(r['session_id'] or '?')})"
 
 
 def lines(db, since: str, show) -> list[str]:
@@ -342,7 +379,7 @@ def lines(db, since: str, show) -> list[str]:
                    f"(from {s['checked']} checks in {s['sessions']} sessions{', each weighted by 1 over its chance of being drawn' if s['weighted'] else ''})")
     out.append(f"  your time: at most {cfg.weekly_count} checks a week for one scope and {cfg.weekly_budget} in all; when the limit is reached the next call is asked about instead")
     for r in pending(db, cfg.weekly_count):
-        out.append(f"  waiting  {r['decision_id']}  [{r['rule_id']}]  {show(r['label'] or '')}".rstrip())
+        out.append(f"  waiting  {r['decision_id']}  [{r['rule_id']}]  {describe(r, show)}")
     if s["waiting"]:
         out.append("  check them in your terminal: jade review mark")
     return out
