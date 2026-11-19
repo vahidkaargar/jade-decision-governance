@@ -49,6 +49,8 @@ EGRESS_MARK = egress.MARK  # marker prefix R-21 matches: curl, wget or nc sendin
 RECORDED_RULES = ("R-30", "R-31", "R-32")  # rules below the permit floor whose hits the hook journals (events `secret_read`, `blind_spot`): not gated, but counted so a soak report can size them
 BLIND_MARK = blind.BLIND_MARK   # marker prefix R-31 matches: `blind:<label> <command>`, a command the classifier cannot read (W-31)
 FETCH_MARK = blind.FETCH_MARK   # marker prefix R-22 matches: fetched or decoded text that runs as code (W-31)
+GH_MERGE_MARK = "gh:merge-api "   # marker prefix R-10 matches: a `gh api` call whose GraphQL text merges a pull request (V6-08, N20); the segment text has the quoted query blanked
+_GH_MERGE_MUTATION = re.compile(r"\b(?:mergePullRequest|enablePullRequestAutoMerge|mergeBranch)\b")
 PATH_RULES = ("R-01", "R-04", "R-12", "R-13", "R-16", "R-18", "R-24")  # the rules about where a write lands: they also see relative operands made absolute
 WRITE_KEYS = ("file_path", "notebook_path", "path", "filePath", "file", "filepath", "target_file", "file_name", "filename", "target")
 CONTENT_KEYS = {"content", "new_string", "old_string", "new_str", "old_str", "new_source", "text", "contents", "data", "source", "patch"}
@@ -1700,6 +1702,8 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
             marks.append(FETCH_MARK)
         elif fetched:
             fetched.update(blind.copies_of(words, fetched))   # `mv a b; bash b`: the copy is the fetched file under another name
+        if len(words) > 1 and words[0].rsplit("/", 1)[-1] == "gh" and words[1] == "api" and _GH_MERGE_MUTATION.search(text_in):
+            marks.append(GH_MERGE_MARK)   # the query is quoted text, so the whole command is read, as for a SQL client below
         seg_labels = [lab for lab in (blind.script_label(words, known), "computed-cwd" if computed and _computed_write(_bare(seg)) else None) if lab]
         labels.extend(seg_labels)
         marks.extend(f"{BLIND_MARK}{lab} " for lab in seg_labels)

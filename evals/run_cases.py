@@ -7,8 +7,9 @@ isolated home, no network). Exit non-zero on any mismatch. Reports the pass rate
 recorded one, and fails when the behaviour changes, so a fix has to remove the marker. Every `known_gap` row also carries `work_item` (the
 item that closes it, `W-n` or a roadmap `V6-n`) and `gap_date` (YYYY-MM-DD, when it was recorded); a row without them fails (V6-03): a gap
 is a visible ceiling with an owner, never an anonymous pass; the item must exist and the date must be real (see `_gap_owner`).
-`evals/known_gaps/cases.jsonl` is the list of open bypass vectors; `evals/known_gaps/timing.jsonl` holds the wall-clock gap, outside the
-default run (only the serial `timing` test job replays it).
+`evals/known_gaps/cases.jsonl` is the list of open bypass vectors. A row leaves it, with its fix and a test, for `evals/adversarial/cases.jsonl` (V6-08).
+`evals/performance/timing.jsonl` holds the wall-clock case, outside the default run (only the serial `timing` test job replays it).
+A `gate` or `gate_write` case may set `level` (`low`, `medium`, `high`): the autonomy level of its config, which the human-only classes need.
 """
 from __future__ import annotations
 
@@ -72,8 +73,10 @@ def run_case(c: dict) -> list[str]:
         ev = {"tool_name": "Bash", "tool_input": {"command": c.get("command", "")}, "session_id": "case-session", "cwd": "/tmp/case"}
         if kind == "gate_mcp":
             ev = {"tool_name": c["tool"], "tool_input": c["input"], "session_id": "case-session", "cwd": "/tmp/case"}
+        if c.get("level"):   # the autonomy level the human set (docs/12): the human-only classes (HO-shell-startup ...) are high work only once there is one
+            (Path(os.environ["JADE_CONFIG"]) / "config.json").write_text(json.dumps({"level": c["level"]}))
         if kind == "gate_write":
-            tin = {c.get("key", "file_path"): c["path"]}
+            tin = {c.get("key", "file_path"): os.path.expanduser(c["path"])}   # `~/.zshrc` is the profile of whoever runs the case, as `~` is in a command
             if c.get("content_parts"):  # file content assembled from parts so that no case file holds a token-shaped literal
                 tin["content"] = "".join(c["content_parts"])
             ev = {"tool_name": c.get("tool", "Write"), "tool_input": tin, "session_id": "case-session", "cwd": "/tmp/case"}
