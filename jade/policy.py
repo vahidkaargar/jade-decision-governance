@@ -1094,6 +1094,43 @@ def _written_text(tool_input: dict) -> str:
 
 
 _SCRIPT_READ_MAX = 1 << 20
+_JSON_U_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
+
+
+def _settings_disables(text: str | None) -> bool:
+    """Does the text of a settings file turn the JADE hooks off or move JADE (`disableAllHooks`, `JADE_GATE_MODE` ...)? JSON lets a key be written with `\\uXXXX`
+    escapes, so the text is read both as written and with the escapes decoded. None (the result could not be worked out) counts as yes."""
+    if text is None:
+        return True
+    return bool(_SETTINGS_DISABLE.search(text) or _SETTINGS_DISABLE.search(_JSON_U_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), text)))
+
+
+def _settings_result(tool_input: dict, subject: str, cwd: str) -> str | None:
+    """The whole text a Write, Edit or MultiEdit leaves in the settings file `subject`, or None when the gate cannot work it out (a call that carries no text, a file
+    it cannot read or that is over 1 MiB, an `old_string` that is not in the file). An Edit only carries a piece, so a key split over two calls (`disableAllH`, then
+    `H"` to `Hooks"`) shows only in the whole result."""
+    content = tool_input.get("content")
+    if isinstance(content, str):
+        return content
+    edits = [e for e in (tool_input.get("edits") or []) if isinstance(e, dict)]
+    if isinstance(tool_input.get("old_string"), str) and isinstance(tool_input.get("new_string"), str):
+        edits.append(tool_input)
+    if not edits:
+        return None
+    path = _realpath(os.path.join(cwd or os.getcwd(), _expand_home(subject)))
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) > _SCRIPT_READ_MAX:
+            return None
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read(_SCRIPT_READ_MAX)
+    except (OSError, ValueError):
+        return None
+    for e in edits:
+        old, new = e.get("old_string"), e.get("new_string")
+        if not isinstance(old, str) or not isinstance(new, str) or not old or old not in text:
+            return None
+        text = text.replace(old, new) if e.get("replace_all") else text.replace(old, new, 1)
+    return text
 
 
 def _script_names_state(f: str, dirs: tuple[str, ...], cwd: str) -> bool:
@@ -1180,7 +1217,7 @@ def _ho_tool_paths(a: Assessment, tool_input: dict, subjects: list[str], cwd: st
             _ho_add(a, HO_SHELL)
         if _SETTINGS_FILE.search(_path_key(s, cwd)):
             text = _written_text(tool_input) if text is None else text
-            if not text or _SETTINGS_DISABLE.search(text):   # unreadable text counts: it could be anything
+            if not text or _settings_disables(text) or _settings_disables(_settings_result(tool_input, s, cwd)):   # unreadable text counts: it could be anything
                 _ho_add(a, HO_SETTINGS)
 
 

@@ -642,6 +642,10 @@ def set_level(value: str, stdin_isatty: bool | None = None) -> None:
     atomic_write(paths.config_dir() / "config.json", json.dumps(cfg, indent=1) + "\n")
 
 
+OFF_MEANS = ("off is observe plus floor: most rules only log, but SI-07, SI-08, SI-09 to SI-12 and writes to JADE's own wiring (HO-wiring, HO-checkout-install, "
+             "HO-settings-shadow, HO-state-path) block. Use `jade level high` to have JADE ask about high-risk calls.")
+
+
 def _level_row() -> tuple[str, bool, str]:
     raw, lv = paths.config().get("level"), paths.level()
     if raw is None:
@@ -650,8 +654,9 @@ def _level_row() -> tuple[str, bool, str]:
         return ("level", False, f"the config level {raw!r} is not off, low, medium or high, so it counts as unset; `jade level unset` clears it")
     if raw != _recorded_level():
         return ("level", False, f"{lv}, but no `jade level` command recorded it (written some other way?); run `jade level unset`, look at the config directory, set it again")
-    if lv == "off":   # V6-10: not a failure (the human chose it), but not "ok": most rules only log
-        return ("level", None, "off: JADE only watches; most rules only log (the row `what blocks` lists them)")
+    if lv == "off":   # V6-10: not a failure (the human chose it), but not "ok": most rules only log. V6-16: the floor blocks
+        return ("level", None, "off (observe plus floor): most rules only log; SI-07, SI-08 and writes to JADE's own wiring block, as do SI-09 to SI-12 "
+                               "(the row `what blocks` lists them)")
     return ("level", True, f"{lv}")
 
 
@@ -682,8 +687,11 @@ def blocking_summary(mode: str | None = None, level: str | None | bool = False) 
         return (None, "advisory gate mode, no level set: nothing blocks; every safety invariant (" + ", ".join(active) + ") and every risk rule only log" + unset)
     if mode == "advisory":
         return (None, "advisory gate mode: " + ", ".join(gov) + " block; " + ", ".join(soft) + " and every risk rule only log")
-    if level == "off":
-        return (None, "advisory: " + ", ".join(soft) + ", R-13, R-16 and all risk rules only log; " + ", ".join(gov) + " block (level off, docs/12)")
+    if level == "off":   # V6-16: observe plus floor; hooks._verdict and hooks.pretool
+        floor = sorted(hooks.OFF_FLOOR_INVARIANTS)
+        firm = sorted(set(floor) | set(gov))
+        return (None, "advisory: " + ", ".join(i for i in soft if i not in floor) + " and every risk rule (R-13 and R-16 too) only log; "
+                + ", ".join(firm) + " block, and so does a write to JADE's own wiring (" + ", ".join(sorted(hooks.OFF_FLOOR_CLASSES)) + ") (level off, observe plus floor, docs/12)")
     if level is None:
         return (True, "every active safety invariant (" + ", ".join(active) + ") blocks; a high or critical risk call is held for a human approval (docs/12)" + unset)
     if level in ("low", "medium"):   # hooks._gate: memory.step, then proxy.step, run before the human is asked
@@ -692,6 +700,29 @@ def blocking_summary(mode: str | None = None, level: str | None | bool = False) 
                       "(once enough owner answers exist); any other high or critical call is held for a human (docs/12)")
     return (True, "every safety invariant (" + ", ".join(ids) + ") blocks; a high or critical risk call is held for a human approval (Jev decides nothing at "
                   "this level, docs/12)")
+
+
+def list_b() -> tuple[dict, dict]:
+    """List B of the floor (V6-17): what is advisory by design, for gate mode `off` and gate mode `advisory`, as `{"mode", "firm", "advisory"}` of safety invariant ids.
+    The R rules and the HO classes are advisory in both modes and are not listed one by one. `jade check` prints it (`_list_b_row`) and the floor tests assert it."""
+    from . import hooks
+
+    every = sorted(str(i["id"]) for i in policy.safety()["invariants"])
+    gov = sorted(hooks.GOVERNANCE_INVARIANTS)
+    return ({"mode": "off", "firm": [], "advisory": every},
+            {"mode": "advisory", "firm": gov, "advisory": [i for i in every if i not in gov]})
+
+
+def _list_b_row() -> tuple[str, bool, str]:
+    """What the owner chose to leave advisory by design (List B of the floor). Never a warning: it says what gate mode `off` and `advisory` mean, whatever is set now."""
+    try:
+        off, adv = list_b()
+    except Exception as e:  # noqa: BLE001 - the `policies load` row reports the failure
+        return ("advisory by design", True, f"unknown: the safety policy does not load ({type(e).__name__})")
+    return ("advisory by design", True,
+            f"gate mode off: nothing blocks ({', '.join(off['advisory'])}, every R rule and every HO class are skipped); "
+            f"gate mode advisory: {', '.join(adv['firm'])} block once a level is set, and {', '.join(adv['advisory'])}, every R rule and every HO class only log "
+            "(the floor of level `off` is another thing: it needs gate mode enforce)")
 
 
 def _what_blocks_row(pretool_ok: bool | None = None, wiring: list[str] | None = None) -> tuple[str, bool | None, str]:
@@ -1717,6 +1748,7 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
     rows.append(_gate_mode_row())
     rows.append(_level_row())
     rows.append(_what_blocks_row(st.get("PreToolUse", False), problems))
+    rows.append(_list_b_row())
     rows.append(pending_row())
     rows.append(_overrides_row())
     rows.append(_ack_audit_row())
@@ -1842,8 +1874,10 @@ def _permission_row() -> tuple[str, bool, str]:
         return ("host permission prompt", False, f"permissions.defaultMode is {mode} (the host never asks) and the gate is {gate} (JADE never blocks): nothing stops a call. "
                 "Set the gate to enforce or the host to a prompting mode. " + detail)
     if mode in PERMISSIVE_MODES and paths.level() == "off":   # V6-10: a warning, not a failure (blocking at level off is V6-16)
+        from . import hooks
+
         return ("host permission prompt", None, f"permissions.defaultMode is {mode} (the host never asks) and level off (JADE only logs most rules): only "
-                + ", ".join(sorted(_governance_ids())) + " stop a call. " + detail)
+                + ", ".join(sorted(_governance_ids() | hooks.OFF_FLOOR_INVARIANTS)) + " and a write to JADE's own wiring stop a call. " + detail)
     return ("host permission prompt", True, detail)
 
 
