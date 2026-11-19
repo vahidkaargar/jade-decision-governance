@@ -19,13 +19,12 @@ import os
 import re
 import secrets
 import sqlite3
-import unicodedata
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import ledger, paths, policy, redact, schemas, signing
+from . import askplain, ledger, paths, policy, redact, schemas, signing
 from .state_machine import TERMINAL as TERMINAL_DECISION
-from .util import at_least, canonical, human_tty_refusal, new_id, parse_ts, sha256, ts, ts_in, user
+from .util import at_least, canonical, human_tty_refusal, new_id, parse_ts, sha256, show_safely, ts, ts_in, user
 
 DEFAULT_TTL_S = 1800
 MAX_SUBJECT = 20000        # the most command text a permit stores and the approval screen shows; a longer command is never approved
@@ -387,18 +386,9 @@ def get(path, permit_id: str):
 
 # ---- the approval screen -------------------------------------------------------------------------------
 def printable(text: str) -> str:
-    """The text with every character that could redraw the terminal or hide itself written out as an escape: control characters (ESC, CR,
-    backspace), format characters (bidirectional overrides, zero-width), unpaired surrogates, line and paragraph separators and every space
-    other than U+0020. A newline stays a newline so that a multi-line command reads as one."""
-    out = []
-    for ch in text:
-        cat = unicodedata.category(ch)
-        if ch == "\n" or (ch != "\t" and cat not in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp") and (cat != "Zs" or ch == " ")):
-            out.append(ch)
-        else:
-            n = ord(ch)
-            out.append(f"\\x{n:02x}" if n < 0x100 else f"\\u{n:04x}" if n < 0x10000 else f"\\U{n:08x}")
-    return "".join(out)
+    """The text with every character that could redraw the terminal or hide itself written out as an escape. It is `util.show_safely`, the one function that the
+    terminal screen, the chat question, the dialog, `jade review` and `jade knows` share (V6-09). Use it on a command, a path or content, not on prose (`prose=True`)."""
+    return show_safely(text)
 
 
 def verify_scope(p, raw: dict | None = None) -> dict:
@@ -473,6 +463,28 @@ def confirm_code(p) -> str:
     return p.plan_hash[:6]
 
 
+def approval_valid_until(p) -> str:
+    """The end of an approval made now. The screen fixes it before the human types the code, so the code the screen shows and the message the approver signs name the same time."""
+    return ts_in(p.ttl_s)
+
+
+def approval_code(path, p, valid_until: str | None = None) -> str:
+    """The code the permit screen shows and accepts (V6-26). With the signed backend a high or critical permit is signed by the approver helper, which shows the code of the
+    message it signs (`signing.code_of`): the screen shows that very code, so the human types one code in both places and the helper's own line ("the code must equal the
+    one `jade permit approve` showed you") is true. Without it, the code is `confirm_code`. Pass the `valid_until` that `approve` gets, or the code changes with the clock."""
+    if signing.signed_backend() and at_least(str(p.risk_level), "high"):
+        db, own = _db(path)
+        try:
+            row = db.one("SELECT * FROM permits WHERE permit_id=?", (p.permit_id,))
+            doc = _doc(row) if row is not None else None
+            if doc is not None:
+                return signing.code_of(_approval_message(row, {**doc, "principal": f"human:{user()}"}, valid_until or approval_valid_until(p)))
+        finally:
+            if own:
+                db.close()
+    return confirm_code(p)
+
+
 def review_raw(db, p, now_s: str | None = None) -> str:
     """W-43: the approval screen with the secrets the ledger does not store, from the raw call kept for this permit. Human terminal only (the CLI checks, SI-09
     blocks it for an agent). A permit without a secret gets the ordinary screen."""
@@ -497,12 +509,38 @@ def review_text(p, now_s: str | None = None, raw: dict | None = None) -> str:
                    f"  | {printable(c['text']).replace(chr(10), chr(10) + '  | ')}\n")
     secrets = (f"Secrets  {ctx['revealed']} secret-shaped value(s) are shown below in full, for you only: the ledger stores them redacted, and the raw call is kept in a "
                "private file that is deleted when this permit is approved, revoked or expires\n") if ctx.get("revealed") else ""
-    return (f"Permit   {p.permit_id}   risk {p.risk_level}   environment {p.environment}   {age}\n{secrets}"
-            f"Rule     {printable(str(ctx.get('rule', '?')))}: {printable(str(ctx.get('rationale', '')))}\n"
+    parts = askplain.build(_plain_view(ctx), ctx["tool"], channel(p.ttl_s), folder=str(ctx.get("cwd", "")), who=_who(ctx))   # V6-26: the same builder as the chat and the dialog
+    plain = "\n".join(parts.head) + "\n"
+    return (f"{plain}Permit   {p.permit_id}   risk {p.risk_level}   environment {p.environment}   {age}\n{secrets}"
+            f"Rule     {printable(str(ctx.get('rule', '?')))}: {show_safely(str(ctx.get('rationale', '')), prose=True)}\n"
             f"Tool     {printable(ctx['tool'])}   cwd {printable(str(ctx.get('cwd', '')))}\n"
+            f"{parts.where[1]}\n"
             f"Plan     sha256 {p.plan_hash[:12]}   {ctx.get('length', len(ctx['subject']))} characters, shown in full below\n"
             f"Command\n  | {body}\n{content}"
-            f"Approving allows exactly this call once within {p.ttl_s // 60} minutes.")
+            f"{parts.closing[0]}\n{parts.closing[2]}\n{parts.closing[1]}")
+
+
+def channel(ttl_s: int) -> askplain.Channel:
+    """What the permit screen does with an answer and with none (V6-26): the request lives, and an approval holds, for the permit's own time."""
+    return askplain.Channel("permit", wait_s=int(ttl_s), allow_s=int(ttl_s))
+
+
+def _who(ctx: dict) -> str:
+    if not ctx.get("bound"):
+        return "a request made from the command line"
+    return "a subagent" if ctx.get("agent_id") else "the main session"
+
+
+def _plain_view(ctx: dict):
+    """The call as the gate reads it now, for the plain first lines of the screen: a shell call is assessed again from its text (the plan hash was checked against it), any
+    other tool is named by its rule. The assessment decides only what is said, never whether the permit is valid."""
+    tool, subject = ctx["tool"], str(ctx.get("subject", ""))
+    if tool in ("Bash", "PowerShell") and not ctx.get("redacted"):
+        try:
+            return policy.assess(tool, {"command": subject}, str(ctx.get("cwd", "")))
+        except Exception:   # noqa: BLE001 - a screen that cannot read the call still shows the command
+            pass
+    return SimpleNamespace(rule_id=str(ctx.get("rule", "")), ho_ids=[], seg_keys=[], subject=subject, level="high")
 
 
 # ---- lifecycle ---------------------------------------------------------------------------------------------
@@ -517,21 +555,30 @@ def _decision_refusal(con, decision_id: str) -> str | None:
     return f"its decision is {d['status']} but past its deadline ({d['expires_at']})" if d["expires_at"] <= ts() else None
 
 
-def approve(path, permit_id: str, stdin_isatty: bool | None = None):
+def approve(path, permit_id: str, stdin_isatty: bool | None = None, valid_until: str | None = None):
     """PENDING -> ISSUED. Refuses unless stdin is an interactive terminal outside any agent harness, the request has not expired, the
-    decision it belongs to is still waiting, and (when the permit carries a command) the command on file is what the plan hash covers."""
+    decision it belongs to is still waiting, and (when the permit carries a command) the command on file is what the plan hash covers.
+    `valid_until` (signed backend only) is the end the screen fixed before the code was typed (`approval_valid_until`): it must still be ahead and never past the permit's own
+    time. Without it the end is the permit's time from now."""
     why = human_tty_refusal(stdin_isatty)
     if why:
         raise ApprovalRefused(f"permit approval needs a human at an interactive terminal; an agent session cannot approve ({why})")
     db, own = _db(path)
     refused = None
-    sig = valid_until = None
+    sig = None
+    fixed, valid_until = valid_until, None
     try:
         if signing.signed_backend():   # W-38: the signature is made before the write transaction opens (the helper waits on a human) and checked inside it
             row0 = db.one("SELECT * FROM permits WHERE permit_id=?", (permit_id,))
             doc0 = _doc(row0) if row0 is not None and _col(row0, "state") == "PENDING" else None
             if doc0 is not None and at_least(str(_col(row0, "risk_level")), "high"):
                 valid_until = ts_in(_col(row0, "ttl_s"))
+                if fixed is not None:
+                    if fixed <= ts():
+                        raise PermitError("the time of this approval ran out while the screen was open; run `jade permit approve` again")
+                    if fixed > valid_until:
+                        raise PermitError("the end time of this approval is later than the permit allows; no approval was made")
+                    valid_until = fixed
                 try:
                     sig = signing.sign_with_helper(_approval_message(row0, {**doc0, "principal": f"human:{user()}"}, valid_until))
                 except RuntimeError as e:
@@ -582,6 +629,69 @@ def approve(path, permit_id: str, stdin_isatty: bool | None = None):
     finally:
         if own:
             db.close()
+
+
+REFUSAL_KINDS = ("permit_refused", "permit_denied")
+REFUSAL_NOTE_S = 3600   # the agent is told of a refusal for this long
+
+
+def refuse(path, permit_id: str, *, deny: bool = False, stdin_isatty: bool | None = None):
+    """PENDING -> REVOKED by a human at a terminal (V6-26). `deny=False` is a refusal: the permit is revoked and the event `permit_refused` is journaled. It is NOT a Deny: no
+    human answer is stored, so the hold keys, the Deny cap and the learning loop do not change, and a mistyped key or a "not now" does not block a kind of call. `deny=True`
+    (the human typed the word `deny`) also stores a Deny as a human answer on the terminal channel. The agent is told on its next try (`refusal_note`)."""
+    why = human_tty_refusal(stdin_isatty)
+    if why:
+        raise ApprovalRefused(f"permit refusal needs a human at an interactive terminal; an agent session cannot refuse ({why})")
+    db, own = _db(path)
+    try:
+        with db.tx() as con:
+            row = con.execute("SELECT * FROM permits WHERE permit_id=?", (permit_id,)).fetchone()
+            if row is None:
+                raise PermitError(f"unknown permit {permit_id}")
+            if row["state"] != "PENDING":
+                raise PermitError(f"permit {permit_id} is {row['state']}, not PENDING")
+            con.execute("UPDATE permits SET state='REVOKED' WHERE permit_id=? AND state='PENDING'", (permit_id,))
+            db.event(permit_id, "permit_denied" if deny else "permit_refused", prev="PENDING", next="REVOKED",
+                     guard="a human typed deny at the permit screen" if deny else "a human typed n at the permit screen", actor=f"human:{user()}", con=con)
+            if deny:
+                _record_deny(db, row)
+        drop_raw(db, permit_id)
+    finally:
+        if own:
+            db.close()
+
+
+def _record_deny(db, row) -> None:
+    """The Deny of a permit, stored as a human answer with the key the chat would have used for the same call, so a later Jev question and `jade review` see it."""
+    from . import memory
+
+    ctx = _loads(row["scope"])
+    doc = _doc(row) or {}
+    tool, subject, fp = str(ctx.get("tool", "")), str(ctx.get("subject", "")), _fingerprints_of(doc) if doc else {}
+    a = None
+    if tool in ("Bash", "PowerShell") and not ctx.get("redacted"):
+        try:
+            a = policy.assess(tool, {"command": subject}, str(ctx.get("cwd", "")))
+        except Exception:   # noqa: BLE001 - the Deny is kept with the plan hash alone
+            a = None
+    if a is not None and a.plan_hash == row["plan_hash"]:
+        exact, cls, _ = memory.keys(a, tool, {"command": subject}, fp)
+    else:
+        exact, cls = memory.exact_key(row["plan_hash"], fp), None
+    db.record_human_answer(session=ctx.get("session_id"), decision_id=row["decision_id"], rule_id=str(ctx.get("rule") or "?"), class_key=cls, exact_key=exact, answer="deny",
+                           channel="terminal", label=" ".join(subject.split())[:120] or None, ho=bool(a.ho_ids) if a is not None else False)
+
+
+def refusal_note(db, plan_hash: str) -> str:
+    """For the gate's message to the agent: the human refused or denied a permit for this very call a short time ago. Empty when nobody did."""
+    since = ts_in(-REFUSAL_NOTE_S)
+    r = db.one("SELECT e.kind AS kind, e.entity_id AS pid FROM events e JOIN permits p ON p.permit_id=e.entity_id "
+               "WHERE e.kind IN (?,?) AND p.plan_hash=? AND e.ts>=? ORDER BY e.ts DESC LIMIT 1", (*REFUSAL_KINDS, plan_hash, since))
+    if r is None:
+        return ""
+    word = "denied" if r.kind == "permit_denied" else "refused"
+    return (f" The human {word} an earlier permit request for this same call (permit {r.pid}). Do not retry it unchanged. Do not rephrase, split or script it to reach the same "
+            "goal. Do other work, or tell the human what you need and why.")
 
 
 def _static_refusal(db, row, doc: dict, level: str) -> str | None:

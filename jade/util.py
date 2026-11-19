@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import sys
+import unicodedata
 from datetime import UTC, datetime, timedelta
 from typing import NamedTuple
 
@@ -297,6 +298,53 @@ def language(text: str | None) -> str:
         return "unknown"
     share = sum(1 for c in letters if ord(c) in ARABIC) / len(letters)
     return "fa" if share >= 0.6 else "en" if share <= 0.05 else "mixed"
+
+
+_UNSAFE_CATEGORIES = frozenset(("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"))   # control, format (bidi, zero-width), surrogate, private use, unassigned, line and paragraph separator
+ZWNJ = "‌"   # the Persian half-space: the one format character that real prose needs
+# Letters and symbols that draw as blank (not format characters, so the categories above miss them): Hangul fillers, Braille blank, Khmer inherent vowels.
+_BLANK_FILLERS = frozenset((0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800, 0x17B4, 0x17B5))
+# Marks that draw nothing, or change how the letter before them draws: combining grapheme joiner, Mongolian free variation selectors, variation selectors.
+_HIDDEN_MARKS = frozenset((0x034F, *range(0x180B, 0x1810), *range(0xFE00, 0xFE10), *range(0xE0100, 0xE01F0)))
+
+
+def _escape(ch: str) -> str:
+    n = ord(ch)
+    return f"\\x{n:02x}" if n < 0x100 else f"\\u{n:04x}" if n < 0x10000 else f"\\U{n:08x}"
+
+
+def show_safely(text: str | None, *, prose: bool = False, one_line: bool = False) -> str:
+    """The text with every character that could redraw the screen or hide itself written out as an escape (`\\x1b`, `\\u202e`): control characters (ESC, CR, backspace),
+    format characters (bidirectional overrides and isolates, zero-width), unpaired surrogates, private use, unassigned, line and paragraph separators, and every space other
+    than U+0020. A newline stays, so a multi-line command reads as one. This is the one function for any command, path or content that a human reads before deciding (V6-09).
+    `prose=True` also keeps U+200C, so Persian words keep their half-space: use it for sentences, never for a command, a path or content. `one_line=True` then turns each
+    run of white space (a line break, a tab) into one space. None gives an empty string.
+    Characters that draw as blank letters or symbols (Hangul fillers, Braille blank) are always written out. Outside prose, so are the marks that draw nothing (variation selectors,
+    the combining grapheme joiner) and any combining mark whose base is an ASCII character or nothing: a look-alike folder name must not look like the real one. A mark after a
+    non-ASCII letter (a Persian vowel mark) stays."""
+    out = []
+    base_plain = True   # the last base character was ASCII, an escape, or there was none: a combining mark after it has nothing real to attach to
+    for ch in text or "":
+        if ch == "\n" or (one_line and ch == "\t") or (prose and ch == ZWNJ):
+            out.append(ch)
+            base_plain = True
+            continue
+        cat = unicodedata.category(ch)
+        n = ord(ch)
+        if cat in ("Mn", "Me"):
+            if not prose and (n in _HIDDEN_MARKS or base_plain):
+                out.append(_escape(ch))
+            else:
+                out.append(ch)   # a kept mark does not change what its base is
+            continue
+        if cat in _UNSAFE_CATEGORIES or (cat == "Zs" and ch != " ") or n in _BLANK_FILLERS:
+            out.append(_escape(ch))
+            base_plain = True
+        else:
+            out.append(ch)
+            base_plain = ch.isascii()
+    shown = "".join(out)
+    return re.sub(r"\s+", " ", shown).strip() if one_line else shown
 
 
 def one_line(text: str | None) -> str:

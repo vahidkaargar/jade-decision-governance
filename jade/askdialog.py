@@ -22,7 +22,7 @@ import sys
 from datetime import timedelta
 
 from . import askchat, askplain, memory, paths
-from .util import canonical, new_id, now, ts
+from .util import canonical, new_id, now, show_safely, ts
 
 DIALOG_WAIT_S = 120       # how long the dialog stays up before it gives up
 ALARM_MARGIN_S = 10       # the hook alarm and the host timeout sit this far above the wait
@@ -84,17 +84,29 @@ def run_dialog(text: str, wait_s: int) -> str | None:
     return m.group("label").strip() or None
 
 
+def channel() -> askplain.Channel:
+    """What the dialog does with an answer and with none, read from the constants now (V6-26): the text states these numbers."""
+    return askplain.Channel("dialog", wait_s=DIALOG_WAIT_S, deny_s=DENY_TTL_S, again_s=GAVE_UP_TTL_S)
+
+
+def who_asks(ctx: dict) -> str:
+    """A dialog is for a subagent. Its type is the host's own name for it, so it is written out safely and cut short."""
+    kind = show_safely(str(ctx.get("agent_type") or ""), one_line=True)[:40].strip()
+    return f"a subagent ({kind})" if kind else "a subagent"
+
+
 def text_for(a, tool: str, ctx: dict) -> str:
     """Everything in the dialog comes from the gate, none from the agent."""
-    lines = [*askplain.header(a, tool), f"JADE gate: {a.level} risk, rule {a.rule_id}. A subagent wants to run this call."]
+    parts = askplain.build(a, tool, channel(), folder=askchat.clip(str(ctx.get("cwd") or "")), who=who_asks(ctx))   # V6-26: the one builder
+    lines = [*parts.head, f"JADE gate: {a.level} risk, rule {a.rule_id}. A subagent wants to run this call."]
     if a.ho_ids:
         lines.append("Classes: " + ", ".join(a.ho_ids) + " (only you can decide these)")
-    lines.append(f"Tool: {tool}")
-    lines.append("Command:\n" + askchat._clip(str(ctx.get("subject") or a.subject)))
+    lines.append(f"Tool: {show_safely(tool)}")
+    lines.append("Command:\n" + askchat.command_text(a, str(ctx.get("subject") or a.subject)))
     content = ctx.get("content")
     if isinstance(content, dict):
-        lines.append(f"It also writes {content.get('length')} characters of content (sha256 {str(content.get('sha256'))[:12]}). First part:\n{askchat._clip(str(content.get('text') or ''))}")
-    lines.append("Allow this one call? Single use, this session only. Deny, or no answer, blocks it.")
+        lines.append(f"It also writes {content.get('length')} characters of content (sha256 {str(content.get('sha256'))[:12]}). First part:\n{askchat.clip(str(content.get('text') or ''))}")
+    lines.extend(parts.lines)
     return "\n".join(lines)
 
 
@@ -127,7 +139,7 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
         return None
     if askchat.paused(db, session):
         return None
-    text = text_for(a, tool, ctx)
+    text = text_for(a, tool, {**ctx, "agent_type": event.get("agent_type")})
     ask_id = new_id("a")[2:]
     _insert(db, ask_id, session, event, a, tool, hold, fpj, text, "DIALOG", DIALOG_WAIT_S + ALARM_MARGIN_S, False)   # while it is on screen the session's GUI tools are paused
     armed = _alarm_running()

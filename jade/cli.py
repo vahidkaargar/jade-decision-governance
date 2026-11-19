@@ -216,13 +216,20 @@ def _permit(a) -> int:
         if a.yes:
             raise permits.PermitError("-y is not accepted: read the command, then type the code shown")
         print(permits.review_raw(db, p))  # raises instead of showing a command that was cut or does not match the plan hash; shows a secret only from the raw call W-43 keeps
-        code = permits.confirm_code(p)
-        if input(f"Type {code} to approve, anything else to refuse: ").strip().lower() != code:
-            print("not approved")
+        until = permits.approval_valid_until(p)   # V6-26: the screen shows the code it accepts; with the signed backend that is the code of the message the helper signs
+        code = permits.approval_code(db, p, until)
+        typed = input(f"Type {code} to approve, n to refuse it now, deny to record a Deny, anything else to leave it waiting: ").strip().lower()
+        if typed == code.lower():
+            p = permits.approve(db, a.permit_id, valid_until=until)
+            print(f"ISSUED until {p.expires_at}. The agent can now retry the identical call.")
+            return 0
+        if typed in ("n", "deny"):
+            permits.refuse(db, a.permit_id, deny=typed == "deny")
+            print("refused: the permit is revoked and the agent is told when it asks again. This is not a Deny." if typed == "n"
+                  else "refused: the permit is revoked and your Deny is recorded. The agent is told when it asks again.")
             return 1
-        p = permits.approve(db, a.permit_id)
-        print(f"ISSUED until {p.expires_at}. The agent can now retry the identical call.")
-        return 0
+        print("not approved; the permit is still waiting")
+        return 1
     except (permits.ApprovalRefused, permits.PermitError) as e:
         print(f"jade: {e}", file=sys.stderr)
         return 1

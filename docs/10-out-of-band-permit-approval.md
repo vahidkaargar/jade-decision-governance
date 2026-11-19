@@ -47,7 +47,7 @@ Enforce mode is only as strong as the approval. This is why W-38 is a preconditi
 ### 4.2 Flow
 
 1. The gate blocks a high call and creates a PENDING permit (unchanged).
-2. The agent reports the permit id. The human runs `jade permit approve prm_xxx` in their own terminal: the existing review and typed code, then sudo asks for their login password and the helper shows the message and asks for its code.
+2. The agent reports the permit id. The human runs `jade permit approve prm_xxx` in their own terminal: the review, then a typed code. With the signed backend, the code on that screen is the code of the message the helper signs (`signing.code_of`, V6-26), so the same code is typed twice: once on the screen, once at the helper. The screen fixes the end time of the approval before the code is shown, because the end time is part of the signed message. Then sudo asks for their login password and the helper shows the message and asks for its code. On the screen, `n` refuses the request now (the permit is revoked, the event `permit_refused` is journaled, no Deny is stored) and the word `deny` records a Deny. Anything else leaves the permit waiting.
 3. `jade permit approve` verifies the returned signature itself, then issues the permit with `approval_reference` `sig:<user>@<time>`.
 4. The agent retries the command. The hook rebuilds the message, verifies the signature against the root-owned anchor and consumes the permit once.
 

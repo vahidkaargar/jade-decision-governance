@@ -20,7 +20,7 @@ from types import SimpleNamespace
 from typing import NamedTuple
 
 from . import ledger, memory, paths, policy, signing
-from .util import is_human_tty, now, one_line, parse_ts, ts, user
+from .util import is_human_tty, now, parse_ts, show_safely, ts, user
 
 
 def pretool_matcher() -> str:
@@ -717,6 +717,11 @@ def parse_since(value: str) -> float:
     return int(m.group(1)) * {"m": 60, "h": 3600, "d": 86400}[m.group(2)]
 
 
+def _shown_line(text: str | None) -> str:
+    """A stored label on one line, every control, bidi and zero-width character written out (V6-09)."""
+    return show_safely(text, one_line=True)
+
+
 def review(since_s: float | None = None) -> str:
     """What the human answered to JADE's asks (read-only): counts by answer, strength, rule and channel. Confirming answers is a later, human-only step."""
     db = ledger.open(timeout=5)
@@ -814,7 +819,7 @@ def review_lines(db, since_s: float | None) -> list[str]:
             a = {"rule_id": det.get("rule"), "label": det.get("label")}
         else:
             a = db.con.execute("SELECT rule_id, label FROM human_answers WHERE answer_id=?", (r["entity_id"],)).fetchone()
-        out.append(f"  {did}  [{a['rule_id'] if a else '?'}]  {one_line(a['label'] if a else '')}  {('(marked ' + marks[did] + ')') if did in marks else ''}".rstrip())
+        out.append(f"  {did}  [{a['rule_id'] if a else '?'}]  {_shown_line(a['label'] if a else '')}  {('(marked ' + marks[did] + ')') if did in marks else ''}".rstrip())
     return out
 
 
@@ -875,7 +880,7 @@ def _scope_lines(r) -> list[str]:
     how to undo it."""
     from . import memory, scopes
 
-    lines = [f"Would become standing for: {one_line(r['scope_label'])} ({memory.USE_DAYS} days after last use)"]
+    lines = [f"Would become standing for: {_shown_line(r['scope_label'])} ({memory.USE_DAYS} days after last use)"]
     covers = scopes.COVERS.get(r["scope_kind"])
     if covers:
         lines.append(covers)
@@ -902,12 +907,12 @@ def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, al
         chosen: list = []
         for (rule, _, is_class, scope_key), rs in groups.items():
             if scope_key:
-                say(f"{one_line(rs[-1]['label']) or '(no text kept)'}  [{rule}]  allowed {len(rs)}x")
+                say(f"{_shown_line(rs[-1]['label']) or '(no text kept)'}  [{rule}]  allowed {len(rs)}x")
                 for line in _scope_lines(rs[-1]):
                     say(f"   {line}")
             else:
                 kind = "this kind of call" if is_class else "this exact call only"
-                say(f"{one_line(rs[-1]['label']) or '(no text kept)'}  [{rule}]  allowed {len(rs)}x  ->  would be standing for {kind}")
+                say(f"{_shown_line(rs[-1]['label']) or '(no text kept)'}  [{rule}]  allowed {len(rs)}x  ->  would be standing for {kind}")
             if rule in memory.NEVER_RULES:
                 say("   (rule is always asked; confirming it changes nothing)")
             if all_ or ask("  stand for this? [y/N] ").strip().lower() in ("y", "yes"):
@@ -950,8 +955,8 @@ def knows_list() -> str:
         cap_end = parse_ts(r["confirmed_ts"]) + timedelta(days=memory.CAP_DAYS)
         end = min(x for x in (use_end, cap_end) if x)
         note = "  (near its 180-day end: confirm again to keep it)" if (cap_end - now()) <= timedelta(days=memory.NEAR_CAP_DAYS) else ""
-        scope = f"  scope  {one_line(r['scope_label'])}" if r["scope_label"] else ""
-        out.append(f"{r['answer_id']}  [{r['rule_id']}]  {'kind' if r['class_key'] else 'exact'}  {one_line(r['label'])}{scope}  stops deciding {ts(end)[:10]}{note}")
+        scope = f"  scope  {_shown_line(r['scope_label'])}" if r["scope_label"] else ""
+        out.append(f"{r['answer_id']}  [{r['rule_id']}]  {'kind' if r['class_key'] else 'exact'}  {_shown_line(r['label'])}{scope}  stops deciding {ts(end)[:10]}{note}")
     return "\n".join(out) or "no standing answers"
 
 
@@ -1001,7 +1006,7 @@ def knows_template(rows, since: tuple[str, str] | None = None) -> str:
         key = (r["rule_id"], "scope", r["scope_key"]) if r["scope_key"] else (r["rule_id"], "class", r["class_key"]) if r["class_key"] else (r["rule_id"], "exact", r["exact_key"])
         if key in seen:
             continue
-        text = one_line(r["scope_label"] or r["label"]) or "(a call with no label stored)"
+        text = _shown_line(r["scope_label"] or r["label"]) or "(a call with no label stored)"
         if len(text) > KNOWS_LABEL_CHARS:
             text = text[:KNOWS_LABEL_CHARS - 3] + "..."
         seen[key] = f"# I am fine with: {text}  [{r['rule_id']}]  (risk: {askplain.risk_line(r['rule_id'])})"

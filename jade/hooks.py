@@ -641,7 +641,7 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
                                       context=ctx, fingerprints=fp, environment=a.environment).permit_id
         else:
             pid = pending.permit_id
-        why = f" (Permit {found.permit_id} exists but cannot be used: {refusal}.)" if found is not None and refusal else ""
+        why = (f" (Permit {found.permit_id} exists but cannot be used: {refusal}.)" if found is not None and refusal else "") + permits.refusal_note(db, a.plan_hash)   # V6-26: a human refusal is told to the agent
         if ctx.get("redacted") and permits.keep_raw(db, pid, permits.raw_parts(tool, a, event)):   # W-43: the human allowed it, so the raw call is kept for their review only
             return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}). This {tool} call needs a human-approved permit, and the {ctx['redacted']} secret-shaped "
                                  f"value(s) in it are not stored in the ledger.{why}\n"
