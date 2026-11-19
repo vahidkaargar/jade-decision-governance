@@ -591,6 +591,16 @@ def _ops(a) -> int:
                 print(f"level {a.value}")
                 if a.value == "off":
                     print(ops.OFF_MEANS, file=sys.stderr)
+            if paths.level() not in (None, "off"):   # V6-28: a display name for the pair, on stderr so stdout keeps the bare value for scripts
+                eff = ops.jev_effective()
+                print(f"label {ops.autonomy_label(paths.level(), eff)} (level {paths.level()}, jev {eff}; `jade jev` shows or sets the model key)", file=sys.stderr)
+        elif a.cmd == "jev":
+            if a.value is None:
+                print(ops.jev_effective())
+                print(ops._jev_row()[2], file=sys.stderr)
+            else:
+                ops.set_jev(a.value)
+                print(f"jev {a.value}")
         elif a.cmd == "claude-md":
             if a.action == "show":
                 print(ops.claude_md_section())
@@ -789,8 +799,10 @@ def build_parser() -> argparse.ArgumentParser:
     pknows.add_argument("id", nargs="?")
     plevel = sub.add_parser("level", help="human only: show or set the autonomy level (docs/12): unset, off, low, medium or high; no argument prints it")
     plevel.add_argument("value", nargs="?", choices=("unset", "off", "low", "medium", "high"))
+    pjev = sub.add_parser("jev", help="human only: show or set whether a model may be asked at all (on or off, or unset for the default); no argument prints it")
+    pjev.add_argument("value", nargs="?", choices=("unset", "on", "off"))
     sub.add_parser("claude-md").add_argument("action", choices=("show", "apply"))
-    gh = sub.add_parser("git-hook", help="the standalone pre-push guard for the default branch (SI-08): `script` prints it, `check <repo>` says whether a repository runs it").add_subparsers(dest="action", required=True)
+    gh =sub.add_parser("git-hook", help="the standalone pre-push guard for the default branch (SI-08): `script` prints it, `check <repo>` says whether a repository runs it").add_subparsers(dest="action", required=True)
     gh.add_parser("script", help="print the self-contained POSIX sh pre-push hook (installs nothing; install it yourself, docs/08 section 2.7)")
     gh.add_parser("check", help="report whether the pre-push hook git runs for REPO is the JADE guard; exit 1 when it is not").add_argument("repo")
     sub.add_parser("maintain").add_argument("--offline", action="store_true")
@@ -856,7 +868,7 @@ def main(argv: list[str] | None = None) -> int:
         print(ops.launchd_plist(a.label), end="")
         return 0
     table = {"permit": _permit, "decide": _decide, "ack": _ack, "question": _question, "route": _route, "fast": _fast, "work": _work,
-             "label": _label, "eval": _eval, "improve": _improve, "hooks": _ops, "gate": _ops, "review": _ops, "knows": _ops, "level": _ops, "claude-md": _ops, "maintain": _maintain, "git-hook": _git_hook}
+             "label": _label, "eval": _eval, "improve": _improve, "hooks": _ops, "gate": _ops, "review": _ops, "knows": _ops, "level": _ops, "jev": _ops, "claude-md": _ops, "maintain": _maintain, "git-hook": _git_hook}
     return table[a.cmd](a)
 
 

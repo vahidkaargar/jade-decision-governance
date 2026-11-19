@@ -89,6 +89,24 @@ def live(alias: str = "") -> str:
     return LIVE.format(a=f"{alias}." if alias else "")
 
 
+UNREADABLE_RECORD = "unreadable"   # what `last_setting` returns for a newest event that holds no value it can read: no setting is read from it
+
+
+def last_setting(db, kind: str, key: str):
+    """The value the newest `kind` event (written by a human command such as `jade jev`) recorded under `key`: None when there is no such event or it recorded
+    `unset`, UNREADABLE_RECORD when the event exists but its detail does not hold the key. The query uses the `events_kind_ts` index."""
+    row = db.con.execute("SELECT detail_json FROM events WHERE kind=? ORDER BY id DESC LIMIT 1", (kind,)).fetchone()
+    if row is None:
+        return None
+    try:
+        detail = json.loads(row[0]) if row[0] else None
+    except ValueError:
+        return UNREADABLE_RECORD
+    if not isinstance(detail, dict) or key not in detail:
+        return UNREADABLE_RECORD
+    return detail[key]
+
+
 def dedup_ttl_s() -> int:
     """How long an answered call anchors a repeat: `dedup.ttl_s` of policies/routing.yaml (3600 as shipped)."""
     from . import policy

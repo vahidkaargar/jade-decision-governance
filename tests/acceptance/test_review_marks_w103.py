@@ -139,14 +139,16 @@ def test_review_shows_the_silent_share_the_marks_and_the_recent_runs(medium):
     assert "marked: 1 silent run(s), 1 right, 0 wrong; wrong runs are below" in out and "(marked right)" in out
 
 
-def test_review_counts_owner_answered_plain_high_calls_toward_fifty_and_leaves_out_human_only_ones(medium):
+def test_review_counts_owner_answered_plain_high_calls_and_leaves_out_human_only_ones_and_gates_nothing_by_them(medium):
     m.ask_and_allow()
     d = m.db()
     try:
         d.record_human_answer(session=SESSION, decision_id=None, rule_id="R-26", class_key=None, exact_key="e" * 64, answer="allow", channel="chat", ho=True)
     finally:
         d.close()
-    assert "owner-answered plain-high calls: 1 of 50" in ops.review(None)
+    out = ops.review(None)
+    assert "owner-answered plain-high calls: 1 (a count of answers gates nothing" in out
+    assert "Jev deny gate: 0 of 30 kinds of call you denied" in out and "not met" in out   # V6-28: the gate counts denies
 
 
 def test_review_says_nothing_extra_when_nothing_has_happened():
