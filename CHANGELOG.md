@@ -11,7 +11,7 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 - **Ledger scope columns.** Memory matches scope keys for confirmed answers only.
 - **`jade knows edit` template.** Two model sentences and one line per kind of answer, with its risk.
 - Agent rule "Send one risky action per call" in the skill and in `docs/claude-md-jev-section.md`.
-- Threat row T30 in `docs/05` (a scope that covers more than the owner meant).
+- Threat row T31 in `docs/05` (a scope that covers more than the owner meant).
 - **"Never looser than main" check (V6-03).** `uv run python evals/never_looser.py <ref-a> <ref-b>` compares the gate on two versions of the code. It runs every command from the eval files, the test fixtures and the redirect tests through both, in three folders (no repository, a repository on `main`, a repository on a feature branch). It prints each command that the first version stops and the second lets through. Exit 0 and no output mean: not looser on these commands. Exit 1 means at least one command got looser. Exit 2 means the check could not run in full, so it is not an answer. The result is only as good as the command list, so it never says "not looser" in general. A new test checks that every rule of the first version is reached by at least one command.
 - **Known-gap list (V6-03).** `evals/known_gaps/` holds the holes both versions still have, as counted rows with an owner. They are listed, not hidden. A row joins the normal gate only after its fix is merged.
 
