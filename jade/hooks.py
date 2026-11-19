@@ -124,6 +124,11 @@ def failsafe_reason(event: dict) -> str | None:
             if _SEAL_KEY_TEXT.search(t) or _SEAL_KEY_TEXT.search(policy.real(os.path.expanduser(t))) or policy.is_seal_key_dir(policy.real(os.path.expanduser(t))):
                 return f"{tool} names {t[:120]!r}, which may be the permit seal key"
         return None
+    if policy.is_mcp(tool):   # V6-18 c: an MCP file reader or search that names the seal key, or a directory that may hold it
+        _kind, targets, globs = policy.mcp_read_targets(tool, tin)
+        for t in (*targets, *globs):
+            if _SEAL_KEY_TEXT.search(t) or _SEAL_KEY_TEXT.search(policy.real(os.path.expanduser(t))) or policy.is_seal_key_dir(policy.real(os.path.expanduser(t))):
+                return f"{tool} names {t[:120]!r}, which may be the permit seal key"
     cmd = tin.get("command") if tool in policy.SHELL_TOOLS else next((tin[k] for k in ("command", "cmd", "script") if isinstance(tin.get(k), str)), None)
     if cmd is not None or tool in policy.SHELL_TOOLS:
         text = str(cmd or "").strip()
