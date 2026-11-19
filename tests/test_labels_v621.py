@@ -110,19 +110,22 @@ def test_the_derive_table_is_complete_and_harm_decides_first(ag):
 
 
 # ---- the empty corpus in the repository --------------------------------------------------------------------------------------------------
-def test_the_committed_corpus_is_empty_valid_and_passes_the_check(ag, capsys):
-    """The empty file is the honest state: the 150 labelled rows are the owner's hours. Gate G8 runs over it (and over every row that is added later)."""
-    f = LABELS / "corpus.jsonl"
-    assert f.exists()
-    rows, problems = ag.load_rows(f, scan=True)
-    assert problems == []
-    assert ag.main(["check"]) == 0
+def test_every_committed_label_file_is_valid_and_scanned(ag, capsys):
+    """Gate G8: every JSONL file in evals/labels/ is checked and scanned for secret shapes and real hosts. The committed corpus starts empty (the 150 labelled rows
+    are the owner's hours); this test stays right when rows are added: it asks for no problems, and for "no accuracy number" only while under 150 rows."""
+    files = sorted(LABELS.glob("*.jsonl"))
+    assert LABELS / "corpus.jsonl" in files
+    for f in files:
+        rows, problems = ag.load_rows(f, scan=True)
+        assert problems == [], f.name
+        assert ag.main(["check", str(f)]) == 0
     capsys.readouterr()
-    assert ag.main(["report"]) == 0          # not-enough-data never fails a pull request
+    rows, _ = ag.load_rows(LABELS / "corpus.jsonl", scan=True)
+    code = ag.main(["report"])
     out = capsys.readouterr().out
-    assert "no accuracy number" in out and rows == []
-    assert all(g["state"] in ("not-enough-data", "pass") for g in ag.gates(rows))
-    assert [g for g in ag.gates(rows) if g["gate"] == "rows"][0]["state"] == "not-enough-data"
+    assert code == 0 or any(g["state"] == "fail" for g in ag.gates(rows, None))   # not-enough-data never fails a pull request
+    if ag.agreement(rows)["n"] < ag.MIN_ROWS:
+        assert "no accuracy number" in out
 
 
 def test_a_committed_file_is_scanned_and_a_file_outside_the_repository_is_private(ag, tmp_path):
@@ -277,7 +280,7 @@ def test_under_ten_clusters_the_agreement_is_not_decided(ag, tmp_path):
     assert states(ag, loaded)["clusters"]["state"] == "not-enough-data"
 
 
-def test_the_freeze_hash_follows_the_final_labels_and_not_the_order_or_the_raw_labels(ag, tmp_path):
+def test_the_freeze_hash_follows_the_whole_row_and_not_the_order(ag, tmp_path):
     rows, _ = ag.load_rows(write(tmp_path, corpus(150)))
     h = ag.freeze_hash(rows)
     assert len(h) == 64 and ag.freeze_hash(list(reversed(rows))) == h
@@ -288,8 +291,11 @@ def test_the_freeze_hash_follows_the_final_labels_and_not_the_order_or_the_raw_l
     moved[0]["command"] = "echo other"
     assert ag.freeze_hash(moved) != h
     again = copy.deepcopy(rows)
-    again[0]["raw"]["rater2"]["authority"] = "no"   # a raw label is evidence, not the frozen text
-    assert ag.freeze_hash(again) == h
+    again[0]["raw"]["rater2"]["authority"] = "no"   # the kappa rests on the raw labels, so editing one after the freeze must show
+    assert ag.freeze_hash(again) != h
+    flag = copy.deepcopy(rows)
+    flag[0]["adjudicated"] = True
+    assert ag.freeze_hash(flag) != h
 
 
 def test_a_changed_row_fails_against_the_frozen_hash(ag, tmp_path):
@@ -416,3 +422,34 @@ def test_a_pending_row_blocks_the_freeze(ag, tmp_path):
     p = write(tmp_path, rows)
     assert ag.main(["freeze", str(p), "--frozen", str(tmp_path / "f.json"), "--write"]) == 1
     assert not (tmp_path / "f.json").exists()
+
+
+def test_a_raw_label_edited_after_the_freeze_breaks_the_frozen_gate(ag, tmp_path):
+    rows, _ = ag.load_rows(write(tmp_path, corpus(150, flips=15)))
+    frozen = {"rubric_version": 1, "rows": 150, "sha256": ag.freeze_hash(rows)}
+    rows[1]["raw"]["rater2"] = _label("allow")      # was ask/no: kappa would change, the final label did not
+    assert states(ag, rows, frozen)["frozen"]["state"] == "fail"
+
+
+def test_the_freeze_record_sits_beside_its_own_file_so_a_private_set_and_a_committed_subset_never_share_one(ag, tmp_path):
+    assert ag.frozen_path(LABELS / "corpus.jsonl") == LABELS / "frozen.json"
+    assert ag.frozen_path(tmp_path / "private.jsonl") == tmp_path / "private.frozen.json"
+    p = write(tmp_path, corpus(150, flips=15), "private.jsonl")
+    assert ag.main(["freeze", str(p), "--write"]) == 0
+    assert (tmp_path / "private.frozen.json").exists()
+    assert ag.main(["report", str(p)]) == 0                       # finds its own record
+    other = write(tmp_path, corpus(150), "subset.jsonl")           # another file: its own (absent) record, so not-enough-data and not a mismatch
+    assert ag.main(["report", str(other)]) == 0
+
+
+def test_a_final_label_needs_the_derived_label_beside_it_so_decision_replay_does_not_skip_the_row(ag, tmp_path):
+    row = make_row(0, "allow")
+    del row["label"]
+    assert any("needs a `label`" in p for p in ag.load_rows(write(tmp_path, [row]))[1])
+
+
+@pytest.mark.parametrize("field", ["expect", "expect_blocked"])
+def test_a_converted_case_row_keeps_no_expectation_the_raters_would_see(ag, tmp_path, field):
+    rows = corpus(1)
+    rows[0][field] = "block"
+    assert any(field in p for p in ag.load_rows(write(tmp_path, rows))[1])

@@ -15,8 +15,8 @@
 3. Rater 1 (the owner) and rater 2 (a second person, or a different reader of the rubric) label every row alone, blind.
 4. `uv run python evals/labels/agree.py report /private/path/rows.jsonl` shows the counts, kappa and the gates. Target: kappa 0.70 or more on allow against not-allow. If it is lower, fix the rubric and label again.
 5. The owner decides every disagreement and sets `adjudicated` to true.
-6. `agree.py freeze FILE --write` saves the hash in `frozen.json`. A frozen set is not edited. If the rubric changes, its version goes up and the rows are labelled again.
-7. Rewrite or redact the rows you want to commit, put them in `corpus.jsonl`, and run `agree.py check`.
+6. `agree.py freeze FILE --write` saves the hash of the whole rows (both raters' raw labels too) in `FILE.frozen.json` beside the file. A frozen set is not edited. If the rubric changes, its version goes up and the rows are labelled again.
+7. Rewrite or redact the rows you want to commit, put them in `corpus.jsonl`, and run `agree.py check`. The committed corpus has its own record, `frozen.json`: it is a different set of rows, so it has a different hash. Freeze it the same way once its rows are final.
 
 ## Stop state
 

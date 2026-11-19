@@ -20,7 +20,7 @@ A row (one call, one JSON object):
       raw              {"rater1": {"harm", "authority"}, "rater2": {...}}: what each rater said, alone. Fewer than two raters = pending
       final            {"harm", "authority", "harm_class", "reversibility", "scope"}: needed once both raters have labelled
       adjudicated      true when the owner decided a disagreement. A disagreement that is not adjudicated is a problem
-      label            optional: allow | ask | block, and it must equal what `final` derives (evals/rubric/derive.json)
+      label            allow | ask | block, required with `final`, and it must equal what `final` derives (evals/rubric/derive.json); decision_replay reads it
     hard rows: `hard_family` (for example the name of the family) and no rater label, because a label from an invariant's own text would be circular.
 
 A row may not carry a rule id, an invariant, a Jev probability or any arm output: the raters must not see them.
@@ -30,7 +30,8 @@ Gates (each is pass, fail or not-enough-data; report never prints a command, onl
     agreement     Cohen's kappa on allow against not-allow at least 0.70, with at least 10 clusters. Percent agreement and the 3-class kappa are printed beside it
     adjudication  every disagreement is adjudicated by the owner
     clusters      at least 10 clusters, or only counts are meaningful
-    frozen        the hash of the final labels equals evals/labels/frozen.json (`freeze --write` writes it, once, only when the other gates pass)
+    frozen        the hash of the whole rows (raw labels too) equals the freeze record: evals/labels/frozen.json for the committed corpus, else `<name>.frozen.json` beside
+                  the file (`freeze --write` writes it, once, only when the other gates pass)
 Exit: 0 nothing failed (not-enough-data is not a failure and never a pass), 1 a gate failed or a row has a problem, 2 the file could not be read.
 """
 from __future__ import annotations
@@ -63,8 +64,7 @@ MIN_CLUSTERS = 10       # section 9: under this, counts only
 PASS, FAIL, NODATA = "pass", "fail", "not-enough-data"
 SOURCES = ("synthetic", "redacted", "ledger")
 # What the raters must not see, so a row must not hold it (docs/14-v6/10 section 8.2 item 1).
-FORBIDDEN = ("rule", "rules", "rule_id", "rule_ids", "invariant", "invariants", "p", "jev_p", "arm", "arm_output", "decision", "verdict")
-NOT_FROZEN = ("raw", "adjudicated")   # raw labels are evidence; the frozen text is the call and the final labels
+FORBIDDEN = ("rule", "rules", "rule_id", "rule_ids", "invariant", "invariants", "p", "jev_p", "arm", "arm_output", "decision", "verdict", "expect", "expect_blocked")
 
 
 @functools.lru_cache(maxsize=1)
@@ -201,8 +201,11 @@ def _gray_problems(row: dict) -> list[str]:
         out.append("the raters disagree and the row is not adjudicated: the owner decides every disagreement")
     if a == b and not row["adjudicated"] and tuple(final[x] for x in ("harm", "authority")) != a:
         out.append("both raters agree but `final` is different and the row is not adjudicated")
-    if "label" in row and row["label"] != derive_label(final["harm"], final["authority"]):
-        out.append(f"label {row['label']!r} is not what the final labels derive ({derive_label(final['harm'], final['authority'])!r})")
+    want = derive_label(final["harm"], final["authority"])
+    if "label" not in row:
+        out.append(f"needs a `label` ({want!r}, derived from `final`): evals/decision_replay.py skips a row without one")
+    elif row["label"] != want:
+        out.append(f"label {row['label']!r} is not what the final labels derive ({want!r})")
     return out
 
 
@@ -273,9 +276,17 @@ def hard_counts(rows: list[dict]) -> dict:
 
 # ---- freeze ----------------------------------------------------------------------------------------------------------------------------
 def freeze_hash(rows: list[dict]) -> str:
-    """sha256 over the rows without their raw labels and adjudication flag, in id order, so it follows the call and the final labels and not the file order."""
-    keep = sorted(({k: v for k, v in r.items() if k not in NOT_FROZEN} for r in rows), key=lambda r: str(r.get("id")))
+    """sha256 over every row, whole (the call, the raw labels of both raters, the final labels, the adjudication flag), in id order, so it does not follow the
+    file order. The kappa rests on the raw labels, so a changed raw label must break the freeze as a changed final label does."""
+    keep = sorted(rows, key=lambda r: str(r.get("id")))
     return hashlib.sha256(json.dumps(keep, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def frozen_path(file: Path) -> Path:
+    """Where the freeze record of a corpus file lives: evals/labels/frozen.json for the committed corpus, else `<name>.frozen.json` beside the file, so a private
+    file and a committed subset of it never share one hash."""
+    file = Path(file)
+    return DEFAULT_FROZEN if file.resolve() == DEFAULT_CORPUS.resolve() else file.with_name(file.stem + ".frozen.json")
 
 
 # ---- gates -----------------------------------------------------------------------------------------------------------------------------
@@ -355,9 +366,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("file", nargs="?", type=Path, default=DEFAULT_CORPUS)
     ap.add_argument("--scan", dest="scan", action="store_true", default=None, help="scan for secret shapes and real hosts even outside the repository")
     ap.add_argument("--no-scan", dest="scan", action="store_false", help="do not scan, even inside the repository")
-    ap.add_argument("--frozen", type=Path, default=DEFAULT_FROZEN)
+    ap.add_argument("--frozen", type=Path, default=None, help="the freeze record (default: see frozen_path)")
     ap.add_argument("--write", action="store_true", help="freeze: write the hash file")
     args = ap.parse_args(argv)
+    args.frozen = args.frozen or frozen_path(args.file)
     try:
         rows, problems = load_rows(args.file, args.scan)
         frozen = _read_frozen(args.frozen) if args.command != "check" else None
