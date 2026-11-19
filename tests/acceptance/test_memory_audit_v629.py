@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from jade import audit, hooks, ledger, memory, ops, paths, permits, policy
+from jade import audit, hooks, ledger, memory, ops, paths, permits, policy, proxy
 from jade.util import now, ts
 from tests.acceptance import test_memory_w101 as m
 from tests.acceptance.test_jev_proxy_w102 import prov, ready  # noqa: F401  (fixtures: Jev on, past the band of owner answers)
@@ -535,6 +535,21 @@ def test_with_jev_on_a_limit_of_the_audit_still_asks_and_jev_does_not_run_the_ca
     assert m.rows("SELECT * FROM events WHERE kind='jev_allowed'") == []
     assert [e["guard"] for e in m.rows("SELECT guard FROM events WHERE kind='audit_refused'")] == ["weekly_count"]
     assert ready.sent == []                                         # Jev was not even asked: it could only have said yes
+
+
+def test_with_a_limit_hit_and_the_deny_gate_one_sample_short_jev_stays_shadow_even_though_its_own_question_is_the_last_sample(medium, prov):
+    """Review fix: the gate was read twice. The first read (gate not met) let the question go to Jev; the question itself became the 100th sample, so the second read said met
+    and Jev's yes ran a call the audit had stopped."""
+    from tests.acceptance.test_jev_proxy_w102 import owner_answers, prefs
+
+    prefs()
+    owner_answers(samples=proxy.MIN_SAMPLES - 1)
+    jev_standing()
+    set_audit(weekly_count=1)
+    assert run(1)[0].exit_code == 0
+    r = hooks.pretool(m.call(CMD, "sess-v629-002"))
+    assert asked(r)
+    assert m.rows("SELECT * FROM events WHERE kind='jev_allowed'") == []
 
 
 def test_with_jev_on_a_paused_scope_asks_about_every_call_and_the_mark_text_is_true(ready):

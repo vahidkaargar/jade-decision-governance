@@ -32,6 +32,7 @@ _NESTED_OPEN = re.compile(r"\$\(|`|[<>]\(")   # a stage that holds one of these 
 HERE_ALLOWANCE = 6_000_000  # characters more that the here-strings of a chain may be read for: a text that the budget charged already comes back once per level
 UNSAFE_MARK = "@unsafe!"   # prefix of the copy of a stage whose verb can write or run something, so rules see its resolved operands
 UNSAFE_GIT = "git:unsafe-config "
+VAR_CAP = "cap:var-readings "   # marker prefix R-10 matches: the work allowance for reading variable commands with their values ran out (VARIABLE_WORK)
 TEXT_MARK = "@text!"   # prefix of a line the scanner extracted from a program (`import jade.cli`): words for the invariants to read, no operands to resolve
 
 # Same matches as the frozen copy's pattern, in linear time (V6-08, WT W-104): a descriptor only starts at the start of a run of digits. Without `(?<!\d)` the engine tried every
@@ -53,7 +54,7 @@ _LAUNCHER = (r"(?:" + _RUNNER + r"|sudo(?:\s+(?:-[ugphCDrtUT]\s+\S+|-[A-Za-z-]+)
              r"|exec(?:\s+(?:-a\s+\S+|-[cl]+))*|noglob|nocorrect"
              r"|env(?:\s+-[A-Za-z-]+)*|g?timeout(?:\s+-\S+)*\s+\d+[smhd]?|nice(?:\s+-n?\s*\d+)?|caffeinate(?:\s+-\w+(?:\s+\d+)?)*"
              r"|xargs(?:\s+-(?:I\s*\S+|n\s*\d+|P\s*\d+|[0a-zA-Z]+))*"
-             r"|arch(?:\s+-\S+)*|watch(?:\s+-[A-Za-z-]+(?:=\S+)?(?:\s+\d+(?:\.\d+)?)?)*|script(?:\s+-[abd-zA-Z]+)*\s+\S+|corepack(?=\s+(?:npm|npx|pnpm|pnpx|yarn)\b))")
+             r"|arch(?:\s+-\S+)*|watch(?:\s+-[A-Za-z-]+(?:=\S+)?(?:\s+\d+(?:\.\d+)?)?)*|script(?!(?:\s+-[A-Za-z-]+)*\s+(?:-[A-Za-z]*c(?![A-Za-z])|--command))(?:\s+-[abd-zA-Z]+)*\s+\S+|corepack(?=\s+(?:npm|npx|pnpm|pnpx|yarn)\b))")
 PREFIX = re.compile(r"^(?:(?:(?:(?:/[\w.+-]+)*/)?" + _LAUNCHER + r"|[A-Za-z_]\w*=\S*|do|then|else|if|while|until|!)\s+)+")
 
 ALIAS_TAIL = re.compile(r"\s-c\s+alias\.[^\s=]*=$")
@@ -960,7 +961,8 @@ class _Scan:
         also read as `git push origin main`. The stage as written is read as before, so this only adds readings.
         The work is counted for the whole text (`VARIABLE_WORK`): a stage that holds a nested `$g $(...)` is read again once for every value at every level, which
         doubles the work (or more) per level (V6-08 review). A stage with a nested substitution costs its length for each value, a flat stage costs one for each value.
-        Past the count the stage is not read with its values and the text carries the `eval-var` mark: a variable the gate could not read, recorded (R-31), never a silent pass."""
+        Past the count the stage is not read with its values and the text carries the `cap:var-readings` mark, which risk.yaml rates R-10 (high): a text that long is asked about, so that
+        padding in front of a `$g push origin main` cannot switch the reading off (integration review of the V6-08 cap; a recorded-only mark would be looser than uncapped)."""
         lead = raw.lstrip()
         bare = PREFIX.sub("", lead, count=1)
         m = re.match(r'"?\$(?:\{(\w+)\}|(\w+))"?', bare)   # `"$g"` expands as `$g` does (a single-quoted `'$g'` does not)
@@ -969,7 +971,7 @@ class _Scan:
         if len(self.budget) > 5:
             cost = len(values) * (len(raw) if _NESTED_OPEN.search(raw) else 1)
             if self.budget[5] < cost:
-                deferred.append(blind.BLIND_MARK + "eval-var")
+                deferred.append(VAR_CAP + "...")   # rated R-10 (asked about), not R-31: a cap that only records would let padding switch the reading off (integration review)
                 return []
             self.budget[5] -= cost
         head = lead[:len(lead) - len(bare)]

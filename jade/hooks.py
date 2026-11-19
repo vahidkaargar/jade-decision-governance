@@ -1044,10 +1044,11 @@ def session_start(event: dict) -> HookResult:
     try:
         decide.sweep(db)
         permits.sweep(db)
-        out = _override_notice(db, event) + _shadow_notice(db, event) + _repo_config_notice(db, event)
+        out = _override_notice(db, event) + _shadow_notice(db, event)
         src = event.get("source")
         reshow = isinstance(src, str) and src in RESHOW_SOURCES
         out += _held_notice(db, reshow) + _expired_twice_notice(db, reshow)   # V6-27: held decisions come first (docs/14-v6/07 section 6.3), then pending permits
+        out += _repo_config_notice(db, event)   # the scan of a repository folder comes last: what the human must decide never waits behind it
         pending = permits.listing(db, ("PENDING",))
         pend = [p for p in pending if getattr(p, "source", None) != "test"]
         if pend:

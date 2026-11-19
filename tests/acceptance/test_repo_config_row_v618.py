@@ -305,6 +305,18 @@ def test_more_rules_files_than_the_scan_reads_are_reported_not_dropped_silently(
     assert rows_of()[ROW][0] is None
 
 
+def test_a_rules_folder_with_many_entries_and_few_files_is_cut_short_and_says_so(human_env, jade_stub, proj, monkeypatch):
+    """Review fix: `rglob` walked the whole tree before `islice` could cut it; the walk itself is bounded now."""
+    monkeypatch.setattr(ops, "_MAX_RULE_WALK", 50)
+    rules = proj / ".claude" / "rules"
+    rules.mkdir(parents=True)
+    for i in range(80):
+        (rules / f"d{i:03d}").mkdir()
+    put(rules / "a.md", "ok\n")
+    found = ops.repo_config_findings(proj)
+    assert any(kind == "unreadable" and "or more" in line and "not scanned" in line for kind, line in found), found
+
+
 def test_the_scan_stops_at_a_total_size_and_says_so(human_env, jade_stub, proj, monkeypatch):
     monkeypatch.setattr(ops, "_MAX_RULE_BYTES", 100)
     for i in range(4):

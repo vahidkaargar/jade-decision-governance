@@ -318,7 +318,8 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: 
         return None
     if not jev_on(db):
         return None   # V6-28: before any state is built, so nothing goes to a model, shadow included
-    if audit_held and level != "high" and deny_gate(db)["ok"]:
+    gate_ok = deny_gate(db)["ok"] if audit_held and level != "high" else None   # read once: the question to Jev below is itself a shadow sample and could meet the gate while it is answered
+    if gate_ok:
         return None   # Jev would decide here: the audit says the owner is asked (until the deny gate is met, or at level high, Jev only records and decides nothing)
     tin = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
     if skip_reason(a, tool, tin, level) or permits.make_context(tool, a, event, cwd=cwd).get("redacted"):
@@ -355,7 +356,7 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: 
         return None
     db.event(item.call_id, "jev_accepted", guard=f"{a.rule_id} {a.level}", actor="hook",
              detail={"session": session, "hold": hold, "rule": a.rule_id, "exact_key": exact, "class_key": cls, "coarse_key": coarse})   # the link `false_allows` follows to the owner's later deny
-    if level == "high" or not deny_gate(db)["ok"]:
+    if level == "high" or not (deny_gate(db)["ok"] if gate_ok is None else gate_ok):   # an audit hold decided at the top by the same reading: it stays shadow if it was shadow
         return None   # shadow: asked and recorded, decides nothing
     try:
         with db.tx():

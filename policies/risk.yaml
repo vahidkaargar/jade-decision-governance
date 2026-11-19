@@ -50,7 +50,7 @@ rules:
     level: high
     reversibility: partially_reversible
     blast_radius: public
-    match: "\\b(gh pr merge|gh release (create|merge)|glab mr merge|npm publish|cargo publish|twine upload|docker push|composio execute)\\b|^gh:merge-api |\\b(?:gh|glab) api\\b[^;&|]*(?<![\\w-])(?:pulls|merge_requests)/[^\\s/]+/merge(?![\\w-])|\\bgh api\\b[^;&|]*(?<![\\w-])repos/[^\\s/]+/[^\\s/]+/merges(?![\\w-])|\\bgit (?:send-pack|http-push)\\b|\\bgit push\\b(?!(?:\\s+(?:-u|-q|--set-upstream|--quiet))*\\s+\\w[\\w.-]*\\s+(?!main\\b|master\\b|v?[0-9]|HEAD\\b)\\w[\\w./-]*(?:\\s*(?:$|[;&|)]|2>&1)))"
+    match: "^cap:var-readings |\\b(gh pr merge|gh release (create|merge)|glab mr merge|npm publish|cargo publish|twine upload|docker push|composio execute)\\b|^gh:merge-api |\\b(?:gh|glab) api\\b[^;&|]*(?<![\\w-])(?:pulls|merge_requests)/[^\\s/]+/merge(?![\\w-])|\\bgh api\\b[^;&|]*(?<![\\w-])repos/[^\\s/]+/[^\\s/]+/merges(?![\\w-])|\\bgit (?:send-pack|http-push)\\b|\\bgit push\\b(?!(?:\\s+(?:-u|-q|--set-upstream|--quiet))*\\s+\\w[\\w.-]*\\s+(?!main\\b|master\\b|v?[0-9]|HEAD\\b)\\w[\\w./-]*(?:\\s*(?:$|[;&|)]|2>&1)))"
     rationale: "External side effect: merge, release, publish, connected-app action, or a git push that is not a plain push of one named branch (bare push, force, delete, tag, default branch, refspec)"
   - id: R-11
     level: high

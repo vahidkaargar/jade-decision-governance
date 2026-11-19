@@ -78,7 +78,7 @@ These calls are always your question. The hook does not send them, at any level:
 - an email address, and any other text that redaction changes;
 - a program over 4 KiB, a write over 4 KiB, or more than one inline program in one call;
 - a call you denied, or marked wrong, before;
-- egress (an upload of local data) at level `medium` or `high`; it is sent at level `low` only;
+- egress (an upload of local data) at any level; it is never sent;
 - a call when you wrote no preferences and no confirmed answer exists for its rule.
 
 ## Other commands that call the provider
@@ -102,9 +102,9 @@ Nothing else in JADE opens a network connection.
 JADE keeps a ledger in `~/.local/share/jade` (mode 600). It holds the command text of gated calls, the text of Jev calls, decisions, permits and your answers.
 
 - `jade maintain` removes most project text older than 90 days and keeps every number (statuses, hashes, risk levels, timings, costs, probabilities). Change the window with `retention_days` in your config, or run `jade ledger purge --older-than 90d` yourself.
-- Two paths are not cleared by any purge, also not with `--ask-text`. The working folder of a gated call stays in the permit (its scope holds the plain path). For a `git push`, the repository path and the commit id stay in the permit's precondition. A folder name that names a customer or a project stays in the ledger file. Only removing the ledger file removes them.
+- Three paths are not cleared by any purge, also not with `--ask-text`. The queue of the audit of silent runs (`audit_queue`, V6-29) keeps the command text and the folder of each call that ran from a standing answer; its rows are sealed, and clearing the text needs a new seal (work item W-210). The working folder of a gated call stays in the permit (its scope holds the plain path). For a `git push`, the repository path and the commit id stay in the permit's precondition. A folder name that names a customer or a project stays in the ledger file. Only removing the ledger file removes them.
 - On macOS, `jade setup` can install the job that runs `jade maintain`. Off macOS nothing runs it until you schedule it: `jade maintain-schedule` prints a cron line or a systemd timer. `jade check` warns while the job has not run.
-- By default the purge does not clear the chat question text of an ask, and not the labels of asks and answers, which can hold up to 120 characters of a command. `jade ledger purge --ask-text` clears them. It is off until the owner decides (work item W-146), and `jade maintain` never turns it on.
+- By default the purge does not clear the chat question text of an ask, and not the labels of asks and answers, which can hold up to 120 characters of a command. `jade ledger purge --ask-text` clears them. It is off until the owner decides (work item W-147), and `jade maintain` never turns it on.
 - `jade ledger purge --dry-run` shows what would be cleared, per table, and changes nothing.
 
 ## What JADE cannot promise

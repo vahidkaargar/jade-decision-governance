@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import itertools
 import json
 import math
 import os
@@ -1687,6 +1686,31 @@ _INSTRUCTION_FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".claude/CLAU
 _MAX_RULE_FILES = 200       # rules files scanned; more are counted and reported, never dropped silently
 _MAX_RULE_ENUM = 5000       # rules files listed at most, so a repository with a million files cannot slow the scan
 _MAX_RULE_BYTES = 16 * 1024 * 1024   # all the rules files together
+_MAX_RULE_WALK = 20000      # directory entries looked at, so a `.claude/rules` full of folders and no `.md` file cannot hold up the session start
+
+
+def _rules_files(rules_dir: Path) -> tuple[list[Path], bool]:
+    """The `.md` files under `rules_dir`, at most `_MAX_RULE_ENUM`, from a walk that looks at no more than `_MAX_RULE_WALK` entries and follows no link. The flag says the
+    list is cut short (by either limit), so the report can say so."""
+    found: list[Path] = []
+    seen = 0
+    try:
+        for root, dirs, files in os.walk(rules_dir, followlinks=False):
+            dirs.sort()
+            for name in sorted(files):
+                seen += 1
+                if seen > _MAX_RULE_WALK:
+                    return sorted(found), True
+                if name.endswith(".md"):
+                    if len(found) >= _MAX_RULE_ENUM:
+                        return sorted(found), True
+                    found.append(Path(root, name))
+            seen += len(dirs)
+            if seen > _MAX_RULE_WALK:
+                return sorted(found), True
+    except OSError:
+        pass
+    return sorted(found), False
 _PLAIN_NAME = re.compile(r"[\w.-]{1,40}")
 _TAG_RANGES = ((0xE0000, 0xE007F), (0xE0100, 0xE01EF))   # tag characters and the variation selectors supplement: text no reader sees
 _BIDI_CONTROLS = frozenset({*range(0x202A, 0x202F), *range(0x2066, 0x206A)})   # embeddings, overrides and isolates (Trojan Source)
@@ -1863,13 +1887,10 @@ def repo_config_findings(cwd=None) -> list[tuple[str, str]]:
                 out.append(("mcp", f"{label(d / '.mcp.json')}: {len(servers)} MCP server(s): {_repo_names(servers)}"))
     for d in dirs:
         rules_dir = d / ".claude" / "rules"
-        try:
-            rules = sorted(itertools.islice(rules_dir.rglob("*.md"), _MAX_RULE_ENUM))
-        except OSError:
-            rules = []
-        named = [(d / n, None) for n in _INSTRUCTION_FILES] + [(f, f"(file {k})") for k, f in enumerate(rules[:_MAX_RULE_FILES], 1)]
-        if len(rules) > _MAX_RULE_FILES:   # the host loads every rules file, so a file left out is a gap in the report
-            out.append(("unreadable", f"{label(rules_dir)}: {len(rules) - _MAX_RULE_FILES}{' or more' if len(rules) >= _MAX_RULE_ENUM else ''} more rules files were "
+        rules, cut = _rules_files(rules_dir)
+        named =[(d / n, None) for n in _INSTRUCTION_FILES] + [(f, f"(file {k})") for k, f in enumerate(rules[:_MAX_RULE_FILES], 1)]
+        if len(rules) > _MAX_RULE_FILES or cut:   # the host loads every rules file, so a file left out is a gap in the report
+            out.append(("unreadable", f"{label(rules_dir)}: {max(len(rules) - _MAX_RULE_FILES, 0)}{' or more' if cut else ''} more rules files were "
                                       "not scanned for hidden Unicode"))
         spent = 0
         for f, shown in named:
