@@ -594,7 +594,7 @@
  {
   "kind": "ident",
   "parts": [
-   "com.mobogift.m",
+   "com.example.m",
    "emserve.plist"
   ],
   "template": "ran @@ and it passed"

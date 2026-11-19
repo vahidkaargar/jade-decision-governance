@@ -130,7 +130,7 @@ def test_the_cli_run_as_a_script_is_not_si09_unless_the_subcommand_is_human_only
 
 @pytest.mark.parametrize("sub", ["remove", "stop", "kill", "kickstart", "submit"])
 def test_launchctl_cannot_silence_the_maintain_agent_by_any_verb(sub):
-    cmd = f"launchctl {sub} com.mobogift.jade-maintain"
+    cmd = f"launchctl {sub} com.example.jade-maintain"
     assert LEVELS[level(cmd).level] >= LEVELS["high"]
     assert hooks.pretool(bash(cmd)).exit_code == 2
     assert level("launchctl list").level == "low"

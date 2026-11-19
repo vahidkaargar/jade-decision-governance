@@ -72,7 +72,7 @@ An independent adversarial review of the verifier, the helper and the install sc
 
 ## 5. Open points that need the maintainer
 
-1. **Create the approver account** (needs the admin password; the agent cannot, and should not): is a dedicated standard user acceptable on the Mac mini? The cost is one `sysadminctl` call and one sudoers drop-in, both in an install script the human reads and runs.
+1. **Create the approver account** (needs the admin password; the agent cannot, and should not): is a dedicated standard user acceptable on this machine? The cost is one `sysadminctl` call and one sudoers drop-in, both in an install script the human reads and runs.
 2. **Ledger write path (resolved in the implementation).** The approver account never touches the ledger: `jade permit approve` pipes the message to the helper and receives the signature on stdout, so no `attach` command exists and the ledger stays owned by one user. The signature is self-authenticating: the hook checks it, not who stored it.
 3. **Hardware key.** If you own a FIDO2 key and want touch-per-approval, say so: option C replaces the key, not the design.
 4. **Rollout rule (decided 2026-11-13).** `jade gate enforce` refuses to start while the backend is `tty` and the last 7 days show gated calls with no host prompt, unless the human passes `--allow-unsigned`, which is journaled as event `enforce_unsigned_override`.

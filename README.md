@@ -14,6 +14,103 @@ It governs how agents (Claude Code first) use [TypeSafe Jev](https://docs.typesa
 
 > **Guiding invariant.** No model output (the decision model, a reasoning model, an evaluator, or an improvement agent) can authorize a side effect, weaken protected policy, declare an unobserved outcome successful, or bypass a human approval boundary.
 
+**Support: Claude Code only; macOS tested; Linux CI only; Windows not supported.** JADE is alpha. It installs in advisory mode, which blocks nothing, and you decide when to make it firmer. With no key, or with no level set, it sends nothing off your machine from the hook (see "What leaves your machine").
+
+## Where it runs
+
+| Platform | State |
+|---|---|
+| macOS (Apple silicon or Intel) with Claude Code | Tested. This is the platform the author uses. CI also runs a macOS job: the setup tests, the hook payload tests and the install check |
+| Linux with Claude Code | CI only. The test suite runs on Linux with Python 3.13 and 3.14. No person has done an install trial there yet. There is no Keychain: the key comes from `OPENROUTER_API_KEY`. `jade setup` does not install the maintenance job; `jade maintain-schedule` prints a cron line or a systemd timer for you to install |
+| Windows | Not supported and not tested |
+| Other agents (Codex, Cursor, Gemini, Aider) | Not wired, so nothing is gated. `jev` and `jade ask` work from any tool and enforce nothing |
+| Provider | One: OpenRouter, at the fixed address `openrouter.ai`. No setting changes it |
+
+## Two settings, read separately
+
+JADE has two settings. They are separate, and only you can change them (an agent cannot).
+
+1. **The gate mode is the safety floor.** It says how firm the gate is: `off`, `advisory` (records what it would block) or `enforce`. Read it with `jade gate status`.
+2. **The level is the autonomy setting.** It says how much JADE may answer in your place, and whether text may leave your machine. It is `unset`, `off`, `low`, `medium` or `high`. Read it with `jade level`.
+
+`jade check` shows both: the row `level`, and the row `what blocks`, which lists the blocking rules by id. The table below is not a promise from this page. A test runs the real hook for each pair and compares the result with every cell.
+
+<details>
+<summary>What the real hook does, for each pair of settings</summary>
+
+| Gate mode | Level | `git push origin main` | `rm -rf ~/work` | `jade permit approve ...` |
+|---|---|---|---|---|
+| `off` | `unset` | runs | runs | runs |
+| `off` | `off` | runs | runs | runs |
+| `off` | `low` | runs | runs | runs |
+| `off` | `medium` | runs | runs | runs |
+| `off` | `high` | runs | runs | runs |
+| `advisory` | `unset` | runs | runs | runs |
+| `advisory` | `off` | runs | runs | stops |
+| `advisory` | `low` | runs | runs | stops |
+| `advisory` | `medium` | runs | runs | stops |
+| `advisory` | `high` | runs | runs | stops |
+| `enforce` | `unset` | stops | stops | stops |
+| `enforce` | `off` | runs | runs | stops |
+| `enforce` | `low` | stops | stops | stops |
+| `enforce` | `medium` | stops | stops | stops |
+| `enforce` | `high` | stops | stops | stops |
+
+</details>
+
+The three calls are a push to the default branch (safety invariant SI-08), a high-risk delete (rule R-11) and an agent that tries to approve its own permit (SI-09). "Stops" means the hook refuses the call. "Runs" means the hook lets it through: in advisory mode it still records what it would have blocked. Read two things from the table. First, level `off` is not the firmest setting: only the four governance invariants (SI-09 to SI-12) block there. Second, in `enforce` with the level `unset` every gate rule blocks. Even then a rule is not a wall against an agent that is hostile and runs as your user (docs/05).
+
+## What a blocked command looks like
+
+Claude Code, JADE in enforce mode, no level set, terminal approval. After `jade setup` the gate is in advisory mode and the same calls are not blocked, only recorded.
+
+```text
+Agent runs: git push origin main
+JADE safety invariant SI-08 blocks this Bash call. No permit can authorize it. Rule text: policies/safety.yaml. Do not rephrase the command to get around the invariant; ask the human.
+
+Agent runs: rm -rf ~/work
+JADE gate: high risk (R-11: Destroys local history or files). This Bash call needs a human-approved permit.
+Permit prm_xxxxxxxxxxxx is PENDING. Ask the human to run in their own terminal:  jade permit approve prm_xxxxxxxxxxxx
+Then retry the identical command (single use, 30 minutes). You cannot approve it yourself; do not rephrase the command to avoid the gate. Continue with other work meanwhile.
+```
+
+The first call can never be approved by anyone. What really stops a push to the default branch is git and the remote (the pre-push guard and branch protection, docs/08 section 2.7); JADE reading the command is a second layer. The second call waits for you. You read the command in your own terminal, type the code, and the agent retries the same command once. Any other command does not match the permit.
+
+## What leaves your machine
+
+| Where | What | When |
+|---|---|---|
+| `openrouter.ai` | Redacted text of a call, your preferences, up to 8 past answers, a fixed question, your key in a header | The hook, only in enforce mode with level `low`, `medium` or `high` and a key: also at level `high`, where the answer is only recorded. And `jev`, `jade ask` and `jade check` when you run them |
+| `github.com` and its release hosts | Release data and the install | `jade upgrade` and `jade upgrade --check` only |
+| Nowhere else | No analytics, no crash report, no phone-home | Never |
+
+Ordinary source code and commands are sent as they are. Redaction hides secret shapes and email addresses, not private code. With no key, with level `off` or `unset`, or with the gate not in enforce mode, the hook sends nothing. The full page, with the fields, the limits, the calls that are never sent and how long text stays on your disk, is `PRIVACY.md`. It says nothing about what the provider does with the data: read their terms.
+
+## Which release you are running
+
+You install JADE from GitHub, with the install line in the Quick start. So you trust the repository `github.com/vahidkaargar/jade-decision-governance`, its owner's account and the release tag at the moment `uv` fetches it. JADE runs on every tool call of your agent, so read what you install.
+
+- `jade upgrade` lists the files that change under `jade/`, `policies/`, `registry/` and `scripts/`, and installs only after you type yes.
+- It does not check a signature or an attestation. JADE publishes no signed tags and no build attestations.
+- A release has a `SHA256SUMS` file. It catches a damaged download. It does not catch a compromised release.
+- The release workflow refuses a tag whose commit is not on `main`, and a tag with no CHANGELOG section.
+
+## How fast
+
+The gate runs on every tool call. These are the numbers the repository holds, each with its date and the number of runs.
+
+| What | Runs | p50 | p95 | Date | Source file |
+|---|---|---|---|---|---|
+| Hook process, a call that is not gated, empty ledger | 30 | 113.5 ms | 156.2 ms | 2026-11-09 | result-ledger-100k-2026-11-09.json: empty_ledger_hook_process/pretool_ungated_read |
+| Hook process, a gated call with a permit pending, empty ledger | 30 | 152.2 ms | 165.7 ms | 2026-11-09 | result-ledger-100k-2026-11-09.json: empty_ledger_hook_process/pretool_gated_pending_permit |
+| Hook process, a call that is not gated, 100,000 ledger rows | 30 | 109.9 ms | 119.0 ms | 2026-11-09 | result-ledger-100k-2026-11-09.json: after/hook_process/pretool_ungated_read |
+| Hook process, a gated call with a permit pending, 100,000 ledger rows | 30 | 150.0 ms | 162.4 ms | 2026-11-09 | result-ledger-100k-2026-11-09.json: after/hook_process/pretool_gated_pending_permit |
+| One provider call with one question | 20 | 514 ms | 639 ms | 2026-11-09 | result-2026-11-09.json: single_noul_parallel_1 |
+
+These numbers are old. They were measured on 2026-11-09 on macOS, with a synthetic ledger, before release 0.4.0. They are not measured again on the current release; that is an open item for the owner. The files are in `evals/performance/`.
+
+When a level sends a call to the provider, the hook waits for the answer, also in shadow. It waits at most 3 seconds, inside the hook's own limit of 6 seconds, and then you are asked as before. No live figure for this wait is published here.
+
 ## Status
 
 | Stage | State |
@@ -26,7 +123,7 @@ It governs how agents (Claude Code first) use [TypeSafe Jev](https://docs.typesa
 
 **What 0.5 and 0.6 added (docs/12).** A level for the whole machine (`jade level`, set only by you): at `high`, a gated call is one click in the chat or a dialog instead of a terminal permit. At `low` or `medium`, a call you confirmed earlier (`jade review confirm`, `jade knows`) runs with no question, and Jev may answer a plain high call in your place when it is sure enough (`jade review` shows the silent share, your marks and the wrong-rate bound). Human-only classes (live JADE wiring, deletes that cannot be undone, money, public releases) and critical calls are asked every time, and no answer is remembered for them. A failed call closes its decision (`PostToolUseFailure`). Details and the owner page: `docs/12-jev-decides-phase1.md`.
 
-**Supported:** Claude Code is the only harness JADE is wired into, and macOS is the tested platform (CI runs the suite on Linux). The `jev` and `jade ask` commands work from any tool, but no other agent is gated.
+**Supported:** Claude Code is the only harness JADE is wired into, and macOS is the tested platform (CI runs the suite on Linux; see "Where it runs"). The `jev` and `jade ask` commands work from any tool, but no other agent is gated.
 
 Signed permit approval (W-38, W-89) is merged: with the approver installed, a high or critical permit is approved by a signature only a separate OS account can make, and `jade gate enforce` refuses without it. The installer has not yet been run on a second machine; treat it as new (`docs/10`, `docs/11`).
 
@@ -64,6 +161,7 @@ A prose rule with no threshold and no enforcement point does not hold. Details a
 | 9 | `docs/09-install-and-upgrade.md` | Versioning policy, the upgrade contract, the release process, supported platforms, troubleshooting by `jade check` row, full uninstall |
 | 10 | `docs/10-out-of-band-permit-approval.md` | Signed permit approval: an approval a same-user agent cannot synthesise (implemented; the human installs the approver, `scripts/install-approver.sh`) |
 | 11 | `docs/11-release-0.4.0-plan.md` | The plan for the first enforce-ready release: gates in order, what is human-only, rollback |
+| — | `PRIVACY.md` | What JADE sends off your machine, when, what is never sent, and how long text stays on your disk |
 | — | `BACKLOG.md` | Every open item: owner, priority, dependency, trigger, next action |
 | — | `docs/JADE_Claude_Code_Master_Plan.md` | The original handoff draft this repository completes |
 
