@@ -16,11 +16,13 @@ A subagent call has no AskUserQuestion: `askdialog` (W-100c) asks it in a macOS 
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 from datetime import timedelta
 
-from . import memory, paths
+from . import askplain, memory, paths
+from . import scopes as scopes_mod
 from .util import canonical, new_id, now, ts
 
 CHAT_MODES = ("auto", "bypassPermissions")
@@ -46,9 +48,17 @@ def _clip(text: str) -> str:
     return f"{text[:HEAD_CHARS]}\n... {len(text) - HEAD_CHARS - TAIL_CHARS} characters not shown ...\n{text[-TAIL_CHARS:]}"
 
 
-def question_for(ask_id: str, a, tool: str, ctx: dict) -> dict:
-    """The one question the human sees. Everything in it comes from the gate, none from the agent."""
-    lines = [f"[jade:ask_{ask_id}] JADE gate: {a.level} risk, rule {a.rule_id}. {a.rationale}"]
+ALLOW, DENY = "Allow", "Deny"
+SUGGEST_PROJECT = "Allow, suggest for this project"
+SUGGEST_ANY = "Allow, suggest for any project"
+SUGGEST_LABELS = {"kind_project": SUGGEST_PROJECT, "merge_project": SUGGEST_PROJECT, "kind_any": SUGGEST_ANY}   # scopes.offered gives at most one project scope
+SUGGEST_LATER = "You confirm it later in a terminal. Undo with `jade knows rm`."
+
+
+def question_for(ask_id: str, a, tool: str, ctx: dict, scopes: list | None = None) -> dict:
+    """The one question the human sees. Everything in it comes from the gate, none from the agent. `scopes` (from `scopes.offered`) adds one option per label:
+    a click on it is the same single-use Allow, recorded with the scope as a hint that only `jade review confirm` makes standing."""
+    lines = [f"[jade:ask_{ask_id}] JADE gate: {a.level} risk, rule {a.rule_id}.", *askplain.header(a, tool)]
     if a.ho_ids:
         lines.append("Classes: " + ", ".join(a.ho_ids) + " (only you can decide these)")
     lines.append(f"Tool: {tool}")
@@ -56,10 +66,30 @@ def question_for(ask_id: str, a, tool: str, ctx: dict) -> dict:
     content = ctx.get("content")
     if isinstance(content, dict):
         lines.append(f"It also writes {content.get('length')} characters of content (sha256 {str(content.get('sha256'))[:12]}). First part:\n{_clip(str(content.get('text') or ''))}")
+    options = [{"label": ALLOW, "description": "Run this one call once. It is not remembered."},
+               {"label": DENY, "description": "Do not run it. The agent is told you said no."}]
+    seen: set[str] = set()
+    for sc in scopes or []:
+        label = SUGGEST_LABELS.get(sc.kind)
+        if label is None or label in seen:
+            continue
+        seen.add(label)
+        lines.append(f"{label}: {sc.label}")
+        options.append({"label": label, "description": f"{sc.covers} {SUGGEST_LATER}"})
     lines.append("Allow this one call? Single use, 10 minutes, this session only.")
-    return {"question": "\n".join(lines), "header": "JADE gate", "multiSelect": False,
-            "options": [{"label": "Allow", "description": "Run this one call once. It is not remembered."},
-                        {"label": "Deny", "description": "Do not run it. The agent is told you said no."}]}
+    return {"question": "\n".join(lines), "header": "JADE gate", "multiSelect": False, "options": options}
+
+
+def _scope_for(row, label: str) -> dict | None:
+    """The scope this ask stored for a suggest label, or None when the ask offered none under that label (a forged answer, or an ask from before scopes)."""
+    try:
+        stored = json.loads(row.scopes_json or "[]")
+    except ValueError:
+        return None
+    for sc in stored if isinstance(stored, list) else []:
+        if isinstance(sc, dict) and SUGGEST_LABELS.get(sc.get("kind")) == label:
+            return sc
+    return None
 
 
 def refusal(db, session: str, hold: str, fpj: str, tool: str, where: str):
@@ -165,12 +195,13 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
                 if paused(db, session):
                     return None   # the human is away: the signed permit path, not another ask that would only expire
                 ask_id = new_id("a")[2:]   # twelve hex characters
-                q = question_for(ask_id, a, tool, ctx)
+                offered = scopes_mod.offered(a, tool, event.get("tool_input"), fp, cwd)   # from the gate's own reading of the call, never from the agent
+                q = question_for(ask_id, a, tool, ctx, offered)
                 _, cls, _ = memory.keys(a, tool, event.get("tool_input"), fp)
-                db.con.execute("INSERT INTO asks(ask_id, session_id, agent_id, plan_hash, hold_key, fingerprints_json, rule_id, level, tool, question_json, status, created_ts, expires_ts, source, class_key, label, ho) "
-                               "VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',?,?,?,?,?,?)",
+                db.con.execute("INSERT INTO asks(ask_id, session_id, agent_id, plan_hash, hold_key, fingerprints_json, rule_id, level, tool, question_json, status, created_ts, expires_ts, source, class_key, label, ho, scopes_json) "
+                               "VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',?,?,?,?,?,?,?)",
                                (ask_id, session, event.get("agent_id"), a.plan_hash, hold, fpj, a.rule_id, a.level, tool, json.dumps(q), ts(), ts(now() + timedelta(seconds=ASK_TTL_S)), db.source, cls,
-                                decide.scrub(a.subject).replace("\n", " ")[:120], 1 if a.ho_ids else 0))
+                                decide.scrub(a.subject).replace("\n", " ")[:120], 1 if a.ho_ids else 0, json.dumps([dataclasses.asdict(sc) for sc in offered])))
                 db.event(ask_id, "ask_opened", guard=f"{a.rule_id} {a.level}", actor="hook", detail={"tool": tool, "ho_ids": list(a.ho_ids)})
                 from . import askdialog
 
@@ -224,12 +255,15 @@ def settle(event: dict):
     try:
         for question, label in answers.items():
             m = TOKEN.search(str(question))
-            if not m or label not in ("Allow", "Deny"):
+            if not m or label not in (ALLOW, DENY, *SUGGEST_LABELS.values()):
                 continue
             row = db.one("SELECT * FROM asks WHERE ask_id=? AND session_id=? AND status='SHOWN'", (m.group(1), event.get("session_id")))
             if row is None:
                 continue
-            allow = label == "Allow"
+            scope = _scope_for(row, label) if label in SUGGEST_LABELS.values() else None
+            if label in SUGGEST_LABELS.values() and scope is None:
+                continue   # a suggest label this ask did not offer (a forged answer): nothing is decided
+            allow = label != DENY
             until = ts(now() + timedelta(seconds=GRANT_TTL_S)) if allow else ts(now() + timedelta(seconds=ASK_TTL_S))
             with db.tx():
                 if db.con.execute("UPDATE asks SET status=?, answered_ts=?, expires_ts=? WHERE ask_id=? AND status='SHOWN'",
@@ -237,7 +271,7 @@ def settle(event: dict):
                     continue
                 db.event(row.ask_id, "ask_allowed" if allow else "ask_denied", guard=f"{row.rule_id} {row.level}", actor="human", detail={"channel": "chat"})
                 db.record_human_answer(session=row.session_id, decision_id=row.decision_id, rule_id=row.rule_id, class_key=row.class_key,
-                                       exact_key=memory.exact_key(row.hold_key, row.fingerprints_json), answer="allow" if allow else "deny", channel="chat", label=row.label, ho=bool(row.ho))
+                                       exact_key=memory.exact_key(row.hold_key, row.fingerprints_json), answer="allow" if allow else "deny", channel="chat", label=row.label, ho=bool(row.ho), scope=scope)
     finally:
         db.close()
     return HookResult()

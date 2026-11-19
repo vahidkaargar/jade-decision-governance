@@ -21,7 +21,7 @@ import subprocess
 import sys
 from datetime import timedelta
 
-from . import askchat, memory, paths
+from . import askchat, askplain, memory, paths
 from .util import canonical, new_id, now, ts
 
 DIALOG_WAIT_S = 120       # how long the dialog stays up before it gives up
@@ -86,7 +86,7 @@ def run_dialog(text: str, wait_s: int) -> str | None:
 
 def text_for(a, tool: str, ctx: dict) -> str:
     """Everything in the dialog comes from the gate, none from the agent."""
-    lines = [f"JADE gate: {a.level} risk, rule {a.rule_id}. {a.rationale}", "A subagent wants to run this call."]
+    lines = [*askplain.header(a, tool), f"JADE gate: {a.level} risk, rule {a.rule_id}. A subagent wants to run this call."]
     if a.ho_ids:
         lines.append("Classes: " + ", ".join(a.ho_ids) + " (only you can decide these)")
     lines.append(f"Tool: {tool}")
