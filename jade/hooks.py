@@ -107,6 +107,8 @@ def _gui_pause(event: dict, tool: str):
 def failsafe_reason(event: dict) -> str | None:
     """Why a gated call must be blocked when the policy cannot be consulted, or None when it is clearly harmless: a read-only command,
     a file write outside the protected locations, a tool whose name says it only reads."""
+    if (bad := malformed_reason(event)) is not None:
+        return bad
     tool = str(event.get("tool_name") or "")
     if not policy.is_gated(tool):
         return None
@@ -411,12 +413,29 @@ def _policy_failure(mode: str, event: dict, tool: str, tool_input: dict, cwd: st
     return _fail_closed(mode, f"the policy could not be loaded or applied ({type(exc).__name__}: {str(exc)[:200]}), and {why}.")
 
 
+def malformed_reason(event: dict) -> str | None:
+    """Why a PreToolUse event is not the shape the host sends, when that could hide a gated call (V6-18 d, F11, N26); None when it is well formed or is no tool
+    call at all (no `tool_name`). A `tool_name` that is not a string cannot be matched to the gated list, and the text of a list `command` is not what the
+    shell would run, so neither is read as harmless. A `tool_input` that is not an object is handled by `failsafe_reason` (it blocks a gated tool)."""
+    if "tool_name" not in event:
+        return None
+    tool = event["tool_name"]
+    if not isinstance(tool, str):
+        return f"the event has a tool_name that is not a string ({type(tool).__name__})"
+    tin = event.get("tool_input")
+    if tool in policy.SHELL_TOOLS and isinstance(tin, dict) and tin.get("command") is not None and not isinstance(tin["command"], str):
+        return f"the {tool} command is not a string ({type(tin['command']).__name__})"
+    return None
+
+
 def pretool(event: dict, permit=None) -> HookResult:
     global _STARTED
     _STARTED = time.monotonic()   # Jev in the hook (proxy.step) is given what is left of BUDGET_S
     mode = paths.gate_mode()
     if mode == "off":
         return HookResult()
+    if (bad := malformed_reason(event)) is not None:
+        return _fail_closed(mode, bad + ".")
     tool = event.get("tool_name", "")
     if tool == "AskUserQuestion":
         from . import askchat
@@ -988,6 +1007,11 @@ def main(name: str) -> int:
         event = {}
     if not isinstance(event, dict):
         event = {}
+    if name not in HANDLERS:   # V6-18 d, N26: a typo in the wiring must not leave a gate that silently passes everything (the gate mode `off` keeps its meaning: nothing runs)
+        if paths.gate_mode() == "off":
+            return 0
+        print(f"JADE gate: unknown hook name {name!r}; the hooks are {', '.join(HANDLERS)}. Run `jade check` and `jade hooks install` in a terminal.", file=sys.stderr)
+        return 2
     try:
         if name == "pretool":
             _arm(BUDGET_S)
