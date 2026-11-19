@@ -139,3 +139,42 @@ def test_an_unloadable_policy_still_blocks_an_mcp_read_of_the_key_and_lets_other
     assert pre(DC + "start_search", {"path": str(key.parent), "pattern": "x", "searchType": "content"}).exit_code == 2
     assert pre(DC + "read_file", {"path": str(REPO / "README.md")}).exit_code == 0
     assert pre(DC + "get_file_info", {"path": str(REPO / "README.md")}).exit_code == 0
+
+
+# ---- review fix: the key behind more decoys than the scan reads, or in a string longer than a path -----------------------------------------------
+@pytest.mark.parametrize("n", [254, 255, 256, 257, 300, 5000])
+def test_the_key_after_any_number_of_decoy_paths_is_blocked(key, n):
+    a = assess(DC + "read_multiple_files", {"paths": [str(REPO / "README.md")] * n + [str(key)]})
+    assert "SI-10" in a.blocked, n
+
+
+@pytest.mark.parametrize("tool_input", [
+    {"paths": [str(Path("/etc/hosts"))] * 257},
+    {"path": "/etc/hosts/" + "a" * 5000},
+    {"paths": ["/etc/hosts", "/tmp/" + "b" * 5000]},
+    {"path": "/tmp", "pattern": "x" * 5000, "searchType": "files"},
+    {"path": "/tmp", "pattern": "x", "searchType": "content", "filePattern": ["*.md"] * 300},
+])
+def test_a_list_or_a_string_over_the_limits_counts_as_reaching_the_key(tool_input):
+    assert "SI-10" in assess(DC + "start_search", tool_input).blocked
+
+
+def test_the_hook_blocks_the_key_behind_257_decoys_and_names_si10(key):
+    ti = {"paths": [str(REPO / "README.md")] * 300 + [str(key)]}
+    r = hooks.pretool({"tool_name": DC + "read_multiple_files", "tool_input": ti, "cwd": "/tmp/x", "session_id": "s-v618-c"})
+    assert r.exit_code == 2 and "SI-10" in r.stderr
+
+
+def test_a_content_pattern_over_the_string_limit_is_a_regex_and_not_a_target():
+    a = assess(DC + "start_search", {"path": str(REPO / "docs"), "pattern": "x" * 5000, "searchType": "content"}, cwd=str(REPO))
+    assert "SI-10" not in a.blocked
+
+
+def test_an_unloadable_policy_still_blocks_a_list_over_the_limit(key, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("policy broken")
+
+    monkeypatch.setattr(hooks, "_classify", boom)
+    ti = {"paths": [str(REPO / "README.md")] * 300 + [str(key)]}
+    r = hooks.pretool({"tool_name": DC + "read_multiple_files", "tool_input": ti, "cwd": str(REPO), "session_id": "s-v618-c"})
+    assert r.exit_code == 2

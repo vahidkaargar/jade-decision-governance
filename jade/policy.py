@@ -810,12 +810,14 @@ def _reads_the_seal_key(inv: dict, tool: str, tool_input: dict, cwd: str) -> boo
 _MCP_PATH_KEYS = frozenset({*WRITE_KEYS, *PATH_KEYS, "paths", "files", "file_paths", "filepaths", "uri", "root", "cwd"})
 _MCP_GLOB_KEYS = frozenset({"glob", "filepattern", "file_pattern", "include"})
 _MCP_MAX_TARGETS = 256
+_MCP_MAX_STRING = 4096
 
 
 def _mcp_strings(v) -> list[str]:
-    """The non-empty strings of a value that is a string or a list of strings (one level of list), short enough to be a path."""
+    """The non-empty strings of a value that is a string or a list of strings (one level of list), short enough to be a path. A list or a string over the
+    limits is cut here and counted as reaching the key by `mcp_targets_overflow`."""
     items = v if isinstance(v, (list, tuple)) else [v]
-    return [x for x in items[:_MCP_MAX_TARGETS] if isinstance(x, str) and x.strip() and len(x) <= 4096]
+    return [x for x in items[:_MCP_MAX_TARGETS] if isinstance(x, str) and x.strip() and len(x) <= _MCP_MAX_STRING]
 
 
 def mcp_read_targets(tool: str, tool_input: dict) -> tuple[str, list[str], list[str]]:
@@ -835,10 +837,27 @@ def mcp_read_targets(tool: str, tool_input: dict) -> tuple[str, list[str], list[
     return ("Grep" if content else "Read"), paths_, globs
 
 
+def mcp_targets_overflow(tool: str, tool_input: dict) -> bool:
+    """Does a path or glob argument of an MCP call hold more than `_MCP_MAX_TARGETS` entries, or a string longer than a path can be? `mcp_read_targets` keeps
+    only the first entries, so the key could hide behind decoys (`read_multiple_files` with 256 other paths first). Such a call counts as reaching the key."""
+    if not isinstance(tool_input, dict):
+        return False
+    content = str(tool_input.get("searchType", "")).lower() == "content" or "grep" in tool.lower()
+    for k, v in tool_input.items():
+        lk = str(k).lower()
+        if lk in _MCP_PATH_KEYS or lk in _MCP_GLOB_KEYS or (lk == "pattern" and not content):
+            items = v if isinstance(v, (list, tuple)) else [v]
+            if len(items) > _MCP_MAX_TARGETS or any(isinstance(x, str) and len(x) > _MCP_MAX_STRING for x in items):
+                return True
+    return False
+
+
 def _mcp_reads_the_seal_key(tool: str, tool_input: dict, cwd: str) -> bool:
     inv = next((i for i in safety()["invariants"] if i["id"] == "SI-10"), None)
     if inv is None:
         return False
+    if mcp_targets_overflow(tool, tool_input):   # fail closed: what the scan below would leave out could be the key
+        return True
     kind, targets, globs = mcp_read_targets(tool, tool_input)
     return (bool(targets) or bool(globs)) and _seal_key_reached(inv, kind, targets, globs, cwd)
 
@@ -962,7 +981,7 @@ _STATE_LITERAL = re.compile(r"\.config/jade(?![\w.-])|\.local/share/jade(?![\w.-
 _INSTALL_CMD = re.compile(r"\b(?:uv\s+tool\s+(?:install|upgrade|reinstall)|uv\s+pip\s+install|pip3?\s+install|pipx\s+(?:install|upgrade|reinstall)|python3?\s+-m\s+pip\s+install)\b")
 _UV_TOOL_JADE = re.compile(r"\buv\s+tool\s+(?:uninstall|upgrade|reinstall|install)\b[^;&|]*\bjade|\buv\s+tool\s+(?:uninstall|upgrade|reinstall)\b[^;&|]*--all\b")   # R-13: changes or removes the installed JADE tool itself, whatever it installs from
 _SETTINGS_FILE = re.compile(r"(?:^|/)\.claude/settings(?:\.local)?\.json$")
-_SETTINGS_DISABLE = re.compile(r"disableAllHooks|allowManagedHooksOnly|JADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME|REGISTRY_DIR)|\"hooks\"\s*:\s*(?:\{\s*\}|null)", re.I)
+_SETTINGS_DISABLE = re.compile(r"disableAllHooks|allowManagedHooksOnly|JADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME|REGISTRY_DIR|SESSION_ID)|CLAUDE_CODE_SESSION_ID|\"hooks\"\s*:\s*(?:\{\s*\}|null)", re.I)
 TERMINAL_TOOLS = frozenset({"mcp__terminal__run_in_terminal"})
 
 

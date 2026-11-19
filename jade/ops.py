@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import itertools
 import json
 import math
 import os
@@ -1528,12 +1529,23 @@ def shadow_problems(cwd=None, *, managed: bool = True, plugins: bool = True) -> 
 
 # ---- what a repository controls before the trust dialog (V6-18 e, BS-01, BS-02; display only) ----------------------------
 _INSTRUCTION_FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".claude/CLAUDE.md")
-_MAX_RULE_FILES = 50
+_MAX_RULE_FILES = 200       # rules files scanned; more are counted and reported, never dropped silently
+_MAX_RULE_ENUM = 5000       # rules files listed at most, so a repository with a million files cannot slow the scan
+_MAX_RULE_BYTES = 16 * 1024 * 1024   # all the rules files together
 _PLAIN_NAME = re.compile(r"[\w.-]{1,40}")
 _TAG_RANGES = ((0xE0000, 0xE007F), (0xE0100, 0xE01EF))   # tag characters and the variation selectors supplement: text no reader sees
 _BIDI_CONTROLS = frozenset({*range(0x202A, 0x202F), *range(0x2066, 0x206A)})   # embeddings, overrides and isolates (Trojan Source)
-_ALWAYS_HIDDEN = frozenset({0x200B, *range(0x2060, 0x2065), 0x00AD, 0x180E, 0x034F, 0xFEFF})
+_ALWAYS_HIDDEN = frozenset({0x200B, *range(0x2060, 0x2065), 0x00AD, 0x180E, 0x034F, 0xFEFF,
+                            *range(0xFE00, 0xFE0F),                 # variation selectors 1 to 15 (a text-smuggling channel); VS16 is the emoji selector, read below
+                            *range(0x206A, 0x2070),                 # deprecated format characters
+                            0x3164, 0x115F, 0x1160, 0xFFA0,         # Hangul fillers: blank, and not a letter
+                            0x2800,                                 # braille blank
+                            *range(0xFFF9, 0xFFFD),                 # interlinear annotation marks and the object replacement character
+                            *range(0x1D173, 0x1D17B)})              # musical format controls
+_VS16 = 0xFE0F                                                      # ordinary after an emoji; a run of them carries bits
+_JOINERS = frozenset({0x200C, 0x200D})
 _NEEDS_A_SCRIPT = frozenset({0x200C, 0x200D, 0x200E, 0x200F, 0x061C})   # ordinary in Persian and Arabic text and in emoji sequences, hidden anywhere else
+_JOINER_MIN, _JOINER_RATIO = 8, 6   # a line with this many joiners, and one in every six characters or more, hides bits in them
 
 
 def _repo_name(k) -> str:
@@ -1556,24 +1568,53 @@ def _joins_text(c: str | None) -> bool:
 
 def hidden_unicode(text: str) -> tuple[dict[str, int], int]:
     """({class: count}, line of the first hit) of the characters in `text` that a reader does not see but a model reads. Classes: `tag`, `bidi`, `zero-width`.
-    A byte order mark at the very start is not counted, and a joiner or direction mark next to Persian, Arabic or emoji text is ordinary writing."""
+    A byte order mark at the very start is not counted, and a joiner or direction mark next to Persian, Arabic or emoji text is ordinary writing, unless two
+    joiners touch, or a line holds many of them (`_JOINER_MIN`, `_JOINER_RATIO`: bits of a hidden message). Also counted as `zero-width`: variation selectors
+    (a run of the emoji selector too), Hangul fillers, the braille blank, the deprecated format characters, the interlinear and object marks, musical format controls."""
     if text.isascii():
         return {}, 0
     counts: dict[str, int] = {}
     first = 0
     line = 1
+    line_len = ordinary_joiners = 0   # the joiners of this line that were exempt as ordinary writing; too many of them in a line are bits of a hidden message
+
+    def end_of_line() -> None:
+        nonlocal first
+        if ordinary_joiners >= _JOINER_MIN and ordinary_joiners * _JOINER_RATIO >= line_len:
+            counts["zero-width"] = counts.get("zero-width", 0) + ordinary_joiners
+            first = first or line
+
     for i, c in enumerate(text):
         o = ord(c)
         if c == "\n":
+            end_of_line()
             line += 1
+            line_len = ordinary_joiners = 0
             continue
+        line_len += 1
         if o < 0x80:
             continue
-        kind = ("tag" if any(a <= o <= b for a, b in _TAG_RANGES) else "bidi" if o in _BIDI_CONTROLS else "zero-width" if o in _ALWAYS_HIDDEN and not (o == 0xFEFF and i == 0)
-                else "zero-width" if o in _NEEDS_A_SCRIPT and not (_joins_text(text[i - 1] if i else None) or _joins_text(text[i + 1] if i + 1 < len(text) else None)) else None)
+        prev, nxt = (ord(text[i - 1]) if i else 0), (ord(text[i + 1]) if i + 1 < len(text) else 0)
+        if any(a <= o <= b for a, b in _TAG_RANGES):
+            kind = "tag"
+        elif o in _BIDI_CONTROLS:
+            kind = "bidi"
+        elif o in _ALWAYS_HIDDEN and not (o == 0xFEFF and i == 0):
+            kind = "zero-width"
+        elif o == _VS16 and (0xFE00 <= prev <= _VS16 or 0xFE00 <= nxt <= _VS16):   # one after an emoji is ordinary; a run is not
+            kind = "zero-width"
+        elif o in _NEEDS_A_SCRIPT:
+            if (o in _JOINERS and (prev in _JOINERS or nxt in _JOINERS)) or not (_joins_text(text[i - 1] if i else None) or _joins_text(text[i + 1] if i + 1 < len(text) else None)):
+                kind = "zero-width"
+            else:
+                kind = None
+                ordinary_joiners += o in _JOINERS
+        else:
+            kind = None
         if kind:
             counts[kind] = counts.get(kind, 0) + 1
             first = first or line
+    end_of_line()
     return counts, first
 
 
@@ -1628,12 +1669,14 @@ def repo_config_findings(cwd=None) -> list[tuple[str, str]]:
         return []
     root = dirs[-1]
 
-    def label(f: Path) -> str:
+    def label(f: Path, last: str | None = None) -> str:
+        """A path as it may be shown: every segment is a plain name (`_repo_name`), else `(unusual name)`, because a directory or file name is repository text.
+        `last` replaces the final segment (a rules file is shown by its number, not by its name)."""
         try:
-            rel = f.relative_to(root).as_posix()
+            parts = list(f.relative_to(root).parts)
         except ValueError:
-            rel = f.name
-        return re.sub(r"[^\w ./@+,~-]", "?", rel)[:80]
+            parts = [f.name]
+        return "/".join([_repo_name(p) for p in parts[:-1]] + [last if last is not None else _repo_name(parts[-1])] if parts else [last or "."])
 
     out: list[tuple[str, str]] = []
     for f in project_settings_files(cwd):
@@ -1664,20 +1707,30 @@ def repo_config_findings(cwd=None) -> list[tuple[str, str]]:
             if isinstance(servers, dict) and servers:
                 out.append(("mcp", f"{label(d / '.mcp.json')}: {len(servers)} MCP server(s): {_repo_names(servers)}"))
     for d in dirs:
-        files = [d / n for n in _INSTRUCTION_FILES]
+        rules_dir = d / ".claude" / "rules"
         try:
-            files += sorted((d / ".claude" / "rules").rglob("*.md"))[:_MAX_RULE_FILES]
+            rules = sorted(itertools.islice(rules_dir.rglob("*.md"), _MAX_RULE_ENUM))
         except OSError:
-            pass
-        for f in files:
+            rules = []
+        named = [(d / n, None) for n in _INSTRUCTION_FILES] + [(f, f"(file {k})") for k, f in enumerate(rules[:_MAX_RULE_FILES], 1)]
+        if len(rules) > _MAX_RULE_FILES:   # the host loads every rules file, so a file left out is a gap in the report
+            out.append(("unreadable", f"{label(rules_dir)}: {len(rules) - _MAX_RULE_FILES}{' or more' if len(rules) >= _MAX_RULE_ENUM else ''} more rules files were "
+                                      "not scanned for hidden Unicode"))
+        spent = 0
+        for f, shown in named:
+            if shown and spent >= _MAX_RULE_BYTES:
+                out.append(("unreadable", f"{label(rules_dir)}: the scan of the rules files stopped at its total size limit; the rest were not scanned for hidden Unicode"))
+                break
             text, problem = _bounded_text(f)
+            where = label(rules_dir / "_", shown) if shown else label(f)   # a rules file by its number, whatever directories lie between
             if problem:
-                out.append(("unreadable", f"{label(f)}: {problem} for hidden Unicode"))
+                out.append(("unreadable", f"{where}: {problem} for hidden Unicode"))
             if text is None:
                 continue
+            spent += len(text) if shown else 0
             counts, first = hidden_unicode(text)
             if counts:
-                out.append(("unicode", f"{label(f)}: hidden Unicode ({', '.join(f'{n} {k}' for k, n in sorted(counts.items()))}; first at line {first})"))
+                out.append(("unicode", f"{where}: hidden Unicode ({', '.join(f'{n} {k}' for k, n in sorted(counts.items()))}; first at line {first})"))
     return out
 
 
@@ -1722,7 +1775,7 @@ def _overrides_row() -> tuple[str, bool, str]:
     if weak:
         return ("gate overrides", False, "weakening: " + ", ".join(f"{o.var} [{o.why}]" for o in weak) + ". Unset them; `JADE_ACK_OVERRIDES=VAR,...` only silences "
                 "this row for a deliberate override in this shell, never one in the Claude settings `env` block")
-    return ("gate overrides", True, shown or "none (JADE_GATE_MODE, JADE_POLICY_DIR, JADE_CONFIG, JADE_HOME, JADE_APPROVER_ANCHOR all default)")
+    return ("gate overrides", True, shown or "none (JADE_GATE_MODE, JADE_POLICY_DIR, JADE_CONFIG, JADE_HOME, JADE_APPROVER_ANCHOR, JADE_SESSION_ID all default or unset)")
 
 
 def overlay_problems() -> list[str]:

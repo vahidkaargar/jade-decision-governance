@@ -127,6 +127,8 @@ def failsafe_reason(event: dict) -> str | None:
                 return f"{tool} names {t[:120]!r}, which may be the permit seal key"
         return None
     if policy.is_mcp(tool):   # V6-18 c: an MCP file reader or search that names the seal key, or a directory that may hold it
+        if policy.mcp_targets_overflow(tool, tin):
+            return f"{tool} names more paths, or a longer one, than the gate reads, so the permit seal key may be among them"
         _kind, targets, globs = policy.mcp_read_targets(tool, tin)
         for t in (*targets, *globs):
             if _SEAL_KEY_TEXT.search(t) or _SEAL_KEY_TEXT.search(policy.real(os.path.expanduser(t))) or policy.is_seal_key_dir(policy.real(os.path.expanduser(t))):
