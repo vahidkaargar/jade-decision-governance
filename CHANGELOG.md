@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+### Added
+- **"Never looser than main" check (V6-03).** `uv run python evals/never_looser.py <ref-a> <ref-b>` compares the gate on two versions of the code. It runs every command from the eval files, the test fixtures and the redirect tests through both, in three folders (no repository, a repository on `main`, a repository on a feature branch). It prints each command that the first version stops and the second lets through. Exit 0 and no output mean: not looser on these commands. Exit 1 means at least one command got looser. Exit 2 means the check could not run in full, so it is not an answer. The result is only as good as the command list, so it never says "not looser" in general. A new test checks that every rule of the first version is reached by at least one command.
+- **Known-gap list (V6-03).** `evals/known_gaps/` holds the holes both versions still have, as counted rows with an owner. They are listed, not hidden. A row joins the normal gate only after its fix is merged.
+
 ### Changed
 
 - **One id register for work items and threats (V6-02).** A W id and a T id now each name one thing, and `tests/test_ids_unique.py` fails on a new duplicate (the allow-lists are empty). `W-96` to `W-105` are historic feature ids (CHANGELOG, test file names, commits) and no work item uses them. The 21 working-tree backlog rows that were numbered `W-96` to `W-116` are in `work-items.jsonl` as `W-117` to `W-137` (old id plus 21; `W-115` stays the SI-13 sandbox row), the PR 47 entries below and its tests and spec cite the new ids, and a citation written "WT W-110" means `W-131`. Eight rows that waited for the register are `W-138` to `W-145`. See `docs/07` section 2.
