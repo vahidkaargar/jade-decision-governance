@@ -344,8 +344,9 @@ def test_g3_the_real_hook_blocks_and_asks_in_every_enforcing_arm(replayed):
 
 
 def test_g3_at_level_off_the_hook_only_logs_and_the_governance_invariant_still_blocks(replayed):
+    """V6-16: level off is observe plus floor. A push to main (SI-08) now blocks at off in gate mode enforce, as the governance invariant (E4) does; an ask is only logged."""
     res = replayed[3]
-    assert actions(res, ".:off:enforce") == {"E1": ("allow", ""), "E2": ("allow", "block"), "E3": ("allow", "ask"), "E4": ("block", "")}
+    assert actions(res, ".:off:enforce") == {"E1": ("allow", ""), "E2": ("block", ""), "E3": ("allow", "ask"), "E4": ("block", "")}
     assert actions(res, ".:unset:advisory") == {"E1": ("allow", ""), "E2": ("allow", "block"), "E3": ("allow", "ask"), "E4": ("allow", "block")}
 
 

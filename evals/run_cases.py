@@ -87,9 +87,23 @@ def run_case(c: dict) -> list[str]:
         if r.exit_code != c["expect_exit"]:
             problems.append(f"exit {r.exit_code}, expected {c['expect_exit']}")
     elif kind in ("gate", "gate_write", "gate_mcp"):
+        from jade import policy
+
+        old_home, old_roots = os.environ.get("HOME"), policy._shell_roots
         if c.get("level"):   # the autonomy level the human set (docs/12): the human-only classes (HO-shell-startup ...) are high work only once there is one
             (Path(os.environ["JADE_CONFIG"]) / "config.json").write_text(json.dumps({"level": c["level"]}))
-        res = hooks.pretool(gate_event(c))
+            # the shell start-up class reads the start-up files of HOME: use this case's own empty HOME and the real reader (a pytest run swaps it for one that
+            # returns nothing), so the answer does not depend on the machine's own ~/.zshrc
+            os.environ["HOME"] = os.environ["JADE_HOME"]
+            policy._shell_roots = policy._real_shell_roots
+        try:
+            res = hooks.pretool(gate_event(c))
+        finally:
+            policy._shell_roots = old_roots
+            if old_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = old_home
         want = 2 if c.get("expect") == "block" else 0
         if res.exit_code != want:
             problems.append(f"gate exit {res.exit_code}, expected {want} ({res.stderr[:80]!r})")

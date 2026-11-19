@@ -658,6 +658,7 @@ def test_a_nested_rated_command_behind_a_quoted_separator_is_shown_whole():
     assert "bash -c 'cd /prod; git reset --hard HEAD~1'" in tail and "not shown above" in tail, tail
 
 
+@pytest.mark.timing
 def test_more_nested_statements_than_the_cap_say_so_and_stay_fast():
     import time
     from types import SimpleNamespace

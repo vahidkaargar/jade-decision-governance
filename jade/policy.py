@@ -1084,6 +1084,9 @@ def _shell_roots() -> tuple[str, ...]:
     return tuple(dict.fromkeys(out))
 
 
+_real_shell_roots = _shell_roots   # tests/conftest.py swaps `_shell_roots` for one that returns (); the case runner (evals/run_cases.py) puts this one back for a case that sets a level
+
+
 def _written_text(tool_input: dict) -> str:
     """The new text a Write, Edit, MultiEdit or NotebookEdit call carries ('' when it carries none the gate can read)."""
     parts = [str(tool_input[k]) for k in ("content", "new_string", "new_source") if isinstance(tool_input.get(k), str)]

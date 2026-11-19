@@ -29,7 +29,7 @@ def test_runner_detects_a_wrong_expectation(tmp_path, capsys):
 
 
 def _gap_row(**extra):
-    row = {"id": "KGX1", "class": "variable_as_git", "kind": "gate", "command": "g=git; $g push origin main", "expect": "block",
+    row = {"id": "KGX1", "class": "variable_as_git", "kind": "gate", "command": "v=push; git $v origin main", "expect": "block",   # V6-08 closed `g=git; $g push ...`: this form is still open (KG58)
            "known_gap": "a variable as the command name hides the push"}
     return json.dumps({**row, **extra}) + "\n"
 
@@ -130,7 +130,8 @@ def test_the_known_gap_list_names_every_open_vector_of_the_v6_03_card():
     subjects = {r.get("command") or r.get("path") for r in rows}
     assert OPEN_VECTORS - subjects == set()
     # a row moves out only with its fix and a test (V6-08): what is left under V6-08 is the four shell start-up rows, which are open at no level
-    assert {r["id"] for r in rows if r.get("work_item") == "V6-08"} == {"KG06", "KG07", "KG08", "KG31"}
+    # KG56 (git -C "" push, found by the V6-22 oracle review) also waits under V6-08; the residual variable forms wait under W-151
+    assert {r["id"] for r in rows if r.get("work_item") == "V6-08"} == {"KG06", "KG07", "KG08", "KG31", "KG56"}
 
 
 def test_every_vector_v6_08_closed_is_an_adversarial_case_that_blocks_and_no_longer_a_gap():
