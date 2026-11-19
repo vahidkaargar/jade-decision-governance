@@ -513,7 +513,7 @@ def review_text(p, now_s: str | None = None, raw: dict | None = None) -> str:
     plain = "\n".join(parts.head) + "\n"
     return (f"{plain}Permit   {p.permit_id}   risk {p.risk_level}   environment {p.environment}   {age}\n{secrets}"
             f"Rule     {printable(str(ctx.get('rule', '?')))}: {show_safely(str(ctx.get('rationale', '')), prose=True)}\n"
-            f"Tool     {printable(ctx['tool'])}   cwd {printable(str(ctx.get('cwd', '')))}\n"
+            f"Tool     {printable(ctx['tool'])}   cwd {show_safely(str(ctx.get('cwd', '')), one_line=True)}\n"
             f"{parts.where[1]}\n"
             f"Plan     sha256 {p.plan_hash[:12]}   {ctx.get('length', len(ctx['subject']))} characters, shown in full below\n"
             f"Command\n  | {body}\n{content}"

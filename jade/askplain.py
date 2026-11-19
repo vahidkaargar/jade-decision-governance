@@ -424,10 +424,6 @@ def _npm(words: list[str]) -> _Rule:
     return [], (["let anyone read the package (--access public)"] if public else [])
 
 
-def _rm(words: list[str]) -> _Rule:
-    return [], (["allow it to delete the root folder (--no-preserve-root)"] if "--no-preserve-root" in _flags(words) else [])
-
-
 _SUDO = r"(?:sudo(?: -\S+)*\s+)?"
 _WIDEN: list[tuple[re.Pattern, object]] = [(re.compile(p), f) for p, f in (
     (r"^" + _SUDO + r"git clean\b", _clean),
@@ -439,7 +435,6 @@ _WIDEN: list[tuple[re.Pattern, object]] = [(re.compile(p), f) for p, f in (
     (r"^" + _SUDO + r"crontab\b", _crontab),
     (r"^" + _SUDO + r"gh gist\b", _gist),
     (r"^" + _SUDO + r"npm publish\b", _npm),
-    (r"^" + _SUDO + r"rm\b", _rm),
 )]
 
 
@@ -629,7 +624,7 @@ def build(a, tool: str, ch: Channel, *, folder: str, who: str) -> Parts:
     safely here. The command itself is not built here: each channel shows it in its own way."""
     from . import thresholds
 
-    folder = show_safely(folder) if folder else "(not given)"
+    folder = show_safely(folder, one_line=True) if folder else "(not given)"   # one line: a folder name with a line break must not forge an "Asked by" or "Allow" line
     who = show_safely(who, one_line=True)[:80]
     head = header(a, tool)
     where = [f"Folder: {folder}", f"Asked by: {who}"]
