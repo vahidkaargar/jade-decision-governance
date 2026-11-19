@@ -130,6 +130,7 @@ def test_egress_is_decided_at_low_with_the_higher_band_and_never_at_medium(ready
     assert len(ready.sent) == n   # nothing was sent
 
 
+@pytest.mark.timing
 @pytest.mark.parametrize("kind", ["abstain", "unavailable", "late"])
 def test_anything_but_an_accept_is_the_owners_question(ready, kind, monkeypatch):
     if kind == "abstain":
@@ -235,6 +236,7 @@ def test_text_in_the_command_cannot_reach_the_instructions(ready):
 
 # ------------------------------------------------------------------ the hook keeps its time
 
+@pytest.mark.timing
 def test_a_slow_provider_keeps_the_hook_inside_its_budget(ready):
     ready.delay = 1.5
     t0 = time.monotonic()
@@ -242,6 +244,7 @@ def test_a_slow_provider_keeps_the_hook_inside_its_budget(ready):
     assert r.exit_code == 0 and time.monotonic() - t0 < hooks.BUDGET_S
 
 
+@pytest.mark.timing
 def test_a_hung_provider_is_cut_and_the_owner_is_asked(ready, monkeypatch):
     ready.delay = 30
     monkeypatch.setattr(proxy, "DEADLINE_S", 0.3)
@@ -456,6 +459,7 @@ def test_a_hung_exchange_does_not_leave_its_row_evaluating(ready, monkeypatch):
     assert m.rows("SELECT state FROM jev_calls WHERE question_id=? AND state='EVALUATING'", (QID,)) == []
 
 
+@pytest.mark.timing
 def test_the_deadline_follows_what_is_left_of_the_hook_budget():
     assert proxy._deadline(None) == pytest.approx(proxy.DEADLINE_S)
     assert proxy._deadline(time.monotonic() - (hooks.BUDGET_S - proxy.RESERVE_S - 1.0)) == pytest.approx(1.0, abs=0.2)

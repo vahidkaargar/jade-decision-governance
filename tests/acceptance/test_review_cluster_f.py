@@ -380,6 +380,7 @@ def test_an_ambiguous_prefix_inside_a_slug_is_not_a_token(text):
     assert redact_mod.redact(text) == (text, 0) and not redact_mod.residual(text)
 
 
+@pytest.mark.timing
 def test_redaction_of_glued_text_stays_linear():
     import time
     text = ("xsk-" + "ab" * 20 + "_") * 4000 + "ghp_" * 4000

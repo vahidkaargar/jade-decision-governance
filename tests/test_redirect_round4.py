@@ -349,6 +349,7 @@ def test_a_run_that_counts_is_kept_and_a_plain_run_is_cut():
     assert shellnorm._collapse_runs("x y z " * 12) == "x y z " * 4
 
 
+@pytest.mark.timing
 @pytest.mark.parametrize("depth, pipes", [(6, 8), (8, 4), (10, 3)])
 def test_a_chain_of_pipelines_is_not_read_once_per_pipe_per_level(depth, pipes):
     """Each `| sh` after a here-string re-produced the text of the stage: the output grew as pipes ** depth (24 s for 1.7 kB on main)."""
@@ -362,6 +363,7 @@ def test_a_chain_of_pipelines_is_not_read_once_per_pipe_per_level(depth, pipes):
     assert si08(command)
 
 
+@pytest.mark.timing
 def test_heredoc_bodies_with_backslashes_are_not_squared_by_a_nest():
     command = PUSH
     for k in range(10):

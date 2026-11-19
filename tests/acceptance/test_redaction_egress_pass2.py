@@ -49,6 +49,7 @@ _UNITS = [
 ]
 
 
+@pytest.mark.timing
 @pytest.mark.parametrize("unit", _UNITS)
 def test_redaction_is_linear_on_adversarial_text(unit):
     """`redact()` runs on every gated command before the hook's timeout; a hook that overruns it is killed and the command runs."""
@@ -63,6 +64,7 @@ def test_a_long_or_unclosed_bracket_value_is_still_redacted():
         assert "AAAA" not in out and "short-one" not in out and hits == 1, out
 
 
+@pytest.mark.timing
 def test_a_huge_gated_command_is_still_decided_well_before_the_hook_timeout(monkeypatch):
     """The reviewer's DoS: a critical command followed by 150 KB of `password=[a` took 13 s, the host killed the hook (fail open)."""
     monkeypatch.setenv("JADE_GATE_MODE", "enforce")

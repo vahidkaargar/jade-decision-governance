@@ -3,11 +3,14 @@ import json
 import plistlib
 import time
 
+import pytest
+
 from jade import adapter, ask, cli, ledger, ops
 
 Q = "q.verify_claim.supported_by_evidence"
 
 
+@pytest.mark.timing
 def test_rollback_drill_restores_champion(tmp_path):
     ops.pin_champion(tmp_path, Q, 1)
     ops.set_challenger(tmp_path, Q, 2)

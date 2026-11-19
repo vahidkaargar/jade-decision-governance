@@ -82,16 +82,19 @@ def _timed(fn):
         return e, time.monotonic() - t0
 
 
+@pytest.mark.timing
 def test_a_resolver_that_hangs_cannot_hold_the_transport_past_the_deadline(stalled_resolver):
     out, elapsed = _timed(lambda: adapter.http_transport(PAYLOAD, "fake-key", DEADLINE))
     assert isinstance(out, TimeoutError) and elapsed < BOUND
 
 
+@pytest.mark.timing
 def test_a_connect_that_hangs_cannot_hold_the_transport_past_the_deadline(stalled_connect):
     out, elapsed = _timed(lambda: adapter.http_transport(PAYLOAD, "fake-key", DEADLINE))
     assert isinstance(out, TimeoutError) and elapsed < BOUND
 
 
+@pytest.mark.timing
 def test_a_hung_resolver_is_unavailable_exit_5_and_inside_the_provider_deadline(stalled_resolver, tmp_path):
     prov = adapter.OpenRouterProvider(key_fn=lambda: "fake-key", deadline_s=DEADLINE)
     r, elapsed = _timed(lambda: ask_once(prov, ledger.open(tmp_path)))
@@ -99,6 +102,7 @@ def test_a_hung_resolver_is_unavailable_exit_5_and_inside_the_provider_deadline(
     assert elapsed < BOUND + 0.5      # no second attempt starts after the deadline
 
 
+@pytest.mark.timing
 def test_a_hung_connect_is_unavailable_exit_5_and_inside_the_provider_deadline(stalled_connect, tmp_path):
     prov = adapter.OpenRouterProvider(key_fn=lambda: "fake-key", deadline_s=DEADLINE)
     r, elapsed = _timed(lambda: ask_once(prov, ledger.open(tmp_path)))
@@ -106,6 +110,7 @@ def test_a_hung_connect_is_unavailable_exit_5_and_inside_the_provider_deadline(s
     assert elapsed < BOUND + 0.5
 
 
+@pytest.mark.timing
 @pytest.mark.parametrize("scheme", ["http", "https"])
 def test_a_server_that_accepts_and_stalls_is_cut_at_the_deadline(monkeypatch, tmp_path, scheme):
     srv = _Silent()
@@ -119,6 +124,7 @@ def test_a_server_that_accepts_and_stalls_is_cut_at_the_deadline(monkeypatch, tm
     assert elapsed < BOUND + 0.5
 
 
+@pytest.mark.timing
 def test_a_hung_resolver_behind_a_proxy_url_is_cut_too(monkeypatch, release):
     def blocked(*a, **kw):
         release.wait(4.0)
@@ -132,6 +138,7 @@ def test_a_hung_resolver_behind_a_proxy_url_is_cut_too(monkeypatch, release):
     assert isinstance(out, TimeoutError) and elapsed < BOUND
 
 
+@pytest.mark.timing
 def test_a_transport_failure_before_the_deadline_keeps_its_own_error(monkeypatch):
     """The worker thread hands the real exception back; only a missed deadline is a TimeoutError."""
     def refused(*a, **kw):
@@ -143,6 +150,7 @@ def test_a_transport_failure_before_the_deadline_keeps_its_own_error(monkeypatch
     assert isinstance(out, ConnectionRefusedError) and elapsed < 2.0
 
 
+@pytest.mark.timing
 def test_an_abandoned_worker_never_delivers_a_late_answer(stalled_resolver, release):
     """After the deadline the caller has its TimeoutError; when the stub finally returns, nothing is raised into or returned to anyone."""
     out, _ = _timed(lambda: adapter.http_transport(PAYLOAD, "fake-key", 0.3))

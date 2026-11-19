@@ -304,6 +304,7 @@ def _timed(cmd: str) -> float:
     return time.perf_counter() - t
 
 
+@pytest.mark.timing
 def test_n1_many_quoted_words_cost_is_linear_not_quadratic():
     small = _timed("echo " + "'a' " * 5000)
     big = _timed("echo " + "'a' " * 40000)
@@ -314,12 +315,14 @@ def test_n1_many_quoted_words_cost_is_linear_not_quadratic():
     assert _timed("echo " + "$(true) " * 20000) < 10.0
 
 
+@pytest.mark.timing
 def test_n1_nested_shell_quoting_is_bounded_and_still_found():
     assert _timed(_nest("git push origin main", 10)) < 5.0
     assert "SI-08" in assess(_nest("git push origin main", 7)).blocked
     assert _timed(_nest("git push origin main", 12)) < 30.0  # past the work budget: degraded text search, never a hang; origin/main's own reading of this takes 0.6 s here and the gate runs it too
 
 
+@pytest.mark.timing
 def test_n1_work_budget_exhaustion_degrades_to_text_search_not_open():
     cmd = "echo " + "'a' " * 300000 + "; git push origin main"
     t = time.perf_counter()
@@ -466,6 +469,7 @@ def test_probe_cd_to_a_computed_directory_is_a_documented_limit():
     assert a.level == "medium" and a.rule_id == "R-32"
 
 
+@pytest.mark.timing
 def test_n1_huge_command_is_not_masked_and_cost_stays_bounded():
     from jade import inert
 

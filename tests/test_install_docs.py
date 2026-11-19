@@ -78,7 +78,7 @@ def test_release_process_names_the_tag_the_workflow_and_the_checksum_command():
 
 def test_platform_section_states_the_launchd_and_linux_limits():
     text = _section(5)
-    assert "launchd" in text and "no job helper" in text and "Linux" in text and "Windows" in text and "OPENROUTER_API_KEY" in text
+    assert "launchd" in text and "jade maintain-schedule" in text and "Linux" in text and "Windows" in text and "OPENROUTER_API_KEY" in text
 
 
 def test_uninstall_covers_everything_setup_and_install_create():

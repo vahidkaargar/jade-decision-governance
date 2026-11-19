@@ -9,7 +9,7 @@ It governs how agents (Claude Code first) use [TypeSafe Jev](https://docs.typesa
 
 - every model call is journaled, with typed errors that never count as "yes";
 - a probability maps to accept / abstain / reject through per-task-family thresholds, with abstention as a real exit code;
-- side effects above a risk level need a single-use **execution permit** that only a human at a terminal can approve;
+- side effects above a risk level need a single-use approval that only a human can give: a signed **execution permit** approved in their own terminal (30 minutes), or, once they set a level with `jade level`, an Allow answer in the chat or a dialog (10 minutes, one call, never for live JADE wiring). Safety invariants such as pushing the default branch cannot be approved by anyone;
 - improvement of prompts and thresholds is measured offline and cannot touch its own safety rules.
 
 > **Guiding invariant.** No model output (the decision model, a reasoning model, an evaluator, or an improvement agent) can authorize a side effect, weaken protected policy, declare an unobserved outcome successful, or bypass a human approval boundary.
@@ -20,15 +20,19 @@ It governs how agents (Claude Code first) use [TypeSafe Jev](https://docs.typesa
 |-------|-------|
 | DESIGN_READY | **Yes** — design approved by the maintainer 2026-11-09 |
 | IMPLEMENTED | **Yes** — `jade` 0.6.1: ledger, adapter, redaction, `jev` shim, question registry, permits, hook gate, calibration, bounded improvement loop, standalone pre-push guard (`jade git-hook`); Phases 1–5 acceptance tests pass. 0.2.1 closed the first independent adversarial review and 0.2.2 the false-positive pass and the structural fix for "never push to the default branch" (see `CHANGELOG.md`). The command classifier is defence in depth, not the enforcement of that rule: the enforcement is the pre-push guard and branch protection on the remote, which only a human can install (`docs/08-deployment-runbook.md` section 2.7, W-68, W-69). The residual risks are listed in `docs/05-threat-model.md` and tracked in `BACKLOG.md` |
-| LIVE (enforce) | **Yes, on the reference machine: advisory from 2026-11-09, enforce with the signed approver since 2026-11-13** — the four hooks are installed, the gate blocks high and critical calls that have no permit, a permit needs a signature only the `_jadeapprove` account can make, the daily maintenance job is loaded, the pre-push guard and the remote branch ruleset protect `main` |
+| LIVE (enforce) | **Run on the author's machine, in enforce mode with the signed approver, since 2026-11-13. What is on for your machine is what `jade check` says, not this table.** Enforce means: the five hooks are installed, the gate blocks high and critical calls that have no approval, and a permit needs a signature only the `_jadeapprove` account can make. Whether the daily maintenance job has been loaded, whether the pre-push guard is installed and whether branch protection is on for a repository are facts of one machine and one remote: `jade check` shows each row ok, FAIL, or "unknown: owner confirms" |
 | VALIDATED | No — needs 14 days of real ledger data, labelled outcomes and one full improvement cycle (`docs/08` section 5); earliest 2026-11-27 (14 days of enforce) |
 | PRODUCTION_APPROVED | No — a human decision (`docs/08`) |
+
+**What 0.5 and 0.6 added (docs/12).** A level for the whole machine (`jade level`, set only by you): at `high`, a gated call is one click in the chat or a dialog instead of a terminal permit. At `low` or `medium`, a call you confirmed earlier (`jade review confirm`, `jade knows`) runs with no question, and Jev may answer a plain high call in your place when it is sure enough (`jade review` shows the silent share, your marks and the wrong-rate bound). Human-only classes (live JADE wiring, deletes that cannot be undone, money, public releases) and critical calls are asked every time, and no answer is remembered for them. A failed call closes its decision (`PostToolUseFailure`). Details and the owner page: `docs/12-jev-decides-phase1.md`.
+
+**Supported:** Claude Code is the only harness JADE is wired into, and macOS is the tested platform (CI runs the suite on Linux). The `jev` and `jade ask` commands work from any tool, but no other agent is gated.
 
 Signed permit approval (W-38, W-89) is merged: with the approver installed, a high or critical permit is approved by a signature only a separate OS account can make, and `jade gate enforce` refuses without it. The installer has not yet been run on a second machine; treat it as new (`docs/10`, `docs/11`).
 
 Hardening batch 1 (merged 2026-11-09, `CHANGELOG.md` Unreleased) added the wiring checks: `jade check` now reports shadowed or disabled hooks in project, managed and plugin settings, lints the private overlay, compares the installed code with the checkout, validates permit and improvement rows, and the permit seal key is protected against Read, Grep and Glob as well as shell. After pulling a change like this, re-install the tool and, when the changelog says the hook matcher changed, re-run `jade hooks install` yourself (an agent cannot: SI-09).
 
-What exists today: the design documents, the runtime, six JSON Schema contracts, five policy files with a tested loader, a 10-entry question registry, replayable regression and adversarial cases (`evals/run_cases.py`), the baseline and performance tooling, and the phase acceptance tests. What does not exist yet is listed in `BACKLOG.md` (for example the routing and judgment eval sets, W-49, and several metrics of `docs/04` section 7, W-52); the documents mark each of those as planned. The gate is a syntactic classifier with known residual risks (`docs/05` T2, T3, T18, T19, T22): it is a strong guard rail for an agent that makes mistakes, not a boundary against one that is adversarial and runs as the same user. Wiring it into an agent harness is deliberately a human step: see `docs/08-deployment-runbook.md`.
+What exists today: the design documents, the runtime, six JSON Schema contracts, five policy files with a tested loader, a 12-entry question registry, replayable regression and adversarial cases (`evals/run_cases.py`), the baseline and performance tooling, and the phase acceptance tests. What does not exist yet is listed in `BACKLOG.md` (for example the routing and judgment eval sets, W-49, and several metrics of `docs/04` section 7, W-52); the documents mark each of those as planned. The gate is a syntactic classifier with known residual risks (`docs/05` T2, T3, T18, T19, T22): it is a strong guard rail for an agent that makes mistakes, not a boundary against one that is adversarial and runs as the same user. Wiring it into an agent harness is deliberately a human step: see `docs/08-deployment-runbook.md`.
 
 ## Why: the measured baseline
 
@@ -40,7 +44,7 @@ Before designing anything, the current practice was measured on one developer ma
 | Of those, followed by a done/verified claim in the next message (heuristic) | 30% |
 | Calls that re-asked an identical question in the same session | 20% |
 | Calls with an error or unparsable result, none of which blocked anything | 9.4% |
-| Latency, one question or eight batched | ≈ 500 ms either way |
+| Latency, one question or eight batched (measured at baseline, 2026-11-08) | ≈ 500 ms either way. A live call is slower and changes with the provider: `jade check` prints the latency of its canary call |
 
 A prose rule with no threshold and no enforcement point does not hold. Details and method: `docs/00-inventory-and-gaps.md`, `docs/04-calibration-and-evaluation.md`.
 
@@ -84,7 +88,7 @@ This release is **enforce-ready**: it installs in advisory mode (records what it
 
 **Requirements**
 
-- macOS or Linux (macOS is the tested platform; the maintenance job helper is macOS only, see `docs/09-install-and-upgrade.md` section 5)
+- macOS or Linux (macOS is the tested platform; `jade setup` installs the maintenance job on macOS only, on Linux `jade maintain-schedule` prints a cron line or a systemd timer for you to install; see `docs/09-install-and-upgrade.md` section 5)
 - Python 3.13 or newer and [uv](https://docs.astral.sh/uv/)
 - [Claude Code](https://docs.claude.com/en/docs/claude-code) (JADE installs its hooks in `~/.claude/settings.json`)
 - An OpenRouter key for the Jev calls: in the macOS Keychain (service `OPENROUTER_API_KEY`, account `$USER`) or in the `OPENROUTER_API_KEY` environment variable of the shell that starts Claude Code. The gate and the hooks work without a key; `jev` and the live `jade check` canary need it. `jade setup` never asks for the value and never prints it

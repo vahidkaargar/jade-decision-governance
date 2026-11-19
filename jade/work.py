@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import json
+import os
 import re
+import stat
+import tempfile
+import threading
+import time
 from datetime import date
 from pathlib import Path
 
 from . import schemas
+
+try:
+    import fcntl
+except ImportError:   # Windows
+    fcntl = None
 
 # The generated table starts at a line that is exactly the heading `## Items`. The hand-written text above it may quote the words in prose
 # or in a code span (`## Items`); only a heading line counts, and the very first line of the file counts too.
@@ -31,10 +43,77 @@ def load(path: Path) -> list[dict]:
     return items
 
 
+LOCK_WAIT_S = 10.0   # how long a writer waits for another writer before it gives up with a TimeoutError
+_held = threading.local()   # the lock files this thread holds: `locked` can be entered again (`jade work` holds it over load and save, and save asks for it too)
+
+
+def lock_path(path: Path) -> Path:
+    """The lock is a file next to the data file, never the data file itself: `os.replace` swaps the data file's inode, and a lock on the old inode would guard nothing."""
+    p = Path(os.path.realpath(path))
+    return p.with_name(p.name + ".lock")
+
+
+@contextlib.contextmanager
+def locked(path: Path):
+    """Hold an exclusive lock on `path` (a read, change and save of a work file belong inside one). It waits up to LOCK_WAIT_S and then raises TimeoutError.
+    The same thread may enter it again. Where `fcntl` does not exist (Windows) there is no lock and the atomic write is all that protects the file."""
+    key = str(lock_path(path))
+    mine = getattr(_held, "keys", None)
+    if mine is None:
+        mine = _held.keys = set()
+    if key in mine or fcntl is None:
+        yield
+        return
+    fd = os.open(key, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + LOCK_WAIT_S
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as e:
+                if e.errno not in (errno.EAGAIN, errno.EACCES):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"another jade command holds the lock on {path} (waited {LOCK_WAIT_S:g}s); try again") from None
+                time.sleep(0.05)
+        mine.add(key)
+        try:
+            yield
+        finally:
+            mine.discard(key)
+    finally:
+        os.close(fd)   # closing the descriptor drops the lock
+
+
+def atomic_write(path: Path, text: str) -> None:
+    """Write the whole file or none of it: a temp file in the same directory, flushed to disk, given the old file's mode, then renamed over it. A failure
+    removes the temp file and leaves the old file as it was. A symlink is followed, so the link stays a link."""
+    target = Path(os.path.realpath(path))
+    try:
+        mode = stat.S_IMODE(target.stat().st_mode)
+    except FileNotFoundError:
+        mode = 0o644
+    fd, tmp = tempfile.mkstemp(prefix=f".{target.name}.jade-", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def save(path: Path, items: list[dict]) -> None:
+    """Validate every item, then write the file atomically under the lock. A reader sees the old file or the new one, never a cut-off line."""
     for w in items:
         schemas.validate("work-item", w)
-    Path(path).write_text("".join(json.dumps(w, ensure_ascii=False) + "\n" for w in items))
+    with locked(path):
+        atomic_write(path, "".join(json.dumps(w, ensure_ascii=False) + "\n" for w in items))
 
 
 def age(items: list[dict], today: date | None = None) -> list[str]:
@@ -190,5 +269,5 @@ def render(jsonl: Path, backlog: Path, today: date | None = None) -> str:
     head = ITEMS_HEADING.split(backlog.read_text(), maxsplit=1)[0] if backlog.exists() else "# Backlog\n\n"
     text = (head.rstrip("\n") + f"\n{MARK}\n" + table(items) +
             f"\n\nAging: P2 → P1 after 14 idle days; P3 → P2 after 30. Rendered by `jade work render` on {(today or date.today()).isoformat()}.\n")
-    backlog.write_text(text)
+    atomic_write(backlog, text)   # a cut-off BACKLOG.md would lose the hand-written head; two renders of one source give one text, so no lock
     return text

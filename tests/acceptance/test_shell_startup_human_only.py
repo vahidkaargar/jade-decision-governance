@@ -98,6 +98,7 @@ def test_a_neighbour_file_is_not_a_startup_file(home):
     assert CLASS not in write(home / "notes.txt").ho_ids
 
 
+@pytest.mark.timing
 def test_a_fifo_startup_file_does_not_block(home):
     os.mkfifo(home / ".zshenv")
     t = time.monotonic()

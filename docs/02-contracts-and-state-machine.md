@@ -13,7 +13,7 @@ PreToolUse gate                   → EXECUTING    (permit consumed)
 jade decide outcome <id> ...      → VERIFYING → {SUCCEEDED | FAILED | OUTCOME_UNKNOWN}; from FAILED, `jade decide event <id> compensate|rollback`
 ```
 
-Resumable side states: `WAITING_HUMAN`, `WAITING_DEPENDENCY`, `RETRY_SCHEDULED`. Terminal: `SUCCEEDED`, `FAILED`, `COMPENSATED`, `ROLLED_BACK`, `OUTCOME_UNKNOWN`, `REJECTED`, `CANCELLED`, `EXPIRED`.
+Resumable side states: `WAITING_HUMAN`, `WAITING_DEPENDENCY` (reserved, not entered: no event leads into it, only `resume` leaves it; it stays in the schema so an old row still reads), `RETRY_SCHEDULED`. Terminal: `SUCCEEDED`, `FAILED`, `COMPENSATED`, `ROLLED_BACK`, `OUTCOME_UNKNOWN`, `REJECTED`, `CANCELLED`, `EXPIRED`.
 
 ## 2. Transition table
 

@@ -287,9 +287,9 @@ def _run(specs: list[Spec], items: list[Item], state: dict, hits: int, warnings:
             elif it.verdict.verdict == "REJECT":
                 result.exit_code = 3
                 result.note = f"{it.spec.question_id} rejected (P={it.verdict.value:.2f}): the evidence looks like a summary; attach raw output"
-    if res and res.ok and res.resolved_model:
+    if res and res.ok and res.resolved_model and db:   # the note goes to the ledger this call uses, never to the JADE home by default (V6-11); no ledger, no note
         try:
-            ops.check_drift(None, res.resolved_model, ops.expected_models())
+            ops.check_drift(None, res.resolved_model, ops.expected_models(), db=db)
         except Exception as e:  # noqa: BLE001 - drift bookkeeping is informational
             warnings.append(f"drift check skipped ({type(e).__name__})")
     try:

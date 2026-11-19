@@ -505,6 +505,7 @@ def test_the_blind_spot_count_is_in_the_ledger_stats():
 
 
 # ---------------------------------------------------------------- the gate stays inside its time budget
+@pytest.mark.timing
 def test_the_new_scans_are_cheap_on_a_large_command():
     import time
 

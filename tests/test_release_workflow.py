@@ -1,4 +1,5 @@
 """REL-3: .github/workflows/release.yml. The workflow is never run here; these tests parse it and pin what it must do."""
+import re
 from pathlib import Path
 
 import pytest
@@ -93,3 +94,56 @@ def test_no_job_interpolates_a_github_context_into_a_shell_script(wf):
 
 def test_every_job_has_a_timeout(wf):
     assert all("timeout-minutes" in j for j in wf["jobs"].values())
+
+
+# ---- V6-34: the release rules are enforced by the workflow, not by habit ---------------------------------------------------------------------------
+
+SHA_PIN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}$")
+
+
+def needs(job: dict) -> list[str]:
+    n = job.get("needs", [])
+    return [n] if isinstance(n, str) else list(n)
+
+
+def reaches(jobs: dict, start: str, target: str) -> bool:
+    seen, todo = set(), [start]
+    while todo:
+        j = todo.pop()
+        if j == target:
+            return True
+        if j not in seen:
+            seen.add(j)
+            todo.extend(needs(jobs[j]))
+    return False
+
+
+def test_the_guard_job_runs_first_on_the_full_history_and_checks_the_tag(wf):
+    guard = wf["jobs"]["guard"]
+    assert needs(guard) == []
+    checkout = steps(guard)[0]
+    assert checkout["uses"].startswith("actions/checkout@") and checkout["with"] == {"fetch-depth": 0}
+    text = run_text(guard)
+    assert "git fetch" in text and "origin/main" in text
+    assert 'sh scripts/check_release_tag.sh "$GITHUB_REF_NAME"' in text
+    assert text.index("git fetch") < text.index("check_release_tag.sh")
+    assert (ROOT / "scripts" / "check_release_tag.sh").is_file()
+
+
+def test_no_job_can_run_before_the_guard_has_passed(wf):
+    jobs = wf["jobs"]
+    for name in jobs:
+        if name != "guard":
+            assert reaches(jobs, name, "guard"), name
+
+
+def test_every_action_is_pinned_by_a_commit_sha(wf):
+    for doc in (wf, load("ci.yml")):
+        for ref in uses(doc):
+            assert SHA_PIN.match(ref), ref
+
+
+def test_the_release_notes_step_has_no_fallback_text_and_fails_on_an_empty_section(wf):
+    text = run_text(wf["jobs"]["release"])
+    assert "See CHANGELOG.md" not in text
+    assert "no CHANGELOG.md section" in text and "exit 1" in text

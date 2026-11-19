@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 
 from . import paths, policy
-from .util import at_least, now, ts
+from .util import at_least, now, ts, ts_in
 
 _STARTED: float | None = None   # time.monotonic() when this PreToolUse call began
 BUDGET_S = 6.0          # whole PreToolUse handler; the dialog path (askdialog) raises its own alarm for the wait, the installed host timeout (ops.HOOKS) covers it
@@ -903,6 +903,83 @@ def _ready_notice(db, rows: list[dict], shown: set, room: int) -> list[str]:
     return lines
 
 
+RESHOW_SOURCES = ("compact", "resume")   # SessionStart `source` values after which the session has lost its context (V6-27): briefing lines told once are shown again
+
+
+def _once(db, kind: str, ids: list[str], reshow: bool) -> bool:
+    """True when a briefing line about `ids` is to be shown: always after a compact or resume, else once per distinct set of ids (a ledger event with a key)."""
+    if reshow:
+        return True
+    try:
+        digest = hashlib.sha1("\n".join(sorted(ids)).encode("utf-8", "replace")).hexdigest()[:12]   # noqa: S324 - an idempotency key, not security
+        return db.event("briefing", kind, guard=f"{len(ids)} item(s)", actor="hook", key=f"{kind}:{digest}")
+    except Exception:  # noqa: BLE001 - if the note cannot be written, show the line: telling twice is better than never
+        return True
+
+
+def _held_notice(db, reshow: bool) -> list[str]:
+    """How many decisions SI-07 holds now: an unknown outcome, or an irreversible call still executing (the same two cases as `_si07_hold`; a reversible one
+    that is still running is not held). The ledger keeps no project for a decision and a hold is by command, not by directory, so the count is for all projects
+    and the line says so. Told once per set of ids; shown again, with the ids, after a compact or resume. Never blocks."""
+    try:
+        from . import ledger
+
+        now_s = ts()
+        ids = []
+        for r in db.all("SELECT decision_id, status, expires_at, doc_json FROM decisions WHERE status IN ('OUTCOME_UNKNOWN','EXECUTING') AND " + ledger.live()):
+            if r.status == "OUTCOME_UNKNOWN" or r.expires_at <= now_s:
+                ids.append(r.decision_id)
+                continue
+            try:
+                irreversible = json.loads(r.doc_json)["risk"]["reversibility"] == "irreversible"
+            except (ValueError, KeyError, TypeError):
+                irreversible = True
+            if irreversible:
+                ids.append(r.decision_id)
+        if not ids or not _once(db, "held_notice", ids, reshow):
+            return []
+        shown = f" Ids: {', '.join(sorted(ids)[:5])}{' ...' if len(ids) > 5 else ''}." if reshow else ""
+        return [f"JADE: decisions held: {len(ids)} (all projects: the ledger does not record the project). A held command is not run again until a human or you record what really "
+                f"happened: jade decide outcome <id> --type observed --success true|false --method \"how you checked\".{shown}"]
+    except Exception:  # noqa: BLE001 - an announcement must never change the hook's answer
+        return []
+
+
+def _expired_twice_notice(db, reshow: bool) -> list[str]:
+    """Plans whose permit expired twice in the last day with no later use of that plan (V6-27). A permit that nobody approved in time, or that was approved and
+    not used, is `EXPIRED`; the plan hash groups them. Told once per set; shown again after a compact or resume. Never blocks."""
+    try:
+        from . import ledger
+
+        since = ts_in(-86400)
+        plans = []
+        keys = []   # plan hash + newest issue time of the set: the same command expiring twice again later is news again, the same pair is told once
+        for r in db.all("SELECT plan_hash, MAX(issued_at) AS last FROM permits WHERE state='EXPIRED' AND expires_at>=? AND " + ledger.live() +
+                        " GROUP BY plan_hash HAVING COUNT(*)>=2", (since,)):
+            later = db.one("SELECT 1 AS x FROM permits WHERE plan_hash=? AND state IN ('CONSUMED','ISSUED') AND issued_at>? LIMIT 1", (r.plan_hash, r.last))
+            if later is None:
+                plans.append(r.plan_hash)
+                keys.append(f"{r.plan_hash}@{r.last}")
+        if not plans or not _once(db, "expired_twice_notice", keys, reshow):
+            return []
+        shown = f" Plan hashes: {', '.join(sorted(p[:12] for p in plans)[:5])}." if reshow else ""
+        return [f"JADE: permits that expired twice: {len(plans)}. Nobody approved them in time, or the approved permit was not used. Ask the human before you request the same call again.{shown}"]
+    except Exception:  # noqa: BLE001 - an announcement must never change the hook's answer
+        return []
+
+
+def _open_ask_notice(db, session: str) -> list[str]:
+    """Open asks of this session, for a compact or resume: the session lost the ask id it was told. Another session's ask is not this agent's to answer."""
+    try:
+        from . import ledger
+
+        ids = [r.ask_id for r in db.all("SELECT ask_id FROM asks WHERE session_id=? AND status IN ('PENDING','SHOWN') AND expires_ts>? AND " + ledger.live() + " ORDER BY created_ts",
+                                       (session, ts()))]
+    except Exception:  # noqa: BLE001 - an announcement must never change the hook's answer
+        return []
+    return [f"JADE: open asks of this session: {', '.join(ids[:5])}{' ...' if len(ids) > 5 else ''}. The human answers them; do not run the call until they are answered."] if ids else []
+
+
 def session_start(event: dict) -> HookResult:
     from . import decide, ledger, permits
 
@@ -911,10 +988,15 @@ def session_start(event: dict) -> HookResult:
         decide.sweep(db)
         permits.sweep(db)
         out = _override_notice(db, event) + _shadow_notice(db, event)
+        src = event.get("source")
+        reshow = isinstance(src, str) and src in RESHOW_SOURCES
+        out += _held_notice(db, reshow) + _expired_twice_notice(db, reshow)   # V6-27: held decisions come first (docs/14-v6/07 section 6.3), then pending permits
         pending = permits.listing(db, ("PENDING",))
         pend = [p for p in pending if getattr(p, "source", None) != "test"]
         if pend:
             out.append(f"JADE: {len(pend)} permit(s) awaiting human approval: " + ", ".join(p.permit_id for p in pend[:5]))
+        if reshow:
+            out += _open_ask_notice(db, str(event.get("session_id") or ""))
         waiting = db.one("SELECT COUNT(*) AS n FROM decisions WHERE status='WAITING_HUMAN' AND " + ledger.live()).n
         if waiting:
             out.append(f"JADE: {waiting} decision(s) in WAITING_HUMAN (`jade decide list --status WAITING_HUMAN`).")
