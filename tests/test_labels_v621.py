@@ -205,7 +205,7 @@ def test_a_pending_row_has_fewer_than_two_raters_and_counts_as_pending_not_as_ag
 
 def test_hard_class_rows_are_counted_per_family_and_get_no_label_to_score(ag, tmp_path):
     """A label taken from an invariant's own text would be circular, so a hard row holds a family and no rater labels, and stays out of kappa."""
-    hard = [{"id": f"HD{i}", "class": "hard", "kind": "gate", "command": "echo hard", "source": "synthetic", "cluster": "hard", "hard_family": fam}
+    hard = [{"id": f"HD{i}", "class": "hard", "kind": "gate", "command": f"echo hard {i}", "source": "synthetic", "cluster": "hard", "hard_family": fam}
             for i, fam in enumerate(["push-main", "push-main", "delete-root"])]
     rows, problems = ag.load_rows(write(tmp_path, [*corpus(6), *hard]))
     assert problems == []
@@ -453,3 +453,112 @@ def test_a_converted_case_row_keeps_no_expectation_the_raters_would_see(ag, tmp_
     rows = corpus(1)
     rows[0][field] = "block"
     assert any(field in p for p in ag.load_rows(write(tmp_path, rows))[1])
+
+
+# ---- review fixes: a whitelist of fields, a label only where it is checked, keys scanned, copies counted once ------------------------------
+@pytest.mark.parametrize("field", ["label", "known_gap", "friction_ok"])
+def test_a_hard_row_may_not_carry_a_label_or_a_replay_mark(ag, tmp_path, field):
+    """decision_replay reads `label` from any row, so a hard row with one would be scored for accuracy: the card says hard rows get no rate."""
+    hard = {"id": "H1", "class": "hard", "kind": "gate", "command": "git push --force origin main", "source": "synthetic", "cluster": "c", "hard_family": "SI-13",
+            field: "allow" if field == "label" else True}
+    assert any(field in p for p in ag.load_rows(write(tmp_path, [hard]))[1])
+    assert ag.main(["check", str(write(tmp_path, [hard], "h.jsonl"))]) == 1
+
+
+def test_a_gray_row_without_both_raters_and_a_final_may_not_carry_a_label(ag, tmp_path):
+    one = make_row(0, "allow")
+    del one["raw"]["rater2"], one["final"], one["adjudicated"]     # `label` stays: a pending row with a label
+    assert any("label" in p for p in ag.load_rows(write(tmp_path, [one]))[1])
+    two = make_row(1, "allow")
+    del two["final"], two["adjudicated"]                           # both raters, no final, but a label
+    assert any("label" in p for p in ag.load_rows(write(tmp_path, [two]))[1])
+    zero = make_row(2, "allow")
+    zero["raw"] = {}
+    del zero["final"], zero["adjudicated"]
+    assert any("label" in p for p in ag.load_rows(write(tmp_path, [zero]))[1])
+
+
+def test_a_hard_row_with_a_label_cannot_become_a_replay_row(ag, tmp_path):
+    """The point of the finding: the same file must not feed a hard row to decision_replay as a scored row. The loader refuses it first."""
+    bad = [{"id": "h1", "class": "hard", "kind": "gate", "command": "git push --force origin main", "source": "synthetic", "cluster": "c", "hard_family": "SI-13",
+            "label": "allow"}]
+    rows, problems = ag.load_rows(write(tmp_path, bad))
+    assert problems and ag.main(["check", str(write(tmp_path, bad, "h.jsonl"))]) == 1
+
+
+@pytest.mark.parametrize("field", ["rule_hits", "rule_hit", "Rule", "decision_id", "jev_probability", "p_accept", "matched_rule", "band", "policy", "gate_decision",
+                                   "observed", "ID", "notes"])
+def test_a_row_takes_only_the_fields_the_format_names_so_a_near_miss_is_refused(ag, tmp_path, field):
+    rows = corpus(1)
+    rows[0][field] = "SI-13"
+    problems = ag.load_rows(write(tmp_path, rows))[1]
+    assert any("not an allowed field" in p or "must not see" in p for p in problems), field
+
+
+def test_nested_objects_take_only_their_own_fields(ag, tmp_path):
+    rows = corpus(3)
+    rows[0]["raw"]["rater1"]["rule"] = "R-12"
+    rows[1]["final"]["rule_id"] = "SI-13"
+    rows[2]["raw"]["rater2"]["p"] = 0.9
+    problems = ag.load_rows(write(tmp_path, rows))[1]
+    assert sorted({p.split(":")[0] for p in problems}) == ["line 1 LB000", "line 2 LB001", "line 3 LB002"]
+
+
+def test_a_gate_row_takes_the_call_fields_of_its_kind_only(ag, tmp_path):
+    rows = corpus(1)
+    rows[0]["path"] = "x"                      # a `gate` row has a command, not a path
+    assert any("not an allowed field" in p for p in ag.load_rows(write(tmp_path, rows))[1])
+
+
+def test_a_secret_shaped_key_name_is_scanned_and_never_printed(ag, tmp_path):
+    tok = _secret()
+    mcp = {"id": "m", "class": "hard", "kind": "gate_mcp", "tool": "t", "input": {tok: 1}, "source": "synthetic", "cluster": "c", "hard_family": "SI"}
+    top = {"id": "t", "class": "hard", "kind": "gate", "command": "echo x", "source": "synthetic", "cluster": "c", "hard_family": "SI", tok: 1}
+    nested = {"id": "n", "class": "hard", "kind": "gate_mcp", "tool": "t", "input": {"a": [{tok: 1}]}, "source": "synthetic", "cluster": "c", "hard_family": "SI"}
+    for row in (mcp, top, nested):
+        problems = ag.load_rows(write(tmp_path, [row]), scan=True)[1]
+        assert problems, row["id"]
+        assert tok not in "\n".join(problems), row["id"]
+    assert any("secret-shaped" in p for p in ag.load_rows(write(tmp_path, [mcp]), scan=True)[1])
+    assert any("secret-shaped" in p for p in ag.load_rows(write(tmp_path, [nested]), scan=True)[1])
+
+
+def test_one_call_repeated_under_many_ids_is_a_problem_and_cannot_be_frozen(ag, tmp_path, capsys):
+    """150 ids, two distinct calls, 12 made-up clusters: this used to pass every gate. Now each repeat is a problem and the freeze is refused."""
+    rows = []
+    for i in range(150):
+        rows.append(make_row(i, "allow" if i % 2 else "block", command="ls" if i % 2 else "rm -rf /", cluster=f"task-{i % 12}"))
+    p = write(tmp_path, rows)
+    loaded, problems = ag.load_rows(p)
+    assert sum("same call as" in x for x in problems) == 148
+    assert ag.agreement(loaded)["n"] == 2
+    assert states(ag, loaded)["rows"]["state"] == "not-enough-data"
+    assert ag.main(["check", str(p)]) == 1
+    assert ag.main(["report", str(p)]) == 1
+    assert ag.main(["freeze", str(p), "--write"]) == 1
+    assert not (tmp_path / "rows.frozen.json").exists()
+    capsys.readouterr()
+
+
+def test_a_repeat_with_other_spaces_or_across_classes_is_still_a_repeat(ag, tmp_path):
+    a = make_row(0, "allow", command="echo   hello")
+    b = make_row(1, "allow", command="echo hello")
+    hard = {"id": "H", "class": "hard", "kind": "gate", "command": "echo\thello", "source": "synthetic", "cluster": "h", "hard_family": "f"}
+    problems = ag.load_rows(write(tmp_path, [a, b, hard]))[1]
+    assert sum("same call as" in x for x in problems) == 2
+    # a write is compared by its path and its joined content
+    w = {"id": "W1", "class": "hard", "kind": "gate_write", "path": "a.txt", "content_parts": ["x", "y"], "source": "synthetic", "cluster": "c", "hard_family": "f"}
+    w2 = {**w, "id": "W2", "content_parts": ["xy"]}
+    w3 = {**w, "id": "W3", "content_parts": ["xz"]}
+    problems = ag.load_rows(write(tmp_path, [w, w2, w3], "w.jsonl"))[1]
+    assert sum("same call as" in x for x in problems) == 1
+
+
+def test_one_task_that_holds_too_many_of_the_rows_fails_the_clusters_gate(ag, tmp_path):
+    rows = corpus(150)
+    for i, r in enumerate(rows):
+        r["cluster"] = "big-task" if i < 60 else f"task-{i % 12}"      # 40 percent of the rows are one task; 13 clusters in all
+    loaded, _ = ag.load_rows(write(tmp_path, rows))
+    s = states(ag, loaded)
+    assert s["clusters"]["state"] == "fail" and "one task" in s["clusters"]["detail"]
+    assert ag.main(["freeze", str(tmp_path / "rows.jsonl"), "--write"]) == 1

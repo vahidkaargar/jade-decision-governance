@@ -8,6 +8,16 @@
 - `agree.py` loads a corpus, checks every row, computes kappa and percent agreement of the two raters, counts hard-class rows per family, and freezes the final labels by hash. Its docstring has the row format.
 - `corpus.jsonl` is the file for committed rows. Only `synthetic` or `redacted` rows (or `public:<set>` rows) may go in. A secret scan and a host scan run over every committed row.
 
+## What the loader refuses
+
+- Any field the format does not name (a whitelist), also inside `raw` and `final`. A rule id, an invariant or a Jev probability cannot come in under a new name.
+- A `label` on a hard row, or on a gray row that has no two raters and no `final`. A hard row is counted per family and never scored for accuracy.
+- A secret shape or a real host anywhere in a committed row, key names too.
+- The same call twice (spaces of a command collapsed), under any ids. Count each call once. The row count and kappa count distinct calls only.
+- One task holding more than 25% of the rows. A cluster is the calls of one source task. Name clusters by task, not to reach 10.
+
+The call text (`command`, `content_parts`, `input`) is free text. The loader cannot know what it means, so keep rule ids and notes out of it.
+
 ## Steps for the owner
 
 1. Choose a private folder outside the repository for real rows. Real commands, paths and host names stay there.
