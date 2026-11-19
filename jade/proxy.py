@@ -289,6 +289,8 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: 
         _close_stranded(db, session, began)
         return None
     item = result.primary
+    if item.call_id:   # V6-23: the link from this pair to its call, so a readout never has to guess between the calls of one session (ids only, no text)
+        db.event(_attempt_key(session, hold), "jev_answered", guard=f"{a.rule_id} {a.level}", actor="hook", detail={"call_id": item.call_id})
     if result.exit_code != 0 or item.verdict is None or item.verdict.verdict != "ACCEPT" or not item.call_id:
         return None
     if level == "high" or owner_answers(db) < _band_answers():

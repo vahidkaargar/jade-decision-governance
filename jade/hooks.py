@@ -382,6 +382,8 @@ def _detail(event: dict, a: policy.Assessment | None = None, **more) -> dict:
          "agent_id": event.get("agent_id"), **more}
     if a is not None:
         d["plan_hash"] = a.plan_hash
+        if a.blocked:
+            d["invariants"] = list(a.blocked)   # V6-32 (W-74): which safety invariants fired, as ids only. The guard text keeps them too; `jade learn blockers` reads both
     return d
 
 
@@ -439,6 +441,11 @@ def pretool(event: dict, permit=None) -> HookResult:
         _journal("gate", "safety_block", a, event)
         return _verdict(mode, f"JADE safety invariant {', '.join(a.blocked)} blocks this {tool} call. No permit can authorize it. "
                               f"Rule text: policies/safety.yaml. Do not rephrase the command to get around the invariant; ask the human.", a.blocked)
+    if mode == "enforce" and paths.level() == "off" and OFF_FLOOR_CLASSES & set(a.ho_ids):
+        _journal("gate", "safety_block", a, event)   # V6-16: at level `off` a write to JADE's own live wiring still blocks (the floor of "observe plus floor")
+        return HookResult(2, f"JADE floor: level off blocks this {tool} call. It writes to JADE's own live wiring ({', '.join(sorted(OFF_FLOOR_CLASSES & set(a.ho_ids)))}: "
+                             "the hook files, `~/.claude/settings.json`, the install, the JADE config or state). No permit can authorize it at this level. "
+                             "Do not rephrase the call to get around the floor; ask the human to do it in their own terminal.")
     if a.ho_ids and paths.level() in ("low", "medium", "high") and not at_least(a.level, "high"):
         a.level, a.elevated = "high", True   # docs/12: a human-only class (a mod file, the terminal panel ...) is high work once the human has set a level; `level` and `rule_id` stay the rule's
     if not at_least(a.level, policy.permit_floor()):
@@ -449,20 +456,28 @@ def pretool(event: dict, permit=None) -> HookResult:
                 _journal("gate", "secret_read", a, event)   # W-55: counted (rule, tool, session), never the path or the command; the read itself is not gated
         return HookResult()
     try:
-        return _gate("advisory" if paths.level() == "off" else mode, tool, a, event, permit)   # level off: JADE only watches (docs/12)
+        return _gate("advisory" if paths.level() == "off" else mode, tool, a, event, permit, hold_mode=mode)   # level off: JADE watches and keeps the floor (docs/12)
     except Exception as e:  # noqa: BLE001 - the ledger is unreadable, locked or full: no permit can be checked, so nothing high-risk runs
         return _fail_closed(mode, f"this {tool} call is {a.level} risk ({a.rule_id}) and the permit ledger failed ({type(e).__name__}: {str(e)[:160]}), "
                                   "so no permit can be checked.")
 
 
 GOVERNANCE_INVARIANTS = frozenset({"SI-09", "SI-10", "SI-11", "SI-12"})
+# V6-16: level `off` is "observe plus floor". At `off` (gate mode enforce) these two invariants block too, and so does a write to JADE's live wiring.
+OFF_FLOOR_INVARIANTS = frozenset({"SI-07", "SI-08"})
+# the running install and hook files, an install built from a checkout, a settings write that disables the hooks, and a script run that names the JADE state or config
+# (a script can set `gate_mode` to `advisory` in the config, and that turns the whole floor off)
+OFF_FLOOR_CLASSES = frozenset({policy.HO_WIRING, policy.HO_INSTALL, policy.HO_SETTINGS, policy.HO_STATE})
 
 
 def _verdict(mode: str, message: str, blocked: list[str] | tuple[str, ...] = ()) -> HookResult:
     """Exit 2, or an advisory exit 0. Once the human has set a level (docs/12) the governance invariants block whatever the gate mode, and any level at all
-    keeps them firm; the other invariants are advisory at level `off` ("JADE only watches") and in advisory gate mode."""
+    keeps them firm; at level `off` SI-07 and SI-08 are firm as well (V6-16, the floor); the other invariants are advisory at level `off` ("observe") and in
+    advisory gate mode."""
     level = paths.level()
     if level is not None and GOVERNANCE_INVARIANTS & set(blocked):
+        return HookResult(2, message)
+    if mode != "advisory" and level == "off" and OFF_FLOOR_INVARIANTS & set(blocked):
         return HookResult(2, message)
     if mode == "advisory" or (level == "off" and blocked):
         return HookResult(0, "[advisory, not blocked] " + message)
@@ -563,8 +578,11 @@ def fingerprints(subject: str, cwd: str) -> dict[str, str]:
     return {"git_head": ";".join(sorted(set(heads)))} if heads else {}
 
 
-def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> HookResult:
+def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit, hold_mode: str | None = None) -> HookResult:
+    """`mode` is the mode the risk gate runs in (advisory at level off); `hold_mode` is the gate mode in force, which SI-07 uses (it is firm at level off, V6-16)."""
     from . import decide, ledger, permits, state_machine
+
+    hold_mode = mode if hold_mode is None else hold_mode
 
     db = ledger.open(timeout=LEDGER_TIMEOUT_S)
     try:
@@ -589,13 +607,13 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
         hold = _si07_hold(db, a)
         if hold:
             did, reason = hold
-            if mode != "advisory":
-                db.event("gate", "safety_block", guard=f"{a.rule_id} {a.level} SI-07", actor="hook", detail=_detail(event, a, decision_id=did))
-            return _verdict(mode, f"JADE safety invariant SI-07 blocks this {tool} call. An earlier run of this exact command (decision {did}) {reason}"
+            if hold_mode != "advisory":
+                db.event("gate", "safety_block", guard=f"{a.rule_id} {a.level} SI-07", actor="hook", detail=_detail(event, a, decision_id=did, invariants=["SI-07"]))
+            return _verdict(hold_mode, f"JADE safety invariant SI-07 blocks this {tool} call. An earlier run of this exact command (decision {did}) {reason}"
                                   f"{' and still executing' if 'executing' in reason else ''}. It is not retried automatically and no permit is raised or used for it. "
                                   f"Read the real state, then record it: jade decide outcome {did} --type observed --success true|false --method \"how you checked\". "
-                                  "Do not rephrase the command to get around the invariant; ask the human.")
-        found = permit or permits.find_usable(db, a.plan_hash, level=a.level, fingerprints=fp, **who)
+                                  "Do not rephrase the command to get around the invariant; ask the human.", ("SI-07",))
+        found =permit or permits.find_usable(db, a.plan_hash, level=a.level, fingerprints=fp, **who)
         refusal = None
         if found is not None:
             try:
@@ -641,7 +659,7 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit) -> Ho
                                       context=ctx, fingerprints=fp, environment=a.environment).permit_id
         else:
             pid = pending.permit_id
-        why = f" (Permit {found.permit_id} exists but cannot be used: {refusal}.)" if found is not None and refusal else ""
+        why = (f" (Permit {found.permit_id} exists but cannot be used: {refusal}.)" if found is not None and refusal else "") + permits.refusal_note(db, a.plan_hash)   # V6-26: a human refusal is told to the agent
         if ctx.get("redacted") and permits.keep_raw(db, pid, permits.raw_parts(tool, a, event)):   # W-43: the human allowed it, so the raw call is kept for their review only
             return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}). This {tool} call needs a human-approved permit, and the {ctx['redacted']} secret-shaped "
                                  f"value(s) in it are not stored in the ledger.{why}\n"
@@ -728,7 +746,7 @@ def _close_decision(event: dict, success: bool, method: str) -> HookResult:
             db.event(event.get("session_id") or "session", "BYPASS", guard="raw Decisions API call outside the adapter", actor="hook")
         did = _executing_decision(db, tool, tin, event, cwd)
         if did:
-            decide.record_outcome(db, did, "observed", success, method, attribution="indirect")
+            decide.record_outcome(db, did, "observed", success, method, attribution="indirect", goal_check="exit_only")   # the exit status is not the goal (DI-8)
     finally:
         db.close()
     return HookResult()

@@ -285,7 +285,7 @@ def test_a_wrong_mark_makes_the_same_call_ask_again_and_leaves_other_calls(ready
 def test_the_report_counts_jev_runs_with_cost_and_latency(ready):
     assert hooks.pretool(m.call(KIND)).exit_code == 0
     out = ops.review(None)
-    assert "silent runs: 1 (0 from standing answers, 1 by Jev)" in out
+    assert "calls that ran without asking you: 1 (0 from standing answers, 1 by Jev)" in out
     assert "Jev for you: 1 call(s), 1 allowed" in out and "median latency" in out
     assert "[R-11]" in out
 

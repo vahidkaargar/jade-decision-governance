@@ -125,7 +125,7 @@ def test_auto_label_joins_only_the_call_that_gated_the_decision(tmp_path):
     refs = decide.get(db, did)["evaluation_refs"]
     assert refs == [gate.primary.call_id]
     db.con.execute("UPDATE decisions SET status='SUCCEEDED' WHERE decision_id=?", (did,))
-    db.con.execute("INSERT INTO outcomes(outcome_id, decision_id, doc_json, ts) VALUES('o1', ?, ?, ?)", (did, json.dumps({"observation_type": "observed", "success": 1}), ts()))
+    db.con.execute("INSERT INTO outcomes(outcome_id, decision_id, doc_json, ts) VALUES('o1', ?, ?, ?)", (did, json.dumps({"observation_type": "observed", "success": 1, "measurements": {"goal_check": "human"}}), ts()))   # DI-8
     assert evals.auto_label(db)["observed"] == 1
     labelled = {r.call_id: r.label for r in db.all("SELECT call_id, label FROM labels")}
     assert labelled == {gate.primary.call_id: 1}      # not the rejected call on another claim, not the evidence_is_raw companion

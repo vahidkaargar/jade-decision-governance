@@ -20,7 +20,7 @@ from types import SimpleNamespace
 from typing import NamedTuple
 
 from . import ledger, memory, paths, policy, signing
-from .util import is_human_tty, now, one_line, parse_ts, ts, user
+from .util import is_human_tty, now, parse_ts, show_safely, ts, user
 
 
 def pretool_matcher() -> str:
@@ -689,6 +689,10 @@ def set_level(value: str, stdin_isatty: bool | None = None) -> None:
     atomic_write(paths.config_dir() / "config.json", json.dumps(cfg, indent=1) + "\n")
 
 
+OFF_MEANS = ("off is observe plus floor: most rules only log, but SI-07, SI-08, SI-09 to SI-12 and writes to JADE's own wiring (HO-wiring, HO-checkout-install, "
+             "HO-settings-shadow, HO-state-path) block. Use `jade level high` to have JADE ask about high-risk calls.")
+
+
 def _level_row() -> tuple[str, bool, str]:
     raw, lv = paths.config().get("level"), paths.level()
     if raw is None:
@@ -697,8 +701,9 @@ def _level_row() -> tuple[str, bool, str]:
         return ("level", False, f"the config level {raw!r} is not off, low, medium or high, so it counts as unset; `jade level unset` clears it")
     if raw != _recorded_level():
         return ("level", False, f"{lv}, but no `jade level` command recorded it (written some other way?); run `jade level unset`, look at the config directory, set it again")
-    if lv == "off":   # V6-10: not a failure (the human chose it), but not "ok": most rules only log
-        return ("level", None, "off: JADE only watches; most rules only log (the row `what blocks` lists them)")
+    if lv == "off":   # V6-10: not a failure (the human chose it), but not "ok": most rules only log. V6-16: the floor blocks
+        return ("level", None, "off (observe plus floor): most rules only log; SI-07, SI-08 and writes to JADE's own wiring block, as do SI-09 to SI-12 "
+                               "(the row `what blocks` lists them)")
     return ("level", True, f"{lv}")
 
 
@@ -729,8 +734,11 @@ def blocking_summary(mode: str | None = None, level: str | None | bool = False) 
         return (None, "advisory gate mode, no level set: nothing blocks; every safety invariant (" + ", ".join(active) + ") and every risk rule only log" + unset)
     if mode == "advisory":
         return (None, "advisory gate mode: " + ", ".join(gov) + " block; " + ", ".join(soft) + " and every risk rule only log")
-    if level == "off":
-        return (None, "advisory: " + ", ".join(soft) + ", R-13, R-16 and all risk rules only log; " + ", ".join(gov) + " block (level off, docs/12)")
+    if level == "off":   # V6-16: observe plus floor; hooks._verdict and hooks.pretool
+        floor = sorted(hooks.OFF_FLOOR_INVARIANTS)
+        firm = sorted(set(floor) | set(gov))
+        return (None, "advisory: " + ", ".join(i for i in soft if i not in floor) + " and every risk rule (R-13 and R-16 too) only log; "
+                + ", ".join(firm) + " block, and so does a write to JADE's own wiring (" + ", ".join(sorted(hooks.OFF_FLOOR_CLASSES)) + ") (level off, observe plus floor, docs/12)")
     if level is None:
         return (True, "every active safety invariant (" + ", ".join(active) + ") blocks; a high or critical risk call is held for a human approval (docs/12)" + unset)
     if level in ("low", "medium"):   # hooks._gate: memory.step, then proxy.step, run before the human is asked
@@ -739,6 +747,29 @@ def blocking_summary(mode: str | None = None, level: str | None | bool = False) 
                       "(once enough owner answers exist); any other high or critical call is held for a human (docs/12)")
     return (True, "every safety invariant (" + ", ".join(ids) + ") blocks; a high or critical risk call is held for a human approval (Jev decides nothing at "
                   "this level, docs/12)")
+
+
+def list_b() -> tuple[dict, dict]:
+    """List B of the floor (V6-17): what is advisory by design, for gate mode `off` and gate mode `advisory`, as `{"mode", "firm", "advisory"}` of safety invariant ids.
+    The R rules and the HO classes are advisory in both modes and are not listed one by one. `jade check` prints it (`_list_b_row`) and the floor tests assert it."""
+    from . import hooks
+
+    every = sorted(str(i["id"]) for i in policy.safety()["invariants"])
+    gov = sorted(hooks.GOVERNANCE_INVARIANTS)
+    return ({"mode": "off", "firm": [], "advisory": every},
+            {"mode": "advisory", "firm": gov, "advisory": [i for i in every if i not in gov]})
+
+
+def _list_b_row() -> tuple[str, bool, str]:
+    """What the owner chose to leave advisory by design (List B of the floor). Never a warning: it says what gate mode `off` and `advisory` mean, whatever is set now."""
+    try:
+        off, adv = list_b()
+    except Exception as e:  # noqa: BLE001 - the `policies load` row reports the failure
+        return ("advisory by design", True, f"unknown: the safety policy does not load ({type(e).__name__})")
+    return ("advisory by design", True,
+            f"gate mode off: nothing blocks ({', '.join(off['advisory'])}, every R rule and every HO class are skipped); "
+            f"gate mode advisory: {', '.join(adv['firm'])} block once a level is set, and {', '.join(adv['advisory'])}, every R rule and every HO class only log "
+            "(the floor of level `off` is another thing: it needs gate mode enforce)")
 
 
 def _what_blocks_row(pretool_ok: bool | None = None, wiring: list[str] | None = None) -> tuple[str, bool | None, str]:
@@ -764,6 +795,11 @@ def parse_since(value: str) -> float:
     return int(m.group(1)) * {"m": 60, "h": 3600, "d": 86400}[m.group(2)]
 
 
+def _shown_line(text: str | None) -> str:
+    """A stored label on one line, every control, bidi and zero-width character written out (V6-09)."""
+    return show_safely(text, one_line=True)
+
+
 def review(since_s: float | None = None) -> str:
     """What the human answered to JADE's asks (read-only): counts by answer, strength, rule and channel. Confirming answers is a later, human-only step."""
     db = ledger.open(timeout=5)
@@ -774,7 +810,7 @@ def review(since_s: float | None = None) -> str:
     window = "all time" if since_s is None else f"last {int(since_s // 3600)}h" if since_s >= 3600 else f"last {int(since_s // 60)}m"
     db = ledger.open(timeout=5)
     try:
-        extra = review_lines(db, since_s)
+        extra = review_lines(db, since_s) + friction_review_lines(db, since_s, window)
     finally:
         db.close()
     if not rows:
@@ -819,6 +855,16 @@ def _latest_marks(db, since: str) -> dict[str, str]:
     return out
 
 
+def friction_review_lines(db, since_s: float | None, window: str) -> list[str]:
+    """V6-23: the effort side of the review, beside the correctness side: how often JADE asked, how long answers took, how many asks ran out, and what is known about
+    whether the answers were right (marked runs, checked labels), or the plain statement that correctness is not measured (d11 checklist item 17)."""
+    from . import readouts
+
+    since = readouts.since_seconds(since_s)
+    marks = _latest_marks(db, since)
+    return readouts.friction_lines(db, since, window, len(marks), sum(1 for m in marks.values() if m == "wrong"), readouts.label_coverage(db, since)["fit_labelled"])
+
+
 def review_lines(db, since_s: float | None) -> list[str]:
     """What the standing answers are doing: how often a question was avoided, what the human marked wrong, and how far the answer count is from the 50 that a later
     step needs. Counts and rule ids only; no command text beyond the label the human already saw in `jade review confirm`."""
@@ -843,13 +889,15 @@ def review_lines(db, since_s: float | None) -> list[str]:
     wrong = sum(1 for m in marked.values() if m == "wrong")
     by_jev = sum(1 for r in silent if r["kind"] == "jev_allowed")
     share = 100 * len(silent) // (len(silent) + asked) if len(silent) + asked else 0
-    who = f"silent runs from standing answers: {len(silent)}" if not by_jev else f"silent runs: {len(silent)} ({len(silent) - by_jev} from standing answers, {by_jev} by Jev)"
-    out = [f"{who}; questions answered: {asked}; silent share {share}% of plain-high calls"]
+    who = f"calls that ran from standing answers, without asking you: {len(silent)}" if not by_jev else \
+        f"calls that ran without asking you: {len(silent)} ({len(silent) - by_jev} from standing answers, {by_jev} by Jev)"
+    out = [f"{who}; questions you answered: {asked}; {share}% of the ordinary high-risk calls ran without asking you"]   # V6-23: plain words for "silent share of plain-high calls"
     if marked:
-        out.append(f"marked: {len(marked)} silent run(s), {len(marked) - wrong} right, {wrong} wrong; wrong runs are below {100 * wrong_rate_upper(wrong, len(marked)):.0f}% of such runs (95% bound)")
+        out.append(f"you marked {len(marked)} of these calls: {len(marked) - wrong} right, {wrong} wrong; we are 95% sure that no more than "
+                   f"{100 * wrong_rate_upper(wrong, len(marked)):.0f}% of such calls are wrong")
     elif silent:
-        out.append("none of the silent runs is marked yet: `jade review mark DECISION_ID right|wrong` in your terminal (wrong makes JADE ask that call, and its kind, again)")
-    out.append(f"owner-answered plain-high calls: {plain_all} of {JEV_BAND_ANSWERS} (a model deciding for you stays off until then)")
+        out.append("you have not marked any of these calls yet: `jade review mark DECISION_ID right|wrong` in your terminal (wrong makes JADE ask that call, and its kind, again)")
+    out.append(f"ordinary high-risk calls you have answered (each call counted once): {plain_all} of the {JEV_BAND_ANSWERS} needed before a model may decide for you; it stays off until then")
     if jev:
         allowed = sum(1 for r in silent if r["kind"] == "jev_allowed")
         lat = sorted(r["latency_ms"] or 0.0 for r in jev)
@@ -861,7 +909,7 @@ def review_lines(db, since_s: float | None) -> list[str]:
             a = {"rule_id": det.get("rule"), "label": det.get("label")}
         else:
             a = db.con.execute("SELECT rule_id, label FROM human_answers WHERE answer_id=?", (r["entity_id"],)).fetchone()
-        out.append(f"  {did}  [{a['rule_id'] if a else '?'}]  {one_line(a['label'] if a else '')}  {('(marked ' + marks[did] + ')') if did in marks else ''}".rstrip())
+        out.append(f"  {did}  [{a['rule_id'] if a else '?'}]  {_shown_line(a['label'] if a else '')}  {('(marked ' + marks[did] + ')') if did in marks else ''}".rstrip())
     return out
 
 
@@ -922,7 +970,7 @@ def _scope_lines(r) -> list[str]:
     how to undo it."""
     from . import memory, scopes
 
-    lines = [f"Would become standing for: {one_line(r['scope_label'])} ({memory.USE_DAYS} days after last use)"]
+    lines = [f"Would become standing for: {_shown_line(r['scope_label'])} ({memory.USE_DAYS} days after last use)"]
     covers = scopes.COVERS.get(r["scope_kind"])
     if covers:
         lines.append(covers)
@@ -949,12 +997,12 @@ def review_confirm(stdin_isatty: bool | None = None, *, ask=input, say=print, al
         chosen: list = []
         for (rule, _, is_class, scope_key), rs in groups.items():
             if scope_key:
-                say(f"{one_line(rs[-1]['label']) or '(no text kept)'}  [{rule}]  allowed {len(rs)}x")
+                say(f"{_shown_line(rs[-1]['label']) or '(no text kept)'}  [{rule}]  allowed {len(rs)}x")
                 for line in _scope_lines(rs[-1]):
                     say(f"   {line}")
             else:
                 kind = "this kind of call" if is_class else "this exact call only"
-                say(f"{one_line(rs[-1]['label']) or '(no text kept)'}  [{rule}]  allowed {len(rs)}x  ->  would be standing for {kind}")
+                say(f"{_shown_line(rs[-1]['label']) or '(no text kept)'}  [{rule}]  allowed {len(rs)}x  ->  would be standing for {kind}")
             if rule in memory.NEVER_RULES:
                 say("   (rule is always asked; confirming it changes nothing)")
             if all_ or ask("  stand for this? [y/N] ").strip().lower() in ("y", "yes"):
@@ -997,8 +1045,8 @@ def knows_list() -> str:
         cap_end = parse_ts(r["confirmed_ts"]) + timedelta(days=memory.CAP_DAYS)
         end = min(x for x in (use_end, cap_end) if x)
         note = "  (near its 180-day end: confirm again to keep it)" if (cap_end - now()) <= timedelta(days=memory.NEAR_CAP_DAYS) else ""
-        scope = f"  scope  {one_line(r['scope_label'])}" if r["scope_label"] else ""
-        out.append(f"{r['answer_id']}  [{r['rule_id']}]  {'kind' if r['class_key'] else 'exact'}  {one_line(r['label'])}{scope}  stops deciding {ts(end)[:10]}{note}")
+        scope = f"  scope  {_shown_line(r['scope_label'])}" if r["scope_label"] else ""
+        out.append(f"{r['answer_id']}  [{r['rule_id']}]  {'kind' if r['class_key'] else 'exact'}  {_shown_line(r['label'])}{scope}  stops deciding {ts(end)[:10]}{note}")
     return "\n".join(out) or "no standing answers"
 
 
@@ -1048,7 +1096,7 @@ def knows_template(rows, since: tuple[str, str] | None = None) -> str:
         key = (r["rule_id"], "scope", r["scope_key"]) if r["scope_key"] else (r["rule_id"], "class", r["class_key"]) if r["class_key"] else (r["rule_id"], "exact", r["exact_key"])
         if key in seen:
             continue
-        text = one_line(r["scope_label"] or r["label"]) or "(a call with no label stored)"
+        text = _shown_line(r["scope_label"] or r["label"]) or "(a call with no label stored)"
         if len(text) > KNOWS_LABEL_CHARS:
             text = text[:KNOWS_LABEL_CHARS - 3] + "..."
         seen[key] = f"# I am fine with: {text}  [{r['rule_id']}]  (risk: {askplain.risk_line(r['rule_id'])})"
@@ -1798,6 +1846,7 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
     rows.append(_gate_mode_row())
     rows.append(_level_row())
     rows.append(_what_blocks_row(st.get("PreToolUse", False), problems))
+    rows.append(_list_b_row())
     rows.append(pending_row())
     rows.append(_overrides_row())
     rows.append(_ack_audit_row())
@@ -1923,8 +1972,10 @@ def _permission_row() -> tuple[str, bool, str]:
         return ("host permission prompt", False, f"permissions.defaultMode is {mode} (the host never asks) and the gate is {gate} (JADE never blocks): nothing stops a call. "
                 "Set the gate to enforce or the host to a prompting mode. " + detail)
     if mode in PERMISSIVE_MODES and paths.level() == "off":   # V6-10: a warning, not a failure (blocking at level off is V6-16)
+        from . import hooks
+
         return ("host permission prompt", None, f"permissions.defaultMode is {mode} (the host never asks) and level off (JADE only logs most rules): only "
-                + ", ".join(sorted(_governance_ids())) + " stop a call. " + detail)
+                + ", ".join(sorted(_governance_ids() | hooks.OFF_FLOOR_INVARIANTS)) + " and a write to JADE's own wiring stop a call. " + detail)
     return ("host permission prompt", True, detail)
 
 
@@ -1960,13 +2011,14 @@ def unknown_rows() -> list[tuple[str, bool | None, str]]:
 
 
 def no_prompt_gated_calls(days: int = 7) -> tuple[int, int]:
-    """(gated calls seen, of those with no host prompt) in the last `days` days; (0, 0) when the ledger cannot be read."""
-    from . import hooks
+    """(gated calls seen, of those with no host prompt) in the last `days` days; (0, 0) when the ledger cannot be read. V6-23: counted as `jade ledger stats` counts
+    (`readouts.load_counts`): an SI-07 hold is one call, not two."""
+    from . import hooks, readouts
 
     try:
         db = ledger.open(timeout=2)
         try:
-            rows = db.all("SELECT detail_json FROM events WHERE kind IN ('gated','safety_block') AND " + ledger.live() + " AND ts>=?", (ts(now() - timedelta(days=days)),))
+            rows = readouts.gated_rows(db, readouts.since_days(days))
         finally:
             db.close()
     except Exception:  # noqa: BLE001 - informational and a pre-flight: an unreadable ledger is reported by its own check row
@@ -2034,4 +2086,25 @@ def print_check(rows) -> int:
     failed = [n for n, ok, _ in rows if check_failed(ok)]
     if failed:
         print(f"jade check: {len(failed)} failed ({', '.join(failed)})", file=sys.stderr)
+    return 1 if failed else 0
+
+
+def print_check_json(rows) -> int:
+    """`jade check --json` (V6-23): the same rows and the same exit code as `print_check`. `ok` is true, false (a failure) or null (a warning). `load_last_7_days` is the
+    gated-call count that `jade ledger stats` prints too, from one definition (`readouts.load_counts`), with how many of those calls had no host prompt."""
+    from . import readouts
+
+    failed = [n for n, ok, _ in rows if check_failed(ok)]
+    load = None
+    try:
+        db = ledger.open(timeout=2)
+        try:
+            load = readouts.load_counts(db, readouts.since_days(7))
+        finally:
+            db.close()
+        load["no_host_prompt"] = no_prompt_gated_calls()[1]
+    except Exception:  # noqa: BLE001 - an unreadable ledger is the ledger row's failure
+        load = None
+    print(json.dumps({"ok": not failed, "failed": failed, "rows": [{"name": n, "ok": None if ok is None else bool(ok), "detail": d} for n, ok, d in rows],
+                      "load_last_7_days": load}, sort_keys=True, separators=(",", ":")))
     return 1 if failed else 0

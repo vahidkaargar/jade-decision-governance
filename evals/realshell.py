@@ -97,7 +97,17 @@ def _stub_text(name: str) -> str:
 
 
 def _parse_log(data: str) -> list[list[str]]:
-    return [[p for p in rec.split("\x1f") if p != ""] for rec in data.split("\x1e") if rec]
+    """Every word ends with a 0x1f, so a record has one empty piece at the end: that one is dropped. An empty word inside (`git -C "" push`) is a real
+    word and stays (V6-22: dropping it made -C swallow `push`)."""
+    out = []
+    for rec in data.split("\x1e"):
+        if not rec:
+            continue
+        parts = rec.split("\x1f")
+        if parts and parts[-1] == "":
+            parts.pop()
+        out.append(parts)
+    return out
 
 
 def _kill_group(proc: subprocess.Popen) -> None:

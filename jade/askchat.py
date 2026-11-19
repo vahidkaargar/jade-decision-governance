@@ -7,7 +7,7 @@ At a level (`jade level`), gate mode enforce, host mode auto or bypassPermission
 2. PreToolUse on that AskUserQuestion calls `rewrite`: the whole question is REPLACED by the hook's own text (rule, rationale, the command, the part that is
    not shown), so the agent's wording never reaches the human. The host shows the replaced question (probe cell 5b, evals/probes/hook_ask/RESULTS.md).
 3. PostToolUse on it calls `settle`: the answer is read from the host's `tool_response.answers` (never from agent text). Allow makes a single-use grant
-   (10 minutes, this session, this call); Deny closes the ask. The answer is recorded as a hint in `human_answers`; it teaches nothing yet.
+   (10 minutes, this session, this exact call: its tool, text and folder, the `plan_hash`, and the Bash run settings such as the sandbox switch); Deny closes the ask. The answer is recorded as a hint in `human_answers`; it teaches nothing yet.
 4. The identical retry reaches `step` again, which consumes the grant, opens a decision (so SI-07 still holds an unknown outcome) and lets the call run.
 
 A grant is never valid for live JADE wiring, a host mode outside the two above, or a call with secrets in it: those keep the signed terminal permit.
@@ -21,16 +21,23 @@ import json
 import re
 from datetime import timedelta
 
-from . import askplain, memory, paths
+from . import askplain, memory, paths, policy, shellnorm
 from . import scopes as scopes_mod
-from .util import canonical, new_id, now, ts
+from .util import canonical, new_id, now, sha256, show_safely, ts
 
 CHAT_MODES = ("auto", "bypassPermissions")
+RUN_FIELDS_IGNORED = frozenset({"command", "cmd", "script", "description"})   # the text (the plan hash covers it) and the display line
 ASK_TTL_S = 600
 GRANT_TTL_S = 600
 PERMIT_ONLY = frozenset({"HO-wiring", "HO-checkout-install", "HO-settings-shadow", "HO-state-path"})   # live JADE wiring: a human types `jade permit approve`
 TOKEN = re.compile(r"\[jade:ask_([0-9a-f]{12})\]")
+# V6-26, Fix B (docs d13 X-15, d07 4.1): `rewrite` replaces every question of the call that carries the token with the one JADE question, so a batch loses its other questions.
+# The words below tell the agent to send the JADE question alone. Fix C (`rewrite` refuses a batch with a token) is the next release.
+SEND_ALONE = "Send it alone: no other question in the same call, because JADE replaces every other question of that call with its own. Put your other questions in a separate AskUserQuestion call."
 HEAD_CHARS, TAIL_CHARS = 450, 150
+GATED_CAP = 600        # a rated command that the clip hides is shown again up to this many characters
+GATED_PARTS = 3        # ... and at most this many of them
+LOCATE_MAX = 20000     # a longer text is not searched for the rated part: the question shows the gate's own reading instead
 DENY_CAP = 3            # the 3rd Deny of one call is a plain refusal: the human has answered, asking again is pressure
 EXPIRE_PAUSE = 30       # asks that expired unanswered, in the window below and since the last answer, pause asking for the session
 PAUSE_WINDOW_S = 3600
@@ -42,16 +49,205 @@ def applicable(mode: str, a, event: dict) -> bool:
             and bool(event.get("session_id")) and not (set(a.ho_ids) & PERMIT_ONLY))
 
 
-def _clip(text: str) -> str:
-    if len(text) <= HEAD_CHARS + TAIL_CHARS + 100:
-        return text
-    return f"{text[:HEAD_CHARS]}\n... {len(text) - HEAD_CHARS - TAIL_CHARS} characters not shown ...\n{text[-TAIL_CHARS:]}"
+def run_fields(tool: str, tool_input) -> dict:
+    """The fields of a shell call, other than its text, that change how it runs (Bash: `dangerouslyDisableSandbox`, `run_in_background`, `timeout`).
+    The plan hash covers the tool, the text and the folder only, so these are bound to the grant here. `description` is display text and does not count.
+    A value that is empty or false is the default and does not count either, so an absent field and a false one are the same call."""
+    if not isinstance(tool_input, dict) or not policy.runs_shell(tool, tool_input):
+        return {}
+    return {str(k): v for k, v in sorted(tool_input.items(), key=lambda kv: str(kv[0]))
+            if k not in RUN_FIELDS_IGNORED and v not in (None, False, "", 0, [], {})}
+
+
+def _short(text: str) -> bool:
+    return len(text) <= HEAD_CHARS + TAIL_CHARS + 100
+
+
+def clip(text: str) -> str:
+    """A path, a folder or a content text for the human: clipped, and every control, bidi and zero-width character written out (V6-09)."""
+    if _short(text):
+        return show_safely(text)
+    return (f"{show_safely(text[:HEAD_CHARS])}\n... {len(text) - HEAD_CHARS - TAIL_CHARS} characters not shown ...\n{show_safely(text[-TAIL_CHARS:])}")
+
+
+_clip = clip   # the old name, for any caller outside this package
+
+
+_HEREDOC = re.compile(r"<<-?[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?(\w+))")
+_PLAIN = re.compile(r"[\w./@:=+,%~ \t-]*\Z")   # a statement with no quote, no nesting, no redirect: its key is read from its words alone
+ASSESS_CAP = 40        # statements with a quote or a nested form are rated one by one, at most this many
+
+
+def _statements(text: str) -> list[tuple[int, int]]:
+    """(start, end) of each top-level statement of a shell text: split at a line break, `;`, `&&`, `||`, `|` and `&` that are outside quotes, `$( )`, `( )`, `${ }`, backticks
+    and here-document bodies. A nested form (`bash -c '...'`, `$(...)`) and everything it holds is one statement, so a `cd` inside it stays with the command that follows it.
+    Quotes this cannot close make one long statement: the question then shows its start and says to read the call elsewhere."""
+    n, i, start = len(text), 0, 0
+    out: list[tuple[int, int]] = []
+    pending: list[str] = []   # here-document delimiters opened on this line
+
+    def cut(end: int, width: int):
+        nonlocal start
+        if text[start:end].strip():
+            out.append((start, end))
+        start = end + width
+
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            i += 2
+        elif c == "'":
+            k = text.find("'", i + 1)
+            i = n if k < 0 else k + 1
+        elif c == '"':
+            i = shellnorm._dq_end(text, i + 1) + 1
+        elif c == "`":
+            k = i + 1
+            while k < n and text[k] != "`":
+                k += 2 if text[k] == "\\" else 1
+            i = k + 1
+        elif c == "$" and text.startswith("${", i):
+            i = shellnorm._match_brace(text, i + 2)
+        elif c == "$" and text.startswith("$(", i):
+            i = shellnorm._skip_span(text, i + 1)
+        elif c in "<>" and text.startswith("(", i + 1):
+            i = shellnorm._skip_span(text, i + 1)
+        elif c == "(":
+            i = shellnorm._skip_span(text, i)
+        elif c == "<" and text.startswith("<<", i) and not text.startswith("<<<", i) and (m := _HEREDOC.match(text, i)):
+            pending.append(m.group(1) or m.group(2) or m.group(3))
+            i = m.end()
+        elif c == "\n":
+            if pending:   # the here-document bodies start on the next line and end at their delimiter line: they are part of this statement
+                pos = i + 1
+                for word in pending:
+                    while pos < n:
+                        eol = text.find("\n", pos)
+                        eol = n if eol < 0 else eol
+                        line = text[pos:eol].strip()
+                        pos = eol + 1
+                        if line == word:
+                            break
+                pending.clear()
+                i = max(i + 1, pos - 1)
+            else:
+                cut(i, 1)
+                i += 1
+        elif c == ";":
+            cut(i, 1)
+            i += 1
+        elif c == "&":
+            if text.startswith("&&", i):
+                cut(i, 2)
+                i += 2
+            elif (i and text[i - 1] in "<>") or text.startswith("&>", i):
+                i += 1
+            else:
+                cut(i, 1)
+                i += 1
+        elif c == "|":
+            if text.startswith(("||", "|&"), i):
+                cut(i, 2)
+                i += 2
+            elif i and text[i - 1] == ">":
+                i += 1
+            else:
+                cut(i, 1)
+                i += 1
+        else:
+            i += 1
+    if text[start:].strip():
+        out.append((start, n))
+    return out
+
+
+_CD = re.compile(r"\s*(?:cd|pushd)(?:\s|\Z)")
+
+
+def _hidden_gated(keys: set[str], text: str) -> tuple[list[tuple[int, int]], bool]:
+    """Which parts of `text` hold a command the gate rated and are not wholly in the head or the tail that the question shows, and whether every rated key was found in the text.
+    A part is a whole top-level statement, so a rated command inside `bash -c '...'` or `$(...)` is shown with the form it sits in, and a `cd` just before it is shown with it. The
+    same key twice, one copy visible and one hidden, shows the hidden one. A statement with a quote or a nested form is rated by the gate's own `assess` (at most ASSESS_CAP of them).
+    Never raises: a text this cannot follow gives (no parts, False), and the question then says to read the call elsewhere."""
+    try:
+        stmts = _statements(text)
+        edge = len(text) - TAIL_CHARS
+        shown = [e <= HEAD_CHARS or s >= edge for s, e in stmts]
+        found: set[str] = set()
+        got: dict[int, set[str]] = {}
+        calls, unsure = 0, False
+        for idx in sorted(range(len(stmts)), key=lambda k: shown[k]):   # the hidden statements first, so the cap never takes them
+            s, e = stmts[idx]
+            seg = text[s:e].strip()
+            if _PLAIN.match(seg):
+                got[idx] = {policy._segment_key(policy._bare(seg))} & keys
+            elif calls >= ASSESS_CAP:
+                unsure = True
+            else:
+                calls += 1
+                got[idx] = set(policy.assess("Bash", {"command": seg}, cwd="").seg_keys) & keys
+            found |= got.get(idx, set())
+        hidden: list[tuple[int, int]] = []
+        for idx, (_s, e) in enumerate(stmts):
+            if shown[idx] or not got.get(idx):
+                continue
+            j = idx
+            while j > 0 and not shown[j - 1] and _CD.match(text, stmts[j - 1][0]):   # a hidden `cd` or `pushd` right before it changes where it runs
+                j -= 1
+            if hidden and hidden[-1][1] >= e:
+                continue
+            hidden.append((stmts[j][0], e))
+    except Exception:   # noqa: BLE001 - a command the segmenter cannot read is never a reason to show less
+        return [], False
+    return hidden, keys <= found and not unsure
+
+
+READ_ELSEWHERE = "Deny it and ask the agent to run the risky command on its own, so that you can read all of it."
+KEY_CAP = 200
+
+
+def _gate_reading(keys: set[str]) -> str:
+    """The commands the gate rated, in its own words (the canonical key: the program without its folder, launcher prefixes gone, every argument kept)."""
+    shown = sorted(keys)[:GATED_PARTS]
+    out = "\n".join(show_safely(k[:KEY_CAP], one_line=True) + (" ..." if len(k) > KEY_CAP else "") for k in shown)
+    return out + (f"\n... and {len(keys) - len(shown)} more" if len(keys) > len(shown) else "")
+
+
+def command_text(a, text: str) -> str:
+    """The command as the human sees it: clipped, with every control, bidi and zero-width character written out. When the clip hides a part that the gate rated, that part is
+    shown again in full (up to GATED_CAP characters). When this cannot find the part in the text (a quote, a line break or a here-document changes where a command starts), or the
+    text is too long to search, the gate's own reading of what it rated is shown instead, and the question says that the whole text is not shown (V6-09)."""
+    if _short(text):
+        return show_safely(text)
+    out = clip(text)
+    keys = set(getattr(a, "seg_keys", None) or [])
+    if len(text) > LOCATE_MAX:
+        hidden, complete = [], False
+    else:
+        hidden, complete = _hidden_gated(keys, text) if keys else ([], False)
+    if not complete:
+        out += "\nJADE cannot show which part of this call is risky, and the middle of it is not shown. "
+        out += (f"JADE rated this:\n{_gate_reading(keys)}\n" if keys else "") + READ_ELSEWHERE
+    for s, e in hidden[:GATED_PARTS]:
+        part = text[s:e].strip()
+        cut = len(part) > GATED_CAP
+        out += "\nA risky command in the part that is not shown above, " + ("its start" if cut else "in full") + f":\n{show_safely(part[:GATED_CAP])}"
+        if cut:
+            out += f"\n... {len(part) - GATED_CAP} more characters of it are not shown. {READ_ELSEWHERE}"
+    if len(hidden) > GATED_PARTS:
+        out += f"\n{len(hidden) - GATED_PARTS} more risky commands are in the part that is not shown. {READ_ELSEWHERE}"
+    return out
+
+
+def channel() -> askplain.Channel:
+    """What the chat does with an answer and with none, read from the constants now (V6-26): the question text states these numbers."""
+    return askplain.Channel("chat", wait_s=ASK_TTL_S, allow_s=GRANT_TTL_S, deny_s=ASK_TTL_S, deny_cap=DENY_CAP)
 
 
 ALLOW, DENY = "Allow", "Deny"
 SUGGEST_PROJECT = "Allow, suggest for this project"
 SUGGEST_ANY = "Allow, suggest for any project"
-SUGGEST_LABELS = {"kind_project": SUGGEST_PROJECT, "merge_project": SUGGEST_PROJECT, "kind_any": SUGGEST_ANY}   # scopes.offered gives at most one project scope
+SUGGEST_LABELS = {"kind_project": SUGGEST_PROJECT, "merge_project": SUGGEST_PROJECT, "rule_project": SUGGEST_PROJECT, "kind_any": SUGGEST_ANY}   # scopes.offered gives at most one project scope
 SUGGEST_LATER = "You confirm it later in a terminal. Undo with `jade knows rm`."
 
 
@@ -61,13 +257,15 @@ def question_for(ask_id: str, a, tool: str, ctx: dict, scopes: list | None = Non
     lines = [f"[jade:ask_{ask_id}] JADE gate: {a.level} risk, rule {a.rule_id}.", *askplain.header(a, tool)]
     if a.ho_ids:
         lines.append("Classes: " + ", ".join(a.ho_ids) + " (only you can decide these)")
-    lines.append(f"Tool: {tool}")
-    lines.append("Command:\n" + _clip(str(ctx.get("subject") or a.subject)))
+    lines.append(f"Tool: {show_safely(tool)}")
+    lines.append("Command:\n" + command_text(a, str(ctx.get("subject") or a.subject)))
     content = ctx.get("content")
     if isinstance(content, dict):
-        lines.append(f"It also writes {content.get('length')} characters of content (sha256 {str(content.get('sha256'))[:12]}). First part:\n{_clip(str(content.get('text') or ''))}")
-    options = [{"label": ALLOW, "description": "Run this one call once. It is not remembered."},
-               {"label": DENY, "description": "Do not run it. The agent is told you said no."}]
+        lines.append(f"It also writes {content.get('length')} characters of content (sha256 {str(content.get('sha256'))[:12]}). First part:\n{clip(str(content.get('text') or ''))}")
+    if ctx.get("run_fields"):
+        lines.append("It also runs with: " + ", ".join(f"{show_safely(str(k))}={show_safely(str(v))}" for k, v in ctx["run_fields"].items()))
+    parts = askplain.build(a, tool, channel(), folder=clip(str(ctx.get("cwd") or "(not given)")), who="main session")   # V6-26: the one builder
+    options = list(parts.options)
     seen: set[str] = set()
     for sc in scopes or []:
         label = SUGGEST_LABELS.get(sc.kind)
@@ -76,7 +274,7 @@ def question_for(ask_id: str, a, tool: str, ctx: dict, scopes: list | None = Non
         seen.add(label)
         lines.append(f"{label}: {sc.label}")
         options.append({"label": label, "description": f"{sc.covers} {SUGGEST_LATER}"})
-    lines.append("Allow this one call? Single use, 10 minutes, this session only.")
+    lines.extend(parts.lines)   # the folder, who asks, what Allow and Deny do, and what no answer does: in the question itself, because the host may not draw option descriptions
     return {"question": "\n".join(lines), "header": "JADE gate", "multiSelect": False, "options": options}
 
 
@@ -90,6 +288,15 @@ def _scope_for(row, label: str) -> dict | None:
         if isinstance(sc, dict) and SUGGEST_LABELS.get(sc.get("kind")) == label:
             return sc
     return None
+
+
+def _scope_of_kind(row, kind: str) -> dict | None:
+    """The scope of this kind that the ask stored, or None."""
+    try:
+        stored = json.loads(row.scopes_json or "[]")
+    except ValueError:
+        return None
+    return next((sc for sc in stored if isinstance(sc, dict) and sc.get("kind") == kind), None) if isinstance(stored, list) else None
 
 
 def refusal(db, session: str, hold: str, fpj: str, tool: str, where: str):
@@ -133,7 +340,7 @@ def stop_nudge(db, session: str):
             continue
         db.event(row.ask_id, "ask_nudged", guard="stop with an ask that never reached the question", actor="hook")
         return HookResult(2, "JADE: a gated call of this session is waiting for the human's answer in the chat. Call the AskUserQuestion tool now with ONE question whose text starts "
-                             f"with [jade:ask_{row.ask_id}] and the options Allow and Deny, wait for the answer, then retry the identical call. This reminder is shown once per ask.")
+                             f"with [jade:ask_{row.ask_id}] and the options Allow and Deny. {SEND_ALONE} Wait for the answer, then retry the identical call. This reminder is shown once per ask.")
     return None
 
 
@@ -174,12 +381,17 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
     ctx = permits.make_context(tool, a, event, cwd=cwd)
     if ctx.get("redacted"):
         return None   # a secret-shaped value is never stored or shown: the terminal permit path says what to do
-    session, hold, fpj = event["session_id"], a.hold_key or a.plan_hash, canonical(memory.keyed_fp(a, fp))
+    extras = run_fields(tool, event.get("tool_input"))
+    keyed = memory.keyed_fp(a, fp)
+    if extras:   # how the call runs is part of the call the human allows: the key, the open question and the question text all carry it
+        keyed = {**keyed, "_run": sha256(canonical(extras))[:16]}
+        ctx["run_fields"] = {k: str(v)[:80] for k, v in extras.items()}
+    session, hold, fpj = event["session_id"], a.hold_key or a.plan_hash, canonical(keyed)
     _expire(db)
     try:
         with db.tx():
-            row = db.one("SELECT ask_id FROM asks WHERE session_id=? AND status='ALLOWED' AND hold_key=? AND fingerprints_json=? AND expires_ts>? ORDER BY answered_ts LIMIT 1",
-                         (session, hold, fpj, ts()))
+            row = db.one("SELECT ask_id FROM asks WHERE session_id=? AND status='ALLOWED' AND plan_hash=? AND hold_key=? AND fingerprints_json=? AND expires_ts>? ORDER BY answered_ts LIMIT 1",
+                         (session, a.plan_hash, hold, fpj, ts())) if a.plan_hash else None   # V6-07: the grant is for this tool, this text and this folder; a row without the hash is never honoured
             if row is not None and db.con.execute("UPDATE asks SET status='CONSUMED' WHERE ask_id=? AND status='ALLOWED'", (row.ask_id,)).rowcount == 1:
                 did = run_decision(db, a, tool, cwd, session, row.ask_id, "chat")
                 db.con.execute("UPDATE asks SET decision_id=? WHERE ask_id=?", (did, row.ask_id))
@@ -187,8 +399,8 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
                 return HookResult(0, f"JADE: your Allow in the chat (ask {row.ask_id}) was used for this {tool} call. It is spent; the next identical call asks again.")
             if (res := refusal(db, session, hold, fpj, tool, "the chat")) is not None:
                 return res
-            open_ask = db.one("SELECT ask_id FROM asks WHERE session_id=? AND status IN ('PENDING','SHOWN') AND hold_key=? AND fingerprints_json=? AND expires_ts>? ORDER BY created_ts DESC LIMIT 1",
-                              (session, hold, fpj, ts()))
+            open_ask = db.one("SELECT ask_id FROM asks WHERE session_id=? AND status IN ('PENDING','SHOWN') AND plan_hash=? AND hold_key=? AND fingerprints_json=? AND expires_ts>? ORDER BY created_ts DESC LIMIT 1",
+                              (session, a.plan_hash, hold, fpj, ts()))   # an open question shows one text: a changed text gets its own question
             if open_ask is not None:
                 ask_id = open_ask.ask_id
             else:
@@ -210,6 +422,7 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
         return HookResult(2, f"JADE gate: the chat approval for this {tool} call could not be used ({e}). Ask the human to run `jade decide list` and look at it.")
     return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}). The human decides this {tool} call in the chat.\n"
                          f"Call the AskUserQuestion tool now with ONE question whose text starts with {f'[jade:ask_{ask_id}]'} and the options Allow and Deny. "
+                         f"{SEND_ALONE} "
                          "JADE replaces the question text with the real one, so do not write the command into it. Wait for the answer. "
                          f"Then retry the identical {tool} call, unchanged. Do not answer the question yourself and do not rephrase the call to avoid the gate.")
 
@@ -264,6 +477,8 @@ def settle(event: dict):
             if label in SUGGEST_LABELS.values() and scope is None:
                 continue   # a suggest label this ask did not offer (a forged answer): nothing is decided
             allow = label != DENY
+            if not allow:
+                scope = _scope_of_kind(row, "rule_project")   # V6-16: a Deny of a call that has the R-16 / R-14 project scope takes that scope out (the newest answer wins)
             until = ts(now() + timedelta(seconds=GRANT_TTL_S)) if allow else ts(now() + timedelta(seconds=ASK_TTL_S))
             with db.tx():
                 if db.con.execute("UPDATE asks SET status=?, answered_ts=?, expires_ts=? WHERE ask_id=? AND status='SHOWN'",

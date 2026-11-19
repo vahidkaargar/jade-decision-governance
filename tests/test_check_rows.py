@@ -1,6 +1,7 @@
 """V6-10: `jade check` and `jade hooks install` say what is true, at level `off` and in every gate mode and level pair, and say "unknown" for what JADE
 cannot see. A row is (name, ok, detail) where ok is True (ok), False (FAIL, the exit code is non-zero, as before) or None (WARN: not a failure, but not
-safe either, or not known). Only rule ids and levels are printed, never a command. No default and no blocking behaviour changes here (that is V6-16)."""
+safe either, or not known). Only rule ids and levels are printed, never a command. No default and no blocking behaviour changes here. (V6-16 then made level `off` "observe plus floor": SI-07, SI-08 and the wiring classes block; the table
+below reads that from `hooks._verdict`.)"""
 
 import json
 import subprocess
@@ -131,11 +132,12 @@ def test_level_off_row_is_a_warning_with_the_advisory_text(wired):
     setup_pair("enforce", "off")
     ok, detail = rows()["what blocks"]
     assert ok is None
-    soft = [s for s in invariant_ids() if s not in hooks.GOVERNANCE_INVARIANTS]
-    assert detail.startswith("advisory: " + ", ".join(soft) + ", R-13, R-16 and all risk rules only log; " + ", ".join(GOV) + " block"), detail
-    assert "SI-07" in soft and "SI-08" in soft
+    floor = sorted(hooks.OFF_FLOOR_INVARIANTS)   # V6-16: observe plus floor
+    soft = [s for s in invariant_ids() if s not in hooks.GOVERNANCE_INVARIANTS and s not in floor]
+    assert detail.startswith("advisory: " + ", ".join(soft) + " and every risk rule (R-13 and R-16 too) only log; " + ", ".join(sorted(set(GOV) | set(floor))) + " block"), detail
+    assert floor == ["SI-07", "SI-08"] and "SI-07" not in soft and "SI-08" not in soft
     ok, detail = rows()["level"]
-    assert ok is None and detail.startswith("off: JADE only watches")
+    assert ok is None and detail.startswith("off (observe plus floor)")
 
 
 def test_level_high_row_is_ok(wired):

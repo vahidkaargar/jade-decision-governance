@@ -2,9 +2,10 @@
 
 The same rule `tests/test_routing_policy_w53.py` enforces for `routing.yaml`. Five keys were read by nothing and read as controls that did not exist:
 `abstain_to` (where an abstain goes: the exit code is 3 and the agent decides), `max_revisions` (the cap is the constant `state_machine.MAX_REVISIONS`;
-a cap the policy file could raise is a safety change, so it is not wired), `human_question.each_question_includes` and `human_question.deadline_default_h`
-(the question the human sees is built by `askplain` and `askchat` from the gate's own reading, and shows no deadline), and the `score.gates` flag (a score
-ranks and never gates; `thresholds.judge` says so in code). They are deleted, and these tests fail if one comes back unread.
+a cap the policy file could raise is a safety change, so it is not wired), `human_question.deadline_default_h` (the question the human sees shows no deadline),
+`human_question.each_question_includes` and the `score.gates` flag (a score ranks and never gates; `thresholds.judge` says so in code). Then V6-26 made
+`each_question_includes` a real control: `askplain.build` refuses to build a question that lacks one of the listed fields, so that key is back and is listed in
+PROSE_ONLY below. The others are deleted, and these tests fail if one comes back unread.
 """
 
 from __future__ import annotations
@@ -27,8 +28,9 @@ PROSE_ONLY = {
     "exit_codes.provider_unavailable": "mirrors thresholds.EXIT; the same test pins it",
     "exit_codes.invalid_question": "mirrors thresholds.EXIT; the same test pins it",
     "families.strategy_choice.note": "a reminder for the reader that a split choice is acceptable",
+    "human_question.each_question_includes": "read by askplain.build (V6-26), which tests/acceptance/test_human_text_tier1.py drives; this truth test builds no question",
 }
-DELETED = ("abstain_to", "max_revisions", "each_question_includes", "deadline_default_h", "human_question", "gates")
+DELETED = ("abstain_to", "max_revisions", "deadline_default_h", "gates")
 
 
 def _read_keys(doc, monkeypatch) -> set[str]:
@@ -77,7 +79,7 @@ def test_the_five_unread_keys_are_gone_and_no_document_promises_them():
     root = REAL.parent
     for rel in ("README.md", *(f"docs/{p.name}" for p in sorted((root / "docs").glob("0*.md")))):
         body = (root / rel).read_text()
-        for key in ("each_question_includes", "deadline_default_h", "max_revisions"):
+        for key in ("deadline_default_h", "max_revisions"):
             assert key not in body, f"{rel} names {key}, which is deleted"
 
 

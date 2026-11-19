@@ -147,7 +147,7 @@ def tracing(tracer: Tracer, db=None):
 
 def operations(db):
     """Named operations that exercise the code paths a hook, the stop reminder, the checks and the daily job run. Each takes the open ledger."""
-    from jade import decide, hooks, ledger, ops, permits, policy
+    from jade import decide, hooks, ops, permits, policy
     from jade.util import now, ts
 
     ev = {"tool_name": "Bash", "tool_input": {"command": SYNTHETIC_GATED}, "session_id": BENCH_SESSION, "cwd": BENCH_CWD}
@@ -191,14 +191,26 @@ def operations(db):
         db.all("SELECT outcome_id FROM outcomes WHERE decision_id=? ORDER BY rowid DESC LIMIT 1", (did,))
 
     def start_and_events_window():
-        db.all("SELECT detail_json FROM events WHERE kind IN ('gated','safety_block') AND " + ledger.live() + " AND ts>=?", (ts(now() - timedelta(days=7)),))
+        from jade import readouts
+
+        readouts.gated_rows(db, ts(now() - timedelta(days=7)))   # the statement `jade check` and `jade ledger stats` both run (V6-23)
+
+    def stats_readouts():   # V6-23: what `jade ledger stats` and `jade review` read beyond the call counters
+        from jade import readouts
+
+        since = ts(now() - timedelta(days=14))
+        readouts.load_counts(db, since)
+        readouts.ask_load(db, since)
+        readouts.verify_links(db, since)
+        readouts.label_coverage(db, since)
+        readouts.shadow_agreement(db, since)
 
     def session_start():
         hooks.session_start({"session_id": BENCH_SESSION, "cwd": BENCH_CWD})
 
     return {"session_start": session_start, "pretool_gated": gate, "posttool": posttool, "permit_and_hold_lookups": find_usable_and_pending, "begin_call_dedup": dedup_and_calls,
             "stop_undisposed": stop_undisposed, "sweeps": sweeps, "check_ledger_rows": check_rows, "decision_lookups": decision_lookups,
-            "events_window": start_and_events_window}
+            "events_window": start_and_events_window, "stats_readouts": stats_readouts}
 
 
 # ---- measurement ---------------------------------------------------------------------------------

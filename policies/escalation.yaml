@@ -36,7 +36,9 @@ exit_codes:                            # mirrors thresholds.EXIT; tests/test_esc
   reject: 4
   provider_unavailable: 5
   invalid_question: 6
+human_question:                        # every escalation is its own question; none are grouped or delayed (W-35, docs/05 T14)
+  each_question_includes: ["context", "impact", "options", "recommended_default", "consequence_of_no_answer"]   # read by askplain.build (V6-26): it refuses to build a question without them
 # An abstain is exit code 3 and the agent decides what to do next: the file names no destination for it. The revision cap is the constant
 # state_machine.MAX_REVISIONS (3). Escalations are not grouped or delayed (W-35). A human question is built by jade/askplain.py from the gate's own reading of the
-# call; it shows what the call does, its risk and the options, and no answer leaves the call blocked. It shows no recommended default and no deadline.
+# call; it shows what the call does, its risk, the options, and what no answer does (the call stays blocked). It shows no deadline.
 # Every key above is read by code or listed in tests/test_escalation_policy_keys.py, which fails on a key nothing reads (W-83, V6-11).

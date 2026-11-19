@@ -74,9 +74,13 @@ CREATE INDEX IF NOT EXISTS human_answers_scope ON human_answers(scope_key, stren
 CREATE INDEX IF NOT EXISTS human_answers_class ON human_answers(class_key, strength);
 CREATE INDEX IF NOT EXISTS human_answers_ts ON human_answers(ts);
 CREATE INDEX IF NOT EXISTS asks_call ON asks(session_id, hold_key, status);
+CREATE INDEX IF NOT EXISTS asks_created ON asks(created_ts);
+CREATE INDEX IF NOT EXISTS decisions_created ON decisions(created_at);
+CREATE INDEX IF NOT EXISTS calls_decision ON jev_calls(decision_id);
 """
 MIGRATIONS = {"jev_calls": [("language", "TEXT"), ("source", "TEXT")], "decisions": [("hold_key", "TEXT"), ("source", "TEXT")],
               "permits": [("source", "TEXT")], "events": [("source", "TEXT")], "asks": [("class_key", "TEXT"), ("label", "TEXT"), ("ho", "INTEGER"), ("scopes_json", "TEXT")],
+              "labels": [("label_type", "TEXT"), ("sample_prob", "REAL"), ("audit_source", "TEXT")],   # V6-23: old rows keep NULL, which reads as a `claim_true` label
               "human_answers": [("last_used_ts", "TEXT"), ("label", "TEXT"), ("ho", "INTEGER"), ("scope_kind", "TEXT"), ("scope_key", "TEXT"), ("scope_label", "TEXT"), ("family_key", "TEXT")]}   # columns added after the first release: (name, type)
 # PRAGMA user_version of a file once SCHEMA, the migrations and INDEXES have been applied to it; a file already at this value skips all three (W-58). It is a
 # digest of those three, so changing any of them changes the version and every file is brought up to date once: nobody has to remember to bump a number.
@@ -264,6 +268,18 @@ class Ledger:
     def find_repeat(self, question_id: str, version: int, state_hash: str, claim_hash: str | None, session: str):
         """Read-only form of the lookup `begin_call` does: the answered call that a new ask of this question on this state would repeat (PF-04)."""
         row = self._anchor(self.con, session, question_id, version, state_hash, claim_hash)
+        return self.get_call(row["call_id"]) if row else None
+
+    def find_first_answer(self, question_id: str, version: int, state_hash: str, claim_hash: str | None, session: str):
+        """The first answer the provider gave to this question on this state in this session, from ANY source (a live row or a `JADE_SOURCE=test` row), or None.
+        This is not an anchor and nothing points at it: it only holds a fresh sample to the first verdict (the never-looser rule) and counts the `--no-cache`
+        cap. A run under the test tag therefore cannot start over with no first answer. Cache rows are not answers of the provider. Read-only."""
+        ttl = dedup_ttl_s()
+        row = self.con.execute(
+            "SELECT call_id FROM jev_calls WHERE session_id=? AND question_id=? AND question_version=? "
+            "AND state_hash=? AND COALESCE(claim_hash,'')=COALESCE(?, '') AND ts>=? "
+            "AND state='DONE' AND exit_code IN (0,3,4) AND COALESCE(provider,'')<>'cache' ORDER BY rowid ASC LIMIT 1",
+            (session, question_id, version, state_hash, claim_hash, ts(now() - timedelta(seconds=ttl)))).fetchone()
         return self.get_call(row["call_id"]) if row else None
 
     def in_flight_batches(self, within_s: float, exclude: tuple[str, ...] = ()) -> int:
