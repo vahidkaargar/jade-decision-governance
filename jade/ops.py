@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1382,9 +1383,8 @@ def managed_settings_path() -> Path:
     return Path(os.environ.get("JADE_MANAGED_SETTINGS") or _MANAGED_SETTINGS)
 
 
-def project_settings_files(cwd) -> list[Path]:
-    """The project `.claude/settings.json` and `settings.local.json` a session started in `cwd` can read: in `cwd` and each ancestor up to the
-    repository root (the nearest directory with `.git`; without one, `cwd` alone). The user's own two files are not listed: wiring_problems owns them."""
+def _project_dirs(cwd) -> list[Path]:
+    """`cwd` and each ancestor up to the repository root (the nearest directory with `.git`; without one, `cwd` alone)."""
     try:
         start = Path(cwd).resolve()
     except (OSError, RuntimeError, TypeError, ValueError):
@@ -1396,6 +1396,13 @@ def project_settings_files(cwd) -> list[Path]:
             break
     else:
         dirs = [start]
+    return dirs
+
+
+def project_settings_files(cwd) -> list[Path]:
+    """The project `.claude/settings.json` and `settings.local.json` a session started in `cwd` can read: in `cwd` and each ancestor up to the
+    repository root (the nearest directory with `.git`; without one, `cwd` alone). The user's own two files are not listed: wiring_problems owns them."""
+    dirs = _project_dirs(cwd)
     sp = settings_path()
     user = {os.path.realpath(sp), os.path.realpath(sp.with_name("settings.local.json"))}
     return [f for d in dirs for name in ("settings.json", "settings.local.json") if os.path.realpath(f := d / ".claude" / name) not in user]
@@ -1517,6 +1524,179 @@ def shadow_problems(cwd=None, *, managed: bool = True, plugins: bool = True) -> 
         for f in files:
             out += _shadow_scan(f)
     return out
+
+
+# ---- what a repository controls before the trust dialog (V6-18 e, BS-01, BS-02; display only) ----------------------------
+_INSTRUCTION_FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".claude/CLAUDE.md")
+_MAX_RULE_FILES = 50
+_PLAIN_NAME = re.compile(r"[\w.-]{1,40}")
+_TAG_RANGES = ((0xE0000, 0xE007F), (0xE0100, 0xE01EF))   # tag characters and the variation selectors supplement: text no reader sees
+_BIDI_CONTROLS = frozenset({*range(0x202A, 0x202F), *range(0x2066, 0x206A)})   # embeddings, overrides and isolates (Trojan Source)
+_ALWAYS_HIDDEN = frozenset({0x200B, *range(0x2060, 0x2065), 0x00AD, 0x180E, 0x034F, 0xFEFF})
+_NEEDS_A_SCRIPT = frozenset({0x200C, 0x200D, 0x200E, 0x200F, 0x061C})   # ordinary in Persian and Arabic text and in emoji sequences, hidden anywhere else
+
+
+def _repo_name(k) -> str:
+    """A key or server name of a repository file as it may be shown: plain word characters only, else a fixed placeholder (a name is repository text)."""
+    return k if isinstance(k, str) and _PLAIN_NAME.fullmatch(k) else "(unusual name)"
+
+
+def _repo_names(keys, limit: int = 8) -> str:
+    shown = sorted({_repo_name(k) for k in keys})
+    return ", ".join(shown[:limit]) + (f" and {len(shown) - limit} more" if len(shown) > limit else "")
+
+
+def _joins_text(c: str | None) -> bool:
+    """A neighbour that makes a joiner or a direction mark ordinary: a letter of an Arabic, Hebrew, Syriac, Thaana or Indic script, a symbol or a pictograph."""
+    if not c:
+        return False
+    o = ord(c)
+    return 0x0590 <= o <= 0x0DFF or 0xFB1D <= o <= 0xFDFF or 0xFE70 <= o <= 0xFEFC or o >= 0x1F000 or unicodedata.category(c) == "So" or c == "️"
+
+
+def hidden_unicode(text: str) -> tuple[dict[str, int], int]:
+    """({class: count}, line of the first hit) of the characters in `text` that a reader does not see but a model reads. Classes: `tag`, `bidi`, `zero-width`.
+    A byte order mark at the very start is not counted, and a joiner or direction mark next to Persian, Arabic or emoji text is ordinary writing."""
+    if text.isascii():
+        return {}, 0
+    counts: dict[str, int] = {}
+    first = 0
+    line = 1
+    for i, c in enumerate(text):
+        o = ord(c)
+        if c == "\n":
+            line += 1
+            continue
+        if o < 0x80:
+            continue
+        kind = ("tag" if any(a <= o <= b for a, b in _TAG_RANGES) else "bidi" if o in _BIDI_CONTROLS else "zero-width" if o in _ALWAYS_HIDDEN and not (o == 0xFEFF and i == 0)
+                else "zero-width" if o in _NEEDS_A_SCRIPT and not (_joins_text(text[i - 1] if i else None) or _joins_text(text[i + 1] if i + 1 < len(text) else None)) else None)
+        if kind:
+            counts[kind] = counts.get(kind, 0) + 1
+            first = first or line
+    return counts, first
+
+
+def _bounded_text(f: Path) -> tuple[str | None, str | None]:
+    """(text, problem) of a repository file, read as the host would (symlinks followed), at most MAX_SETTINGS_BYTES. (None, None) when it is no regular file."""
+    try:
+        st = os.stat(f)
+        if not stat.S_ISREG(st.st_mode):
+            return None, None
+        if st.st_size > MAX_SETTINGS_BYTES:
+            return None, f"too large ({st.st_size} bytes) to scan"
+        with open(f, "rb") as fh:
+            return fh.read(MAX_SETTINGS_BYTES + 1).decode("utf-8", "replace"), None
+    except FileNotFoundError:
+        return None, None
+    except OSError as e:
+        return None, f"cannot be read ({type(e).__name__})"
+
+
+def _settings_findings(label: str, data: dict) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    hooks_map = data.get("hooks")
+    n_hooks, events = 0, []
+    for event, groups in (hooks_map.items() if isinstance(hooks_map, dict) else ()):
+        n = sum(len(g["hooks"]) for g in (groups if isinstance(groups, list) else ()) if isinstance(g, dict) and isinstance(g.get("hooks"), list))
+        if n:
+            n_hooks += n
+            events.append(event)
+    if n_hooks:
+        out.append(("hooks", f"{label}: {n_hooks} hook(s) for {_repo_names(events)}"))
+    if data.get("enableAllProjectMcpServers"):
+        out.append(("mcp", f"{label}: enableAllProjectMcpServers is true (every server in .mcp.json starts without a question)"))
+    if isinstance(data.get("enabledMcpjsonServers"), list) and data["enabledMcpjsonServers"]:
+        out.append(("mcp", f"{label}: enabledMcpjsonServers names {len(data['enabledMcpjsonServers'])} server(s)"))
+    if isinstance(data.get("env"), dict) and data["env"]:
+        out.append(("env", f"{label}: env keys {_repo_names(data['env'])}"))
+    return out
+
+
+def repo_config_findings(cwd=None) -> list[tuple[str, str]]:
+    """(kind, line) for what the repository of `cwd` (and the directories above it up to the repo root) controls and the host loads before or without a trust
+    question: hooks, MCP servers and `env` keys of its Claude settings files and `.mcp.json`, and hidden Unicode in CLAUDE.md, AGENTS.md and the rules files.
+    Names, counts and line numbers only: never a value, a command, a URL or a line of the repository, because the SessionStart text goes to the model. Display
+    only: a hook cannot stop what loads before the hooks run (docs/05 T19)."""
+    if cwd is None:
+        try:
+            cwd = Path.cwd()
+        except OSError:
+            return []
+    dirs = _project_dirs(cwd)
+    if not dirs:
+        return []
+    root = dirs[-1]
+
+    def label(f: Path) -> str:
+        try:
+            rel = f.relative_to(root).as_posix()
+        except ValueError:
+            rel = f.name
+        return re.sub(r"[^\w ./@+,~-]", "?", rel)[:80]
+
+    out: list[tuple[str, str]] = []
+    for f in project_settings_files(cwd):
+        text, problem = _bounded_text(f)
+        if problem:
+            out.append(("unreadable", f"{label(f)}: {problem}"))
+        if text is None:
+            continue
+        try:
+            data = json.loads(text) if text.strip() else {}
+        except ValueError:
+            out.append(("unreadable", f"{label(f)}: is not valid JSON, so JADE cannot say what it sets"))
+            continue
+        if not isinstance(data, dict):
+            out.append(("unreadable", f"{label(f)}: does not hold a JSON object, so JADE cannot say what it sets"))
+            continue
+        out += _settings_findings(label(f), data)
+    for d in dirs:
+        text, problem = _bounded_text(d / ".mcp.json")
+        if problem:
+            out.append(("unreadable", f"{label(d / '.mcp.json')}: {problem}"))
+        elif text is not None:
+            try:
+                servers = (json.loads(text) if text.strip() else {}).get("mcpServers")
+            except (ValueError, AttributeError):
+                out.append(("unreadable", f"{label(d / '.mcp.json')}: is not valid JSON, so JADE cannot say which MCP servers it starts"))
+                continue
+            if isinstance(servers, dict) and servers:
+                out.append(("mcp", f"{label(d / '.mcp.json')}: {len(servers)} MCP server(s): {_repo_names(servers)}"))
+    for d in dirs:
+        files = [d / n for n in _INSTRUCTION_FILES]
+        try:
+            files += sorted((d / ".claude" / "rules").rglob("*.md"))[:_MAX_RULE_FILES]
+        except OSError:
+            pass
+        for f in files:
+            text, problem = _bounded_text(f)
+            if problem:
+                out.append(("unreadable", f"{label(f)}: {problem} for hidden Unicode"))
+            if text is None:
+                continue
+            counts, first = hidden_unicode(text)
+            if counts:
+                out.append(("unicode", f"{label(f)}: hidden Unicode ({', '.join(f'{n} {k}' for k, n in sorted(counts.items()))}; first at line {first})"))
+    return out
+
+
+def _repo_config_row() -> tuple[str, bool | None, str]:
+    """WARN (never FAIL) when the repository controls hooks, MCP servers, env keys or hides Unicode in the instruction files: JADE tells the owner and stops nothing."""
+    try:
+        scanned = str(Path.cwd())
+    except OSError:
+        scanned = "(no current directory)"
+    try:
+        found = repo_config_findings()
+    except Exception:  # noqa: BLE001 - a health probe reports every failure
+        return ("repo config", None, "the repository config could not be scanned; look at .claude/settings*.json, .mcp.json, CLAUDE.md and AGENTS.md by hand")
+    if not found:
+        return ("repo config", True, f"no repository-controlled hooks, MCP servers or env keys, and no hidden Unicode in CLAUDE.md, AGENTS.md or the rules, under {scanned} up to its "
+                "repo root (run `jade check` from the project you work in to scan that one)")
+    lines = [line for _kind, line in found]
+    more = f"; and {len(lines) - 8} more" if len(lines) > 8 else ""
+    return ("repo config", None, "display only, JADE cannot stop what the host loads before its trust dialog: " + "; ".join(lines[:8]) + more)
 
 
 def _gate_mode_row() -> tuple[str, bool, str]:
@@ -1834,6 +2014,7 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
         scanned = "(no current directory)"
     rows.append(("settings shadowing", not shadow, f"no managed or plugin settings file, and no project settings file under {scanned} up to its repo root, disables or shadows the hooks "
                  "(run `jade check` from the project you work in to scan that one)" if not shadow else "; ".join(shadow)))
+    rows.append(_repo_config_row())
     gaps = pretool_matcher_gaps()
     if gaps is not None:
         rows.append(("pretool matcher", not gaps, "covers every gated tool" if not gaps else f"does not cover {', '.join(gaps)}: re-run `jade hooks install` in a terminal"))

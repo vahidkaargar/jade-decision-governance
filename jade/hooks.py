@@ -908,6 +908,36 @@ def _shadow_notice(db, event: dict) -> list[str]:
     return [f"JADE: settings of this project disable or shadow the JADE hooks ({'; '.join(found[:3])}); `jade check` lists every one. Remove the setting unless a human set it on purpose."]
 
 
+_REPO_CONFIG_ORDER = {"unicode": 0, "env": 1, "hooks": 2, "mcp": 3, "unreadable": 4}
+
+
+def _repo_config_notice(db, event: dict) -> list[str]:
+    """What the project of this session controls and the host loads before its trust question: hooks, MCP servers, env keys, hidden Unicode in CLAUDE.md and
+    AGENTS.md (V6-18 e, BS-01, BS-02). One line, shown and journaled once per session (event `repo_config`). Names, counts and line numbers only, never a value or a
+    line of the repository. Display only: it never blocks, and a failure here changes nothing."""
+    cwd = event.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        return []
+    try:
+        from . import ops
+
+        found = sorted(ops.repo_config_findings(cwd), key=lambda f: _REPO_CONFIG_ORDER.get(f[0], 9))
+    except Exception:  # noqa: BLE001 - a scanner failure must never change the hook's answer
+        return []
+    if not found:
+        return []
+    lines = [line for _kind, line in found]
+    digest = hashlib.sha1("\n".join(lines).encode("utf-8", "replace")).hexdigest()[:12]   # noqa: S324 - an idempotency key, not security
+    try:
+        db.event("gate", "repo_config", guard="; ".join(lines)[:500], actor="hook", key=f"repo_config:{event.get('session_id') or '-'}:{digest}",
+                 detail={"session": event.get("session_id"), "cwd": cwd, "findings": lines[:10]})
+    except Exception:  # noqa: BLE001, S110 - journaling must never change the hook's answer
+        pass
+    more = f"; and {len(lines) - 3} more" if len(lines) > 3 else ""
+    return [f"JADE: this project carries config that loads before the trust question and that JADE cannot gate ({'; '.join(lines[:3])[:400]}{more}). "
+            "`jade check` row `repo config` lists it. Display only: look at it before you trust the project."]
+
+
 def _ready_notice(db, rows: list[dict], shown: set, room: int) -> list[str]:
     """Open items whose dependencies are all done, told once each (W-51): the event key names the item and what it waited on, so a later session does not
     repeat it. An item is journaled only when its line fits in the briefing, so one that was cut is told next time. Never blocks."""
@@ -932,7 +962,7 @@ def session_start(event: dict) -> HookResult:
     try:
         decide.sweep(db)
         permits.sweep(db)
-        out = _override_notice(db, event) + _shadow_notice(db, event)
+        out = _override_notice(db, event) + _shadow_notice(db, event) + _repo_config_notice(db, event)
         pending = permits.listing(db, ("PENDING",))
         pend = [p for p in pending if getattr(p, "source", None) != "test"]
         if pend:
