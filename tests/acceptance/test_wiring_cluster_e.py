@@ -22,7 +22,7 @@ def install_hooks():
 def test_healthy_wiring_passes_check_and_the_probe_runs_each_hook(human_env, jade_stub, capsys):
     install_hooks()
     rows = rows_of()
-    assert all(ok for ok, _ in rows.values()), rows
+    assert all(ok is not False for ok, _ in rows.values()), rows   # V6-10: WARN rows (None) are not failures
     assert "decided" in rows["hook wiring"][1]
     assert ops.print_check(ops.check(live=False)) == 0
 
@@ -90,9 +90,9 @@ def test_gate_off_fails_check_and_advisory_passes(human_env, jade_stub, monkeypa
     install_hooks()
     ops.set_gate_mode("off", stdin_isatty=True)
     ok, detail = rows_of()["gate mode"]
-    assert not ok and "inert" in detail
+    assert not ok and "do nothing" in detail
     ops.set_gate_mode("advisory", stdin_isatty=True)
-    assert rows_of()["gate mode"][0]
+    assert rows_of()["gate mode"][0] is None   # V6-10: a warning, not a failure
     ops.set_gate_mode("enforce", stdin_isatty=True)
     assert rows_of()["gate mode"] == (True, "enforce")
 
