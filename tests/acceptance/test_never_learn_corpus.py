@@ -7,9 +7,14 @@ call of the corpus below that is blocked, human-only, critical, or one of the ru
   2. `proxy.skip_reason` is not `None` (the call is never sent to Jev), and
   3. `scopes.offered` offers no scope (the owner is never shown a "same kind, any project" choice for it).
 
-The corpus is every human-only positive case of `test_human_only_w98b.py` (delete, money, release, MCP by name) and every adversarial or regression case of
-`evals/` that expects a block. A call of the case files that is only a plain high call (a push of a feature branch with an odd comment, a `docker compose up`)
-is not in the never group: the owner may let JADE learn it. It is counted, and a control proves that the group is not empty.
+The corpus is every human-only positive case of `test_human_only_w98b.py` (delete, money, release, MCP by name), the same commands spelled with a wrapper (`/usr/bin/env`,
+`arch`, `script`, `watch`, `ssh host '...'`: one wrapper per command, in turn, so that every wrapper is used) and every adversarial or regression case of `evals/`
+that expects a block.
+
+A call of the case files that is only a plain high call (a push of a feature branch with an odd comment, `ssh web1 uptime`) is not in the never group: the owner may
+let JADE learn it. Review of V6-17: that half was a choice of the test, not a check. It is now a named list (`PLAIN_HIGH`): every call that is not in the never group
+must be in it, with the eligibility memory returns today and the reason, and a stale entry fails. A call that is learnable as a whole kind and should not be has a
+backlog row (W-137, W-190).
 
 One documented exception: egress (R-21) at level `low` may go to Jev, with the higher bar 0.85 (d05 4.3). Memory never learns it at any level.
 """
@@ -29,6 +34,7 @@ from tests.acceptance import test_floor_project_scope as fps
 from tests.acceptance import test_human_only_w98b as ho
 from tests.acceptance import test_memory_newer_deny as nd
 from tests.acceptance import test_memory_w101 as m
+from tests.acceptance.test_floor_spellings import WRAPPERS
 from tests.acceptance.test_memory_w101 import OTHER, enforce, medium  # noqa: F401  (fixtures)
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -77,6 +83,9 @@ def case_calls(home: str) -> list[tuple[str, str, dict]]:
 def human_only_calls() -> list[tuple[str, str, dict]]:
     out = [(f"ho-shell:{cmd}", "Bash", {"command": cmd}) for cmd in ho.DELETE + ho.MONEY + ho.RELEASE]
     out += [(f"ho-mcp:{tool}", tool, {"x": 1}) for tool, _ in ho.MCP_YES]
+    for i, cmd in enumerate(ho.DELETE + ho.MONEY + ho.RELEASE):   # the same commands behind a wrapper: a spelling that the classifier misses is not in the never group
+        label, wrap = WRAPPERS[i % len(WRAPPERS)]
+        out.append((f"ho-wrapped[{label}]:{cmd}", "Bash", {"command": wrap(cmd)}))
     return out
 
 
@@ -115,9 +124,11 @@ def places():
 
 def test_the_corpus_is_big_enough_to_mean_something(corpus):
     """A change that empties the corpus (a renamed key, a moved file) must fail here, not pass by checking nothing."""
-    assert len(corpus) >= 300
-    assert sum(1 for n, _, _ in corpus if n.startswith("ho-")) >= 100
+    assert len(corpus) >= 450
+    assert sum(1 for n, _, _ in corpus if n.startswith("ho-shell:")) >= 120
+    assert sum(1 for n, _, _ in corpus if n.startswith("ho-wrapped[")) >= 120
     assert sum(1 for n, _, _ in corpus if n.startswith("adversarial:")) >= 150
+    assert {n.split("]")[0].split("[")[1] for n, _, _ in corpus if n.startswith("ho-wrapped[")} == {label for label, _ in WRAPPERS}   # every wrapper is used
 
 
 def test_control_the_places_let_every_kind_of_scope_be_offered_for_a_plain_call(places):
@@ -150,7 +161,48 @@ def test_n_never_learn_no_call_of_the_never_group_is_remembered_sent_to_jev_or_g
             if offered := scopes.offered(b, tool, tin, {}, folder):
                 problems.append(f"{name} ({why}): scopes offered in {place}: {[s.kind for s in offered]}")
     assert not problems, "\n".join(problems[:40]) + f"\n({len(problems)} problems in {never} never-group calls)"
-    assert never >= 150 and plain >= 20, (never, plain)   # the partition has two real halves: nothing is checked against an empty side
+    assert never >= 400 and plain == len(PLAIN_HIGH), (never, plain)   # the partition has two real halves: nothing is checked against an empty side
+
+
+# The calls of the case files that expect a block (the gate asks at level high, or at the default) and that are still not in the never group: case id, the
+# eligibility memory returns today, and why. Pinned both ways: a call that becomes `never` (the right way) fails here until the entry is removed, and one that gets
+# looser fails at once.
+FEATURE_PUSH = "an ordinary push of a feature branch (an odd comment, a fake approval, a chain or a `bash -c` around it does not change that): the owner may let JADE learn it"
+ONLY_EXACT = "a tool that is not a shell command: memory can keep only the exact call"
+PLAIN_REMOTE = "an ordinary remote or sync command: the owner may let JADE learn it"
+PLAIN_HIGH = {
+    "adversarial:A02": ("class", FEATURE_PUSH), "adversarial:A03": ("class", FEATURE_PUSH), "adversarial:A43": ("class", FEATURE_PUSH), "adversarial:A178": ("class", FEATURE_PUSH),
+    "adversarial:A179": ("class", FEATURE_PUSH), "adversarial:A181": ("class", FEATURE_PUSH), "regression:R14": ("class", FEATURE_PUSH),
+    "adversarial:A40": ("exact", FEATURE_PUSH), "adversarial:A42": ("exact", FEATURE_PUSH), "adversarial:A51": ("exact", FEATURE_PUSH),
+    "adversarial:A41": ("exact", PLAIN_REMOTE), "adversarial:A210": ("exact", PLAIN_REMOTE), "regression:R15": ("exact", PLAIN_REMOTE),
+    "adversarial:A49": ("exact", ONLY_EXACT), "adversarial:A50": ("exact", ONLY_EXACT), "adversarial:A63": ("exact", ONLY_EXACT), "adversarial:A64": ("exact", ONLY_EXACT),
+    "adversarial:A65": ("exact", ONLY_EXACT), "adversarial:A163": ("exact", ONLY_EXACT), "regression:R21": ("exact", ONLY_EXACT),
+    "adversarial:A21": ("exact", "R-16, a file tool: exact only"), "adversarial:A58": ("exact", "R-16, a file tool: exact only"),
+    "adversarial:A236": ("exact", "R-16, a heredoc that writes a patch: exact only"),
+    "adversarial:A228": ("exact", "R-23, a file tool: exact only"), "adversarial:A229": ("exact", "R-23, a file tool: exact only"),
+    "adversarial:A19": ("exact", "R-15 `git -c`: exact only"),
+    "regression:R25": ("class", "R-11 `git reset --hard`: an ordinary high call, as at CONTROL in test_autonomy_floor"),
+    # class-eligible and not ordinary: each has a backlog row, and the entry goes when memory closes it
+    "adversarial:A57": ("class", "BACKLOG W-137: R-12 launchctl bootout of JADE's own agent"), "adversarial:A62": ("class", "BACKLOG W-137: R-12 launchctl remove of JADE's own agent"),
+    "adversarial:A224": ("class", "BACKLOG W-137: R-15 git config alias that runs a program"), "adversarial:A225": ("class", "BACKLOG W-137: R-15 git config alias"),
+    "adversarial:A226": ("class", "BACKLOG W-137: R-15 git config core.sshCommand"), "adversarial:A227": ("class", "BACKLOG W-137: R-15 git config set alias"),
+    "adversarial:A38": ("class", "BACKLOG W-137: R-15 GIT_SSH_COMMAND"),
+    "adversarial:A18": ("class", "BACKLOG W-190: `git push --all origin` can push the default branch"),
+    "adversarial:A59": ("class", "BACKLOG W-190: R-16 sed -i on a JADE source file from the shell"),
+    "regression:R16": ("class", "BACKLOG W-190: composio execute GMAIL_SEND_EMAIL"),
+}
+
+
+def test_the_calls_that_are_not_in_the_never_group_are_a_named_list_with_a_pinned_eligibility(corpus):
+    seen = {}
+    for name, tool, tin in corpus:
+        a = policy.assess(tool, tin, "/tmp/case")
+        if never_class(a) is None:
+            seen[name] = memory.eligibility(a, tool, tin, {})
+    assert set(seen) == set(PLAIN_HIGH), (f"not in the never group and not listed: {sorted(set(seen) - set(PLAIN_HIGH))}; "
+                                          f"listed and now in the never group or gone (remove the entry): {sorted(set(PLAIN_HIGH) - set(seen))}")
+    changed = {n: (PLAIN_HIGH[n][0], got) for n, got in seen.items() if got != PLAIN_HIGH[n][0]}
+    assert not changed, f"memory eligibility moved (listed, now): {changed}"
 
 
 def test_control_a_plain_high_call_of_the_corpus_may_still_be_learned(corpus):

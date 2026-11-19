@@ -72,6 +72,31 @@ def _operands(args: list[str]) -> list[str]:
     return out
 
 
+# Options of a package manager or of docker whose value is the next word. The words between the tool and the verb are not operands: `npm -w pkg publish`,
+# `pnpm --filter x publish`, `docker compose -f x.yml push` (V6-17 review).
+_PM_VALUE_OPTS = frozenset({"-w", "--workspace", "--prefix", "-C", "--dir", "--filter", "-F", "--cwd", "--registry", "--tag", "--access", "--otp", "--userconfig", "--loglevel",
+                            "--cache", "--filter-prod", "-c", "--config"})
+_DOCKER_VALUE_OPTS = frozenset({"-f", "--file", "-p", "--project-name", "--profile", "--env-file", "--project-directory", "-H", "--host", "--context", "-c", "--config", "-l",
+                                "--log-level", "--parallel", "--ansi", "--progress"})
+
+
+def _words_after_options(args: list[str], value_opts: frozenset[str]) -> list[str]:
+    """The operands of a command line: options are dropped, and so is the value of an option in `value_opts` given as a separate word."""
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            out.extend(args[i + 1:])
+            break
+        if a in value_opts:
+            i += 2
+            continue
+        if not a.startswith("-"):
+            out.append(a)
+        i += 1
+    return out
+
+
 def _safe_target(t: str) -> bool:
     """A build or cache directory, or anything under a temporary directory: removing it loses nothing that is not made again."""
     if not t or t.startswith("-"):
@@ -89,7 +114,7 @@ def _safe_target(t: str) -> bool:
 
 # ------------------------------------------------------------------ git
 
-_VERSION_TAG = re.compile(r"v?\d+\.\d+\.\d+(?:[-+.][\w.+-]*)?")
+_VERSION_TAG = re.compile(r"v?\d+\.\d+\.\d+(?:[-+.][\w.+-]*)?|v\d+\.\d+(?:[-+.][\w.+-]*)?")   # `1.2.3`, `v1.2.3`, and a `v` tag of two parts (`v1.0`); `1.0` alone may be a branch
 
 
 def _git_dir(start: str) -> str | None:
@@ -258,6 +283,16 @@ def _program_classes(prog: str, args: list[str], dirs: tuple[str, ...], cwd: str
     ops = _operands(args)
     if prog == "git":
         return _git(args, dirs, cwd)
+    if re.fullmatch(r"python[\d.]*|pypy\d*", prog):   # `python3 -m twine upload`: the module is the program (V6-17 review)
+        for k, a in enumerate(args[:4]):
+            if a == "-m" and k + 1 < len(args):
+                return _program_classes(args[k + 1], args[k + 2:], dirs, cwd)
+            if not a.startswith("-"):
+                break
+        return out
+    if prog == "docker-compose":
+        prog, args = "docker", ["compose", *args]
+        flags, ops = _flags(args), _operands(args)
     if _remove(prog, args):
         out.add(HO_DELETE)
     dry = any(f in ("--dry-run", "-n") or (re.fullmatch(r"-[A-Za-z]*n[A-Za-z]*", f) and prog in ("rsync",)) for f in flags)
@@ -275,7 +310,9 @@ def _program_classes(prog: str, args: list[str], dirs: tuple[str, ...], cwd: str
             out.add(HO_DELETE)
         if ops[:2] == ["volume", "rm"] or ops[:2] == ["volume", "remove"]:
             out.add(HO_DELETE)
-    if prog == "kubectl" and "delete" in ops[:3]:   # `kubectl -n x delete pod`: an option value is an operand here
+    if prog in ("kubectl", "oc") and "delete" in ops[:3]:   # `kubectl -n x delete pod`: an option value is an operand here
+        out.add(HO_DELETE)
+    if prog in ("kubectl", "oc") and "replace" in ops[:3] and "--force" in flags:   # a forced replace deletes the object and creates it again
         out.add(HO_DELETE)
     if prog == "helm" and ("uninstall" in ops[:3] or "delete" in ops[:3]):
         out.add(HO_DELETE)
@@ -293,7 +330,7 @@ def _program_classes(prog: str, args: list[str], dirs: tuple[str, ...], cwd: str
         out.add(HO_DELETE)
     # ---- money
     if prog == "stripe":
-        live = "--live" in args or any(a.startswith("sk_live") or "sk_live_" in a for a in args)
+        live = any(re.fullmatch(r"--live(?:=(?:true|1|yes|y|t))?", a, re.I) for a in args) or any(a.startswith("sk_live") or "sk_live_" in a for a in args)
         if live and (set(ops) & _STRIPE_MONEY) and not (set(ops) & _STRIPE_READ):
             out.add(HO_MONEY)
     if prog in ("curl", "wget", "http", "https") and (_hosts(args) & _MONEY_HOSTS) and (methods & {"POST", "PUT", "PATCH", "DELETE"} or _sends_body(args)):
@@ -307,8 +344,12 @@ def _program_classes(prog: str, args: list[str], dirs: tuple[str, ...], cwd: str
     # ---- release
     publish = prog in ("npm", "yarn", "pnpm", "bun", "cargo", "uv", "poetry", "flit", "twine", "gem", "mvn", "gradle", "gradlew", "helm", "oras") or (prog == "pod" and ops[:2] == ["trunk", "push"])
     if publish and not dry and "--dry-run" not in args:
-        if prog in ("npm", "yarn", "pnpm", "bun") and ops[:1] in (["publish"], ["unpublish"]):
-            out.add(HO_RELEASE)
+        if prog in ("npm", "yarn", "pnpm", "bun"):
+            pm = _words_after_options(args, _PM_VALUE_OPTS)
+            if prog == "yarn" and pm[:1] == ["workspace"]:   # `yarn workspace NAME publish`, `yarn workspace NAME npm publish`
+                pm = pm[2:]
+            if pm[:1] in (["publish"], ["unpublish"]) or (prog == "yarn" and pm[:2] in (["npm", "publish"], ["npm", "unpublish"])):
+                out.add(HO_RELEASE)
         elif prog == "cargo" and ops[:1] in (["publish"], ["yank"]):
             out.add(HO_RELEASE)
         elif prog in ("uv", "poetry", "flit") and ops[:1] == ["publish"]:
@@ -326,9 +367,12 @@ def _program_classes(prog: str, args: list[str], dirs: tuple[str, ...], cwd: str
         elif prog == "pod":
             out.add(HO_RELEASE)
     if prog in ("docker", "podman", "buildah", "nerdctl"):
-        if ops[:1] == ["push"] and _docker_push_is_remote(ops[1:]):
+        dops = _words_after_options(args, _DOCKER_VALUE_OPTS)   # V6-17 review: `docker -H host push`, `docker image push`, `docker compose -f x.yml push`
+        if dops[:1] == ["push"] and _docker_push_is_remote(dops[1:]):
             out.add(HO_RELEASE)
-        if ops[:2] == ["manifest", "push"] and _docker_push_is_remote(ops[2:]):
+        if dops[:2] in (["image", "push"], ["manifest", "push"]) and _docker_push_is_remote(dops[2:]):
+            out.add(HO_RELEASE)
+        if dops[:2] == ["compose", "push"] and not dry and "--dry-run" not in args:   # the images and registries are in the compose file: not for the gate to read
             out.add(HO_RELEASE)
         if "--push" in args and (ops[:1] in (["build"], ["bake"]) or ops[:2] in (["buildx", "build"], ["buildx", "bake"])):
             out.add(HO_RELEASE)

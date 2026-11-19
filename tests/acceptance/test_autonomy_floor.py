@@ -8,13 +8,16 @@ Every other rule (R-13 outside the wiring, R-16 in a checkout, the human-only cl
 Tests only classify and call the hook; nothing runs. Test names carry the plan ids: N4 and N5, N6, N6b of docs/14-v6/05, section 9.
 """
 
+import atexit
 import json
+import shutil
+import tempfile
 from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 
-from jade import decide, hooks, ledger, memory, ops, paths, permits, policy, proxy, scopes, util
+from jade import askchat, decide, hooks, ledger, memory, ops, paths, permits, policy, proxy, scopes, util
 from tests.acceptance import test_jev_proxy_w102 as jev
 from tests.acceptance import test_memory_newer_deny as nd
 from tests.acceptance import test_memory_w101 as mem
@@ -48,6 +51,13 @@ def set_cfg(**kw):
 def human(monkeypatch):
     monkeypatch.setattr(util, "human_tty_refusal", lambda *a, **k: None)
     monkeypatch.setenv("JADE_GATE_MODE", "enforce")
+
+
+@pytest.fixture(autouse=True)
+def shell_roots(monkeypatch):
+    """tests/conftest.py empties the shell start-up roots (no test reads the real ~/.zshrc). The List A row for HO-shell-startup needs one root: a fixed file that is
+    only named, never read for what it holds and never written."""
+    monkeypatch.setattr(policy, "_shell_roots", lambda: (policy._real(str(HOME / ".zshenv")),))
 
 
 @pytest.fixture
@@ -330,6 +340,18 @@ def _b(cmd):
     return lambda: ("Bash", {"command": cmd})
 
 
+# Two scripts the gate only reads (a static read, never run): one names the JADE state (HO-state-path), one is a payload runner that starts real shells
+# (SI-13: the shape of the 2026-11-15 runner). They live in a folder of their own that is removed when the test run ends.
+SCRIPTS = Path(tempfile.mkdtemp(prefix="jade-floor-scripts-")).resolve()
+atexit.register(shutil.rmtree, SCRIPTS, ignore_errors=True)
+(SCRIPTS / "go.sh").write_text("#!/bin/sh\nrm -f ~/.local/share/jade/jade.sqlite\n")
+(SCRIPTS / "run.py").write_text(
+    'import json, os, subprocess, sys\nfrom multiprocessing import Pool\n'
+    'def run_one(cmd):\n    return [subprocess.run(argv, timeout=6).returncode for argv in (["/bin/bash", "-c", cmd], ["/bin/zsh", "-f", "-c", cmd])]\n'
+    'if __name__ == "__main__":\n    cmds = json.load(open(sys.argv[1]))\n    with Pool(8) as p:\n        res = p.map(run_one, cmds)\n    json.dump(res, open(sys.argv[2], "w"))\n')
+(SCRIPTS / "corpus.json").write_text("[]")
+
+
 # (id of the rule or class, builds (tool, input))
 LIST_A = [
     ("SI-02", _b(BIND_ALL)),
@@ -343,9 +365,15 @@ LIST_A = [
     ("HO-money", _b("stripe refunds create --charge ch_1 --live")),
     ("HO-release", _b("npm publish")),
     ("HO-wiring", _wiring),
+    ("HO-state-path", _b(f"bash {SCRIPTS}/go.sh")),
+    ("HO-mod", lambda: ("Write", {"file_path": str(HOME / ".claude" / "dev-mods" / "m.js"), "content": "x"})),
+    ("HO-R17", _b("git config core.hooksPath /tmp/hooks")),
+    ("HO-terminal", lambda: ("mcp__terminal__run_in_terminal", {"command": "bash /tmp/x.sh", "cwd": "/tmp"})),
+    ("HO-shell-startup", lambda: ("Write", {"file_path": str(HOME / ".zshenv"), "content": "alias git=x"})),
+    ("SI-13", _b(f"python3 {SCRIPTS}/run.py {SCRIPTS}/corpus.json {SCRIPTS}/out.json")),
     ("R-03 critical", _b("kubectl apply -f x.yaml")),
     ("R-03 critical (terraform)", _b("terraform apply -auto-approve")),
-    ("R-04 critical", _b("sudo pfctl -f /etc/pf.conf")),
+    ("R-01 critical", _b("sudo pfctl -f /etc/pf.conf")),
     ("critical (vault)", _b("ovault secret rm FOO --project x")),
     ("R-10 merge", _b("gh pr merge 12 --merge")),
     ("R-13 shell", _b("echo x >> ~/.claude/CLAUDE.md")),
@@ -399,6 +427,33 @@ def test_list_a_control_a_plain_high_call_does_run_on_jev_and_on_a_standing_answ
     _stand("Bash", other)
     r = hooks.pretool(_event("Bash", other, session="sess-floor-0002"))
     assert r.exit_code == 0 and "confirmed answer" in r.stderr, r.stderr[:200]
+
+
+@pytest.mark.parametrize("name, build", LIST_A, ids=[n for n, _ in LIST_A])
+def test_list_a_each_row_is_the_rule_or_class_it_names(name, build):
+    """A row that is asked for another reason than its name would pass the matrix for the wrong reason (review of V6-17: five classes and SI-13 had no row)."""
+    tool, tin = build()
+    a = policy.assess(tool, tin, "/tmp")
+    key = name.split()[0]
+    if key.startswith("HO-"):
+        assert key in a.ho_ids, (name, a.ho_ids)
+    elif key == "SI-12":   # code in the hook (`_si12_hit`), not a name in `blocked`: the N4 test below reads it from the refusal text
+        assert "HO-wiring" in a.ho_ids or "HO-state-path" in a.ho_ids, (name, a.ho_ids)
+    elif key.startswith("SI-"):
+        assert key in a.blocked, (name, a.blocked)
+    elif key.startswith("R-"):
+        assert key in {a.rule_id, *(a.seg_rules or [])}, (name, a.rule_id, a.seg_rules)
+
+
+def test_list_a_names_every_human_only_class_and_every_invariant_of_the_floor():
+    """The CHANGELOG says no call of the floor runs without a human: every class of `policy` and every invariant that blocks at every level has a row."""
+    rows = {n.split()[0] for n, _ in LIST_A} | {n for n, _, _ in PERMIT_ONLY} | {"SI-07"}   # SI-07 has its own test (`unknown_outcome`); the two install and shadow classes need a folder, so they are in PERMIT_ONLY
+    classes = {policy.HO_WIRING, policy.HO_INSTALL, policy.HO_SETTINGS, policy.HO_STATE, policy.HO_MOD, policy.HO_R17, policy.HO_TERMINAL, policy.HO_SHELL,
+               policy.HO_DELETE, policy.HO_MONEY, policy.HO_RELEASE}
+    assert classes <= rows, sorted(classes - rows)
+    floor_si = {"SI-02", "SI-05", "SI-07", "SI-08", "SI-09", "SI-10", "SI-11", "SI-12", "SI-13"}   # the invariants that block in enforce mode at every level (the others are advisory)
+    assert floor_si <= rows, sorted(floor_si - rows)
+    assert set(askchat.PERMIT_ONLY) <= {n for n, _, _ in PERMIT_ONLY}, sorted(set(askchat.PERMIT_ONLY) - {n for n, _, _ in PERMIT_ONLY})
 
 
 JEV_MAY_DECIDE = {("R-21 egress", "low")}   # docs/12 and d05 4.3: egress is the one row Jev may decide, at level low only, with the higher bar 0.85 (never memory, never at medium or high)
@@ -474,6 +529,7 @@ PERMIT_ONLY = [
     ("HO-wiring", lambda tmp: ("Write", {"file_path": str(HOME / ".claude" / "settings.json"), "content": "{}"}), None),
     ("HO-checkout-install", lambda tmp: ("Bash", {"command": "uv tool install ."}), str(ROOT)),
     ("HO-settings-shadow", lambda tmp: ("Write", {"file_path": str(tmp / ".claude" / "settings.local.json"), "content": '{"disableAllHooks": true}'}), "tmp"),
+    ("HO-state-path", lambda tmp: ("Bash", {"command": f"bash {SCRIPTS}/go.sh"}), None),
 ]
 
 
