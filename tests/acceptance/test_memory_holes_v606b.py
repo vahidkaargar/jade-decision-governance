@@ -121,3 +121,68 @@ def test_an_allow_is_still_for_one_text_and_one_place():
     other = hooks.pretool(chat.call(chat.CMD, cwd="/var"))
     assert other.exit_code == 2 and "[jade:ask_" in other.stderr
     assert hooks.pretool(chat.call(chat.CMD)).exit_code == 0
+
+
+# ------------------------------------------------------------------ review round 1: the other ways a word can be blanked or hidden from the segment key
+
+def _same_keys(one, two):
+    """Which keys of two calls are equal: the hold key, the exact key, the kind key and the project kind key."""
+    a, b = _a(one), _a(two)
+    ka, kb = memory.keys(a, "Bash", {"command": one}, {}), memory.keys(b, "Bash", {"command": two}, {})
+    return {"hold": a.hold_key == b.hold_key, "exact": ka[0] == kb[0], "class": memory.class_key(a) == memory.class_key(b), "any": memory.any_project_key(a) == memory.any_project_key(b)}
+
+
+# A word with no space but a shell syntax character is rewritten to one byte (x06) in the segment key: no blank, but the text is gone from the key.
+SYNTAX = [("ssh host 'cat>/etc/passwd'", "ssh host 'cat</etc/passwd'"),
+          ("docker compose up -d --project-name 'a;b'", "docker compose up -d --project-name 'a|b'"),
+          ("git reset --hard 'HEAD~1;x'", "git reset --hard 'HEAD~1&x'")]
+# A substitution is `$X` in the segment key, a here-doc is `<<HEREDOC`: the text is gone from the key.
+SUBST = [('ssh host "$(cat /etc/hostname)"', 'ssh host "$(cat ~/.ssh/id_rsa)"'),
+         ("ssh host $(hostname)", "ssh host $(cat ~/.aws/credentials)"),
+         ("ssh host `cat /tmp/a`", "ssh host `cat /tmp/b`"),
+         ("docker compose up -d --project-name $(date)", "docker compose up -d --project-name $(cat ~/.ssh/id_rsa)"),
+         ("ssh host ${A:-p q}", "ssh host ${A:-$(cat ~/.ssh/id_rsa)}"),
+         ("ssh host $(cat /tmp/a)", "ssh host $(cat /tmp/b)")]
+HEREDOC = [("ssh host bash -s <<'EOF'\nls\nEOF", "ssh host bash -s <<'EOF'\nrm -rf ~\nEOF"),
+           ("ssh host <<'EOF'\ncat /etc/passwd\nEOF", "ssh host <<'EOF'\ncat /etc/shadow\nEOF"),
+           ("ssh host <<EOF\nrm -rf /a\nEOF", "ssh host <<EOF\nrm -rf /b\nEOF")]
+# The words move from one command to another: the set of segment keys is the same.
+SWAP = [("ssh staging 'rm -rf /srv/app'; ssh prod 'ls /srv/app'", "ssh prod 'rm -rf /srv/app'; ssh staging 'ls /srv/app'"),
+        ('git reset --hard "x y"; docker compose up -d --project-name "p q"', 'docker compose up -d --project-name "x y"; git reset --hard "p q"'),
+        ("ssh h 'a b'; ssh i 'c d'; ssh h 'e f'", "ssh h 'a b'; ssh h 'c d'; ssh i 'e f'")]
+# A double mark expands `$VAR` and a backslash; a single mark does not. (`~` is not expanded inside any quotes: the same key.)
+MARKS = [("ssh host 'echo $AWS_SECRET_ACCESS_KEY'", 'ssh host "echo $AWS_SECRET_ACCESS_KEY"'),
+         ("docker compose up -d --project-name 'a $X'", 'docker compose up -d --project-name "a $X"'),
+         (r"ssh host 'a\$b c'", r'ssh host "a\$b c"')]
+
+
+@pytest.mark.parametrize("one,two", SYNTAX + SUBST + HEREDOC + SWAP + MARKS)
+def test_every_text_the_segment_key_loses_is_in_the_keys(one, two):
+    got = _same_keys(one, two)
+    assert not got["exact"] and not got["class"] and not got["any"], (one, two, got)
+
+
+@pytest.mark.parametrize("one,two", SYNTAX + SUBST + HEREDOC)
+def test_the_hole_is_real_the_hold_key_is_the_same(one, two):
+    """The premise for the text the segment key loses (not the swaps and the marks, which the key reads in part). If this fails, the segment key was fixed: re-read the finding."""
+    assert _same_keys(one, two)["hold"], (one, two)
+
+
+@pytest.mark.parametrize("one,two", [SUBST[0], SYNTAX[0], HEREDOC[0], SWAP[0], MARKS[0]])
+def test_a_confirmed_answer_does_not_cover_the_other_text(one, two):
+    aid = m.stored(one)
+    assert m.lookup(one)["answer_id"] == aid
+    assert m.lookup(two) is None, (one, two)
+
+
+def test_the_same_text_in_other_spacing_is_still_one_key():
+    """Spaces and quote marks that change nothing do not change the key (also next to a substitution)."""
+    for one, two in [("ssh host  'a>b'", "ssh   host \"a>b\""), ("ssh host $(cat /tmp/a)", "ssh  host   $(cat /tmp/a)"), ("ssh host 'cat /x'", 'ssh host "cat /x"')]:
+        got = _same_keys(one, two)
+        assert got["exact"] and got["class"], (one, two)
+
+
+def test_a_leading_cd_is_the_place_and_not_part_of_the_words():
+    """`cd /srv && git reset --hard "x y"` from /tmp is the same kind of call as `git reset --hard "x y"` from /srv (the place is `_where`)."""
+    a, b = _a('cd /srv && git reset --hard "x y"', "/tmp"), _a('git reset --hard "x y"', "/srv")
+    assert memory.class_key(a) == memory.class_key(b)

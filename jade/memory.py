@@ -6,7 +6,7 @@ runs without a question, through a decision walked to EXECUTING (so SI-07 still 
 
 Two keys per answer:
 - `exact_key`: the call's hold key (the canonical gated segments, independent of quoting, prefixes and cwd) with the fingerprints the gate computes (git HEAD of a
-  push, the digest of written content), the target and the place, and the quoted words the hold key blanks. The same call in the same state.
+  push, the digest of written content), the target and the place, and the text the hold key loses (a quoted word, a substitution, a here-doc body: `_quoted`), in order. The same call in the same state.
 - `class_key`: the kind of call: the winning rule and the sorted set of gated segment keys, with the PR number of `gh pr <verb> N` dropped. Only a call that is
   safe to generalise has one; the rest is exact-only. `eligibility` is the whole decision.
 
@@ -32,8 +32,11 @@ NEAR_CAP_DAYS = 14
 NEVER_RULES = frozenset({"R-21", "R-22", "R-13", "R-18"})   # R-13, R-18: what guards the agent and the files it reads its instructions from (as in proxy.NEVER_RULES)
 EXACT_ONLY_RULES = frozenset({"R-14", "M-05", "M-07"})
 _PLAIN_WORD = re.compile(r"[\w./:@=+,%-]*")   # a quoted word of these characters only is in the segment key as it is
-_QUOTE_MARK = re.compile(r"""[\\'"`#<]""")   # where `_quoted_words` stops: a backslash, a quote mark, a backtick, a comment, a possible here-doc
+_QUOTE_MARK = re.compile(r"""[\\'"`#<]""")   # where `_quoted_form` stops: a backslash, a quote mark, a backtick, a comment, a possible here-doc
 _DQ_BODY = re.compile(r'[^"\\]*(?:\\.[^"\\]*)*', re.S)   # the text of a double-quoted word, up to its closing mark (a backslash takes the next character)
+_EXPANDS = re.compile(r"[$`\\]")   # in a quoted word: what a double mark expands and a single mark does not (a `~` is not expanded inside any quotes)
+_BLANKS = re.compile(r"\s+")
+_LOST = re.compile(r'""|[\x01-\x03\x06]|\$X|/dev/fd/X|<<HEREDOC')   # what a segment key shows in place of text it does not keep: a quoted word with a space, a quoted syntax character, a substitution, a here-doc
 _ENV_WORD = re.compile(r"(?<![\w.-])[A-Za-z_]\w*=\S*")   # a NAME=value word: an env prefix, `env X=1 cmd`, `export X=1;` (it may also match inside an argument: that only asks more)
 _CD_WORD = re.compile(r"(?:^|[;&|(`{]\s*)(?:cd|pushd|popd)(?=[\s;&|)`}]|$)\s*(\S*)")
 _LEADING_CD = re.compile(r"""^[ \t]*cd[ \t]+(?:"([^"$`\\]*)"|'([^']*)'|([^\s"'$`\\;&|()<>*?\[\]{}!#]+))[ \t]*(?:&&|;)[ \t]*""")
@@ -78,32 +81,42 @@ def _target(a) -> dict:
     return {"env": sorted(set(_ENV_WORD.findall(s))), "sudo": bool(_SUDO_WORD.search(s)), "git_c": sorted(set(_GIT_C.findall(s)))}
 
 
+def _leading_cd(s: str) -> tuple[str, str] | None:
+    """(path, rest) of a text that starts with the one `cd PATH &&` (or `;`) that `_where` can read, else None."""
+    if (m := _LEADING_CD.match(s)) and (path := next(v for v in m.groups() if v is not None)) and not _CD_WORD.search(rest := s[m.end():]):
+        return path, rest
+    return None
+
+
 def _where(a) -> str:
     """The directory the call runs in: the launch directory, moved by a leading `cd PATH` (`&&` or `;`) when that is the only `cd`. Another `cd` (a later one, `pushd`, a
     variable or a subshell) makes the place unreadable: the words of every `cd` are part of it, so it never equals a place that was read."""
     base, s = getattr(a, "plan_cwd", "") or "", a.subject or ""
-    if m := _LEADING_CD.match(s):
-        path = next(v for v in m.groups() if v is not None)
-        rest = s[m.end():]
-        if path and not _CD_WORD.search(rest):
-            path = os.path.expanduser(path) if path == "~" or path.startswith("~/") else path
-            return os.path.normpath(path if os.path.isabs(path) else os.path.join(base, path))
+    if lead := _leading_cd(s):
+        path = lead[0]
+        path = os.path.expanduser(path) if path == "~" or path.startswith("~/") else path
+        return os.path.normpath(path if os.path.isabs(path) else os.path.join(base, path))
     cds = sorted(set(_CD_WORD.findall(s)))
     return f"{base}|{'|'.join(cds)}" if cds else base
 
 
-def _quoted_words(s: str) -> list[str] | None:
-    """The quoted words of a command text that the segment key may not show whole: the text between the quote marks, unless it is plain (letters, digits and `./:@=+,%-`),
-    because a plain word stays in the segment key as it is (`git 'reset'` is `git reset`). The mark (single or double) is not part of the text. None when the text is not
-    simple enough to read here (an unclosed quote, `$'..'`, a command substitution inside quotes, a here-doc, a comment): the caller then uses the whole text."""
-    out: list[str] = []
-    i, n = 0, len(s)
+def _quoted_form(s: str) -> str | None:
+    """The command text in a form that keeps what the segment key loses, in order: the unquoted text with its blanks folded, and each quoted word that the segment key may
+    not show whole, with its mark when the mark matters. A quoted word of plain characters (letters, digits and `./:@=+,%-`) is part of the unquoted text, because it stays
+    in the segment key as it is (`git 'reset'` is `git reset`). The mark (single or double) is dropped unless the text has a `$`, a backtick or a backslash: a double
+    mark expands them and a single mark does not. The text keeps its order, so two words that change places between two commands are not the same call. None when the text
+    is not simple enough to read here (an unclosed quote, `$'..'`, a command substitution inside quotes, a here-doc, a comment): the caller then uses the whole text."""
+    pieces: list = []
+    buf: list[str] = []   # the unquoted text since the last kept word
+    last = i = 0
+    n = len(s)
     while m := _QUOTE_MARK.search(s, i):
         i = m.start()
         c = s[i]
         if c == "\\":
             i += 2
             continue
+        start = i
         if c == "'":
             j = s.find("'", i + 1)
             if j < 0 or (i and s[i - 1] == "$"):
@@ -121,25 +134,35 @@ def _quoted_words(s: str) -> list[str] | None:
         else:
             i += 1
             continue
-        if not _PLAIN_WORD.fullmatch(body):
-            out.append(body)
-    return out
+        buf.append(s[last:start])
+        last = i
+        if _PLAIN_WORD.fullmatch(body):
+            buf.append(body)
+        else:
+            pieces.append(_BLANKS.sub(" ", "".join(buf)))
+            buf = []
+            pieces.append([c if _EXPANDS.search(body) else "", body])
+    buf.append(s[last:])
+    pieces.append(_BLANKS.sub(" ", "".join(buf)))
+    return canonical(pieces)
 
 
 def _quoted(a) -> str:
-    """A hash of the quoted-word text of the call, or "" when no gated segment key has a blanked word. The segment key (so the hold key) blanks a quoted word that has a
-    space in it, `ssh host 'cat /etc/passwd'` and `ssh host 'cat /etc/shadow'` are the same key, so the words are part of the exact key and of the kind (V6-06b). The same
-    words in other quote marks are the same text. A text that `_quoted_words` cannot read is hashed whole, spaces folded: more asks, never fewer."""
-    if not any('""' in k for k in getattr(a, "seg_keys", None) or []):
+    """A hash of the command text (`_quoted_form`) when the segment keys lose some of it, else "". The segment key (so the hold key) is blind to a quoted word that has a
+    space in it (`""`), to a word with a shell syntax character (one byte, x06), to a substitution (`$X`, `/dev/fd/X`) and to a here-doc body (`<<HEREDOC`):
+    `ssh host 'cat /etc/passwd'` and `ssh host 'cat /etc/shadow'` are the same key. So the text is part of the exact key and of the kind (V6-06b). The same words in other
+    quote marks, or with other spacing outside the quotes, are the same text. A text that `_quoted_form` cannot read is hashed whole: more asks, never fewer."""
+    if not any(_LOST.search(k) for k in getattr(a, "seg_keys", None) or []):
         return ""
-    return _quoted_hash(a.subject or "")
+    s = a.subject or ""
+    return _quoted_hash(lead[1] if (lead := _leading_cd(s)) else s)   # a leading `cd PATH &&` is the place (`_where`), not a word
 
 
 @functools.lru_cache(maxsize=16)
 def _quoted_hash(s: str) -> str:
     """`_quoted` for one text, remembered: the keys of one call are made several times (the exact key, the kind, the scopes), and the text may be large."""
-    words = _quoted_words(s)
-    return sha256(canonical(words) if words is not None else " ".join(s.split()))[:16]
+    form = _quoted_form(s)
+    return sha256(form if form is not None else s)[:16]
 
 
 def _with_quoted(a, key: dict) -> dict:
@@ -159,7 +182,7 @@ def any_project_key(a) -> str:
 
 
 def keyed_fp(a, fp: dict | None) -> dict:
-    """The fingerprints of the call with its target and place (`_target`, `_where`) added, and its quoted words (`_quoted`) when a segment key blanks one: what the exact
+    """The fingerprints of the call with its target and place (`_target`, `_where`) added, and the text the segment keys lose (`_quoted`) when they lose some: what the exact
     key and the ask rows (`fingerprints_json`) are made from. The hold key drops prefixes, the directory and the quoted words, so without this a staging answer would be
     the same exact call as the prod one, and `ssh host 'cat /etc/passwd'` the same as `ssh host 'cat /etc/shadow'`."""
     out = {**(fp or {}), "_ctx": sha256(canonical({"target": _target(a), "where": _where(a)}))[:16]}
