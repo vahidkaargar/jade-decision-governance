@@ -1,4 +1,4 @@
-# Escaped operators are data (W-96)
+# Escaped operators are data (W-117)
 
 Status: approved by the owner as part of the redirect gate fix plan (2026-11-15). Builds on PR 47 (`17cdd74`).
 
@@ -54,7 +54,7 @@ Backslash and double backslash before every spelling in `FILE_REDIRECTS` and `FD
 - Found while checking: `git push origin feature a>&-main`. bash closes the descriptor and `main` is a separate word, with no blank. `REDIRECT` took `-main` as the target. A `-` right after `>&` or `<&` is now the whole target. Same hole on `origin/main`.
 - Not fixed, same on `origin/main` (24 strict xfail tests keep it visible): a `{` or `}` inside a word is a literal in bash and zsh, but `SPLIT` cuts the segment there, so `git push origin feature a{ :main` is not stopped (assessment and hook). It needs its own change: only a `{` or `}` that stands as a word of its own is a group.
 
-## Follow-up (W-108, W-109): what the review of the fix found
+## Follow-up (W-129, W-130): what the review of the fix found
 
 Fixed in the same PR, with `tests/test_redirect_zsh_and_braces.py` (real bash and zsh, a recording `git`, also through `sh -c`, heredocs and `| zsh`):
 
@@ -63,20 +63,20 @@ Fixed in the same PR, with `tests/test_redirect_zsh_and_braces.py` (real bash an
 - A `{` or `}` that is not a command-group brace is data (`\x06`), decided in the scanner (`_group_brace`): the `{`/`}` hole noted above is closed and its 24 xfail tests are removed.
 - An unquoted heredoc and `echo`/`printf`/`print` halve `\\` before the next shell reads the text; both texts are read.
 
-Not in this PR (W-110, spec B): `git -C my\ repo push`, `a\ #c`, an odd redirect target word, `>! lg`, escape-halving wrappers, `>& -main`, a quoted `-C` value with an operator.
+Not in this PR (W-131, spec B): `git -C my\ repo push`, `a\ #c`, an odd redirect target word, `>! lg`, escape-halving wrappers, `>& -main`, a quoted `-C` value with an operator.
 
-## Follow-up (W-111, W-113): the merge bar and what it left out
+## Follow-up (W-132, W-134): the merge bar and what it left out
 
-Review of the brace fix (e1a76a3) found regressions against `origin/main`. The merge bar that came out of it: the PR fixes the redirect that hid the rest of a push, it is never weaker than `origin/main` on any command, and it costs at most about 3 times as much on realistic input. A gap that `origin/main` has too goes to spec B (W-114). Fixed here, with `tests/test_redirect_round3.py`:
+Review of the brace fix (e1a76a3) found regressions against `origin/main`. The merge bar that came out of it: the PR fixes the redirect that hid the rest of a push, it is never weaker than `origin/main` on any command, and it costs at most about 3 times as much on realistic input. A gap that `origin/main` has too goes to spec B (W-135). Fixed here, with `tests/test_redirect_round3.py`:
 
 - E3-3: the redirect hoist took the first word of a here-string for its file, so `cat <<< 'git push origin :main' | sh` lost `git`. A stage's own stdin text (the words after `<<<`, the body of a heredoc inside `<(...)`) is now read as text, as well as the printed words.
 - E3-4, E3-9: a prefix word with a backslash or a quote (`\env echo '...' | sh`) hid the echo (the plain-text form of that hole is closed too); an escaped operator has two readings (a word, and a backslash with a live operator), as on `origin/main`.
 - DF-6: a decoded `$'\x0f'` could make a brace mark after the sanitiser had run. `_ansi_c` neutralises every mark byte.
 - B3-5: a `{` that stands alone where a command starts, and a `}` that closes it, are written as they are: bash and zsh read them the same way, so a script of groups is read once. Ambiguous braces (after `if`, glued to a word, no blank before `}`) keep the five readings.
 
-Not changed (spec B, W-114): zsh short forms such as `if { true } { echo a }` repeated thousands of times cost about 5 times `origin/main` (the word reading adds a segment each); a classification cache for repeated identical segments would cut it.
+Not changed (spec B, W-135): zsh short forms such as `if { true } { echo a }` repeated thousands of times cost about 5 times `origin/main` (the word reading adds a segment each); a classification cache for repeated identical segments would cut it.
 
-## Follow-up (W-115): the fourth review
+## Follow-up (W-136): the fourth review
 
 Merge bar as above. Fixed, with `tests/test_redirect_round4.py` (real bash and zsh where a push is claimed):
 
@@ -88,5 +88,5 @@ Merge bar as above. Fixed, with `tests/test_redirect_round4.py` (real bash and z
 - R4-O4, CR4-3, DIFF-P2: `_readings` works on chunks (`_chunks`: lines, joined while a group is open or the line is continued); the live reading of an escaped operator is added to the first brace reading only; `_collapse_runs` cuts a run of one word (or up to eight) to four in every reading of a chunk longer than `DENSE`, unless the run moves the directory or counts (`cd`, `-C ..`, `..`). When a chunk moves the directory its other readings are subshells written first, so the tracker moves once (checked against two nested repositories; the verdicts equal those of `origin/main`).
 - Review of this fix: a here-string is found by a quote-aware scanner (`_here_strings`), not by the words (a `<<<` in quotes is text); the refill of the budget is an allowance (`HERE_ALLOWANCE`), and heredoc bodies are read at full depth; `_sub` memoises a text per depth and a deferred text is written once (the pipes of a chain read the same text once, not once per pipe).
 
-Not changed: W-114 (`&>log` rating, zsh short forms). Not covered by the readings any more: a brace reading other than the first combined with the live reading of an escaped operator in one command (0.6.1 reads neither combination).
+Not changed: W-135 (`&>log` rating, zsh short forms). Not covered by the readings any more: a brace reading other than the first combined with the live reading of an escaped operator in one command (0.6.1 reads neither combination).
 
