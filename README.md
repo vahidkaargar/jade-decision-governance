@@ -14,7 +14,7 @@ It governs how agents (Claude Code first) use [TypeSafe Jev](https://docs.typesa
 
 > **Guiding invariant.** No model output (the decision model, a reasoning model, an evaluator, or an improvement agent) can authorize a side effect, weaken protected policy, declare an unobserved outcome successful, or bypass a human approval boundary.
 
-**Support: Claude Code only; macOS tested; Linux CI only; Windows not supported.** JADE is alpha. It installs in advisory mode, which blocks nothing, and you decide when to make it firmer. With no key, or with no level set, it sends nothing off your machine from the hook (see "What leaves your machine").
+**Support: Claude Code only; macOS tested; Linux CI only; Windows not supported.** JADE is alpha. It installs in advisory mode, which blocks nothing, and you decide when to make it firmer. With no key, or with no level set, it sends nothing off your machine from the hook (see "What leaves your machine"). An agent can change the two settings in some setups: see "Two settings, read separately".
 
 ## Where it runs
 
@@ -28,7 +28,7 @@ It governs how agents (Claude Code first) use [TypeSafe Jev](https://docs.typesa
 
 ## Two settings, read separately
 
-JADE has two settings. They are separate, and only you can change them (an agent cannot).
+JADE has two settings. They are separate. You change them in your own terminal. An agent can change them too in some setups: the hook stops an agent from writing the config file that holds them only when the gate mode is not `off` and a level is set. The last column of the table below shows this.
 
 1. **The gate mode is the safety floor.** It says how firm the gate is: `off`, `advisory` (records what it would block) or `enforce`. Read it with `jade gate status`.
 2. **The level is the autonomy setting.** It says how much JADE may answer in your place, and whether text may leave your machine. It is `unset`, `off`, `low`, `medium` or `high`. Read it with `jade level`.
@@ -38,27 +38,27 @@ JADE has two settings. They are separate, and only you can change them (an agent
 <details>
 <summary>What the real hook does, for each pair of settings</summary>
 
-| Gate mode | Level | `git push origin main` | `rm -rf ~/work` | `jade permit approve ...` |
-|---|---|---|---|---|
-| `off` | `unset` | runs | runs | runs |
-| `off` | `off` | runs | runs | runs |
-| `off` | `low` | runs | runs | runs |
-| `off` | `medium` | runs | runs | runs |
-| `off` | `high` | runs | runs | runs |
-| `advisory` | `unset` | runs | runs | runs |
-| `advisory` | `off` | runs | runs | stops |
-| `advisory` | `low` | runs | runs | stops |
-| `advisory` | `medium` | runs | runs | stops |
-| `advisory` | `high` | runs | runs | stops |
-| `enforce` | `unset` | stops | stops | stops |
-| `enforce` | `off` | runs | runs | stops |
-| `enforce` | `low` | stops | stops | stops |
-| `enforce` | `medium` | stops | stops | stops |
-| `enforce` | `high` | stops | stops | stops |
+| Gate mode | Level | `git push origin main` | `rm -rf ~/work` | `jade permit approve ...` | Write to `config.json` |
+|---|---|---|---|---|---|
+| `off` | `unset` | runs | runs | runs | runs |
+| `off` | `off` | runs | runs | runs | runs |
+| `off` | `low` | runs | runs | runs | runs |
+| `off` | `medium` | runs | runs | runs | runs |
+| `off` | `high` | runs | runs | runs | runs |
+| `advisory` | `unset` | runs | runs | runs | runs |
+| `advisory` | `off` | runs | runs | stops | stops |
+| `advisory` | `low` | runs | runs | stops | stops |
+| `advisory` | `medium` | runs | runs | stops | stops |
+| `advisory` | `high` | runs | runs | stops | stops |
+| `enforce` | `unset` | stops | stops | stops | runs |
+| `enforce` | `off` | stops | runs | stops | stops |
+| `enforce` | `low` | stops | stops | stops | stops |
+| `enforce` | `medium` | stops | stops | stops | stops |
+| `enforce` | `high` | stops | stops | stops | stops |
 
 </details>
 
-The three calls are a push to the default branch (safety invariant SI-08), a high-risk delete (rule R-11) and an agent that tries to approve its own permit (SI-09). "Stops" means the hook refuses the call. "Runs" means the hook lets it through: in advisory mode it still records what it would have blocked. Read two things from the table. First, level `off` is not the firmest setting: only the four governance invariants (SI-09 to SI-12) block there. Second, in `enforce` with the level `unset` every gate rule blocks. Even then a rule is not a wall against an agent that is hostile and runs as your user (docs/05).
+The four calls are a push to the default branch (safety invariant SI-08), a high-risk delete (rule R-11), an agent that tries to approve its own permit (SI-09), and an agent that writes the config file with its Write tool (the file that holds the gate mode and the level). "Stops" means the hook refuses the call. "Runs" means the hook lets it through: in advisory mode it still records what it would have blocked. Read three things from the table. First, level `off` is not the firmest setting: in `enforce` it blocks only the safety floor (the safety invariants and writes to JADE's own wiring), so the delete runs there. Second, in `enforce` with the level `unset` every gate rule blocks. Third, the last column is a gap. With gate mode `off`, or with no level set, an agent can write the config file and so move both settings. An agent that writes gate mode `enforce` and level `high` makes the hook send text to the provider, when a key and a preferences text exist. Setting any level with `jade level` (`off` is enough) closes the gap in `advisory` and `enforce`; it does not close it in gate mode `off`. A level an agent writes is not the same as a level you set: `jade check` says when the level was "written some other way". Even with the gap closed a rule is not a wall against an agent that is hostile and runs as your user (docs/05).
 
 ## What a blocked command looks like
 
@@ -80,7 +80,7 @@ The first call can never be approved by anyone. What really stops a push to the 
 
 | Where | What | When |
 |---|---|---|
-| `openrouter.ai` | Redacted text of a call, your preferences, up to 8 past answers, a fixed question, your key in a header | The hook, only in enforce mode with level `low`, `medium` or `high` and a key: also at level `high`, where the answer is only recorded. And `jev`, `jade ask` and `jade check` when you run them |
+| `openrouter.ai` | Redacted text of a call, your preferences, up to 8 past answers, a fixed question, your key in a header | The hook, only in enforce mode with level `low`, `medium` or `high` and a key: also at level `high`, where the answer is only recorded. And `jev`, `jade ask` and `jade check` when you run them. And the daily job `jade maintain`, when `jade setup` or you installed it and a key exists: two calls with a fixed text, with no one at the keyboard |
 | `github.com` and its release hosts | Release data and the install | `jade upgrade` and `jade upgrade --check` only |
 | Nowhere else | No analytics, no crash report, no phone-home | Never |
 

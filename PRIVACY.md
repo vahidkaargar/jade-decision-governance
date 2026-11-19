@@ -10,6 +10,7 @@ Short version:
 - JADE sends text to one provider: `https://openrouter.ai/api/alpha/decisions`. The address is fixed in the code. No setting and no environment variable changes it.
 - The hook sends a call there only when the gate is in enforce mode, a level is set (`low`, `medium` or `high`) and a key exists. This includes level `high`, where the answer is only recorded and decides nothing.
 - Ordinary source code and commands are not changed by redaction. Redaction hides secret shapes and email addresses. It does not hide private code.
+- A job on a timer can send text with no one at the keyboard: the daily job `jade maintain`, when it is installed and a key exists. It sends only two calls with a fixed text (see "Other commands that call the provider").
 - `jade upgrade` talks to GitHub. Nothing else does.
 
 ## When the hook sends a call
@@ -53,13 +54,13 @@ What `state` holds from the hook:
 - `preferences`: your `preferences.md` text without comment lines, at most 4 KiB.
 - `past_answers`: up to 8 past answers of each kind for the same rule. An allow you confirmed is sent with its label (up to 120 characters, the text you read when you confirmed it). A deny is sent as the rule, the word deny and its age in days, with no text.
 - `content_excerpt`: for a write or a tool call that carries content, the whole content (never a part).
-- `fingerprints`: for a `git push`, the repository path and its current commit id. For a write, a hash of the content.
+- `fingerprints`: for a `git push`, the absolute repository path (it can name a customer or a project) and its current commit id. For a write, a hash of the content.
 
-Your level and your folder are not part of it.
+Your level is not part of it. Your working folder is not a field of its own: it is sent only inside the repository path of a `git push`.
 
 Redaction runs on `state` and on the question before it leaves. It replaces secret shapes (API keys, tokens, private keys, passwords in a URL or a flag, authorization headers) and email addresses, except the addresses you list as `owner_emails` in your config. The state is cut at 32 KiB. If a secret-shaped string is still there after redaction, the call is refused and nothing is sent. `jade ask --dry-run` shows exactly what a call from `jade ask` would send.
 
-Redaction is for secret shapes, not for private code. A function body, a file path, a customer name or an internal host name in a command goes to the provider as it is.
+Redaction is for secret shapes, not for private code. A function body, a file path, the repository path of a push, a customer name or an internal host name in a command goes to the provider as it is.
 
 ## What is never sent
 
@@ -79,10 +80,11 @@ These calls are always your question. The hook does not send them, at any level:
 
 ## Other commands that call the provider
 
-You run these yourself. Each one uses the same address, key and redaction.
+You run most of these yourself. One does not need you: the daily job. Each one uses the same address, key and redaction.
 
 - `jev` and `jade ask`: the text you give them (a claim, a state file, evidence). Give raw evidence, and know that it leaves your machine.
 - `jade check` without `--offline`, and `jade maintain` unless it is told `--offline`: two calls with a fixed text about a made-up `make test` run. Nothing from your machine is in them.
+- The daily job: `jade setup` can install a job that runs `jade maintain` once a day (a LaunchAgent on macOS; on Linux the cron line or systemd timer that `jade maintain-schedule` prints, if you install it). It does not pass `--offline`. When a key exists it makes the two fixed-text calls above on its own, with no one at the keyboard. With no key it makes no request. To stop this, remove the job (`docs/09-install-and-upgrade.md` section 7) or run it with `--offline`.
 - `jade improve shadow` and `jade improve protected`: they send the stored state text of past Jev calls from your ledger again, to compare question versions. It is maintainer tooling.
 - `evals/performance/run.py` and `adapters/jev/probe_openrouter.py`: a synthetic fixture, no project text.
 
@@ -96,7 +98,8 @@ Nothing else in JADE opens a network connection.
 
 JADE keeps a ledger in `~/.local/share/jade` (mode 600). It holds the command text of gated calls, the text of Jev calls, decisions, permits and your answers.
 
-- `jade maintain` removes project text older than 90 days and keeps every number (statuses, hashes, risk levels, timings, costs, probabilities). Change the window with `retention_days` in your config, or run `jade ledger purge --older-than 90d` yourself.
+- `jade maintain` removes most project text older than 90 days and keeps every number (statuses, hashes, risk levels, timings, costs, probabilities). Change the window with `retention_days` in your config, or run `jade ledger purge --older-than 90d` yourself.
+- Two paths are not cleared by any purge, also not with `--ask-text`. The working folder of a gated call stays in the permit (its scope holds the plain path). For a `git push`, the repository path and the commit id stay in the permit's precondition. A folder name that names a customer or a project stays in the ledger file. Only removing the ledger file removes them.
 - On macOS, `jade setup` can install the job that runs `jade maintain`. Off macOS nothing runs it until you schedule it: `jade maintain-schedule` prints a cron line or a systemd timer. `jade check` warns while the job has not run.
 - By default the purge does not clear the chat question text of an ask, and not the labels of asks and answers, which can hold up to 120 characters of a command. `jade ledger purge --ask-text` clears them. It is off until the owner decides (work item W-146), and `jade maintain` never turns it on.
 - `jade ledger purge --dry-run` shows what would be cleared, per table, and changes nothing.

@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from jade import adapter, ask, hooks, ops, proxy, upgrade
+from jade import adapter, ask, hooks, ops, paths, proxy, upgrade
 from tests.acceptance import test_memory_w101 as m
 from tests.acceptance.test_jev_proxy_w102 import KIND, prefs
 from tests.acceptance.test_memory_w101 import enforce  # noqa: F401  (autouse fixture)
@@ -94,6 +94,11 @@ def test_the_matrix_provider_row_is_the_one_constant_url():
 CALLS = ("git push origin main", "rm -rf ~/work", "jade permit approve prm_0123456789ab")
 
 
+def config_write(path: Path, content: str) -> dict:
+    """The hook event of an agent that writes the config file with its Write tool."""
+    return {"tool_name": "Write", "tool_input": {"file_path": str(path), "content": content}, "session_id": "sess-front-cfg0", "cwd": "/tmp", "permission_mode": "auto"}
+
+
 def real_table(monkeypatch, mode, level):
     monkeypatch.setenv("JADE_GATE_MODE", mode)
     if level:
@@ -103,6 +108,10 @@ def real_table(monkeypatch, mode, level):
         r = hooks.pretool(m.call(cmd, session=f"sess-front-{i:04d}"))
         assert r.exit_code in (0, 2)
         out.append("stops" if r.exit_code == 2 else "runs")
+    # the file that holds both settings: an agent that writes it can move the gate mode and the level
+    r = hooks.pretool(config_write(paths.config_dir() / "config.json", json.dumps({"gate_mode": "enforce", "level": "high"})))
+    assert r.exit_code in (0, 2)
+    out.append("stops" if r.exit_code == 2 else "runs")
     return out
 
 
@@ -115,7 +124,18 @@ def test_the_two_settings_table_covers_every_pair_once():
 @pytest.mark.parametrize("level", LEVELS)
 def test_the_two_settings_table_is_what_the_real_hook_does(monkeypatch, mode, level):
     row = next(r for r in rows(section(README, "Two settings, read separately")) if r[0] == mode and level_of(r[1]) == level)
-    assert row[2:5] == real_table(monkeypatch, mode, level), f"README says {row[2:5]} for gate mode {mode}, level {level}"
+    assert row[2:6] == real_table(monkeypatch, mode, level), f"README says {row[2:6]} for gate mode {mode}, level {level}"
+
+
+def test_the_readme_does_not_say_an_agent_cannot_change_the_settings():
+    """In gate mode `off`, and in any gate mode while no level is set, the hook lets an agent write the config file, which holds both settings. The page
+    may not promise otherwise: the last column of the table says exactly when the hook stops that write."""
+    text = section(README, "Two settings, read separately")
+    assert not re.search(r"only you can change them|an agent cannot", text, re.I), "an unconditional promise that no agent can change the settings"
+    header = next(line for line in text.splitlines() if line.startswith("|"))
+    assert "config" in header.lower(), "the table needs a column for a write of the config file"
+    head = README.split("## Status")[0]
+    assert re.search(r"agent can (?:change|write)[^.]*settings|settings[^.]*agent can", head, re.I), "the support line must not promise a level nobody can move without a pointer to the hole"
 
 
 def test_the_two_settings_are_read_with_commands_that_exist():
@@ -271,6 +291,77 @@ def test_the_page_says_what_the_other_provider_commands_send():
     text = section(PRIVACY, "Other commands that call the provider")
     for needle in ("jev", "jade ask", "jade check", "jade improve", "fixed text"):
         assert needle in text, needle
+
+
+# ---- the folder: where the repository path and the working folder go -------------------------------------------------------------------
+FOLDER = "customer-acme-secret-project"
+
+
+def git_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / FOLDER
+    repo.mkdir()
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.org", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.org", "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
+    for argv in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "x"]):
+        subprocess.run(["git", *argv], cwd=repo, env=env, check=True, capture_output=True)
+    return repo
+
+
+def test_a_git_push_sends_the_repository_path_and_the_page_says_so(monkeypatch, tmp_path):
+    repo = git_repo(tmp_path)
+    (payload,) = hook_sends(monkeypatch, "enforce", "medium", True, cmd="git push origin v1.0", cwd=str(repo))
+    heads = payload["state"]["fingerprints"]["git_head"]
+    assert heads.startswith(str(repo.resolve())), "the fingerprint of a push holds the absolute repository path"
+    text = section(PRIVACY, "What is in the request")
+    fingerprints = next(line for line in text.splitlines() if line.startswith("- `fingerprints`"))
+    assert "repository path" in fingerprints and "absolute" in fingerprints, "the page must say the absolute path of the repository is sent"
+    assert not re.search(r"your folder (?:is|are) not part", text, re.I), "the page promised that the folder is not sent"
+
+
+def test_a_call_that_is_not_a_push_does_not_send_the_folder(monkeypatch, tmp_path):
+    repo = git_repo(tmp_path)
+    (payload,) = hook_sends(monkeypatch, "enforce", "medium", True, cwd=str(repo))
+    assert FOLDER not in json.dumps(payload), "outside a push the folder is not in the request"
+    assert "Your level is not part of it" in PRIVACY
+
+
+def test_the_purge_keeps_the_working_folder_and_the_repository_path_and_the_page_says_so(monkeypatch, tmp_path):
+    repo = git_repo(tmp_path)
+    r = hooks.pretool(m.call("git push origin v1.0", cwd=str(repo)))
+    assert r.exit_code == 2, "enforce mode, no level: the push waits for a permit"
+    d = m.db()
+    try:
+        with d.tx() as con:
+            con.execute("UPDATE permits SET state='EXPIRED'")
+        ops.purge_report(d, -1, ask_text=True)   # everything the purge can clear, as old as it can be
+        permits = [dict(x) for x in d.con.execute("SELECT * FROM permits").fetchall()]
+    finally:
+        d.con.close()
+    where = {col for row in permits for col, val in row.items() if FOLDER in str(val)}
+    assert where == {"scope", "doc_json"}, f"the purge keeps the folder name in {where}"
+    text = section(PRIVACY, "How long it stays on your machine")
+    assert "working folder" in text and "repository path" in text and "not cleared" in text, "the retention section must say these two paths stay"
+    assert not re.search(r"removes? (?:all )?project text", text), "the purge does not remove all project text"
+
+
+# ---- the daily job ------------------------------------------------------------------------------------------------------------------
+def test_the_daily_job_calls_the_provider_and_the_page_says_so(monkeypatch):
+    """`jade setup` installs a job that runs `jade maintain` with no `--offline`, and `maintain` then runs the live check: two fixed-text calls, with no one at
+    the keyboard. The page may not say that the person starts every provider call."""
+    import plistlib
+
+    from jade import cli
+
+    assert plistlib.loads(ops.launchd_plist("x").encode())["ProgramArguments"][1:] == ["maintain"], "the installed job passes no --offline"
+    for fmt in ("cron", "systemd"):
+        assert "--offline" not in ops.maintain_schedule(fmt)
+    seen = []
+    monkeypatch.setattr(ops, "check", lambda live=False: seen.append(live) or [])
+    cli._maintain(type("Args", (), {"offline": False})())
+    assert seen == [True], "`jade maintain` without --offline runs the live check"
+    text = section(PRIVACY, "Other commands that call the provider")
+    assert "daily job" in text and "no one" in text.lower() and "You run these yourself" not in text
+    assert "daily job" in PRIVACY.split("## When the hook sends a call")[0], "the short version names the daily job"
+    assert "jade maintain" in section(README, "What leaves your machine"), "the front page table names the daily job"
 
 
 # ---- speed -------------------------------------------------------------------------------------------------------------------------
