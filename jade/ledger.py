@@ -53,6 +53,13 @@ CREATE TABLE IF NOT EXISTS asks(
 CREATE TABLE IF NOT EXISTS human_answers(
   answer_id TEXT PRIMARY KEY, ts TEXT NOT NULL, session_id TEXT, decision_id TEXT, rule_id TEXT NOT NULL, class_key TEXT, exact_key TEXT NOT NULL,
   answer TEXT NOT NULL, channel TEXT NOT NULL, strength TEXT NOT NULL DEFAULT 'hint', confirmed_ts TEXT, source TEXT);
+-- V6-29: the audit of calls that ran without a question. One row per drawn call (the draw is made in the hook, `jade/audit.py`); `seal` is an HMAC over the row.
+CREATE TABLE IF NOT EXISTS audit_queue(
+  audit_id TEXT PRIMARY KEY, decision_id TEXT NOT NULL UNIQUE, answer_id TEXT NOT NULL, scope_id TEXT NOT NULL, rule_id TEXT NOT NULL, stage INTEGER NOT NULL,
+  sample_prob REAL NOT NULL, status TEXT NOT NULL, session_id TEXT, drawn_ts TEXT NOT NULL, resolved_ts TEXT, seal TEXT NOT NULL, source TEXT);
+CREATE TABLE IF NOT EXISTS audit_scopes(
+  scope_id TEXT PRIMARY KEY, stage INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'active', runs INTEGER NOT NULL DEFAULT 0, since_ts TEXT NOT NULL,
+  suspended_ts TEXT, updated_ts TEXT NOT NULL, source TEXT);
 """
 # Indexes created after the migrations: some name a column added after the first release (hold_key, source), which an older file lacks until `_migrate`
 # has run. Each serves a query that every gated call or every Stop hook runs, measured at 100k rows in evals/performance/ledger_load.py (W-58); the
@@ -77,11 +84,13 @@ CREATE INDEX IF NOT EXISTS asks_call ON asks(session_id, hold_key, status);
 CREATE INDEX IF NOT EXISTS asks_created ON asks(created_ts);
 CREATE INDEX IF NOT EXISTS decisions_created ON decisions(created_at);
 CREATE INDEX IF NOT EXISTS calls_decision ON jev_calls(decision_id);
+CREATE INDEX IF NOT EXISTS audit_queue_scope ON audit_queue(scope_id, drawn_ts);
+CREATE INDEX IF NOT EXISTS audit_queue_drawn ON audit_queue(drawn_ts);
 """
 MIGRATIONS = {"jev_calls": [("language", "TEXT"), ("source", "TEXT")], "decisions": [("hold_key", "TEXT"), ("source", "TEXT")],
               "permits": [("source", "TEXT")], "events": [("source", "TEXT")], "asks": [("class_key", "TEXT"), ("label", "TEXT"), ("ho", "INTEGER"), ("scopes_json", "TEXT")],
               "labels": [("label_type", "TEXT"), ("sample_prob", "REAL"), ("audit_source", "TEXT")],   # V6-23: old rows keep NULL, which reads as a `claim_true` label
-              "human_answers": [("last_used_ts", "TEXT"), ("label", "TEXT"), ("ho", "INTEGER"), ("scope_kind", "TEXT"), ("scope_key", "TEXT"), ("scope_label", "TEXT"), ("family_key", "TEXT")]}   # columns added after the first release: (name, type)
+              "human_answers": [("last_used_ts", "TEXT"), ("label", "TEXT"), ("ho", "INTEGER"), ("scope_kind", "TEXT"), ("scope_key", "TEXT"), ("scope_label", "TEXT"), ("family_key", "TEXT"), ("silent_runs", "INTEGER"), ("evidence_ts", "TEXT")]}   # columns added after the first release: (name, type)
 # PRAGMA user_version of a file once SCHEMA, the migrations and INDEXES have been applied to it; a file already at this value skips all three (W-58). It is a
 # digest of those three, so changing any of them changes the version and every file is brought up to date once: nobody has to remember to bump a number.
 SCHEMA_VERSION = zlib.crc32(json.dumps([SCHEMA, INDEXES, MIGRATIONS], sort_keys=True).encode()) & 0x7FFFFFFF

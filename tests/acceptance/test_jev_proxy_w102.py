@@ -171,7 +171,8 @@ def test_with_no_preference_and_no_confirmed_answer_nothing_is_sent(medium, prov
 def test_a_confirmed_answer_for_the_same_rule_is_enough_without_a_preferences_file(medium, prov):
     owner_answers()
     m.ask_and_allow()
-    m.confirm_all()
+    for _ in range(ops.JEV_BAND_ANSWERS // 10 + 1):   # V6-29: a sitting confirms at most 10 groups (`ops.CONFIRM_MAX_GROUPS`): the 50 other answers take five sittings, the R-11 answer the sixth
+        m.confirm_all()
     hooks.pretool(m.call(KIND, OTHER))
     assert len(prov.sent) == 1
 

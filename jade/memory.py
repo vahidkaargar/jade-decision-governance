@@ -15,6 +15,9 @@ Never remembered (always asked): a human-only class (docs/12 section 4), the fet
 read (blind labels), a git push or merge (the fingerprint carries the head commit), a merge into the default branch, and every write or MCP call (content is part of the key).
 
 Lifetime: a row is valid while its last human confirm or its last use is within 30 days, and never more than 180 days after the confirm.
+Evidence (V6-29, `jade/audit.py`): a row that has run silently many times (60) with no mark, or for 90 days after its last evidence, stops deciding until the human marks
+one of its runs right or confirms again; a repeat is not evidence. Every call that runs from a row is drawn for the human's check, and a wrong check pauses its scope.
+Both only add questions.
 """
 
 from __future__ import annotations
@@ -231,12 +234,15 @@ def covered_keys(r) -> set[tuple[str, str]]:
 
 
 def standing(r, since: tuple[str, str] | None = None) -> bool:
-    """A confirmed (strong) allow, live (not a test row), confirmed within CAP_DAYS and confirmed or used within USE_DAYS."""
+    """A confirmed (strong) allow, live (not a test row), confirmed within CAP_DAYS, confirmed or used within USE_DAYS, and not aged out by evidence (`audit.aged_out`)."""
+    from . import audit
+
     cap, use = since or valid_since()
     confirmed = _col(r, "confirmed_ts")
     used = _col(r, "last_used_ts")
     return (r["answer"] == "allow" and r["strength"] == "strong" and (_col(r, "source") or "") != "test" and bool(confirmed) and confirmed >= cap
-            and (confirmed if used is None else used) >= use)   # COALESCE(last_used_ts, confirmed_ts): only NULL falls back to the confirm
+            and (confirmed if used is None else used) >= use   # COALESCE(last_used_ts, confirmed_ts): only NULL falls back to the confirm
+            and not audit.aged_out(r))   # V6-29: a row that ran silently with no mark for too long needs evidence; this only adds a condition
 
 
 # The deny rows that take an allow out: any strength the human gave (hint or strong), not a test row. DENY_SQL selects the same rows in SQL.
@@ -331,12 +337,13 @@ def lookup(db, a, tool: str, tool_input: dict | None, fp: dict | None, cwd: str 
 
 
 def use(db, answer_id: str) -> None:
-    db.con.execute("UPDATE human_answers SET last_used_ts=? WHERE answer_id=?", (ts(), answer_id))
+    """A silent run of the row: its last-use time moves forward and its count of runs with no mark goes up (a `right` mark resets it, `audit.reset_evidence`)."""
+    db.con.execute("UPDATE human_answers SET last_used_ts=?, silent_runs=COALESCE(silent_runs,0)+1 WHERE answer_id=?", (ts(), answer_id))
 
 
 def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
     """The memory branch of the gate: a HookResult that lets the call run on a confirmed answer, or None (ask as before)."""
-    from . import askchat, paths, permits, state_machine
+    from . import askchat, audit, paths, permits, state_machine
     from .hooks import HookResult
 
     if mode != "enforce" or paths.level() not in ("low", "medium") or not event.get("session_id"):
@@ -349,9 +356,14 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str):
             row = lookup(db, a, tool, tin if isinstance(tin, dict) else {}, fp, cwd)
             if row is None:
                 return None
+            adm, why = audit.admit(db, row)   # V6-29: a call that cannot be audited (a paused scope, a limit reached, no key) is asked about
+            if adm is None:
+                audit.refused(db, row, why)
+                return None
             did = askchat.run_decision(db, a, tool, cwd, event["session_id"], row["answer_id"][-12:], "memory")
             use(db, row["answer_id"])
-            db.event(row["answer_id"], "memory_allowed", guard=f"{a.rule_id} {a.level}", actor="hook", detail={"decision_id": did, "channel": row["channel"]})
+            db.event(row["answer_id"], "memory_allowed", guard=f"{a.rule_id} {a.level}", actor="hook", detail={"decision_id": did, "channel": row["channel"], "scope_id": adm.scope})
+            audit.record(db, adm, row, did, event["session_id"])   # the draw, in the same transaction: no row written, no silent run
     except state_machine.IllegalTransition:
         return None   # the decision could not advance: ask as before
     return HookResult(0, f"JADE: allowed from your confirmed answer {row['answer_id']} (rule {a.rule_id}). `jade knows list` shows what is remembered; `jade knows rm {row['answer_id']}` forgets it.")

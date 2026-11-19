@@ -92,7 +92,8 @@ def test_confirm_summary_is_three_short_sentences():
     finally:
         db.close()
     out: list[str] = []
-    ops.review_confirm(stdin_isatty=True, ask=lambda _="": "no", say=out.append, all_=True)
+    # V6-29: `--all` no longer takes a group of a high-risk rule (R-11 is high): the group is asked about, the human says yes to it, and no to the last "Type yes"
+    ops.review_confirm(stdin_isatty=True, ask=lambda q="": "y" if "stand for this" in q else "no", say=out.append, all_=True)
     summary = [x for x in out if "will become standing." in x or "Undo one with" in x or "runs without a question" in x]
     assert len(summary) >= 3, out
     sentences = [s for line in summary for s in re.split(r"(?<=[.!?])\s+", line.strip())]
