@@ -71,12 +71,13 @@ CREATE INDEX IF NOT EXISTS permits_test ON permits(source) WHERE source='test';
 CREATE INDEX IF NOT EXISTS calls_evaluating ON jev_calls(ts) WHERE state='EVALUATING';
 CREATE INDEX IF NOT EXISTS human_answers_exact ON human_answers(exact_key, strength);
 CREATE INDEX IF NOT EXISTS human_answers_scope ON human_answers(scope_key, strength);
+CREATE INDEX IF NOT EXISTS human_answers_class ON human_answers(class_key, strength);
 CREATE INDEX IF NOT EXISTS human_answers_ts ON human_answers(ts);
 CREATE INDEX IF NOT EXISTS asks_call ON asks(session_id, hold_key, status);
 """
 MIGRATIONS = {"jev_calls": [("language", "TEXT"), ("source", "TEXT")], "decisions": [("hold_key", "TEXT"), ("source", "TEXT")],
               "permits": [("source", "TEXT")], "events": [("source", "TEXT")], "asks": [("class_key", "TEXT"), ("label", "TEXT"), ("ho", "INTEGER"), ("scopes_json", "TEXT")],
-              "human_answers": [("last_used_ts", "TEXT"), ("label", "TEXT"), ("ho", "INTEGER"), ("scope_kind", "TEXT"), ("scope_key", "TEXT"), ("scope_label", "TEXT")]}   # columns added after the first release: (name, type)
+              "human_answers": [("last_used_ts", "TEXT"), ("label", "TEXT"), ("ho", "INTEGER"), ("scope_kind", "TEXT"), ("scope_key", "TEXT"), ("scope_label", "TEXT"), ("family_key", "TEXT")]}   # columns added after the first release: (name, type)
 # PRAGMA user_version of a file once SCHEMA, the migrations and INDEXES have been applied to it; a file already at this value skips all three (W-58). It is a
 # digest of those three, so changing any of them changes the version and every file is brought up to date once: nobody has to remember to bump a number.
 SCHEMA_VERSION = zlib.crc32(json.dumps([SCHEMA, INDEXES, MIGRATIONS], sort_keys=True).encode()) & 0x7FFFFFFF
@@ -312,7 +313,8 @@ class Ledger:
 
     def record_human_answer(self, *, session: str | None, decision_id: str | None, rule_id: str, class_key: str | None, exact_key: str, answer: str,
                             channel: str, label: str | None = None, ho: bool = False, scope: dict | None = None) -> str:
-        """Store what the human answered to an ask, as a `hint` (docs/12): it decides nothing and goes to no model until `jade review confirm`.
+        """Store what the human answered to an ask, as a `hint` (docs/12): it decides nothing, and its label goes to no model until `jade review confirm` (only an allow
+        is confirmed; a deny is sent to Jev as its rule, answer and age only, `proxy.past_answers`, and its label stays here).
         `exact_key` identifies the call, `class_key` the kind of call. `scope` is `dataclasses.asdict(scopes.Scope)`: the bigger scope the answer was given with; its
         kind, key and label are stored, and `memory.lookup` matches the key once the row is confirmed. Returns the answer id."""
         if answer not in self.HUMAN_ANSWERS or channel not in self.ANSWER_CHANNELS or not exact_key or not rule_id:
@@ -320,15 +322,17 @@ class Ledger:
         aid = new_id("ans")
         ck = redact.redact(class_key, secrets_only=True)[0] if class_key else None
         lb = redact.redact(label, secrets_only=True)[0][:120] if label else None   # what the human sees in `jade review confirm`: the call, one line, secrets removed
-        sk = sl = skey = None
+        sk = sl = skey = fk = None
         if scope:
             sk, skey = scope.get("kind"), scope.get("key")
+            if sk == "kind_project":
+                fk = ck   # the class key of every call the project scope covers: a newer deny with it takes the scope out (memory.covered_keys); never matched
             if sk != "kind_any":
                 ck = None   # a project scope is narrower than the class key, which matches in every project: the row must not carry both
             sl = re.sub(r"\s+", " ", redact.redact(scope["label"], secrets_only=True)[0]).strip()[:120] if scope.get("label") else None   # one line in a terminal
         self.con.execute("INSERT INTO human_answers(answer_id, ts, session_id, decision_id, rule_id, class_key, exact_key, answer, channel, strength, source, label, ho, "
-                         "scope_kind, scope_key, scope_label) VALUES(?,?,?,?,?,?,?,?,?,'hint',?,?,?,?,?,?)",
-                         (aid, ts(), session, decision_id, rule_id, ck, exact_key, answer, channel, self.source, lb, 1 if ho else 0, sk, skey, sl))
+                         "scope_kind, scope_key, scope_label, family_key) VALUES(?,?,?,?,?,?,?,?,?,'hint',?,?,?,?,?,?,?)",
+                         (aid, ts(), session, decision_id, rule_id, ck, exact_key, answer, channel, self.source, lb, 1 if ho else 0, sk, skey, sl, fk))
         self.event(aid, "human_answer", guard=f"{rule_id} {answer} via {channel}", actor="human", detail={"decision_id": decision_id, "rule_id": rule_id})
         return aid
 
@@ -348,11 +352,11 @@ class Ledger:
         return ok
 
     def retire_answers(self, exact_key: str, class_key: str | None, scope_key: str | None = None) -> int:
-        """`jade review mark wrong`: every hint or standing allow of this exact call, of its kind, and of the scope it ran under, stops counting (it can no longer be confirmed
-        or decide). Returns how many."""
+        """`jade review mark wrong`: every hint or standing allow of this exact call, of its kind (its class key, or the `family_key` of a project-scoped row of the
+        kind), and of the scope it ran under, stops counting (it can no longer be confirmed or decide). Returns how many."""
         ids = [r["answer_id"] for r in self.con.execute(
             "SELECT answer_id FROM human_answers WHERE strength IN ('hint','strong') AND answer='allow' AND (exact_key=? OR (class_key IS NOT NULL AND class_key=?) "
-            "OR (scope_key IS NOT NULL AND scope_key=?))", (exact_key, class_key, scope_key))]
+            "OR (family_key IS NOT NULL AND family_key=?) OR (scope_key IS NOT NULL AND scope_key=?))", (exact_key, class_key, class_key, scope_key))]
         for aid in ids:
             self.con.execute("UPDATE human_answers SET strength='revoked' WHERE answer_id=?", (aid,))
             self.event(aid, "human_answer_revoked", guard="jade review mark wrong", actor="human")

@@ -1,7 +1,7 @@
 """Jev decides in the owner's place, inside the hook (docs/12, plan v3, PR-7).
 
-At level low or medium a plain high call that neither a terminal permit nor a confirmed answer covers goes to Jev with the owner's written preferences and the
-confirmed answers they gave to calls of the same rule. An accept in the level's band lets the call run, through a decision walked to EXECUTING (so SI-07 still holds
+At level low or medium a plain high call that neither a terminal permit nor a confirmed answer covers goes to Jev with the owner's written preferences, the
+confirmed answers they gave to calls of the same rule that still count, and their denies of that rule. An accept in the level's band lets the call run, through a decision walked to EXECUTING (so SI-07 still holds
 an unknown outcome). Everything else is the owner's question as before: an abstain, a reject, an unavailable or late provider, a call that is skipped. A verdict that is
 not an accept is never a yes.
 
@@ -14,7 +14,7 @@ Never sent (always the owner's question):
   also when the rule sits in one segment of a longer command;
 - a merge, a call the gate could not read (any segment), a secret-shaped value, text that redaction changed;
 - a program or a write over 4 KiB (the whole content of a write is shown to Jev, never a part), more than one inline program;
-- a call the owner denied before, and a call Jev has already been asked about twice this hour in this session (a reworded comment is the same call);
+- a call the owner denied before (that call, or a call of its kind), and a call Jev has already been asked about twice this hour in this session (a reworded comment is the same call);
 - a call with neither a preferences text nor a confirmed answer of its rule.
 Egress (R-21) is decided at level low only.
 
@@ -29,9 +29,10 @@ import time
 from datetime import timedelta
 
 from . import adapter, ask, ledger, memory, paths
-from .util import canonical, now, sha256, ts
+from .util import canonical, now, parse_ts, sha256, ts
 
 QID = "q.human_proxy.would_allow"
+MIN_VERSION = 2           # the first version whose template reads `past_answers` as confirmed allows and denies without labels (RR11, RR12)
 DEADLINE_S = 3.0          # the most one exchange may take; the hook budget (hooks.BUDGET_S) is the other limit
 RESERVE_S = 1.5           # what the rest of the hook still needs after Jev answered
 MIN_DEADLINE_S = 0.1
@@ -59,12 +60,23 @@ def preferences() -> str:
 
 
 def past_answers(db, rule_id: str) -> list[dict]:
-    """The confirmed (strong) allow answers the owner gave to plain calls of this rule, newest first. Unconfirmed hints and human-only answers are never sent."""
-    cap, use = memory.valid_since()
-    rows = db.con.execute("SELECT rule_id, label FROM human_answers WHERE strength='strong' AND answer='allow' AND rule_id=? AND COALESCE(ho,0)=0 AND confirmed_ts>=? AND "
-                          "COALESCE(last_used_ts, confirmed_ts)>=? AND COALESCE(source,'')<>'test' ORDER BY confirmed_ts DESC, rowid DESC LIMIT ?",
-                          (rule_id, cap, use, MAX_PAST)).fetchall()
-    return [{"rule": r["rule_id"], "answer": "allow", "label": (r["label"] or "")[:120]} for r in rows]
+    """What the owner answered to plain calls of this rule: the confirmed (strong) allows that `memory.lookup` still honours (`memory.honoured_allows`: a newer deny
+    that shares a key with every call the allow covers takes it out), newest first, then the owner's denies of the rule, newest first, each list at most MAX_PAST.
+    Unconfirmed allow hints and human-only answers are never sent. An allow carries its label, which the owner read in `jade review confirm`. A deny is never
+    confirmed, so its label is text the agent wrote (a comment in the command, a host, a path of a call kept off the network): it stays in the ledger, and the deny
+    is sent as its rule, the answer and its age in whole days only."""
+    allows = memory.honoured_allows(db, "rule_id=? AND COALESCE(ho,0)=0", [rule_id], limit=MAX_PAST)
+    denies = db.con.execute(f"SELECT rule_id, ts FROM human_answers WHERE {memory.DENY_SQL} AND rule_id=? AND COALESCE(ho,0)=0 ORDER BY ts DESC, rowid DESC LIMIT ?",  # noqa: S608
+                            (rule_id, MAX_PAST)).fetchall()
+    return ([{"rule": r["rule_id"], "answer": "allow", "label": (r["label"] or "")[:120]} for r in allows]
+            + [{"rule": r["rule_id"], "answer": "deny", "age_days": _age_days(r["ts"])} for r in denies])
+
+
+def _age_days(stamp: str | None) -> int | None:
+    try:
+        return max(0, (now() - parse_ts(stamp)).days) if stamp else None
+    except (TypeError, ValueError):
+        return None
 
 
 def owner_answers(db) -> int:
@@ -99,9 +111,11 @@ def distrust(db, *keys: str | None) -> None:
             db.event(key, "jev_distrust", guard="jade review mark wrong", actor="human")
 
 
-def denied_before(db, hold: str) -> bool:
-    """The owner said no to this call (any session, any time): Jev does not get to say yes."""
-    return db.con.execute("SELECT 1 FROM asks WHERE status='DENIED' AND hold_key=? LIMIT 1", (hold,)).fetchone() is not None
+def denied_before(db, hold: str, cls: str | None = None) -> bool:
+    """The owner said no to this call or to a call of its kind (same class key; any session, any time): Jev does not get to say yes."""
+    if db.con.execute("SELECT 1 FROM asks WHERE status='DENIED' AND (hold_key=? OR (class_key IS NOT NULL AND class_key=?)) LIMIT 1", (hold, cls)).fetchone() is not None:
+        return True
+    return bool(cls) and db.con.execute(f"SELECT 1 FROM human_answers WHERE {memory.DENY_SQL} AND class_key=? LIMIT 1", (cls,)).fetchone() is not None  # noqa: S608
 
 
 def _attempt_key(session: str, hold: str) -> str:
@@ -202,6 +216,42 @@ def _close_stranded(db, session: str, since: str) -> None:
         pass
 
 
+def _spec(db):
+    """The question Jev is asked, or None (the owner is asked as before). A pin to a version the registry does not hold, or to a version older than
+    MIN_VERSION (it reads `past_answers` as confirmed answers only, not in the shape `past_answers` builds now), never blocks the call: the ledger notes
+    it once per reason (event `jev_question_unusable`)."""
+    from . import questions
+
+    try:
+        spec = ask.registry_spec(QID)
+    except questions.InvalidQuestion as e:
+        reason = str(e)
+    except Exception as e:   # a pins.json of the wrong shape (not an object, a list champion, a string fraction, nesting too deep): the owner is asked
+        reason = f"{QID}: the pins file cannot be read ({type(e).__name__}: {e})"
+    else:
+        if spec.version >= MIN_VERSION:
+            return spec
+        reason = f"{QID} version {spec.version} is pinned; Jev decides only with version {MIN_VERSION} or later"
+    reason = reason[:300]
+    db.event(QID, "jev_question_unusable", guard=reason, actor="hook", key="jevq:" + sha256(reason)[:40])
+    return None
+
+
+def replay_past_answers(past) -> list[dict]:
+    """Stored `past_answers` rebuilt in the shape `past_answers` sends now, for a replay of a stored state (`jade improve shadow`): an allow keeps its rule and
+    its label (the owner confirmed it) cut at 120, every other answer keeps its rule, its answer and its age only. A deny label stored before version 2 is
+    dropped; an entry that is not an object is dropped."""
+    out = []
+    for p in past if isinstance(past, list) else []:
+        if not isinstance(p, dict):
+            continue
+        if p.get("answer") == "allow":
+            out.append({"rule": p.get("rule"), "answer": "allow", "label": str(p.get("label") or "")[:120]})
+        else:
+            out.append({"rule": p.get("rule"), "answer": "deny", "age_days": p.get("age_days") if type(p.get("age_days")) is int else None})
+    return out
+
+
 def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: float | None = None):
     """The Jev branch of the gate: a HookResult that lets the call run, or None (the owner is asked as before)."""
     from . import askchat, hooks, permits, state_machine
@@ -218,13 +268,15 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: 
     coarse = coarse_key(a, tool, tin, el)
     hold = a.hold_key or a.plan_hash
     prefs, past = preferences(), past_answers(db, a.rule_id)
-    if not prefs and not past:
-        return None
-    if distrusted(db, [exact, cls, coarse]) or denied_before(db, hold) or attempts(db, session, hold) >= MAX_ATTEMPTS:
+    if not prefs and not any(p["answer"] == "allow" for p in past):
+        return None   # denies alone give Jev nothing to say yes by
+    if distrusted(db, [exact, cls, coarse]) or denied_before(db, hold, cls) or attempts(db, session, hold) >= MAX_ATTEMPTS:
         return None
     state = build_state(a, tool, tin, prefs, past, fp)
-    spec = ask.registry_spec(QID)
-    _, hits, _, leaked = ask.prepare([ask.registry_spec(QID)], dict(state))
+    spec = _spec(db)
+    if spec is None:
+        return None
+    _, hits, _, leaked = ask.prepare([_spec(db)], dict(state))
     if hits or leaked:
         return None   # redaction changed the text: Jev would judge something other than what runs
     deadline = _deadline(started)

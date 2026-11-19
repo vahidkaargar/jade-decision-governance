@@ -1,6 +1,8 @@
 """`jade knows edit` template (clear questions and scopes, task 7): one commented line per kind of standing answer, two model sentences, only `#` lines."""
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
 from jade import askplain, ledger, ops, util
@@ -11,13 +13,22 @@ def human(monkeypatch):
     monkeypatch.setattr(util, "human_tty_refusal", lambda *a, **k: None)
 
 
-def row(label, rule="R-11", scope_kind=None, scope_key=None, scope_label=None, answer="allow"):
+def row(label, rule="R-11", scope_kind=None, scope_key=None, scope_label=None, answer="allow", class_key=None, exact_key=None):
     return {"answer": answer, "label": label, "rule_id": rule, "scope_kind": scope_kind, "scope_key": scope_key, "scope_label": scope_label,
-            "class_key": None, "exact_key": "x"}
+            "class_key": class_key, "exact_key": exact_key or f"x:{label}", "strength": "strong"}
+
+
+def stamped(rows):
+    """Rows come newest first: give each a time one second older than the one before, and confirm each allow at that time (what a real ledger row holds)."""
+    out = []
+    for i, r in enumerate(rows):
+        when = util.ts(util.now() - timedelta(seconds=i))
+        out.append({"ts": when, "confirmed_ts": when if r["answer"] == "allow" else None, "last_used_ts": None, "source": None, **r})
+    return out
 
 
 def lines_of(rows):
-    return ops.knows_template(rows).splitlines()
+    return ops.knows_template(stamped(rows)).splitlines()
 
 
 def test_rows_with_one_scope_become_one_line_with_the_risk_line():
@@ -27,11 +38,12 @@ def test_rows_with_one_scope_become_one_line_with_the_risk_line():
     assert got == [f"# I am fine with: merging pull requests in project demo  [R-11]  (risk: {askplain.risk_line('R-11')})"]
 
 
-def test_rows_without_a_scope_use_a_short_label_grouped_by_rule_and_first_word():
-    rows = [row("git reset --hard HEAD~1"), row("git reset --hard HEAD~2"), row("git clean -fd"), row("docker rm web", rule="R-07")]
+def test_rows_without_a_scope_use_a_short_label_grouped_by_rule_and_class_key():
+    rows = [row("git reset --hard HEAD~1", class_key="C1"), row("git reset --hard HEAD~2", class_key="C1"), row("git clean -fd", class_key="C2"), row("docker rm web", rule="R-07", class_key="C3")]
     got = [x for x in lines_of(rows) if "I am fine with" in x]
-    assert len(got) == 2   # the two git calls of one rule share the first word: one line, named by the newest row
+    assert len(got) == 3   # the two resets share a class key: one line, named by the newest row; the clean is its own kind
     assert any(x.startswith("# I am fine with: git reset --hard HEAD~1  [R-11]") for x in got)
+    assert any("git clean -fd  [R-11]" in x for x in got)
     assert any("docker rm web  [R-07]" in x and f"(risk: {askplain.risk_line('R-07')})" in x for x in got)
 
 
@@ -40,9 +52,10 @@ def test_a_long_label_is_cut_short():
     assert len(got) == 1 and len(got[0]) < 250
 
 
-def test_denies_and_rows_without_text_are_left_out():
+def test_denies_are_left_out_and_a_row_without_text_still_shows():
     rows = [row("git push --force", answer="deny"), row(None)]
-    assert not [x for x in lines_of(rows) if "I am fine with" in x]
+    assert [x for x in lines_of(rows) if "I am fine with" in x] == [
+        f"# I am fine with: (a call with no label stored)  [R-11]  (risk: {askplain.risk_line('R-11')})"]   # lookup still honours it: the line must not hide it
 
 
 def test_the_file_starts_with_two_header_lines_then_two_model_sentences():
