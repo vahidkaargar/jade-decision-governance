@@ -137,7 +137,7 @@ def test_an_unknown_variable_command_is_not_resolved():
     "gh api repos/o/r/merges -f base=main -f head=x", "glab api projects/1/merge_requests/3/merge -X PUT",
     "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'",
     "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {pullRequestId: \"x\"}) { clientMutationId } }'",
-    "gh api graphql -F query=@merge.graphql -f q='mergePullRequest'", "gh api graphql --input - <<'EOF'\n{\"query\": \"mutation { mergePullRequest(input: {}) { x } }\"}\nEOF",
+    "gh api graphql -F query=@merge.graphql", "gh api graphql --input - <<'EOF'\n{\"query\": \"mutation { mergePullRequest(input: {}) { x } }\"}\nEOF",
 ])
 def test_a_merge_through_gh_api_is_rated_like_gh_pr_merge(cmd):
     a = assess(cmd)

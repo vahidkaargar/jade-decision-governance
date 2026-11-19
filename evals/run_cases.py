@@ -73,8 +73,15 @@ def run_case(c: dict) -> list[str]:
         ev = {"tool_name": "Bash", "tool_input": {"command": c.get("command", "")}, "session_id": "case-session", "cwd": "/tmp/case"}
         if kind == "gate_mcp":
             ev = {"tool_name": c["tool"], "tool_input": c["input"], "session_id": "case-session", "cwd": "/tmp/case"}
+        from jade import policy
+
+        old_home, old_roots = os.environ.get("HOME"), policy._shell_roots
         if c.get("level"):   # the autonomy level the human set (docs/12): the human-only classes (HO-shell-startup ...) are high work only once there is one
             (Path(os.environ["JADE_CONFIG"]) / "config.json").write_text(json.dumps({"level": c["level"]}))
+            # the shell start-up class reads the start-up files of HOME: use this case's own empty HOME and the real reader (a pytest run swaps it for one that
+            # returns nothing), so the answer does not depend on the machine's own ~/.zshrc
+            os.environ["HOME"] = os.environ["JADE_HOME"]
+            policy._shell_roots = policy._real_shell_roots
         if kind == "gate_write":
             tin = {c.get("key", "file_path"): os.path.expanduser(c["path"])}   # `~/.zshrc` is the profile of whoever runs the case, as `~` is in a command
             if c.get("content_parts"):  # file content assembled from parts so that no case file holds a token-shaped literal
@@ -83,7 +90,14 @@ def run_case(c: dict) -> list[str]:
         if kind == "gate_mcp" and c.get("content_parts"):
             ev["tool_input"] = {**ev["tool_input"], "content": "".join(c["content_parts"])}
         ev.update(c.get("event", {}))  # extra host fields: permission_mode, agent_id
-        res = hooks.pretool(ev)
+        try:
+            res = hooks.pretool(ev)
+        finally:
+            policy._shell_roots = old_roots
+            if old_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = old_home
         want = 2 if c.get("expect") == "block" else 0
         if res.exit_code != want:
             problems.append(f"gate exit {res.exit_code}, expected {want} ({res.stderr[:80]!r})")
@@ -114,14 +128,18 @@ def run_case(c: dict) -> list[str]:
 
 def _run_classify_time(c: dict) -> list[str]:
     """V6-03 timing kind: `command_prefix` + `digit_run` digits + `command_suffix` (the long input is built here, so no case file holds it) is
-    classified by `policy.assess` at n and at `scale` * n digits (default 4). The larger run must fit `budget_s`, and `scale` times the input must
+    classified by `policy.assess` at n and at `scale` * n digits (default 4). A row with `nest_open` builds `depth` levels of `nest_open` ... `nest_close` around
+    `nest_core` instead, and the larger input has `scale` times the levels (V6-08 review: work that doubles at each level gives a ratio of 2 to the power of the levels added). The larger run must fit `budget_s`, and `scale` times the input must
     not take more than `max_ratio` times as long: at scale 8, linear work gives about 8 and quadratic about 64 (WT W-104, the NULL_REDIRECT case),
     whatever the speed of the machine. Wall-clock cases live in evals/known_gaps/timing.jsonl, outside the default run: only the serial `timing`
     test job replays them, so load from parallel workers cannot flip the verdict."""
     from jade import policy
 
     def took(n: int) -> float:   # the best of two runs, so a cold cache or a busy moment does not decide the ratio
-        cmd = c.get("command_prefix", "") + "1" * n + c.get("command_suffix", "")
+        if "nest_open" in c:   # `depth` levels of `nest_open ... nest_close` around `nest_core`: the cost of nesting (V6-08 review)
+            cmd = c["nest_open"] * n + c.get("nest_core", "echo x") + c.get("nest_close", ")") * n
+        else:
+            cmd = c.get("command_prefix", "") + "1" * n + c.get("command_suffix", "")
         best = float("inf")
         for _ in range(2):
             for mod in (policy, policy.shellnorm):   # the classifier memoises per command text: time the work, not a cache hit
@@ -134,11 +152,12 @@ def _run_classify_time(c: dict) -> list[str]:
             best = min(best, time.perf_counter() - t)
         return best
 
-    n, k = int(c["digit_run"]), int(c.get("scale", 4))
+    n, k = int(c["depth"] if "nest_open" in c else c["digit_run"]), int(c.get("scale", 4))
+    what = "levels" if "nest_open" in c else "digits"
     small, large = took(n), took(k * n)
     problems = []
     if large > c["budget_s"]:
-        problems.append(f"classified {k * n} digits in {large:.2f} s, budget {c['budget_s']} s")
+        problems.append(f"classified {k * n} {what} in {large:.2f} s, budget {c['budget_s']} s")
     if large > c["max_ratio"] * max(small, 1e-3):
         problems.append(f"time ratio {large / max(small, 1e-3):.1f} for {k} times the input, at most {c['max_ratio']} allowed")
     return problems

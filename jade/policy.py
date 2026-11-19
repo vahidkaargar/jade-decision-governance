@@ -49,8 +49,25 @@ EGRESS_MARK = egress.MARK  # marker prefix R-21 matches: curl, wget or nc sendin
 RECORDED_RULES = ("R-30", "R-31", "R-32")  # rules below the permit floor whose hits the hook journals (events `secret_read`, `blind_spot`): not gated, but counted so a soak report can size them
 BLIND_MARK = blind.BLIND_MARK   # marker prefix R-31 matches: `blind:<label> <command>`, a command the classifier cannot read (W-31)
 FETCH_MARK = blind.FETCH_MARK   # marker prefix R-22 matches: fetched or decoded text that runs as code (W-31)
-GH_MERGE_MARK = "gh:merge-api "   # marker prefix R-10 matches: a `gh api` call whose GraphQL text merges a pull request (V6-08, N20); the segment text has the quoted query blanked
+GH_MERGE_MARK = "gh:merge-api "   # marker prefix R-10 matches: a `gh api` call that merges a pull request, or whose query or route the gate cannot read (V6-08, N20); the segment text has the quoted query blanked
 _GH_MERGE_MUTATION = re.compile(r"\b(?:mergePullRequest|enablePullRequestAutoMerge|mergeBranch)\b")
+# A GraphQL call whose query is not text on the command line: a file (`-F query=@q.graphql`; gh reads it), stdin (`--input`), a variable or a substitution (`query="$Q"`), or no query
+# field at all. The gate cannot see a merge there, so the call is asked about like a merge (V6-08 review, N20). A query in single quotes, or in double quotes without a `$` or a
+# backtick, is text the gate reads: `gh api graphql -f query='query { viewer { login } }'` stays a read.
+_GH_QUERY_UNREAD = re.compile(
+    r"""(?<![\w-])--input(?![\w-])|\bquery=["']?@|\bquery=(?:\$|`)|\bquery="(?:[^"\\$`]|\\.)*[$`]""")
+_GH_QUERY_FIELD = re.compile(r"\bquery=")
+# The last part of a pull request route is a variable or a substitution (`pulls/3/$m`, `pulls/3/$(echo merge)`): a merge the literal route rule cannot see.
+_GH_ROUTE_UNREAD = re.compile(r"(?<![\w-])pulls/[^\s/]+/[^\s/]*[$`]")
+
+
+def _gh_api_merges(words: list[str], text: str) -> bool:
+    """`words` is a `gh api` call: it merges a pull request, or its query or route is one the gate cannot read (so it is asked about)."""
+    if _GH_MERGE_MUTATION.search(text) or _GH_ROUTE_UNREAD.search(text):
+        return True
+    if any(w.rstrip("/").rsplit("/", 1)[-1] == "graphql" for w in words[2:]):
+        return bool(_GH_QUERY_UNREAD.search(text)) or not _GH_QUERY_FIELD.search(text)
+    return False
 PATH_RULES = ("R-01", "R-04", "R-12", "R-13", "R-16", "R-18", "R-24")  # the rules about where a write lands: they also see relative operands made absolute
 WRITE_KEYS = ("file_path", "notebook_path", "path", "filePath", "file", "filepath", "target_file", "file_name", "filename", "target")
 CONTENT_KEYS = {"content", "new_string", "old_string", "new_str", "old_str", "new_source", "text", "contents", "data", "source", "patch"}
@@ -1084,6 +1101,9 @@ def _shell_roots() -> tuple[str, ...]:
     return tuple(dict.fromkeys(out))
 
 
+_real_shell_roots = _shell_roots   # tests/conftest.py swaps `_shell_roots` for one that returns (); the case runner (evals/run_cases.py) puts this one back for a case that sets a level
+
+
 def _written_text(tool_input: dict) -> str:
     """The new text a Write, Edit, MultiEdit or NotebookEdit call carries ('' when it carries none the gate can read)."""
     parts = [str(tool_input[k]) for k in ("content", "new_string", "new_source") if isinstance(tool_input.get(k), str)]
@@ -1702,7 +1722,7 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
             marks.append(FETCH_MARK)
         elif fetched:
             fetched.update(blind.copies_of(words, fetched))   # `mv a b; bash b`: the copy is the fetched file under another name
-        if len(words) > 1 and words[0].rsplit("/", 1)[-1] == "gh" and words[1] == "api" and _GH_MERGE_MUTATION.search(text_in):
+        if len(words) > 1 and words[0].rsplit("/", 1)[-1] == "gh" and words[1] == "api" and _gh_api_merges(words, text_in):
             marks.append(GH_MERGE_MARK)   # the query is quoted text, so the whole command is read, as for a SQL client below
         seg_labels = [lab for lab in (blind.script_label(words, known), "computed-cwd" if computed and _computed_write(_bare(seg)) else None) if lab]
         labels.extend(seg_labels)

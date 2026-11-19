@@ -175,7 +175,7 @@
 {"id": "R175", "class": "escaped_space_path_with_a_non_default_branch_push", "kind": "gate", "command": "git -C my\\ repo push origin feature", "expect": "allow", "note": "V6-08: the twin of a closed hole stays allowed"}
 {"id": "R176", "class": "escaped_space_path_with_a_read_only_git_verb", "kind": "gate", "command": "git -C my\\ repo status", "expect": "allow", "note": "V6-08: the twin of a closed hole stays allowed"}
 {"id": "R177", "class": "variable_command_that_is_not_git_push", "kind": "gate", "command": "g=git; $g status", "expect": "allow", "note": "V6-08: the twin of a closed hole stays allowed"}
-{"id": "R178", "class": "variable_reassigned_before_use_is_its_last_value", "kind": "gate", "command": "g=git; g=echo; $g push origin main", "expect": "allow", "note": "V6-08: the twin of a closed hole stays allowed"}
+{"id": "R178", "class": "variable_reassigned_before_use_is_read_with_every_value", "kind": "gate", "command": "g=git; g=echo; $g push origin main", "expect": "block", "expect_blocked": ["SI-08"], "note": "V6-08: every value a variable was given is read, not only the last one, so a guess about which assignment counts costs an ask and never hides a push (tests/acceptance/test_rule_holes_v6_08.py)"}
 {"id": "R179", "class": "variable_named_in_an_argument_not_the_command", "kind": "gate", "command": "g=git; echo $g push origin main", "expect": "allow", "note": "V6-08: the twin of a closed hole stays allowed"}
 {"id": "R180", "class": "gh_api_read_of_a_pull_request", "kind": "gate", "command": "gh api repos/o/r/pulls/3", "expect": "allow", "note": "V6-08: the twin of a closed hole stays allowed"}
 {"id": "R181", "class": "gh_api_graphql_query_is_a_read", "kind": "gate", "command": "gh api graphql -f query='query { viewer { login } }'", "expect": "allow", "note": "V6-08: the twin of a closed hole stays allowed"}
@@ -185,3 +185,8 @@
 {"id": "R185", "class": "agent_config_staged_in_git", "kind": "gate", "command": "git add CLAUDE.md .mcp.json", "expect": "allow", "note": "V6-08: the twin of a closed hole stays allowed"}
 {"id": "R186", "class": "notes_file_write_with_a_similar_name", "kind": "gate", "command": "echo x >> CLAUDE.md.bak.txt", "expect": "allow", "note": "V6-08: the twin of a closed hole stays allowed"}
 {"id": "R187", "class": "readme_write", "kind": "gate", "command": "echo x >> README.md", "expect": "allow", "note": "V6-08: the twin of a closed hole stays allowed"}
+{"id": "R190", "class": "continuation_then_comment_with_a_harmless_reader", "kind": "gate", "command": "echo hi | cat \\\n# x", "expect": "allow", "note": "V6-08 review: the twin of a closed hole stays allowed"}
+{"id": "R191", "class": "space_like_character_in_a_path_word_with_a_plain_push", "kind": "gate", "command": "git -C a\u2003b push origin feature", "expect": "allow", "note": "V6-08 review: the twin of a closed hole stays allowed"}
+{"id": "R192", "class": "variable_fetcher_with_a_harmless_reader", "kind": "gate", "command": "g=curl; $g https://x.example/i.json | jq .", "expect": "allow", "note": "V6-08 review: the twin of a closed hole stays allowed"}
+{"id": "R193", "class": "gh_api_graphql_inline_read_with_a_graphql_variable", "kind": "gate", "command": "gh api graphql -f query='query($o: String!) { viewer { login } }' -f o=x", "expect": "allow", "note": "V6-08 review: the twin of a closed hole stays allowed"}
+{"id": "R194", "class": "gh_api_read_with_a_variable_pull_number", "kind": "gate", "command": "gh api repos/o/r/pulls/$n", "expect": "allow", "note": "V6-08 review: the twin of a closed hole stays allowed"}
