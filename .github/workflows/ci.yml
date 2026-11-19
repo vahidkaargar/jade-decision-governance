@@ -86,5 +86,17 @@ jobs:
           tar -xzf gitleaks.tar.gz -C "$RUNNER_TEMP/bin" gitleaks
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
           rm gitleaks.tar.gz
+      # The secret scan tests skip when gitleaks is missing, and the test jobs do not install it. So they run here, and a missing binary fails them.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.13"
+      - name: Install uv (pinned)
+        run: pip install --quiet uv==0.13.6
+      - name: Sync dev environment
+        run: uv sync --frozen
+      - name: Secret scan tests (gitleaks required)
+        env:
+          JADE_REQUIRE_GITLEAKS: "1"
+        run: uv run pytest -q tests/test_secret_scan.py
       - name: Scan the new commits
         run: sh scripts/scan_new_changes.sh "$SCAN_BASE" HEAD

@@ -88,6 +88,18 @@ def test_the_secret_scan_runs_on_new_commits_with_a_pinned_checked_binary(ci):
     assert (ROOT / "scripts" / "scan_new_changes.sh").is_file()
 
 
+def test_the_secret_scan_job_runs_its_own_tests_with_the_pinned_binary(ci):
+    # tests/test_secret_scan.py skips without gitleaks, and no other job installs it: this job must run it, and a missing binary must fail there, not skip.
+    job = ci["jobs"]["secrets"]
+    steps = job["steps"]
+    step = next(s for s in steps if "tests/test_secret_scan.py" in s.get("run", ""))
+    assert "pytest" in step["run"]
+    assert step["env"]["JADE_REQUIRE_GITLEAKS"] == "1"
+    names = [s.get("name", "") for s in steps]
+    assert names.index("Install gitleaks (pinned, checked)") < steps.index(step)
+    assert any("uv sync --frozen" in s.get("run", "") for s in steps[: steps.index(step)])
+
+
 def test_dependabot_still_updates_the_pinned_actions():
     doc = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text())
     assert "github-actions" in {u["package-ecosystem"] for u in doc["updates"]}
