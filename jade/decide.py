@@ -9,6 +9,11 @@ from . import ledger, paths, policy, redact, schemas, state_machine
 from .util import LEVELS, canonical, new_id, session_id, sha256, ts, ts_in, user
 
 DEFAULT_TTL_S = 24 * 3600
+# V6-23 (DI-8): who saw that the goal was reached. Written by code into the outcome's `measurements`, never read from the method text or from a caller's dict.
+# `exit_only`: the hook closed the decision from the exit status. `agent_reported`: an agent said so. `independent`: a check the agent does not control (a CI
+# status file; no producer yet). `human`: a person at a terminal. Only the last two label a call for fitting (`evals.auto_label`).
+GOAL_CHECKS = ("exit_only", "agent_reported", "independent", "human")
+FIT_GOAL_CHECKS = ("independent", "human")
 
 
 def scrub(value):
@@ -68,34 +73,51 @@ def step(db: ledger.Ledger, decision_id: str, event: str, **kw):
     return state_machine.apply(db, {"decision_id": decision_id, "event": event, **kw})
 
 
+def repeat_of_this_decision(db: ledger.Ledger, call_id: str, decision_id: str) -> bool:
+    """V6-24 (DI-5): is this call a stored answer given again to the same decision (a cached repeat, same evidence), not a new look at new evidence?"""
+    row = db.get_call(call_id)
+    if row is None or row.provider != "cache" or not row.dedup_of:
+        return False
+    orig = db.get_call(row.dedup_of)
+    return bool(orig and orig.decision_id == decision_id)
+
+
 def link_evaluation(db: ledger.Ledger, decision_id: str, call_id: str, verdict: str, error: bool = False) -> str:
-    """Attach a Jev call to a decision and move it: route (if needed) then the matching jev_result_* event."""
+    """Attach a Jev call to a decision and move it: route (if needed) then the matching jev_result_* event. The event names the call, so the state machine
+    can check that a call stands behind it (H17). A cached repeat of the answer this decision already holds moves nothing and uses no revision (DI-5): the
+    decision has the verdict, and only new evidence is a new look."""
     row = db.one("SELECT status FROM decisions WHERE decision_id=?", (decision_id,))
     if row is None:
         raise state_machine.IllegalTransition(f"unknown decision {decision_id}")
+    if row.status in ("ABSTAINED", "NEEDS_EVIDENCE") and not error and repeat_of_this_decision(db, call_id, decision_id):
+        return row.status
     if row.status == "CLASSIFIED":
         step(db, decision_id, "route", guard="route=JEV")
     elif row.status in ("ABSTAINED", "NEEDS_EVIDENCE"):
         step(db, decision_id, "add_evidence", guard=f"new evaluation {call_id}")
     event = "jev_error" if error else {"ACCEPT": "jev_result_accept", "ABSTAIN": "jev_result_abstain", "REJECT": "jev_result_reject"}[verdict]
     doc = get(db, decision_id)
-    res = step(db, decision_id, event, guard=f"call {call_id}", patch={"evaluation_refs": doc["evaluation_refs"] + [call_id]})
+    res = step(db, decision_id, event, guard=f"call {call_id}", call_id=call_id, patch={"evaluation_refs": doc["evaluation_refs"] + [call_id]})
     return res.status
 
 
 def record_outcome(db: ledger.Ledger, decision_id: str, observation_type: str, success: bool | None, method: str, *,
                    evidence_refs: list[str] | None = None, measurements: dict | None = None, attribution: str = "direct",
-                   caller_session: str | None = None) -> dict:
+                   caller_session: str | None = None, goal_check: str = "agent_reported") -> dict:
     """Store an outcome and advance the decision. Only an *observed* success reaches SUCCEEDED;
     an estimate stays in VERIFYING and an unknown result becomes OUTCOME_UNKNOWN (never success). The observe step, the outcome row and the
     closing step are one transaction: a crash leaves the decision where it was, not in VERIFYING with nothing recorded.
-    `caller_session` (the CLI passes it) must be the session that opened the decision."""
+    `caller_session` (the CLI passes it) must be the session that opened the decision.
+    `goal_check` (`GOAL_CHECKS`) says who saw the goal reached. It goes into `measurements` last, so a `goal_check` key in a caller's dict is overwritten, and the
+    state path does not read it: an exit-status close still reaches SUCCEEDED and still releases the SI-07 hold (DI-8). It only decides whether a label may be made."""
+    if goal_check not in GOAL_CHECKS:
+        raise ValueError(f"goal_check must be one of {GOAL_CHECKS}")
     if observation_type == "unknown":
         success = None
     elif success is None:
         raise ValueError("observed/estimated outcomes need success true or false")
     out = {"schema_version": "1.0.0", "outcome_id": new_id("out"), "decision_id": decision_id, "execution_id": new_id("exec"),
-           "observation_type": observation_type, "verification_method": scrub(method), "measurements": scrub(measurements or {}),
+           "observation_type": observation_type, "verification_method": scrub(method), "measurements": {**scrub(measurements or {}), "goal_check": goal_check},
            "attribution_quality": attribution, "observed_at": ts(), "evidence_refs": scrub([str(e)[:512] for e in (evidence_refs or [])]),
            "success": success}
     schemas.validate("outcome", out)

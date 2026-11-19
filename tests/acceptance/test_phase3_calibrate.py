@@ -96,7 +96,7 @@ def test_auto_label_from_outcomes_and_later_contradiction():
     c = _answered(db, "sA", 0.9, "deploy worked", d["decision_id"])
     for ev in ("authorize", "execute"):
         decide.step(db, d["decision_id"], ev)
-    decide.record_outcome(db, d["decision_id"], "observed", False, "health check failed")
+    decide.record_outcome(db, d["decision_id"], "observed", False, "health check failed", goal_check="human")   # DI-8: only a human or independent check labels
     first = _answered(db, "sB", 0.9, "it is fixed")
     _answered_reject = adapter.FixtureProvider(lambda s, q, m: {k: {"type": "noul", "noul": 0.05} for k in q})
     ask.run(ask.verify_specs(companion=False), {"claim": "it is fixed", "evidence": "new raw output shows failure"}, provider=_answered_reject, session="sB", db=db)

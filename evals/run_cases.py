@@ -30,6 +30,23 @@ GAP_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 V6_CARDS = frozenset(f"V6-{i:02d}" for i in range(1, 35))   # the cards of docs/14-v6/12-roadmap.md (plan-v7)
 
 
+def gate_event(c: dict) -> dict:
+    """The PreToolUse event of a `gate`, `gate_write` or `gate_mcp` case row (also used by evals/decision_replay.py, so both read a row the same way)."""
+    kind = c["kind"]
+    ev = {"tool_name": "Bash", "tool_input": {"command": c.get("command", "")}, "session_id": "case-session", "cwd": "/tmp/case"}
+    if kind == "gate_mcp":
+        ev = {"tool_name": c["tool"], "tool_input": c["input"], "session_id": "case-session", "cwd": "/tmp/case"}
+    if kind == "gate_write":
+        tin = {c.get("key", "file_path"): os.path.expanduser(c["path"])}   # `~/.zshrc` is the profile of whoever runs the case, as `~` is in a command
+        if c.get("content_parts"):  # file content assembled from parts so that no case file holds a token-shaped literal
+            tin["content"] = "".join(c["content_parts"])
+        ev = {"tool_name": c.get("tool", "Write"), "tool_input": tin, "session_id": "case-session", "cwd": "/tmp/case"}
+    if kind == "gate_mcp" and c.get("content_parts"):
+        ev["tool_input"] = {**ev["tool_input"], "content": "".join(c["content_parts"])}
+    ev.update(c.get("event", {}))  # extra host fields: permission_mode, agent_id
+    return ev
+
+
 def run_case(c: dict) -> list[str]:
     from jade import adapter, ask, hooks, ledger, questions
 
@@ -70,20 +87,9 @@ def run_case(c: dict) -> list[str]:
         if r.exit_code != c["expect_exit"]:
             problems.append(f"exit {r.exit_code}, expected {c['expect_exit']}")
     elif kind in ("gate", "gate_write", "gate_mcp"):
-        ev = {"tool_name": "Bash", "tool_input": {"command": c.get("command", "")}, "session_id": "case-session", "cwd": "/tmp/case"}
-        if kind == "gate_mcp":
-            ev = {"tool_name": c["tool"], "tool_input": c["input"], "session_id": "case-session", "cwd": "/tmp/case"}
         if c.get("level"):   # the autonomy level the human set (docs/12): the human-only classes (HO-shell-startup ...) are high work only once there is one
             (Path(os.environ["JADE_CONFIG"]) / "config.json").write_text(json.dumps({"level": c["level"]}))
-        if kind == "gate_write":
-            tin = {c.get("key", "file_path"): os.path.expanduser(c["path"])}   # `~/.zshrc` is the profile of whoever runs the case, as `~` is in a command
-            if c.get("content_parts"):  # file content assembled from parts so that no case file holds a token-shaped literal
-                tin["content"] = "".join(c["content_parts"])
-            ev = {"tool_name": c.get("tool", "Write"), "tool_input": tin, "session_id": "case-session", "cwd": "/tmp/case"}
-        if kind == "gate_mcp" and c.get("content_parts"):
-            ev["tool_input"] = {**ev["tool_input"], "content": "".join(c["content_parts"])}
-        ev.update(c.get("event", {}))  # extra host fields: permission_mode, agent_id
-        res = hooks.pretool(ev)
+        res = hooks.pretool(gate_event(c))
         want = 2 if c.get("expect") == "block" else 0
         if res.exit_code != want:
             problems.append(f"gate exit {res.exit_code}, expected {want} ({res.stderr[:80]!r})")
@@ -278,7 +284,8 @@ def _run_secret_stored(c: dict) -> list[str]:
 def _run_lifecycle(c: dict) -> list[str]:
     """Permit and decision-lifecycle cases (review cluster B). `permit_variant`: a human approves a permit for `command`, the hook then sees
     `variant`; `permit_forged`: a row nobody approved (`claim_risk`) exists for `command`; `decide_walk`: an agent sends `events` through
-    `jade decide event`. The human terminal is simulated by replacing the ancestry and session-leader probes; nothing here touches a real terminal or ledger."""
+    `jade decide event`, after the optional `runtime_events` (what `jade ask` records, set up in process: an agent cannot send a Jev result, V6-24).
+    The human terminal is simulated by replacing the ancestry and session-leader probes; nothing here touches a real terminal or ledger."""
     import contextlib
     import io
 
@@ -315,6 +322,8 @@ def _run_lifecycle(c: dict) -> list[str]:
             with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
                 cli.main(["decide", "open", "--objective", "an objective long enough", *(["--command", c["command"]] if c.get("command") else [])])
                 did = json.loads(out.getvalue().strip().splitlines()[-1])["decision_id"]
+                for e in c.get("runtime_events", []):   # V6-24 (H17): the Jev result that `jade ask` writes; an agent cannot send it, so the case sets it up in process
+                    decide.step(db, did, e)
                 for e in c["events"]:
                     cli.main(["decide", "event", did, e])
             status = decide.get(db, did)["status"]

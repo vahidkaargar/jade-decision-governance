@@ -555,7 +555,7 @@ def test_f12_auto_label_does_not_trust_a_succeeded_status_without_an_observed_ou
     db.con.execute("UPDATE decisions SET status='SUCCEEDED' WHERE decision_id=?", (d["decision_id"],))  # a stray write, no outcome row
     assert evals.auto_label(db)["observed"] == 0
     db.con.execute("INSERT INTO outcomes(outcome_id, decision_id, doc_json, ts) VALUES('out_aaaaaaaaaaaa', ?, ?, '2026-11-09T00:00:00Z')",
-                   (d["decision_id"], json.dumps({"observation_type": "observed", "success": True})))
+                   (d["decision_id"], json.dumps({"observation_type": "observed", "success": True, "measurements": {"goal_check": "human"}})))   # DI-8
     assert evals.auto_label(db)["observed"] == 1
 
 

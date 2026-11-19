@@ -99,7 +99,14 @@ def ask_main(argv: list[str], prog: str = "jade ask", provider=None) -> int:
         print(f"jade: dry run: {hits} redaction(s){', state truncated to 32 KiB' if cut else ''}; "
               f"{'a secret-shaped string survived redaction, a real call would be refused (exit 6)' if leaked else 'no secret-shaped string left'}", file=sys.stderr)
         return 0
-    result = ask.run(specs, state, risk=a.risk, decision_id=a.decision, provider=provider, model=a.model, use_cache=not a.no_cache)
+    decision = a.decision or (ask.open_verify_decision(a.text) if a.cmd == "verify" else None)   # V6-23: a verify call with no decision named gets its own, so it is linked
+    use_cache, resample_cap = True, None
+    if a.no_cache:   # H16: a fresh sample of the same text is for a human or a test run, and it is capped; an agent gets the stored answer
+        if is_human_tty() or paths.row_source() == "test":
+            use_cache, resample_cap = False, ask.NO_CACHE_SAMPLES
+        else:
+            print("jade: warning: --no-cache is for a human terminal or a test run; the stored answer is used when there is one", file=sys.stderr)
+    result = ask.run(specs, state, risk=a.risk, decision_id=decision, provider=provider, model=a.model, use_cache=use_cache, resample_cap=resample_cap)
     return ask.emit(result, raw=a.raw, as_json=a.json)
 
 
@@ -119,7 +126,10 @@ def _ask_stats(db, days: int) -> dict | None:
     arg = (f"-{days} days",)
     since = "strftime('%Y-%m-%dT%H:%M:%SZ','now',?)"
     live = ledger.live()
-    gated = db.one(f"SELECT COUNT(*) AS n FROM events WHERE kind='gated' AND ts>={since} AND {live}", arg).n  # noqa: S608 - constant fragments
+    from . import readouts
+
+    load = readouts.load_counts(db, readouts.since_days(days))   # V6-23: the one definition of a gated call, shared with `jade check`
+    gated = load["calls"]
     terminal = db.one(f"SELECT COUNT(*) AS n FROM events WHERE kind='permit_approved' AND ts>={since} AND {live}", arg).n  # noqa: S608
     answers: dict[str, dict[str, int]] = {}
     for r in db.all(f"SELECT channel, answer, COUNT(*) AS n FROM human_answers WHERE ts>={since} AND {live} GROUP BY channel, answer", arg):  # noqa: S608
@@ -135,7 +145,7 @@ def _ask_stats(db, days: int) -> dict | None:
     if gated:
         count = lambda ch: sum(answers.get(ch, {}).values())  # noqa: E731
         per = {"chat": round(100 * count("chat") / gated, 1), "dialog": round(100 * count("dialog") / gated, 1), "terminal": round(100 * terminal / gated, 1)}
-    return {"gated_calls": gated, "answers": answers, "terminal_approvals": terminal, "per_100_gated": per, "by_rule": by_rule}
+    return {"gated_calls": gated, "gated_events": load["gated_events"], "answers": answers, "terminal_approvals": terminal, "per_100_gated": per, "by_rule": by_rule}
 
 
 def _stats(a) -> int:
@@ -165,7 +175,19 @@ def _stats(a) -> int:
                     "events": {x.kind: x.n for x in db.all("SELECT kind, COUNT(*) AS n FROM events WHERE kind IN ('BYPASS','MODEL_DRIFT','INVALID_QUESTION','would_block','safety_block','secret_read','blind_spot') AND " + ledger.live() + " GROUP BY kind")}})
     if (asks := _ask_stats(db, a.days)) is not None:
         out["asks"] = asks
-    print(json.dumps(out, indent=1))
+    from . import readouts
+
+    since_ts = readouts.since_days(a.days)   # V6-23: the readouts that the plan's baseline needs; present in every output, empty ledgers show zeros and "not measured"
+    out["repeat_reasons"] = {x.guard: x.n for x in db.all("SELECT guard, COUNT(*) AS n FROM events WHERE kind='ask_repeat' AND ts>=? AND " + ledger.live() + " GROUP BY guard", (since_ts,))}   # V6-24: why asks were repeats (exact, whitespace, no_cache, cap_hit)
+    out["load"] = readouts.load_counts(db, since_ts)
+    out["friction"] = readouts.ask_load(db, since_ts)
+    out["verify_links"] = readouts.verify_links(db, since_ts)
+    out["label_coverage"] = readouts.label_coverage(db, since_ts)
+    out["shadow_agreement"] = readouts.shadow_agreement(db, since_ts)
+    if getattr(a, "json", False):   # one line, sorted keys, so a script or a diff reads it the same way every time
+        print(json.dumps(out, sort_keys=True, separators=(",", ":")))
+    else:
+        print(json.dumps(out, indent=1))
     return 0
 
 
@@ -282,7 +304,8 @@ def _decide(a) -> int:
                       f"need an interactive human terminal ({why})", file=sys.stderr)
                 return 1
         elif not state_machine.agent_may(event, row.status, row.risk_level):
-            print(f"jade: refused: '{event}' is not an event an agent session may send. Evaluation results, evidence, escalation and cancel are; "
+            print(f"jade: refused: '{event}' is not an event an agent session may send. Fast and deep results, evidence, escalation and cancel are; "
+                  "a Jev result (jev_result_*) is written only by `jade ask --decision`, which names the call; "
                   "execution is the hook's job (with a permit at risk >= high), and verified/failed/unknown follow only from `jade decide outcome`.", file=sys.stderr)
             return 1
         res = decide.step(db, a.decision_id, event, guard=a.note or "", actor="human" if human else "agent", caller_session=session_id())
@@ -621,6 +644,47 @@ def _git_hook(a) -> int:
     return 0 if guarded else 1
 
 
+def _learn(a) -> int:
+    """`jade learn blockers|policy|cases` (V6-32): reports for a human to read. Read-only: no policy, threshold, memory, label or case file is written."""
+    from . import learn, readouts
+
+    db = ledger.open()
+    since = readouts.since_days(a.days) if getattr(a, "days", 0) else ""   # `cases` has no window: every wrong mark counts
+    try:
+        if a.action == "blockers":
+            r = learn.blocker_classes(db, since)
+            sample = learn.blocker_sample(db, since, a.sample) if a.sample else None
+            if a.json:
+                print(json.dumps({**r, **({"sample": sample} if sample is not None else {})}, sort_keys=True, separators=(",", ":")))
+            else:
+                print(learn.render_blockers(r, sample))
+            return 0
+        if a.action == "policy":
+            table = learn.policy_table(db, since)
+            print(json.dumps(table, sort_keys=True, separators=(",", ":")) if a.json else learn.render_table(table))
+            return 0
+        cases_file = Path(paths.shipped_policy_dir()).parent / learn.CASES_REL   # the checkout's case file: an installed wheel has none
+        if not cases_file.is_file():
+            print(f"jade: {learn.CASES_REL} not found next to the installed policies: run `jade learn cases` from a checkout of the repository", file=sys.stderr)
+            return 2
+        records = learn.error_records(db) + (learn.read_records(a.records) if a.records else [])
+        text = cases_file.read_text(encoding="utf-8")
+        out = learn.case_proposals(records, [json.loads(x) for x in text.split("\n") if x.strip()])
+        diff = learn.case_diff(text, out["cases"])
+        print(f"jade: {len(out['cases'])} case(s) proposed, {len(out['skipped'])} record(s) skipped. A case with `twin: unverified` has no human-written harmless look-alike. "
+              f"Run `uv run python evals/case_ratchet.py check` on the proposal before you merge it: a case must fail on the version that erred.", file=sys.stderr)
+        for s in out["skipped"]:
+            print(f"jade: skipped {s['kind']} {s['decision_id'] or ''} (rule {s['rule_id']}): {s['why']}", file=sys.stderr)
+        if a.out and diff:
+            print(f"wrote {learn.write_out(a.out, diff)}")
+        elif diff:
+            print(diff, end="")
+        return 0
+    except (OSError, ValueError, learn.WriteRefused) as e:
+        print(f"jade: {e}", file=sys.stderr)
+        return 2
+
+
 def _maintain(a) -> int:
     """Daily job: expiries, retention, drift canary, miner. Prints one JSON line for the log."""
     from . import decide, improve, ops, permits
@@ -667,6 +731,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("ledger").add_subparsers(dest="action", required=True)
     st = s.add_parser("stats")
     st.add_argument("--days", type=int, default=14)
+    st.add_argument("--json", action="store_true", help="the same figures on one line with sorted keys, for a script (the default is the same data, indented)")
     pg = s.add_parser("purge")
     pg.add_argument("--older-than", type=_days, default=90, metavar="DAYS", help="retention window in days: 90 or 90d (default 90)")
     pg.add_argument("--test-rows", action="store_true", help="instead of the retention purge, remove the rows a run under JADE_SOURCE=test left in the ledger")
@@ -674,6 +739,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     c = sub.add_parser("check", help="probe ledger, policies, registry, hooks, shim and the provider; non-zero on any failure")
     c.add_argument("--offline", action="store_true")
+    c.add_argument("--json", action="store_true", help="the rows as JSON (ok is true, false, or null for a warning) and the load counters; the exit code is the same")
 
     pm = sub.add_parser("permit").add_subparsers(dest="action", required=True)
     pm.add_parser("list").add_argument("--all", action="store_true")
@@ -800,6 +866,19 @@ def build_parser() -> argparse.ArgumentParser:
     gh = sub.add_parser("git-hook", help="the standalone pre-push guard for the default branch (SI-08): `script` prints it, `check <repo>` says whether a repository runs it").add_subparsers(dest="action", required=True)
     gh.add_parser("script", help="print the self-contained POSIX sh pre-push hook (installs nothing; install it yourself, docs/08 section 2.7)")
     gh.add_parser("check", help="report whether the pre-push hook git runs for REPO is the JADE guard; exit 1 when it is not").add_argument("repo")
+    pl = sub.add_parser("learn", help="reports for you to read, never applied (V6-32): what stopped calls, a regression case for each call you marked wrong, a table of asks and errors per rule").add_subparsers(dest="action", required=True)
+    for name, text in (("blockers", "what stopped calls, by safety invariant id and rule id; --sample N lists a fixed sample for your precision check"),
+                       ("policy", "per rule: asks, answers and wrong marks side by side, with a word of advice; changes nothing"),
+                       ("cases", "a diff that adds a regression case for each call you marked wrong (and for each record of --records FILE); applies nothing")):
+        pn = pl.add_parser(name, help=text)
+        if name != "cases":   # `cases` has no window: a call marked wrong is a case however long ago
+            pn.add_argument("--days", type=int, default=30, help="the window in days (default 30; 0 is all time)" + ("; wrong marks and human-only asks always count all time" if name == "policy" else ""))
+            pn.add_argument("--json", action="store_true", help="one line of JSON with sorted keys")
+        if name == "blockers":
+            pn.add_argument("--sample", type=int, default=0, help="also list N blocker rows, fixed by a seed, ids only")
+        if name == "cases":
+            pn.add_argument("--records", help="a JSONL file of audit false allows or counterfactual false rejects (kind, command, optional rule_id, tool, twin_command)")
+            pn.add_argument("--out", help="write the diff to this new file instead of printing it (never inside the checkout, the policies or the config)")
     sub.add_parser("maintain").add_argument("--offline", action="store_true")
     sub.add_parser("version", help="print the code version, commit, ledger schema version and policy_version").add_argument("--json", action="store_true")
     up = sub.add_parser("upgrade", help="human only: install a release of jade-decision-governance with uv, then run jade check from it; --check only looks")
@@ -848,6 +927,8 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "check":
         from . import ops
 
+        if a.json:
+            return ops.print_check_json(ops.check(live=not a.offline))
         return ops.print_check(ops.check(live=not a.offline))
     if a.cmd in ("version", "upgrade"):
         from . import upgrade
@@ -863,7 +944,7 @@ def main(argv: list[str] | None = None) -> int:
         print(ops.launchd_plist(a.label), end="")
         return 0
     table = {"permit": _permit, "decide": _decide, "ack": _ack, "question": _question, "route": _route, "fast": _fast, "work": _work,
-             "label": _label, "eval": _eval, "improve": _improve, "hooks": _ops, "gate": _ops, "review": _ops, "knows": _ops, "level": _ops, "claude-md": _ops, "maintain": _maintain, "git-hook": _git_hook}
+             "label": _label, "eval": _eval, "improve": _improve, "hooks": _ops, "gate": _ops, "review": _ops, "knows": _ops, "level": _ops, "claude-md": _ops, "maintain": _maintain, "git-hook": _git_hook, "learn": _learn}
     return table[a.cmd](a)
 
 

@@ -382,6 +382,8 @@ def _detail(event: dict, a: policy.Assessment | None = None, **more) -> dict:
          "agent_id": event.get("agent_id"), **more}
     if a is not None:
         d["plan_hash"] = a.plan_hash
+        if a.blocked:
+            d["invariants"] = list(a.blocked)   # V6-32 (W-74): which safety invariants fired, as ids only. The guard text keeps them too; `jade learn blockers` reads both
     return d
 
 
@@ -606,7 +608,7 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit, hold_
         if hold:
             did, reason = hold
             if hold_mode != "advisory":
-                db.event("gate", "safety_block", guard=f"{a.rule_id} {a.level} SI-07", actor="hook", detail=_detail(event, a, decision_id=did))
+                db.event("gate", "safety_block", guard=f"{a.rule_id} {a.level} SI-07", actor="hook", detail=_detail(event, a, decision_id=did, invariants=["SI-07"]))
             return _verdict(hold_mode, f"JADE safety invariant SI-07 blocks this {tool} call. An earlier run of this exact command (decision {did}) {reason}"
                                   f"{' and still executing' if 'executing' in reason else ''}. It is not retried automatically and no permit is raised or used for it. "
                                   f"Read the real state, then record it: jade decide outcome {did} --type observed --success true|false --method \"how you checked\". "
@@ -744,7 +746,7 @@ def _close_decision(event: dict, success: bool, method: str) -> HookResult:
             db.event(event.get("session_id") or "session", "BYPASS", guard="raw Decisions API call outside the adapter", actor="hook")
         did = _executing_decision(db, tool, tin, event, cwd)
         if did:
-            decide.record_outcome(db, did, "observed", success, method, attribution="indirect")
+            decide.record_outcome(db, did, "observed", success, method, attribution="indirect", goal_check="exit_only")   # the exit status is not the goal (DI-8)
     finally:
         db.close()
     return HookResult()

@@ -17,6 +17,11 @@ HUMAN_EVENTS = {"human_answer", "human_accept", "human_reject"}
 # outcome record (`observe`, `verified`, `failed`, `unknown`, `reconcile` follow only from `jade decide outcome`, which stores the observation first).
 OUTCOME_EVENTS = {"observe", "verified", "failed", "unknown", "reconcile"}
 RUNTIME_EVENTS = {"deadline"}
+# V6-24 (H17): the result of a Jev call is written only by `jade ask` (`decide.link_evaluation`), which names the call. An agent that sends one itself would walk a
+# decision to ACCEPTED with no call behind it: the gate does not read ACCEPTED, but the "verified" it shows and the labels built on it would be false.
+JEV_RESULT_EVENTS = {"jev_result_accept", "jev_result_abstain", "jev_result_reject"}
+# The exit codes of the call that may stand behind each result. A result may be stricter than the call (a companion check lowers an accept to an abstain), never looser.
+_CALL_EXITS = {"jev_result_accept": (0,), "jev_result_abstain": (0, 3), "jev_result_reject": (4,)}
 # `deadline` ends any state that is waiting for something that may never come. EXECUTING, VERIFYING and OUTCOME_UNKNOWN are not in it: a call that
 # started and never reported is unknown (SI-07), never expired, and an unknown outcome is left only by `reconcile` or a human `cancel`.
 EXPIRES = {"RECEIVED", "VALIDATED", "CLASSIFIED", "EVALUATING", "ABSTAINED", "NEEDS_EVIDENCE", "NEEDS_REVISION", "ACCEPTED", "AUTHORIZED", "FAILED",
@@ -81,7 +86,7 @@ def next_state(src: str, event: str, risk: str = "low", *, prev: str | None = No
 
 def agent_may(event: str, src: str | None = None, risk: str = "low") -> bool:
     """May an agent session (not a human, not the hook) emit this event through the CLI? `src` and `risk` narrow `execute` and `cancel`."""
-    if event in HUMAN_EVENTS or event in OUTCOME_EVENTS or event in RUNTIME_EVENTS:
+    if event in HUMAN_EVENTS or event in OUTCOME_EVENTS or event in RUNTIME_EVENTS or event in JEV_RESULT_EVENTS:
         return False
     if event == "execute":  # below the permit floor nothing but the decision's own bookkeeping stands behind it; above it only the hook, with a permit
         return not at_least(risk, "high")
@@ -100,6 +105,14 @@ def _observed_success(con, decision_id: str) -> bool:
     r = con.execute("SELECT json_extract(doc_json,'$.observation_type') AS t, json_extract(doc_json,'$.success') AS ok FROM outcomes "
                     "WHERE decision_id=? ORDER BY rowid DESC LIMIT 1", (decision_id,)).fetchone()
     return bool(r and r["t"] == "observed" and r["ok"] == 1)
+
+
+def _matching_call(con, decision_id: str, event: str, call_id: str | None) -> bool:
+    """A finished Jev call of this decision whose exit code can stand behind `event` (`_CALL_EXITS`)."""
+    if not call_id:
+        return False
+    r = con.execute("SELECT decision_id, state, exit_code FROM jev_calls WHERE call_id=?", (call_id,)).fetchone()
+    return bool(r and r["decision_id"] == decision_id and r["state"] == "DONE" and r["exit_code"] in _CALL_EXITS[event])
 
 
 def _after_event_insert() -> None:
@@ -135,6 +148,8 @@ def apply(path, ev: dict):
                 raise IllegalTransition("deadline: expires_at has not passed")
             if ev["event"] == "verified" and not _observed_success(con, ev["decision_id"]):
                 raise IllegalTransition("SUCCEEDED needs a recorded outcome with observation_type=observed and success=true")
+            if ev["event"] in JEV_RESULT_EVENTS and (ev.get("actor") == "agent" or ev.get("call_id")) and not _matching_call(con, ev["decision_id"], ev["event"], ev.get("call_id")):
+                raise IllegalTransition(f"{ev['event']} needs a matching finished Jev call of this decision (call_id); an agent's own word is not one")
             dst = next_state(src, ev["event"], row["risk_level"] or "low", prev=row["prev_status"],
                              permit_ok=bool(ev.get("permit_ok")), revision_count=row["revision_count"])
             db.event(ev["decision_id"], ev["event"], prev=src, next=dst, guard=ev.get("guard"), actor=ev.get("actor", "runtime"),
