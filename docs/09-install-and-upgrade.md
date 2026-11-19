@@ -74,10 +74,10 @@ A broken release is not deleted or moved. Fix forward with a new patch tag (`jad
 **Verify the attached files.** `jade upgrade` installs from the tag with uv. To install a file you downloaded, check it against `SHA256SUMS` first:
 
 ```bash
-gh release download v0.6.1 --repo vahidkaargar/jade-decision-governance --dir jade-v0.6.1
-cd jade-v0.6.1
+gh release download v0.7.0 --repo vahidkaargar/jade-decision-governance --dir jade-v0.7.0
+cd jade-v0.7.0
 shasum -a 256 -c SHA256SUMS          # macOS; on Linux: sha256sum -c SHA256SUMS
-uv tool install --reinstall ./jade_decision_governance-0.6.1-py3-none-any.whl
+uv tool install --reinstall ./jade_decision_governance-0.7.0-py3-none-any.whl
 ```
 
 Both lines of `SHA256SUMS` (wheel and sdist) must print `OK`. The checksums come from the same release page as the files: they catch a damaged or partial download, not a compromised release. For that, compare the tag's commit with the repository history.
