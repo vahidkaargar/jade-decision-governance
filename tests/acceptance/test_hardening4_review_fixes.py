@@ -130,14 +130,14 @@ def _patch(path):
 
 @pytest.mark.parametrize("copies", [24, 30])
 def test_patches_past_the_invocation_bound_are_recorded_as_a_blind_spot(copies):
-    a = sh("".join(_patch(f"f{i}") for i in range(copies)) + _patch("jade/hooks.py"), cwd="/Users/mobogift/Documents/projects/jade")
+    a = sh("".join(_patch(f"f{i}") for i in range(copies)) + _patch("jade/hooks.py"), cwd="/Users/x/projects/jade")
     assert at_least_high(a) or (a.rule_id == "R-31" and "patch-body" in a.blind), (a.rule_id, a.level, a.blind)
 
 
 @pytest.mark.parametrize("files", [199, 200, 300])
 def test_headers_past_the_path_bound_are_recorded_as_a_blind_spot(files):
     hdr = "".join(f"--- a/f{i}\n+++ b/f{i}\n@@ -1 +1 @@\n-a\n+b\n" for i in range(files))
-    a = sh(f"patch -p1 <<'EOF'\n{hdr}--- a/jade/hooks.py\n+++ b/jade/hooks.py\n@@ -1 +1 @@\n-a\n+b\nEOF\n", cwd="/Users/mobogift/Documents/projects/jade")
+    a = sh(f"patch -p1 <<'EOF'\n{hdr}--- a/jade/hooks.py\n+++ b/jade/hooks.py\n@@ -1 +1 @@\n-a\n+b\nEOF\n", cwd="/Users/x/projects/jade")
     assert at_least_high(a) or (a.rule_id == "R-31" and "patch-body" in a.blind), (a.rule_id, a.level, a.blind)
 
 

@@ -15,7 +15,7 @@ from jade import cli
 
 ROOT = Path(__file__).resolve().parents[1]
 YAML = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "policies").rglob("*.yaml"))   # their header comments name commands too
-DOCS = ["README.md", "CONTRIBUTING.md", "SECURITY.md", "BACKLOG.md", "skills/jade/SKILL.md", "docs/claude-md-jev-section.md",
+DOCS = ["README.md", "PRIVACY.md", "CONTRIBUTING.md", "SECURITY.md", "BACKLOG.md", "skills/jade/SKILL.md", "docs/claude-md-jev-section.md",
         *sorted(str(p.relative_to(ROOT)) for p in (ROOT / "docs").glob("0*.md"))]
 STOP = ("|", "...", "\u2192", "/", "then", "and", "does")
 FRAGMENT = ("the following arguments are required", "expected one argument", "expected at least one argument")
