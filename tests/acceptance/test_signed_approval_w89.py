@@ -287,7 +287,7 @@ def test_the_check_row_reports_each_state(approver, tmp_path, monkeypatch):
     assert not ok and "not usable" in detail
     monkeypatch.setenv("JADE_APPROVER_ANCHOR", str(tmp_path / "nothing-here"))
     ok, detail = ops._approval_row()[1:]
-    assert ok and detail.startswith("tty")
+    assert ok is None and detail.startswith("tty")   # V6-10: a forgeable terminal approval is a WARN, not ok and not a failure
 
 
 def test_the_new_variable_is_a_reported_override_and_an_si11_name(approver):

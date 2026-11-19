@@ -38,7 +38,7 @@ def proj(tmp_path, monkeypatch):
 def test_a_clean_tree_passes(human_env, jade_stub, proj):
     ops.hooks_install(stdin_isatty=True)
     assert rows_of()[ROW][0]
-    assert all(ok for ok, _ in rows_of().values())
+    assert all(ok is not False for ok, _ in rows_of().values())   # V6-10: WARN rows (None) are not failures
 
 
 @pytest.mark.parametrize("name", ["settings.json", "settings.local.json"])
