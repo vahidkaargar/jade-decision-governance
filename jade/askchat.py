@@ -300,14 +300,15 @@ def _scope_of_kind(row, kind: str) -> dict | None:
 
 
 def refusal(db, session: str, hold: str, fpj: str, tool: str, where: str):
-    """A call the human already answered no to: refused with no new ask. The window (10 minutes after a Deny) or the cap (the 3rd Deny of the same call, ever) is what ends asking."""
+    """A call the human already answered no to: refused with no new ask. The window (10 minutes after a Deny) or the cap (the 3rd Deny of the same call, ever) is what ends asking.
+    A Deny is found by the hold key only (V6-06b, N41, N42): a retry with an env prefix, `sudo` or another folder is the same refused call. `fpj` is kept for the callers."""
     from .hooks import HookResult
 
     n = db.one("SELECT COUNT(*) AS n FROM asks WHERE session_id=? AND status='DENIED' AND hold_key=?", (session, hold)).n
     if n >= DENY_CAP:
         return HookResult(2, f"JADE gate: the human denied this {tool} call {n} times. It is not asked again. Do not retry it or rephrase it to get around the answers; "
                              "tell the human what you need and why, or continue with other work.")
-    denied = db.one("SELECT ask_id FROM asks WHERE session_id=? AND status='DENIED' AND hold_key=? AND fingerprints_json=? AND expires_ts>?", (session, hold, fpj, ts()))
+    denied = db.one("SELECT ask_id FROM asks WHERE session_id=? AND status='DENIED' AND hold_key=? AND expires_ts>? ORDER BY answered_ts DESC LIMIT 1", (session, hold, ts()))   # V6-06b: the hold key only, so an env prefix, `sudo` or another folder does not make a new ask (an Allow stays for one text and one place)
     if denied is not None:
         return HookResult(2, f"JADE gate: the human said no to this {tool} call in {where} (ask {denied.ask_id}). Do not retry it unchanged and do not rephrase it to get "
                              "around the answer. Continue with other work, or tell the human what you need and why.")
