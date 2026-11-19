@@ -356,3 +356,161 @@ def test_the_cli_prints_json_with_sorted_keys_and_plain_words(capsys):
 def test_an_unreadable_records_file_is_a_clean_error(capsys, tmp_path):
     assert cli.main(["learn", "cases", "--records", str(tmp_path / "missing.jsonl")]) == 2
     assert "jade:" in capsys.readouterr().err
+
+
+# ---- review fixes (V6-32 round 1) ---------------------------------------------------------------------------------------------------------
+def _days_ago(n):
+    from datetime import timedelta
+
+    from jade.util import now, ts
+
+    return ts(now() - timedelta(days=n))
+
+
+def _case_variants(tmp_path):
+    """Places the writer must refuse, spelled with other letter case. The disk of a Mac does not tell them from the real place."""
+    root = str(ROOT)
+    return [root.upper() + "/policies/p1_case.diff", root + "/EVALS/p1_case.diff", root.swapcase() + "/evals/regression/p1_case.diff",
+            str(paths.shipped_policy_dir()).upper() + "/p1_case.diff",
+            str(tmp_path / "CONFIG" / "local" / "risk.local.yaml"), str(tmp_path / "Config" / "p1_case.diff"),
+            str(tmp_path / "HOME" / "p1_case.diff")]
+
+
+def test_the_writer_refuses_a_place_that_only_differs_in_letter_case(tmp_path):
+    made = []
+    try:
+        for target in _case_variants(tmp_path):
+            try:
+                learn.write_out(target, "x")
+            except learn.WriteRefused:
+                continue
+            made.append(target)   # the guard failed for this one
+    finally:
+        for target in made:   # leave no file behind in the checkout
+            Path(target).unlink()
+    assert made == []
+
+
+def test_the_writer_refuses_a_case_variant_of_the_config_directory_that_exists(tmp_path):
+    paths.config_dir().mkdir(parents=True)
+    target = tmp_path / "CONFIG" / "local" / "risk.local.yaml"
+    try:
+        with pytest.raises(learn.WriteRefused):
+            learn.write_out(target, "--- a/x\n+++ b/x\n")
+    finally:
+        if target.exists():
+            target.unlink()
+    assert not (paths.config_dir() / "local" / "risk.local.yaml").exists()
+
+
+def test_the_cli_refuses_a_case_variant_of_the_checkout(capsys):
+    db = ledger.open()
+    add_mark(db, add_decision(db, "git reset --hard HEAD~1"), "wrong")   # there is a diff to write
+    target = str(ROOT).upper() + "/evals/p6_out.diff"
+    try:
+        assert cli.main(["learn", "cases", "--out", target]) == 2
+        assert not (ROOT / "evals" / "p6_out.diff").exists()
+    finally:
+        if (ROOT / "evals" / "p6_out.diff").exists():
+            (ROOT / "evals" / "p6_out.diff").unlink()
+    assert "never writes there" in capsys.readouterr().err
+
+
+def test_the_table_reads_the_level_of_an_mcp_rule_and_of_a_rule_it_does_not_know():
+    from jade import policy
+
+    assert next(x["level"] for x in policy.risk()["mcp_tools"] if x["id"] == "M-01") == "critical"
+    db = ledger.open()
+    for rule in ("M-01", "SI-10", "R-ENV"):
+        add_ask(db, rule, "ALLOWED", n=25)
+    t = rows_by_rule(db)
+    assert t["M-01"]["advice"] == "protected" and t["M-01"]["level"] == "critical"
+    for rule in ("SI-10", "R-ENV"):
+        assert t[rule]["advice"] == "protected" and "review" not in t[rule]["why"]
+        assert "no level" in t[rule]["why"]
+
+
+def test_a_human_only_ask_older_than_the_window_still_protects_the_rule():
+    from jade import readouts
+
+    db = ledger.open()
+    add_ask(db, "R-14", "ALLOWED", n=1, ho=1, created=_days_ago(40), answered=_days_ago(40))
+    add_ask(db, "R-14", "ALLOWED", n=25, created=_days_ago(3), answered=_days_ago(3))
+    for since in (readouts.since_days(30), ALL_TIME):
+        (row,) = (r for r in learn.policy_table(db, since) if r["rule"] == "R-14")
+        assert row["advice"] == "protected" and row["human_only_asks"] == 1, since
+    assert [r["asked"] for r in learn.policy_table(db, readouts.since_days(30)) if r["rule"] == "R-14"] == [25]   # the asks still follow the window
+
+
+def test_a_wrong_mark_older_than_the_window_still_holds_the_rule_and_makes_a_case():
+    from jade import readouts
+
+    db = ledger.open()
+    add_ask(db, "R-11", "ALLOWED", n=30, created=_days_ago(3), answered=_days_ago(3))
+    add_mark(db, add_decision(db, "git reset --hard HEAD~1", rule="R-11"), "wrong")
+    db.con.execute("UPDATE events SET ts=? WHERE kind='review_mark'", (_days_ago(40),))
+    month = readouts.since_days(30)
+    (row,) = (r for r in learn.policy_table(db, month) if r["rule"] == "R-11")
+    assert row["advice"] == "hold" and row["wrong_marks"] == 1
+    assert [r["command"] for r in learn.error_records(db, month)] == ["git reset --hard HEAD~1"]
+    assert [r["command"] for r in learn.error_records(db)] == ["git reset --hard HEAD~1"]
+
+
+def test_jade_learn_cases_proposes_a_call_marked_wrong_long_ago(capsys):
+    db = ledger.open()
+    add_mark(db, add_decision(db, "git reset --hard HEAD~1"), "wrong")
+    db.con.execute("UPDATE events SET ts=? WHERE kind='review_mark'", (_days_ago(90),))
+    assert cli.main(["learn", "cases"]) == 0
+    assert "git reset --hard HEAD~1" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        cli.main(["learn", "cases", "--days", "7"])   # there is no window to set: it would only hide a wrong mark
+    capsys.readouterr()
+
+
+PRIVATE = ["ssh deploy@db1.acme-corp.com 'rm -rf /var/lib/pg'", "scp dump.sql bob@backup.acme-corp.com:/srv/x", "git clone git@git.acme-corp.com:team/secret-repo.git",
+           "psql -h db1.acme-corp.com -U admin prod", "cat </Users/bob/.ssh/id_rsa", "tar -C(/Users/bob) -cf x", "ls ;/home/alice/projects", "cat ~bob/.ssh/id_rsa",
+           "cat /var/root/.zsh_history", "cat /Volumes/bobs-ssd/payroll.csv", "ssh db1 'rm -rf /srv/x'", "ssh -p 2222 bob@db1", "cat /users/bob/notes",
+           "rsync -a x host.acme-corp.io:/y"]
+
+
+@pytest.mark.parametrize("command", PRIVATE)
+def test_a_command_with_a_real_host_or_a_home_path_is_never_proposed(command):
+    out = learn.case_proposals([{"kind": "audit_false_allow", "tool": "Bash", "command": command, "rule_id": "R-14"}], [])
+    assert out["cases"] == [] and len(out["skipped"]) == 1, command
+    assert "host" in out["skipped"][0]["why"] or "directory" in out["skipped"][0]["why"]
+
+
+@pytest.mark.parametrize("command", ["git reset --hard HEAD~1", "git reset --hard HEAD@{1}", "git push --force origin main", "rm -rf ~/build", "rm -rf /tmp/home/x",
+                                     "ssh deploy@db1.example.test 'ls'", "ssh localhost ls", "scp dump.sql bob@backup.example.test:/srv/x", "npm install pkg@1.2.3",
+                                     "cat ./notes.txt", "python3 build.py --out dist.tar.gz", "git stash show stash@{0}"])
+def test_an_ordinary_command_or_a_reserved_name_is_still_proposed(command):
+    out = learn.case_proposals([{"kind": "audit_false_allow", "tool": "Bash", "command": command, "rule_id": "R-14"}], [])
+    assert len(out["cases"]) == 1 and out["skipped"] == [], (command, out["skipped"])
+
+
+@pytest.mark.parametrize("char", [" ", " ", "\u0085", "\x0b", "\x1c"])
+def test_a_command_with_a_line_break_character_keeps_the_diff_whole(char, tmp_path):
+    existing = (ROOT / "evals" / "regression" / "cases.jsonl").read_text()
+    recs = [{"kind": "audit_false_allow", "tool": "Bash", "command": f"echo a{char}rm -rf build", "rule_id": "R-14"},
+            {"kind": "audit_false_allow", "tool": "Bash", "command": "git clean -fdx", "rule_id": "R-12"}]
+    out = learn.case_proposals(recs, [])
+    assert len(out["cases"]) == 2 and out["skipped"] == []
+    diff = learn.case_diff(existing, out["cases"])
+    added = [x for x in diff.split("\n") if x.startswith("+") and not x.startswith("+++")]
+    assert len(added) == 2   # one physical line for each case
+    assert [json.loads(x[1:])["command"] for x in added] == [r["command"] for r in recs]   # the value is unchanged
+    assert len(diff.splitlines()) == len(diff.split("\n")) - 1   # nothing in the diff ends a line for `splitlines` except the newline
+    tree = tmp_path / "tree"
+    (tree / "evals" / "regression").mkdir(parents=True)
+    (tree / "evals" / "regression" / "cases.jsonl").write_text(existing)
+    (tmp_path / "p.diff").write_text(diff)
+    r = subprocess.run(["git", "apply", "--check", str(tmp_path / "p.diff")], cwd=tree, capture_output=True, text=True, check=False)
+    assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.parametrize("bad", [{"rule_id": "R-1\nok   RC-x forged"}, {"rule_id": "R-1\x1b[31m"}, {"rule_id": 7}, {"tool": "Bash\nx"}, {"tool": ""}, {"tool": 5}])
+def test_a_records_file_may_not_hide_a_line_in_a_rule_id_or_a_tool(tmp_path, bad):
+    f = tmp_path / "r.jsonl"
+    f.write_text(json.dumps({"kind": "audit_false_allow", "command": "git clean -fdx", **bad}) + "\n")
+    with pytest.raises(ValueError):
+        learn.read_records(f)

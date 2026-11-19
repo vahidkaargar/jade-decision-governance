@@ -11,8 +11,11 @@ Verdict per case:
   not reproduced     passes on the erred version. The error did not come from a rule the case can show (it is in learned state, memory or Jev, or the rule was already
                      right). A human writes a test with that state. The case is not merged as it is.
   not fixed          fails on the fixed version
-  twin ok            a human-written harmless look-alike (`twin_of`) passes on both versions
+  twin ok            a human-written harmless look-alike (`twin_of`) passes on both versions. It must name a case of the same file and expect the opposite of it
   twin fails on ...  the look-alike fails: on the erred version the case is not a fair pair, on the fix the fix blocks too much
+  twin of ...        the row says `twin_of` but has no case to pair with, or the same expectation: it is not read as a twin, and the exit is 1
+
+A row needs a one-line printable `id` and `class`, and no two rows share an id: the runner prints `id class` and the result is read back from that line.
 
 Exit 0: every case is ready and every twin is ok. Exit 1: any other verdict. Exit 2: the check could not run (an unknown ref, a runner that crashed). A runner that
 crashes is never read as a failing case. A case whose twin is `unverified` is still checked; the report says the twin is missing. Nothing is written into the
@@ -30,7 +33,6 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-STATUS = re.compile(r"^(ok  |FAIL|gap )\s+(\S+) ")
 RUN_S = 900
 
 
@@ -47,12 +49,14 @@ def _fail(msg: str):
 
 
 def read_cases(path: Path) -> list[dict]:
-    """The rows of a JSONL file, or the added lines of a unified diff."""
+    """The rows of a JSONL file, or the added lines of a unified diff. A line ends at a newline only (the runner and git split that way too). A row needs a printable,
+    one-line `id` and `class` and a `id` no other row has: the runner prints `id class` and this check reads it back, so a row may not forge or share a result line."""
     text = Path(path).read_text(encoding="utf-8")
-    lines = text.splitlines()
+    lines = text.split("\n")
     if lines and lines[0].startswith("--- "):
         lines = [x[1:] for x in lines if x.startswith("+") and not x.startswith("+++")]
     rows = []
+    seen: set[str] = set()
     for n, line in enumerate(lines, 1):
         if not line.strip():
             continue
@@ -60,10 +64,32 @@ def read_cases(path: Path) -> list[dict]:
             row = json.loads(line)
         except ValueError:
             _fail(f"{path}: line {n} is not a JSON case row")
-        if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:
             _fail(f"{path}: line {n} is not a case row with an id")
+        if not isinstance(row.get("class"), str) or not row["id"].isprintable() or not row["class"].isprintable():
+            _fail(f"{path}: line {n}: the id and the class of a case must be one line of printable text")
+        if row["id"] in seen:
+            _fail(f"{path}: line {n}: the id {row['id']!r} is used by another row")
+        seen.add(row["id"])
         rows.append(row)
     return rows
+
+
+def parse_results(stdout: str, rows: list[dict]) -> dict[str, str]:
+    """case id -> `ok`, `FAIL` or `gap`, from the runner's own lines `STATUS  id class`. The runner prints the rows in file order, so each row's line is looked for only
+    after the line of the row before it, and it must be the whole line: a line inside the text of another result cannot stand in for it. A row with no such line is left out."""
+    lines = stdout.split("\n")
+    got: dict[str, str] = {}
+    pos = 0
+    for r in rows:
+        want = re.compile(rf"(ok  |FAIL|gap )\s+{re.escape(r['id'])} {re.escape(r['class'])}")
+        for i in range(pos, len(lines)):
+            m = want.fullmatch(lines[i].rstrip("\r"))
+            if m:
+                got[r["id"]] = m.group(1).strip()
+                pos = i + 1
+                break
+    return got
 
 
 def run_on(ref: str, rows: list[dict], scratch: Path) -> dict[str, str]:
@@ -79,24 +105,40 @@ def run_on(ref: str, rows: list[dict], scratch: Path) -> dict[str, str]:
     home = scratch / f"home-{tree.name}"
     home.mkdir(exist_ok=True)
     cases = scratch / f"cases-{tree.name}.jsonl"
-    cases.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    cases.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")   # ASCII escapes only: the runner splits lines with `splitlines`, which breaks at U+2028
     env = {**nl._env(home, scratch), "PYTHONPATH": str(tree)}  # noqa: SLF001 - the ref's own `jade` and `policies` come first, ahead of an editable install of another tree
     r = subprocess.run([sys.executable, str(runner), str(cases)], cwd=tree, env=env, capture_output=True, text=True, timeout=RUN_S, check=False)
     if r.returncode not in (0, 1):
         _fail(f"the case runner of {ref!r} exited {r.returncode}: {r.stderr.strip()[-400:]}")
-    got = {m.group(2): m.group(1).strip() for line in r.stdout.splitlines() if (m := STATUS.match(line))}
+    got = parse_results(r.stdout, rows)
     missing = [x["id"] for x in rows if x["id"] not in got]
     if missing:
         _fail(f"the case runner of {ref!r} printed no result for {', '.join(missing)}")
     return got
 
 
+def twin_problem(r: dict, by_id: dict[str, dict]) -> str | None:
+    """Why a row that says `twin_of` is not a twin, or None. A twin is the harmless look-alike of a case in the same file and expects the opposite."""
+    parent = by_id.get(r["twin_of"]) if isinstance(r["twin_of"], str) else None
+    if parent is None or parent is r:
+        return "twin of a case that is not in this file: nothing to pair it with"
+    if parent.get("twin_of"):
+        return "twin of another twin: a twin needs a case"
+    if {parent.get("expect"), r.get("expect")} != {"block", "allow"}:
+        return "twin with the same expectation as its case: not a look-alike with the opposite answer"
+    return None
+
+
 def verdicts(rows: list[dict], erred: dict[str, str], fixed: dict[str, str]) -> list[tuple[str, str]]:
     out = []
+    by_id = {r["id"]: r for r in rows}
     for r in rows:
         cid = r["id"]
         if r.get("twin_of"):
-            if erred[cid] != "ok":
+            bad = twin_problem(r, by_id)
+            if bad:
+                out.append((cid, bad))
+            elif erred[cid] != "ok":
                 out.append((cid, "twin fails on the erred version: the pair is not fair"))
             elif fixed[cid] != "ok":
                 out.append((cid, "twin fails on the fix: the fix blocks too much"))

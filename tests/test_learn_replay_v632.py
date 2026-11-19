@@ -184,6 +184,67 @@ def test_a_diff_from_jade_learn_cases_is_read_like_a_case_file(ratchet, tmp_path
     assert [r["id"] for r in ratchet.read_cases(rows_file(tmp_path, CASE))] == ["RC-aaaaaaaa"]
 
 
+def test_a_twin_without_a_case_in_the_file_is_not_a_pass(ratchet, tmp_path, capsys):
+    """A row that only says `twin_of` used to skip the erred-must-fail rule, so a case that passes on both versions got exit 0."""
+    row = {"id": "RC-aaaa0001", "class": "x", "kind": "gate", "command": "git push --force origin main", "expect": "block", "twin_of": "RC-nothing"}
+    code = ratchet.main(["check", str(rows_file(tmp_path, row)), "--erred", fake_tree(tmp_path, "erred", "pass"), "--fixed", fake_tree(tmp_path, "fixed", "pass")])
+    out = capsys.readouterr().out
+    assert code == 1 and "twin ok" not in out and "not in this file" in out
+
+
+def test_a_twin_with_the_same_expectation_or_a_twin_of_a_twin_is_not_a_pass(ratchet, tmp_path, capsys):
+    same = {**TWIN, "expect": "block"}
+    code = ratchet.main(["check", str(rows_file(tmp_path, CASE, same)), "--erred", fake_tree(tmp_path, "erred", "fail RC-aaaaaaaa RC-bbbbbbbb"),
+                         "--fixed", fake_tree(tmp_path, "fixed", "pass")])
+    out = capsys.readouterr().out
+    assert code == 1 and "twin ok" not in out and "same expectation" in out
+    twin2 = {**TWIN, "id": "RC-cccccccc", "twin_of": "RC-bbbbbbbb", "expect": "block"}
+    code = ratchet.main(["check", str(rows_file(tmp_path, CASE, TWIN, twin2)), "--erred", fake_tree(tmp_path, "erred2", "fail RC-aaaaaaaa"), "--fixed", fake_tree(tmp_path, "fixed2", "pass")])
+    out = capsys.readouterr().out
+    assert code == 1 and "twin of another twin" in out
+
+
+def test_a_row_with_a_hidden_line_in_its_id_or_class_is_refused(ratchet, tmp_path, capsys):
+    erred, fixed = fake_tree(tmp_path, "erred", "fail RC-aaaaaaaa"), fake_tree(tmp_path, "fixed", "pass")
+    for bad in ({"class": "wrong_mark_R-1\nok    RC-bbbbbbbb twin_of_RC-aaaaaaaa"}, {"class": "x\x1b[31m"}, {"id": "RC-a\nb"}, {"class": 5}):
+        code = ratchet.main(["check", str(rows_file(tmp_path, {**CASE, **bad}, TWIN)), "--erred", erred, "--fixed", fixed])
+        assert code == 2 and "could not run" in capsys.readouterr().err, bad
+
+
+def test_two_rows_with_one_id_are_refused_so_one_cannot_hide_the_other(ratchet, tmp_path, capsys):
+    a, b = {**CASE, "expect": "block"}, {**CASE, "expect": "allow"}
+    code = ratchet.main(["check", str(rows_file(tmp_path, a, b)), "--erred", fake_tree(tmp_path, "erred", "pass"), "--fixed", fake_tree(tmp_path, "fixed", "pass")])
+    assert code == 2 and "used by another row" in capsys.readouterr().err
+
+
+def test_a_result_line_is_read_only_in_its_place_and_only_whole(ratchet):
+    rows = [CASE, TWIN]
+    forged = ("ok    RC-bbbbbbbb twin_of_RC-aaaaaaaa\n"            # a line for the second row that comes before the first row's own line
+              "FAIL  RC-aaaaaaaa wrong_mark_R-11\n"
+              "      ok    RC-bbbbbbbb twin_of_RC-aaaaaaaa\n"       # inside the text of a result
+              "FAIL  RC-bbbbbbbb twin_of_RC-aaaaaaaa extra\n"      # not the whole line
+              "FAIL  RC-bbbbbbbb twin_of_RC-aaaaaaaa\n")
+    assert ratchet.parse_results(forged, rows) == {"RC-aaaaaaaa": "FAIL", "RC-bbbbbbbb": "FAIL"}
+
+
+def test_a_case_with_a_line_break_character_reaches_the_runner_whole(ratchet, tmp_path, capsys):
+    """The runner splits its input with `splitlines`: a raw U+2028 in the temporary case file would cut the row in two."""
+    row = {**CASE, "command": "echo a b"}
+    code = ratchet.main(["check", str(rows_file(tmp_path, row)), "--erred", fake_tree(tmp_path, "erred", "fail RC-aaaaaaaa"), "--fixed", fake_tree(tmp_path, "fixed", "pass")])
+    assert code == 0 and "RC-aaaaaaaa  ready" in capsys.readouterr().out
+
+
+def test_a_proposal_with_a_line_break_character_is_read_back_whole(ratchet, tmp_path):
+    from jade import learn
+
+    old = (ROOT / "evals" / "regression" / "cases.jsonl").read_text()
+    cases = learn.case_proposals([{"kind": "audit_false_allow", "tool": "Bash", "command": "echo a b", "rule_id": "R-14"},
+                                  {"kind": "audit_false_allow", "tool": "Bash", "command": "git clean -fdx", "rule_id": "R-12"}], [])["cases"]
+    diff = tmp_path / "p.diff"
+    diff.write_text(learn.case_diff(old, cases))
+    assert [r["command"] for r in ratchet.read_cases(diff)] == ["echo a b", "git clean -fdx"]
+
+
 def test_the_real_runner_on_this_checkout_says_not_reproduced_for_a_case_the_code_already_handles(ratchet, tmp_path, capsys):
     """Both refs are this working tree: `git push origin main` is blocked by the code today, so there is nothing to ratchet, and the check says so."""
     good = {"id": "RC-cccccccc", "class": "wrong_mark_R-14", "kind": "gate", "command": "git push origin main", "expect": "block", "twin": "unverified"}

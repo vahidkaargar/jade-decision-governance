@@ -19,7 +19,9 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import os
 import re
+import unicodedata
 from pathlib import Path
 
 from . import ledger, readouts
@@ -29,7 +31,14 @@ RECORD_KINDS = ("wrong_mark", "audit_false_allow", "counterfactual_false_reject"
 MIN_ANSWERED = 20          # fewer answers than this say nothing about a rule
 CUT_AT = 500               # a decision keeps the first 500 characters of a command (decide.open_decision): a command this long may be cut
 INVARIANT = re.compile(r"\bSI-\d+\b")
-HOME_PATH = re.compile(r"(?:^|[\s'\"=:])(?:/Users|/home)/[^/\s'\"]+")
+# A home or user path in any spelling: after a space, a quote, `=`, `:`, `<`, `;`, `(` and so on, never in the middle of a longer word (`/tmp/home/x` is not one).
+PRIVATE_PATH = re.compile(r"(?<![\w.-])(?:/(?:Users|home|Volumes|root)(?![\w.-])|/(?:private/)?var/root(?![\w.-])|~[A-Za-z_][\w.-]*)", re.I)
+# A real host: `user@host` (ssh, scp, git, psql), or a dotted name that ends in a common public or private top-level word. File endings such as .sh, .py, .md, .in or .app
+# are left out on purpose.
+AT_HOST = re.compile(r"[\w.+-]+@([A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9])")
+DOTTED_HOST = re.compile(r"(?<![\w-])((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:com|net|org|io|dev|co|ai|cloud|info|biz|edu|gov|mil|me|us|uk|de|fr|ru|cn|jp|ir|tv|xyz|tech|online|site|store|internal|corp|lan|intranet|private))(?![\w-])", re.I)
+NET_PROGRAMS = frozenset({"ssh", "sftp", "telnet", "nc", "ncat", "ping", "traceroute", "mosh"})   # the first word that is not an option is a host
+RULE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}")
 TOOL_OF_OBJECTIVE = re.compile(r"^Execute (\S+?):")
 
 
@@ -103,21 +112,23 @@ def blocker_sample(db, since: str, n: int = 30, seed: str = "v1") -> list[dict]:
 
 
 # ---- error records ------------------------------------------------------------------------------------------------------
-def _latest_marks(db, since: str) -> dict[str, str]:
-    """decision id -> the owner's latest mark (`right` or `wrong`) written since `since`. A later mark replaces an earlier one."""
+def _latest_marks(db) -> dict[str, str]:
+    """decision id -> the owner's latest mark (`right` or `wrong`), over all time. A later mark replaces an earlier one. A mark is never aged out of a report: a call marked
+    wrong 40 days ago is still a wrong call, and `jade review mark wrong` leaves no other trace."""
     marks: dict[str, str] = {}
-    for e in db.all(f"SELECT entity_id, detail_json FROM events WHERE kind='review_mark' AND ts>=? AND {ledger.live()} ORDER BY id", (since,)):  # noqa: S608
+    for e in db.all(f"SELECT entity_id, detail_json FROM events WHERE kind='review_mark' AND {ledger.live()} ORDER BY id"):  # noqa: S608
         mark = _detail(e.detail_json).get("mark")
         if mark in ("right", "wrong"):
             marks[e.entity_id] = mark
     return marks
 
 
-def error_records(db, since: str) -> list[dict]:
+def error_records(db, since: str | None = None) -> list[dict]:
     """The calls the owner marked wrong (`jade review mark ID wrong`), from the decision each mark names. This is the only error the ledger records today: an audit
-    false allow and a counterfactual false reject have no producer yet, so they come from a records file (`read_records`)."""
+    false allow and a counterfactual false reject have no producer yet, so they come from a records file (`read_records`). Every wrong mark counts, whatever its age:
+    `since` is accepted for old callers and is not used."""
     out = []
-    for did, mark in _latest_marks(db, since).items():
+    for did, mark in _latest_marks(db).items():
         if mark != "wrong":
             continue
         row = db.one("SELECT doc_json FROM decisions WHERE decision_id=?", (did,))
@@ -134,7 +145,8 @@ def error_records(db, since: str) -> list[dict]:
 
 def read_records(path) -> list[dict]:
     """A JSONL file of error records the ledger cannot produce yet: one object per line with `kind` (`RECORD_KINDS`) and `command`; optional `rule_id`, `tool` (default
-    Bash) and `twin_command` (a harmless look-alike a human wrote). Raises ValueError on a line that is not a valid record, OSError when the file cannot be read."""
+    Bash) and `twin_command` (a harmless look-alike a human wrote). A `rule_id` must look like a rule id and `tool` must be one line of printable text: both are printed
+    and become part of a case class. Other keys are dropped. Raises ValueError on a line that is not a valid record, OSError when the file cannot be read."""
     recs = []
     for n, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
@@ -147,11 +159,42 @@ def read_records(path) -> list[dict]:
             raise ValueError(f"{path}: line {n} needs an object with kind (one of {', '.join(RECORD_KINDS)}) and a command")
         if "twin_command" in r and not isinstance(r["twin_command"], str):
             raise ValueError(f"{path}: line {n}: twin_command must be text")
-        recs.append({"tool": "Bash", **r})
+        rec = {"tool": r.get("tool", "Bash"), "kind": r["kind"], "command": r["command"]}
+        if not isinstance(rec["tool"], str) or not rec["tool"].isprintable() or not 0 < len(rec["tool"]) <= 64:
+            raise ValueError(f"{path}: line {n}: tool must be one line of printable text")
+        if r.get("rule_id") is not None:
+            if not isinstance(r["rule_id"], str) or not RULE_ID.fullmatch(r["rule_id"]):
+                raise ValueError(f"{path}: line {n}: rule_id must look like a rule id (for example R-14)")
+            rec["rule_id"] = r["rule_id"]
+        if "twin_command" in r:
+            rec["twin_command"] = r["twin_command"]
+        recs.append(rec)
     return recs
 
 
 # ---- case proposals -----------------------------------------------------------------------------------------------------
+def _private_host(command: str) -> str | None:
+    """The first host in a command that is not a reserved name, or None. It looks for `user@host`, a dotted name with a common top-level word, and the host that `ssh`
+    and its kind take as their first argument. A package spec such as `pkg@1.2.3` is not a host (a name that starts with a digit is a version, or an address that
+    `evals.text_problems` checks). The check is cautious: when in doubt it names a host, and the record is skipped for a human to rewrite."""
+    from . import evals
+
+    safe = evals._SAFE_HOST  # noqa: SLF001 - the same list of reserved names as the case files
+    for m in AT_HOST.finditer(command):
+        if not m.group(1)[0].isdigit() and not safe.search(m.group(1)):
+            return m.group(1)
+    for m in DOTTED_HOST.finditer(command):
+        if not safe.search(m.group(1)):
+            return m.group(1)
+    words = [w.strip("'\"") for w in command.split()]
+    for i, w in enumerate(words):
+        if os.path.basename(w) in NET_PROGRAMS:
+            arg = next((x for x in words[i + 1:] if x and not x.startswith("-") and not x.isdigit()), None)
+            if arg and re.fullmatch(r"[A-Za-z0-9][\w.-]*", arg) and not safe.search(arg):
+                return arg
+    return None
+
+
 def _unsafe(command: str, tool: str | None) -> str | None:
     """Why this command cannot be written into a case file, or None."""
     from . import evals
@@ -164,8 +207,11 @@ def _unsafe(command: str, tool: str | None) -> str | None:
         return f"the command is {len(command)} characters and may be cut (a decision keeps {CUT_AT}): the command that ran is not known"
     if "[REDACTED:" in command:
         return "part of the command is redacted: the stored text is not the command that ran"
-    if HOME_PATH.search(command):
-        return "the command holds a home directory path; a human rewrites it with a neutral path"
+    if PRIVATE_PATH.search(command):
+        return "the command holds a home directory or user path; a human rewrites it with a neutral path"
+    host = _private_host(command)
+    if host:
+        return f"the command names a host ({host!r}) that is not a reserved name; a human rewrites it with a .test or .example name"
     problems = evals.text_problems(command)
     return "; ".join(problems) if problems else None
 
@@ -225,13 +271,29 @@ def case_proposals(records: list[dict], existing: list[dict]) -> dict:
     return {"cases": cases, "skipped": skipped}
 
 
+_LINE_BREAKS = {"\u0085": "\\u0085", " ": "\\u2028", " ": "\\u2029"}   # json leaves these raw, and `str.splitlines` (here, in the case runner, in the tests) ends a line at them
+
+
+def case_line(case: dict) -> str:
+    """One case as one physical line of JSONL. The three characters that `splitlines` treats as a line end are written as `\\uXXXX` escapes (valid JSON, same value)."""
+    text = json.dumps(case, ensure_ascii=False)
+    for ch, esc in _LINE_BREAKS.items():
+        text = text.replace(ch, esc)
+    return text
+
+
+def _lines(text: str) -> list[str]:
+    """The lines of a text, split at a newline only (git's rule), each with its newline."""
+    return re.findall(r"[^\n]*\n|[^\n]+", text)
+
+
 def case_diff(existing_text: str, cases: list[dict], path: str = CASES_REL) -> str:
     """The cases as a unified diff that adds them to the end of `path`, so `git apply` takes it. The empty string when there is nothing to add."""
     if not cases:
         return ""
     old = existing_text if existing_text.endswith("\n") or not existing_text else existing_text + "\n"
-    new = old + "".join(json.dumps(c, ensure_ascii=False) + "\n" for c in cases)
-    return "".join(difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True), fromfile=f"a/{path}", tofile=f"b/{path}"))
+    new = old + "".join(case_line(c) + "\n" for c in cases)
+    return "".join(difflib.unified_diff(_lines(old), _lines(new), fromfile=f"a/{path}", tofile=f"b/{path}"))
 
 
 # ---- the policy table ---------------------------------------------------------------------------------------------------
@@ -244,9 +306,13 @@ def _never_rules() -> frozenset[str]:
 def policy_table(db, since: str) -> list[dict]:
     """Per rule: the friction (asks and how they were answered) and the error (calls marked wrong) side by side, and a word of advice for a human who reads the table.
 
+    The window (`since`) decides which asks, answers and advisory blocks are counted. The safety evidence is counted over all time: a wrong mark and a human-only ask
+    keep their effect on the advice however old they are, so the advice for a ledger does not change with the window.
+
     There is no "unnecessary asks" number: an ask is unnecessary only if the owner's answer says so, and an allow answer is a hint, not evidence (nothing audits the
     calls that ran silently yet: the column says `not measured`). The advice is one of
-      protected  a human edits this rule; learning never proposes a change (critical, a human-only class, or a rule the memory and the proxy never cover)
+      protected  a human edits this rule; learning never proposes a change (critical, a human-only class, a rule the memory and the proxy never cover, or a rule id the
+                 risk policy has no level for)
       hold       a call this rule covers was marked wrong: look at that first
       too_few    fewer than MIN_ANSWERED answers
       keep       the owner denied some of the asks
@@ -256,9 +322,10 @@ def policy_table(db, since: str) -> list[dict]:
 
     live = ledger.live()
     asks = readouts.ask_load(db, since)["by_rule"]
-    levels = {r["id"]: r.get("level") for r in policy.risk()["rules"]}
+    risk = policy.risk()
+    levels = {r["id"]: r.get("level") for r in (*risk["rules"], *risk.get("mcp_tools", ()))}   # shell rules and MCP rules: M-01 is critical
     wrong: dict[str, int] = {}
-    for did, mark in _latest_marks(db, since).items():
+    for did, mark in _latest_marks(db).items():   # the safety evidence is all time: it never ages out of the window
         if mark == "wrong":
             row = db.one("SELECT rule_id FROM decisions WHERE decision_id=?", (did,))
             if row and row.rule_id:
@@ -268,7 +335,7 @@ def policy_table(db, since: str) -> list[dict]:
         rule, _ = _guard(r.guard)
         if rule:
             would[rule] = would.get(rule, 0) + 1
-    ho = {r.rule_id: r.n for r in db.all(f"SELECT rule_id, COALESCE(SUM(ho),0) AS n FROM asks WHERE created_ts>=? AND {live} GROUP BY rule_id", (since,))}  # noqa: S608
+    ho = {r.rule_id: r.n for r in db.all(f"SELECT rule_id, COALESCE(SUM(ho),0) AS n FROM asks WHERE {live} GROUP BY rule_id")}  # noqa: S608   # all time, like the wrong marks
     never = _never_rules()
     table = []
     for rule in sorted(set(asks) | set(wrong) | set(would)):
@@ -278,6 +345,8 @@ def policy_table(db, since: str) -> list[dict]:
         level = levels.get(rule)
         if rule in never or level == "critical" or ho.get(rule):
             advice, why = "protected", "a human edits this rule; learning does not propose a change to it"
+        elif level is None:
+            advice, why = "protected", "the risk policy has no level for this rule id, so JADE cannot tell if it is a critical one: learning does not propose a change to it"
         elif wrong.get(rule):
             advice, why = "hold", "a call this rule covers was marked wrong: look at those marks first"
         elif answered < MIN_ANSWERED:
@@ -316,6 +385,7 @@ def render_table(table: list[dict]) -> str:
     if not table:
         return "No rule has asks, blocks or marks in this window."
     lines = ["Per rule: what it cost you (asks) and what is known about errors (wrong marks), side by side. Friction is not correctness.",
+             "Asks, answers and advisory blocks count the window. Wrong marks and human-only asks count all time.",
              "The advice is for you to read. Nothing here changes a rule, a threshold or a memory row."]
     for t in table:
         lines.append(f"rule {t['rule']} ({t['level'] or 'level unknown'}): asked {t['asked']}, allowed {t['allowed']}, denied {t['denied']}, no answer {t['expired']}; "
@@ -325,12 +395,32 @@ def render_table(table: list[dict]) -> str:
 
 
 # ---- the one write -------------------------------------------------------------------------------------------------------
+def _fold(p) -> str:
+    return unicodedata.normalize("NFD", str(p)).casefold()
+
+
 def _inside(path: Path, parent: Path) -> bool:
+    """Is `path` in `parent`, or the same place? `resolve()` does not fold letter case, and the macOS disk does not tell `/Users/x/Repo` from `/users/x/repo`, so three tests
+    run: the resolved paths; the same two with case and Unicode form folded (a place that does not exist yet has no other test); and `samefile` on every folder of the
+    path that exists (the disk's own answer, also for a spelling the first two do not see)."""
+    parent = parent.resolve()
     try:
-        path.relative_to(parent.resolve())
+        path.relative_to(parent)
         return True
     except ValueError:
+        pass
+    p, q = _fold(path), _fold(parent)
+    if p == q or p.startswith(q.rstrip(os.sep) + os.sep):
+        return True
+    if not parent.exists():
         return False
+    for place in (path, *path.parents):
+        try:
+            if place.exists() and os.path.samefile(place, parent):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def write_out(path, text: str) -> Path:

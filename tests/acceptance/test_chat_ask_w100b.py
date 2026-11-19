@@ -238,9 +238,16 @@ def test_a_reworded_command_does_not_use_the_grant(level_high):
     assert r.exit_code == 2 and "[jade:ask_" in r.stderr
 
 
-def test_quoting_and_an_env_prefix_do_not_make_it_a_new_command(level_high):
+def test_quoting_and_spacing_do_not_make_it_a_new_command(level_high):
     ask_and_allow()
-    assert hooks.pretool(call("FOO=1  git reset --hard   HEAD~1")).exit_code == 0
+    assert hooks.pretool(call("git  reset --hard   HEAD~1")).exit_code == 0
+
+
+def test_an_env_prefix_is_another_target_and_does_not_use_the_grant(level_high):
+    """V6-06: a kind keeps its target. `FOO=1 git reset ...` is another kind of call, so it is asked again."""
+    ask_and_allow()
+    r = hooks.pretool(call("FOO=1  git reset --hard   HEAD~1"))
+    assert r.exit_code == 2 and "[jade:ask_" in r.stderr
 
 
 def test_another_session_cannot_use_the_grant(level_high):

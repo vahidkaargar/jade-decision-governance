@@ -638,7 +638,7 @@ def _learn(a) -> int:
     from . import learn, readouts
 
     db = ledger.open()
-    since = readouts.since_days(a.days) if a.days else ""
+    since = readouts.since_days(a.days) if getattr(a, "days", 0) else ""   # `cases` has no window: every wrong mark counts
     try:
         if a.action == "blockers":
             r = learn.blocker_classes(db, since)
@@ -656,9 +656,9 @@ def _learn(a) -> int:
         if not cases_file.is_file():
             print(f"jade: {learn.CASES_REL} not found next to the installed policies: run `jade learn cases` from a checkout of the repository", file=sys.stderr)
             return 2
-        records = learn.error_records(db, since) + (learn.read_records(a.records) if a.records else [])
+        records = learn.error_records(db) + (learn.read_records(a.records) if a.records else [])
         text = cases_file.read_text(encoding="utf-8")
-        out = learn.case_proposals(records, [json.loads(x) for x in text.splitlines() if x.strip()])
+        out = learn.case_proposals(records, [json.loads(x) for x in text.split("\n") if x.strip()])
         diff = learn.case_diff(text, out["cases"])
         print(f"jade: {len(out['cases'])} case(s) proposed, {len(out['skipped'])} record(s) skipped. A case with `twin: unverified` has no human-written harmless look-alike. "
               f"Run `uv run python evals/case_ratchet.py check` on the proposal before you merge it: a case must fail on the version that erred.", file=sys.stderr)
@@ -860,8 +860,8 @@ def build_parser() -> argparse.ArgumentParser:
                        ("policy", "per rule: asks, answers and wrong marks side by side, with a word of advice; changes nothing"),
                        ("cases", "a diff that adds a regression case for each call you marked wrong (and for each record of --records FILE); applies nothing")):
         pn = pl.add_parser(name, help=text)
-        pn.add_argument("--days", type=int, default=30, help="the window in days (default 30; 0 is all time)")
-        if name != "cases":
+        if name != "cases":   # `cases` has no window: a call marked wrong is a case however long ago
+            pn.add_argument("--days", type=int, default=30, help="the window in days (default 30; 0 is all time)" + ("; wrong marks and human-only asks always count all time" if name == "policy" else ""))
             pn.add_argument("--json", action="store_true", help="one line of JSON with sorted keys")
         if name == "blockers":
             pn.add_argument("--sample", type=int, default=0, help="also list N blocker rows, fixed by a seed, ids only")
