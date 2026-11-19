@@ -89,13 +89,13 @@ def no_ledger_state(tmp_path):
 
 # ---- fresh machine -------------------------------------------------------------------------------------------------------------------
 def test_a_fresh_machine_gets_every_step_after_one_confirmation_each(human, machine, tmp_path):
-    term = Term(*["y"] * 7)
+    term = Term(*["y"] * 8)
     rep, out = run(term)
     assert rep.rc == 0, out
     assert {o.key: o.outcome for o in rep.outcomes if o.key != "check"} == {
-        "prereq": "ok", "gate": "applied", "hooks": "applied", "claude-md": "applied", "skill-file": "applied", "skill-link": "applied",
+        "prereq": "ok", "gate": "applied", "jev": "applied", "hooks": "applied", "claude-md": "applied", "skill-file": "applied", "skill-link": "applied",
         "launchd-plist": "applied", "launchd-load": "applied"}
-    assert len(term.prompts) == 7 and not term.answers
+    assert len(term.prompts) == 8 and not term.answers
     assert paths.config()["gate_mode"] == "advisory"
     assert all(ops.hooks_status().values()) and ops.pretool_matcher_gaps() == []
     md = (machine.home / ".claude" / "CLAUDE.md").read_text()
@@ -112,36 +112,36 @@ def test_a_fresh_machine_gets_every_step_after_one_confirmation_each(human, mach
 
 
 def test_every_prompt_is_preceded_by_the_exact_change_and_its_undo(human, machine):
-    term = Term(*["y"] * 7)
+    term = Term(*["y"] * 8)
     rep, out = run(term)
-    assert out.count("change:") == 7 and out.count("undo:") == 7 and all("Apply this change? [y/N]" in p for p in term.prompts)
+    assert out.count("change:") == 8 and out.count("undo:") == 8 and all("Apply this change? [y/N]" in p for p in term.prompts)
     assert '"gate_mode": "advisory"' in out and "jade gate enforce" in out
     assert "jade hooks uninstall" in out and "PreToolUse" in out and "SessionStart" in out
     assert ".bak-jade-" in out and "launchctl bootout" in out and "launchctl bootstrap" in out
 
 
 def test_the_key_value_is_never_printed_and_never_read(human, machine, monkeypatch):
-    rep, out = run(Term(*["y"] * 7))
+    rep, out = run(Term(*["y"] * 8))
     assert "sk-test-NEVER-PRINT-ME" not in out
     assert "OPENROUTER_API_KEY" in out   # named, as present in the environment
 
 
 def test_yes_skips_the_prompts_but_changes_the_same_things(human, machine):
     rep, out = run(Term(), yes=True)   # a Term with no answers fails on any prompt
-    assert rep.rc == 0 and [o.outcome for o in rep.outcomes if o.key in ("gate", "hooks", "claude-md", "skill-file", "skill-link", "launchd-plist", "launchd-load")] == ["applied"] * 7
-    assert out.count("change:") == 7   # still shown first
+    assert rep.rc == 0 and [o.outcome for o in rep.outcomes if o.key in ("gate", "jev", "hooks", "claude-md", "skill-file", "skill-link", "launchd-plist", "launchd-load")] == ["applied"] * 8
+    assert out.count("change:") == 8   # still shown first
 
 
 def test_the_summary_says_advisory_is_the_start_and_where_it_is_documented(human, machine):
-    rep, out = run(Term(*["y"] * 7))
+    rep, out = run(Term(*["y"] * 8))
     tail = out[out.index("Summary"):]
     assert "advisory" in tail and "enforce" in tail and "NOT set" in tail and "docs/08" in tail and "new Claude Code session" in tail
 
 
 def test_every_step_records_a_setup_event_in_the_ledger_meta(human, machine):
-    rep, _ = run(Term(*["y"] * 7))
+    rep, _ = run(Term(*["y"] * 8))
     db = ledger.open()
-    for key in ("prereq", "gate", "hooks", "claude-md", "skill-file", "skill-link", "launchd-plist", "launchd-load", "check"):
+    for key in ("prereq", "gate", "jev", "hooks", "claude-md", "skill-file", "skill-link", "launchd-plist", "launchd-load", "check"):
         rec = json.loads(db.meta_get(f"setup.{key}"))
         assert rec["outcome"] and rec["ts"] and rec["version"]
     last = json.loads(db.meta_get("setup.last_run"))
@@ -152,13 +152,13 @@ def test_every_step_records_a_setup_event_in_the_ledger_meta(human, machine):
 
 # ---- second run, partial state -------------------------------------------------------------------------------------------------------
 def test_a_second_run_skips_everything_and_changes_nothing(human, machine, tmp_path):
-    run(Term(*["y"] * 7))
+    run(Term(*["y"] * 8))
     before = snapshot(machine, tmp_path)
     rep, out = run(Term())   # no prompt may appear
     assert rep.rc == 0
     outcomes = {o.key: o.outcome for o in rep.outcomes}
     assert {k: v for k, v in outcomes.items() if k not in ("prereq", "check")} == dict.fromkeys(
-        ("gate", "hooks", "claude-md", "skill-file", "skill-link", "launchd-plist", "launchd-load"), "already_done")
+        ("gate", "jev", "hooks", "claude-md", "skill-file", "skill-link", "launchd-plist", "launchd-load"), "already_done")
     assert snapshot(machine, tmp_path) == before   # no file, link or backup changed
     assert machine.bootstrapped == ["com.jade.maintain"]   # not bootstrapped again
     assert "already done" in out
@@ -167,23 +167,23 @@ def test_a_second_run_skips_everything_and_changes_nothing(human, machine, tmp_p
 def test_partial_state_applies_only_what_is_missing(human, machine):
     ops.set_gate_mode("advisory", stdin_isatty=True)
     ops.hooks_install(stdin_isatty=True)
-    term = Term(*["y"] * 5)
+    term = Term(*["y"] * 6)
     rep, _ = run(term)
     out = {o.key: o.outcome for o in rep.outcomes}
     assert out["gate"] == out["hooks"] == "already_done"
     assert out["claude-md"] == out["skill-file"] == out["skill-link"] == out["launchd-plist"] == out["launchd-load"] == "applied"
-    assert len(term.prompts) == 5
+    assert len(term.prompts) == 6
 
 
 def test_a_configured_enforce_mode_is_not_lowered_to_advisory(human, machine):
     ops.set_gate_mode("enforce", stdin_isatty=True)
-    rep, out = run(Term(*["y"] * 6))
+    rep, out = run(Term(*["y"] * 7))
     assert {o.key: o.outcome for o in rep.outcomes}["gate"] == "already_done" and paths.config()["gate_mode"] == "enforce"
 
 
 def test_gate_mode_off_is_offered_advisory(human, machine):
     ops.set_gate_mode("off", stdin_isatty=True)
-    rep, _ = run(Term(*["y"] * 7))
+    rep, _ = run(Term(*["y"] * 8))
     assert paths.config()["gate_mode"] == "advisory"
 
 
@@ -194,7 +194,7 @@ def test_a_hook_install_with_an_old_matcher_is_not_already_done(human, machine, 
     doc["hooks"]["PreToolUse"][0]["matcher"] = "Bash"
     p.write_text(json.dumps(doc))
     assert setup.state_of("hooks").kind == "todo"
-    rep, _ = run(Term(*["y"] * 7))
+    rep, _ = run(Term(*["y"] * 8))
     assert ops.pretool_matcher_gaps() == []
 
 
@@ -205,7 +205,7 @@ def test_a_claude_md_that_already_has_the_shipped_section_is_done(human, machine
 
 # ---- declined ------------------------------------------------------------------------------------------------------------------------
 def test_a_declined_step_changes_nothing_and_the_rest_continue(human, machine, tmp_path):
-    term = Term("y", "n", "", "y", "y", "y", "y")   # gate y, hooks n, claude-md <enter>, skill y y, plist y, load y
+    term = Term("y", "y", "n", "", "y", "y", "y", "y")   # gate y, jev y, hooks n, claude-md <enter>, skill y y, plist y, load y
     rep, out = run(term)
     o = {x.key: x.outcome for x in rep.outcomes}
     assert o["hooks"] == o["claude-md"] == "declined" and o["gate"] == o["skill-file"] == "applied"
@@ -217,7 +217,7 @@ def test_a_declined_step_changes_nothing_and_the_rest_continue(human, machine, t
 
 
 def test_a_declined_plist_means_launchctl_is_not_offered(human, machine):
-    term = Term("y", "y", "y", "y", "y", "n")
+    term = Term("y", "y", "y", "y", "y", "y", "n")
     rep, out = run(term)
     o = {x.key: x.outcome for x in rep.outcomes}
     assert o["launchd-plist"] == "declined" and o["launchd-load"] == "skipped" and machine.bootstrapped == []
@@ -285,7 +285,7 @@ def test_status_reports_what_is_missing_and_changes_nothing(machine, capsys, tmp
 
 
 def test_status_after_setup_is_all_done_and_exits_zero(human, machine, capsys):
-    run(Term(*["y"] * 7))
+    run(Term(*["y"] * 8))
     capsys.readouterr()
     assert cli.main(["setup", "--status"]) == 0
     out = capsys.readouterr().out
@@ -295,7 +295,7 @@ def test_status_after_setup_is_all_done_and_exits_zero(human, machine, capsys):
 # ---- prerequisites -------------------------------------------------------------------------------------------------------------------
 def test_a_missing_key_says_how_to_add_it_and_does_not_fail_setup(human, machine, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY")
-    rep, out = run(Term(*["y"] * 7))
+    rep, out = run(Term(*["y"] * 8))
     assert {o.key: o.outcome for o in rep.outcomes}["prereq"] == "missing" and rep.rc == 0
     assert "OPENROUTER_API_KEY" in out and "security add-generic-password" in out and "Keychain" in out
 
@@ -326,14 +326,14 @@ def test_the_keychain_probe_is_false_off_macos_or_without_security(monkeypatch):
 def test_a_key_in_the_keychain_counts(human, machine, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY")
     monkeypatch.setattr(setup, "_keychain_has_key", lambda: True)
-    rep, out = run(Term(*["y"] * 7))
+    rep, out = run(Term(*["y"] * 8))
     assert {o.key: o.outcome for o in rep.outcomes}["prereq"] == "ok" and "Keychain" in out
 
 
 # ---- skill ---------------------------------------------------------------------------------------------------------------------------
 def test_missing_skill_data_is_reported_and_nothing_is_created(human, machine, monkeypatch, tmp_path):
     monkeypatch.setattr(setup, "skill_source", lambda: tmp_path / "nowhere" / "SKILL.md")
-    rep, out = run(Term(*["y"] * 5))
+    rep, out = run(Term(*["y"] * 6))
     o = {x.key: x.outcome for x in rep.outcomes}
     assert o["skill-file"] == "blocked" and o["skill-link"] in ("blocked", "skipped") and rep.rc == 1
     assert not (machine.home / ".agents").exists() and not (machine.home / ".claude" / "skills").exists()
@@ -346,7 +346,7 @@ def test_an_older_skill_file_is_replaced_after_a_backup(human, machine):
     d = machine.home / ".agents" / "jade"
     d.mkdir(parents=True)
     (d / "SKILL.md").write_text("my own version\n")
-    rep, out = run(Term(*["y"] * 7))
+    rep, out = run(Term(*["y"] * 8))
     o = {x.key: x.outcome for x in rep.outcomes}
     assert o["skill-file"] == "applied" and rep.rc == 0
     assert (d / "SKILL.md").read_text() == setup.skill_source().read_text()
@@ -360,7 +360,7 @@ def test_a_declined_skill_replacement_changes_nothing(human, machine):
     d = machine.home / ".agents" / "jade"
     d.mkdir(parents=True)
     (d / "SKILL.md").write_text("my own version\n")
-    rep, _ = run(Term("y", "y", "y", "n", "y", "y", "y"))
+    rep, _ = run(Term("y", "y", "y", "y", "n", "y", "y", "y"))
     assert {x.key: x.outcome for x in rep.outcomes}["skill-file"] == "declined"
     assert (d / "SKILL.md").read_text() == "my own version\n" and not list(d.glob("*.bak-jade-*"))
 
@@ -371,7 +371,7 @@ def test_a_skill_file_that_is_a_link_is_never_replaced(human, machine, tmp_path)
     other = tmp_path / "elsewhere.md"
     other.write_text("not ours\n")
     (d / "SKILL.md").symlink_to(other)
-    rep, out = run(Term(*["y"] * 5))
+    rep, out = run(Term(*["y"] * 6))
     assert {x.key: x.outcome for x in rep.outcomes}["skill-file"] == "blocked" and rep.rc == 1
     assert other.read_text() == "not ours\n" and (d / "SKILL.md").is_symlink()
 
@@ -391,7 +391,7 @@ def test_an_existing_different_path_at_the_link_is_never_replaced(human, machine
     else:
         link.symlink_to(machine.home / "nowhere")
     before = os.readlink(link) if link.is_symlink() else None
-    rep, out = run(Term(*["y"] * 6))
+    rep, out = run(Term(*["y"] * 7))
     o = {x.key: x.outcome for x in rep.outcomes}
     assert o["skill-link"] == "blocked" and rep.rc == 1
     assert (os.readlink(link) if link.is_symlink() else None) == before
@@ -415,7 +415,7 @@ def test_the_skill_source_is_the_packaged_copy_of_the_checkout_skill():
 # ---- CLAUDE.md -----------------------------------------------------------------------------------------------------------------------
 def test_no_claude_md_is_not_applicable_and_not_an_error(human, machine):
     (machine.home / ".claude" / "CLAUDE.md").unlink()
-    rep, out = run(Term(*["y"] * 6))
+    rep, out = run(Term(*["y"] * 7))
     assert {o.key: o.outcome for o in rep.outcomes}["claude-md"] == "skipped" and rep.rc == 0
     assert "claude-md show" in out
     assert not (machine.home / ".claude" / "CLAUDE.md").exists()
@@ -423,14 +423,14 @@ def test_no_claude_md_is_not_applicable_and_not_an_error(human, machine):
 
 def test_a_claude_md_without_the_section_is_not_applicable(human, machine):
     (machine.home / ".claude" / "CLAUDE.md").write_text("# nothing here\n")
-    rep, _ = run(Term(*["y"] * 6))
+    rep, _ = run(Term(*["y"] * 7))
     assert {o.key: o.outcome for o in rep.outcomes}["claude-md"] == "skipped" and rep.rc == 0
 
 
 def test_a_claude_md_with_the_section_twice_is_refused_untouched(human, machine):
     text = OLD_CLAUDE_MD + f"\n{ops.JEV_HEADING}\n\nsecond\n"
     (machine.home / ".claude" / "CLAUDE.md").write_text(text)
-    rep, out = run(Term(*["y"] * 6))
+    rep, out = run(Term(*["y"] * 7))
     assert {o.key: o.outcome for o in rep.outcomes}["claude-md"] == "blocked" and rep.rc == 1
     assert (machine.home / ".claude" / "CLAUDE.md").read_text() == text
 
@@ -438,7 +438,7 @@ def test_a_claude_md_with_the_section_twice_is_refused_untouched(human, machine)
 # ---- launchd and platform ------------------------------------------------------------------------------------------------------------
 def test_off_macos_the_launchd_steps_are_skipped(human, machine, monkeypatch):
     monkeypatch.setattr(setup, "_platform", lambda: "linux")
-    rep, out = run(Term(*["y"] * 5))
+    rep, out = run(Term(*["y"] * 6))
     o = {x.key: x.outcome for x in rep.outcomes}
     assert o["launchd-plist"] == o["launchd-load"] == "skipped" and rep.rc == 0
     assert not ops.launch_agents_dir().exists() and machine.bootstrapped == []
@@ -449,14 +449,14 @@ def test_a_plist_at_our_path_that_is_not_a_maintain_job_is_not_overwritten(human
     d = ops.launch_agents_dir()
     d.mkdir(parents=True)
     (d / "com.jade.maintain.plist").write_text("not a plist")
-    rep, _ = run(Term(*["y"] * 5))
+    rep, _ = run(Term(*["y"] * 6))
     o = {x.key: x.outcome for x in rep.outcomes}
     assert o["launchd-plist"] == "blocked" and rep.rc == 1 and (d / "com.jade.maintain.plist").read_text() == "not a plist"
 
 
 def test_a_failed_bootstrap_is_reported_and_fails_the_run(human, machine, monkeypatch):
     monkeypatch.setattr(setup, "_launchctl_bootstrap", lambda plist, label: (False, "Bootstrap failed: 5"))
-    rep, out = run(Term(*["y"] * 7))
+    rep, out = run(Term(*["y"] * 8))
     assert {o.key: o.outcome for o in rep.outcomes}["launchd-load"] == "failed" and rep.rc == 1 and "Bootstrap failed" in out
 
 
@@ -476,13 +476,13 @@ def test_launchctl_bootstrap_runs_launchctl_with_an_argument_list(monkeypatch, t
 # ---- failures and the final check ----------------------------------------------------------------------------------------------------
 def test_a_failing_final_check_fails_the_run(human, machine):
     machine.rows = BAD_ROWS
-    rep, out = run(Term(*["y"] * 7))
+    rep, out = run(Term(*["y"] * 8))
     assert rep.rc == 1 and {o.key: o.outcome for o in rep.outcomes}["check"] == "check_failed"
 
 
 def test_an_unreadable_settings_file_fails_that_step_only(human, machine):
     ops.settings_path().write_text("{ not json")
-    rep, out = run(Term(*["y"] * 7))
+    rep, out = run(Term(*["y"] * 8))
     o = {x.key: x.outcome for x in rep.outcomes}
     assert o["hooks"] == "failed" and o["gate"] == "applied" and o["skill-file"] == "applied" and rep.rc == 1
     assert ops.settings_path().read_text() == "{ not json"
@@ -493,8 +493,11 @@ def test_a_ledger_that_cannot_be_opened_does_not_stop_the_setup(human, machine, 
         raise OSError("disk full")
 
     monkeypatch.setattr(ledger, "open", boom)
-    rep, out = run(Term(*["y"] * 7))
-    assert rep.rc == 0 and "could not record" in out and paths.config()["gate_mode"] == "advisory"
+    rep, out = run(Term(*["y"] * 8))
+    o = {x.key: x.outcome for x in rep.outcomes}
+    assert "could not record" in out and paths.config()["gate_mode"] == "advisory"
+    # the jev step journals first and so needs the ledger: it fails loudly, writes no key, and the other steps carry on
+    assert o["jev"] == "failed" and "jev" not in paths.config() and o["hooks"] == "applied" and rep.rc == 1
 
 
 # ---- SI-09 ---------------------------------------------------------------------------------------------------------------------------
@@ -533,7 +536,7 @@ def test_an_unreadable_or_non_object_config_json_is_refused_and_left_alone(human
     cfg.parent.mkdir(parents=True, exist_ok=True)
     cfg.write_bytes(text.encode("latin-1"))
     before = cfg.read_bytes()
-    rep, out = run(Term(*["y"] * 7))
+    rep, out = run(Term(*["y"] * 8))
     o = {x.key: x.outcome for x in rep.outcomes}
     assert o["gate"] == "blocked" and rep.rc == 1
     assert cfg.read_bytes() == before and not list(cfg.parent.glob("config.json.*"))
@@ -546,6 +549,42 @@ def test_a_valid_config_json_keeps_its_other_keys_when_the_gate_is_set(human, ma
     cfg = paths.config_dir() / "config.json"
     cfg.parent.mkdir(parents=True, exist_ok=True)
     cfg.write_text('{"secret_overlay_dir": "/x"}')
-    rep, _ = run(Term(*["y"] * 7))
+    rep, _ = run(Term(*["y"] * 8))
     assert {x.key: x.outcome for x in rep.outcomes}["gate"] == "applied"
-    assert json.loads(cfg.read_text()) == {"secret_overlay_dir": "/x", "gate_mode": "advisory"}
+    assert json.loads(cfg.read_text()) == {"secret_overlay_dir": "/x", "gate_mode": "advisory", "jev": "off"}
+
+
+# ---- the jev key (W-195, Q-07): a new install records an explicit off; a set key is the owner's -------------------------------------------
+def test_a_fresh_install_writes_an_explicit_jev_off_and_records_it(human, machine):
+    rep, out = run(Term(*["y"] * 8))
+    assert {x.key: x.outcome for x in rep.outcomes}["jev"] == "applied"
+    assert paths.config()["jev"] == "off" and ops.jev_effective() == "off"
+    assert "sends nothing to openrouter.ai" in out and "jade jev on" in out
+    db = ledger.open()
+    try:
+        assert ledger.last_setting(db, "jev", "jev") == "off"
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("value", ["on", "off"])
+def test_a_jev_key_the_owner_already_set_is_never_changed_by_setup(human, machine, value):
+    ops.set_jev(value, stdin_isatty=True)
+    term = Term(*["y"] * 7)
+    rep, out = run(term)
+    assert {x.key: x.outcome for x in rep.outcomes}["jev"] == "already_done"
+    assert len(term.prompts) == 7 and paths.config()["jev"] == value
+
+
+def test_a_jev_value_that_is_neither_on_nor_off_is_refused_and_left_alone(human, machine):
+    cfg = paths.config_dir() / "config.json"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text('{"jev": "maybe"}')
+    rep, out = run(Term(*["y"] * 7))
+    assert {x.key: x.outcome for x in rep.outcomes}["jev"] == "blocked" and json.loads(cfg.read_text())["jev"] == "maybe"
+    assert setup.state_of("jev").kind == "conflict"
+
+
+def test_a_declined_jev_step_leaves_the_key_unset(human, machine):
+    rep, _ = run(Term("y", "n", *["y"] * 6))
+    assert {x.key: x.outcome for x in rep.outcomes}["jev"] == "declined" and "jev" not in paths.config()

@@ -204,7 +204,7 @@ If `uv` answers `Executable already exists: jev`, an older `jev` script sits in 
 
 ```bash
 jade setup --status      # read-only: what is done and what is missing
-jade setup               # asks y/N before each change: advisory gate, hooks, skill, maintenance job, and the Jev section of an existing CLAUDE.md
+jade setup               # asks y/N before each change: advisory gate, an explicit `jev off` when the key is not set, hooks, skill, maintenance job, and the Jev section of an existing CLAUDE.md
 ```
 
 `jade setup` needs an interactive terminal and refuses inside an agent. It backs up `settings.json` and `CLAUDE.md` before it edits them, and it never sets enforce mode. Open a new Claude Code session afterwards: hooks are read at session start.
