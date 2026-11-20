@@ -285,7 +285,7 @@ def _security_verb(args: list[str]) -> str:
         i += 1
         if a == "--":
             break
-        if "p" in a[1:] and a.endswith("p"):   # `-p` (or `-ip`) with its value in the next word
+        if "p" in a[1:] and a.index("p", 1) == len(a) - 1:   # `-p` (or `-ip`) with its value in the next word; getopt `hilp:` takes the rest of `-pp`, `-pXp` as the value (W-137 review)
             i += 1
     return args[i] if i < len(args) else ""
 

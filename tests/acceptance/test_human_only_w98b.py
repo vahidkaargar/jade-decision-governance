@@ -50,6 +50,9 @@ DELETE = [
     # W-137 (owner decision): a Keychain item or a whole keychain deleted
     "security delete-internet-password -s example.org", "security delete-keychain x.keychain", "sudo security delete-keychain /Library/Keychains/x.keychain",
     "/usr/bin/security delete-keychain a.keychain", "security -v delete-internet-password -s x", "security -p 'jade> ' delete-keychain a", "security -i -q delete-keychain a",
+    # W-137 review: getopt `hilp:` -- a `p` that is not the last letter takes the rest of the word as its value, so the next word is the verb
+    "security -pp delete-keychain k", "security -pjadep delete-keychain k", "security -ipp delete-internet-password -s a", "security -lpq delete-keychain k",
+    "security -pjade delete-keychain k",
 ]
 DELETE_NOT = [
     "rm -rf node_modules", "rm -rf ./node_modules ./dist ./build", "rm -rf .venv", "rm -rf /tmp/scratch-1", "rm -rf /private/tmp/x/y", "rm -rf $TMPDIR/build",
@@ -62,6 +65,7 @@ DELETE_NOT = [
     "oc get pods", "oc describe pod x", "kubectl replace -f x.yaml",
     "security find-internet-password -s x", "security list-keychains", "security find-internet-password -s delete-keychain", "echo security delete-keychain x",
     "security -p delete-keychain list-keychains", "security create-keychain x.keychain",
+    "security -ip delete-keychain list-keychains", "security -lp delete-internet-password list-keychains", "security -pp list-keychains",
 ]
 MONEY = [
     "stripe refunds create --charge ch_1 --live", "stripe charges create --amount 100 --currency usd --live", "stripe payouts create --amount 100 --live",
