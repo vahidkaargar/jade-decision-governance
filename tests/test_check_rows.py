@@ -527,9 +527,18 @@ def test_setup_hooks_text_counts_from_hooks(monkeypatch):
     assert "four" not in setup._hooks_change() and f"add {len(ops.HOOKS)} JADE hook entries" in setup._hooks_change()
 
 
-def test_install_summary_rows_name_gate_mode_what_blocks_and_backend_and_write_nothing():
+@pytest.fixture
+def probe_ok(monkeypatch):
+    """The live run of each hook binary behaves. The static wiring checks stay real; only the subprocess is skipped, so a busy machine (the probe has a 15 s
+    limit) cannot turn these rows into "unknown"."""
+    monkeypatch.setattr(ops, "probe_hook", lambda parsed, timeout_s=15.0: None)
+
+
+def test_install_summary_rows_name_gate_mode_what_blocks_and_backend_and_write_nothing(probe_ok):
     setup_pair("enforce", "off")
+    ops.hooks_install(stdin_isatty=True)   # the `what blocks` row reads the real hooks (and the wiring), as in `jade check`
     before = sorted(p.name for p in paths.home().iterdir()) if paths.home().exists() else []
+    settings_before = ops.settings_path().read_text()
     rows_ = ops.install_summary_rows()
     assert [r[0] for r in rows_] == ["gate mode", "what blocks", "approval backend"]   # the row names `jade check` uses
     (_, ok0, text0), (_, ok1, text1), (_, ok2, text2) = rows_
@@ -537,7 +546,7 @@ def test_install_summary_rows_name_gate_mode_what_blocks_and_backend_and_write_n
     assert text1.startswith("advisory: ") and ok1 is None   # level off: a WARN, as in `jade check`
     assert text2.startswith("tty") and ok2 is None
     after = sorted(p.name for p in paths.home().iterdir()) if paths.home().exists() else []
-    assert before == after
+    assert before == after and ops.settings_path().read_text() == settings_before
 
 
 def test_install_summary_row_state_follows_the_gate_and_the_backend(monkeypatch):
@@ -554,7 +563,30 @@ def test_install_summary_rows_render_like_check_rows():
     assert ops.install_summary_lines(rows_) == ["ok    gate mode: enforce", "WARN  what blocks: x", "FAIL  approval backend: y"]
 
 
-def test_jade_hooks_install_prints_the_summary(capsys):
+def test_jade_hooks_install_never_says_ok_for_what_blocks_when_the_hooks_are_disabled(capsys):
+    """Review of W-140: the install row came from `blocking_summary` alone, so with `disableAllHooks` true (the host runs no hook) install printed
+    `ok    what blocks: ...` while `jade check` said WARN "unknown". The install row is now the `what blocks` row of `jade check`."""
+    setup_pair("enforce", None)
+    ops.settings_path().write_text(json.dumps({"disableAllHooks": True}))
+    assert cli.main(["hooks", "install"]) in (0, None)
+    out = capsys.readouterr().out
+    assert "ok    what blocks" not in out, out
+    assert "WARN  what blocks: unknown: the hook wiring has problems" in out, out
+    check_row = [r for r in ops.check(live=False) if r[0] == "what blocks"][0]
+    assert [r for r in ops.install_summary_rows() if r[0] == "what blocks"][0] == check_row
+    assert check_row[1] is None
+
+
+def test_jade_hooks_install_says_ok_for_what_blocks_only_when_the_hook_is_wired(capsys, probe_ok):
+    """The positive twin: gate enforce, no level, the hooks installed and wired: the install row is ok, and it is the `jade check` row."""
+    setup_pair("enforce", None)
+    assert cli.main(["hooks", "install"]) in (0, None)
+    out = capsys.readouterr().out
+    assert "ok    what blocks: every active safety invariant (" in out, out
+    assert [r for r in ops.install_summary_rows() if r[0] == "what blocks"][0] == [r for r in ops.check(live=False) if r[0] == "what blocks"][0]
+
+
+def test_jade_hooks_install_prints_the_summary(capsys, probe_ok):
     setup_pair("advisory", None)
     assert cli.main(["hooks", "install"]) in (0, None)
     out = capsys.readouterr().out

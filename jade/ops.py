@@ -2511,13 +2511,14 @@ def _approval_row() -> tuple[str, bool | None, str]:
 
 def install_summary_rows() -> list[tuple[str, bool | None, str]]:
     """V6-10 (DX-H4), W-140: what `jade hooks install` leaves in force, as rows (name, ok, detail) with the names and the states `jade check` uses: the effective
-    gate mode, what the hook blocks, and the approval backend. Reads the config, the policy and the trust anchor only: nothing is written and no default changes."""
+    gate mode, what the hook blocks, and the approval backend. `what blocks` is the row `jade check` prints (`_what_blocks_row`): it reads the hooks, and when
+    the PreToolUse hook is installed it runs the live wiring probe once (in a throwaway JADE home), so a disabled or dead hook is never "ok" here. It reads the
+    config, the policy, the Claude settings and the trust anchor: nothing is written and no default changes."""
     _, gate_ok, gate_text = _gate_mode_row()
     if os.environ.get("JADE_GATE_MODE") and "JADE_GATE_MODE" not in gate_text:
         gate_text += " (JADE_GATE_MODE in this environment)"
-    blocks_ok, blocks_text = blocking_summary()
     backend_ok, backend_text = _approval_state()
-    return [("gate mode", gate_ok, gate_text), ("what blocks", blocks_ok, blocks_text), ("approval backend", backend_ok, backend_text)]
+    return [("gate mode", gate_ok, gate_text), _what_blocks_row(), ("approval backend", backend_ok, backend_text)]
 
 
 CHECK_PREFIX = {True: "ok  ", False: "FAIL", None: "WARN"}   # V6-10: WARN is not safe or not known, and never changes the exit code
