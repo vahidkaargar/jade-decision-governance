@@ -478,15 +478,29 @@ def brace_expand(word: str, cap: int = 2048) -> list[str]:
 BRACE_WORD = re.compile(r"[^\s;&|()<>`]*\{[^\s]*\}[^\s;&|()<>`]*")
 
 
-def expand_braces(text: str) -> str:
+# A brace word that is the target of a redirect (`> {a,b}`): zsh expands it to several words and every one of them is a target (MULTIOS), so the command is the words
+# around the redirect. Expanded as words (the reading of origin/main, which stays), the first result is the target and the others are words of the command
+# (`git > {a,b} push origin main` read as `git b push origin main`, W-131). `skeleton_both` holds the reading in which every result is a target as one more reading;
+# bash reads such a target as ambiguous and runs nothing, so only zsh takes it.
+_BRACE_TARGET = re.compile(r"(?P<op>&>>?|>>?&?[|!]?|<>|(?<!<)<(?![<(]))(?P<sp>[ \t]*)(?P<w>" + BRACE_WORD.pattern + ")")
+
+
+def expand_braces(text: str, targets: bool = False) -> str:
+    """Brace expansion of the words of `text`. `targets`: a brace word right after a redirect operator becomes one redirect for each result (`> a > b`), not a target and words."""
     if "{" not in text or "," not in text:
         return text
+
+    def target(m: re.Match) -> str:
+        words = brace_expand(m.group("w")) if "," in m.group("w") else []
+        if len(words) < 2:
+            return m.group()
+        return " ".join(m.group("op") + m.group("sp") + w for w in words if w) or m.group()   # `{a,}`: an empty result names no file
 
     def one(m: re.Match) -> str:
         w = m.group()
         return " ".join(brace_expand(w)) if "," in w else w
 
-    return BRACE_WORD.sub(one, text)
+    return BRACE_WORD.sub(one, _BRACE_TARGET.sub(target, text) if targets else text)
 
 
 def _brace_span(s: str, i: int) -> int:
@@ -1510,8 +1524,8 @@ class _Scan:
 
 
 @functools.lru_cache(maxsize=16)
-def _skeleton_top(command: str, literal_end: int, legacy: bool = False, ssh: bool = True) -> str:
-    return _skeleton(command, 0, None, literal_end, legacy, ssh)
+def _skeleton_top(command: str, literal_end: int, legacy: bool = False, ssh: bool = True, targets: bool = False) -> str:
+    return _skeleton(command, 0, None, literal_end, legacy, ssh, targets)
 
 
 def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None, literal_end: int | None = None, ssh: bool = True) -> str:
@@ -1530,16 +1544,17 @@ def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None, li
     return _skeleton(command, _depth, _budget)
 
 
-def _skeleton(command: str, _depth: int, _budget: list[int] | None, literal_end: int = 0, legacy: bool = False, ssh: bool = True) -> str:
-    # `legacy` and `ssh` ride in the budget, which every nested scan shares: origin/main's reading of a quoted `${NAME}` (`$X`, see `_Scan`) and the reading of an ssh remote command, at every depth.
-    # The last slot is the work left for reading variable commands with their values (`VARIABLE_WORK`).
-    budget = _budget if _budget is not None else [BUDGET, HERE_ALLOWANCE, {}, legacy, ssh, VARIABLE_WORK]
+def _skeleton(command: str, _depth: int, _budget: list[int] | None, literal_end: int = 0, legacy: bool = False, ssh: bool = True, targets: bool = False) -> str:
+    # `legacy`, `ssh` and `targets` ride in the budget, which every nested scan shares: origin/main's reading of a quoted `${NAME}` (`$X`, see `_Scan`), the reading of an ssh remote command
+    # and the reading of a brace word after a redirect operator as several targets (`expand_braces`), at every depth.
+    # Slot 5 is the work left for reading variable commands with their values (`VARIABLE_WORK`).
+    budget = _budget if _budget is not None else [BUDGET, HERE_ALLOWANCE, {}, legacy, ssh, VARIABLE_WORK, targets]
     budget[0] -= len(command)
     command = _MARK_CHARS.sub("\x06", command)   # a byte that is one of the marks stays a word
     if _depth > MAX_DEPTH or budget[0] < 0:
         return " ; " + _code(command) + " ; "
     text, _ = _Scan(command, _depth, budget, literal_end).run(0, None)
-    return _hoist_redirects(expand_braces(NULL_REDIRECT.sub(" ", text)))
+    return _hoist_redirects(expand_braces(NULL_REDIRECT.sub(" ", text), len(budget) > 6 and budget[6]))
 
 
 # A brace is a command group in one shell and a plain word in the other, and where a command starts or a word is alone the same text reads differently in zsh and bash.
@@ -1731,7 +1746,8 @@ _QUOTED_VAR = re.compile(r"'[^']*\$|\"[^\"]*\$\{")   # the two places the curren
 @functools.lru_cache(maxsize=16)
 def _skeleton_both_top(command: str, literal_end: int) -> tuple[tuple[str, bool], ...]:
     """The readings of a command, each as (text, is_current): the current reading; the current reading with a single-quoted `$X` and a double-quoted `${NAME}` read as main read
-    them (`literal_end` 0, `legacy`), when the command has one and the two differ; and origin/main's own reading (cut as main cut it). Every one is a command line of its own, so the rating and the push check are the stricter
+    them (`literal_end` 0, `legacy`), when the command has one and the two differ; the current reading with every result of a brace word after a redirect operator a target of its own
+    (`git > {a,b} push origin main`, zsh), when the command has one and the two differ; and origin/main's own reading (cut as main cut it). Every one is a command line of its own, so the rating and the push check are the stricter
     of all of them: a literal `'$B'` that is one reading's branch name stays the other readings' unknown branch (PR 46 merge review, ADV-1 and ADV-2)."""
     command = _JOIN_CHAR.sub("\x06", command)   # a byte that is the join stays a word
     out = [(_skeleton_top(command, literal_end), True)]
@@ -1739,6 +1755,10 @@ def _skeleton_both_top(command: str, literal_end: int) -> tuple[tuple[str, bool]
         loose = _skeleton_top(command, 0, True)
         if loose != out[0][0]:
             out.append((loose, True))
+    if "{" in command and "," in command and _BRACE_TARGET.search(command):   # zsh: `git > {a,b} push origin main` writes a and b and pushes (W-131)
+        multi = _skeleton_top(command, literal_end, False, True, True)
+        if multi != out[0][0]:
+            out.append((multi, True))
     floor = _base_skeleton(command)
     if all(floor != text for text, _ in out):
         out.append((floor, False))
