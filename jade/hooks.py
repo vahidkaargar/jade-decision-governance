@@ -418,14 +418,17 @@ def _policy_failure(mode: str, event: dict, tool: str, tool_input: dict, cwd: st
 
 
 def malformed_reason(event: dict) -> str | None:
-    """Why a PreToolUse event is not the shape the host sends, when that could hide a gated call (V6-18 d, F11, N26); None when it is well formed or is no tool
-    call at all (no `tool_name`). A `tool_name` that is not a string cannot be matched to the gated list, and the text of a list `command` is not what the
+    """Why a PreToolUse event is not the shape the host sends, when that could hide a gated call (V6-18 d, F11, N26); None when it is well formed. The host
+    always names the tool, so an event with no `tool_name` (empty or non-JSON stdin reaches here as `{}`) is not read as "no tool call" (W-209, V6-18):
+    nothing can say it is harmless. A `tool_name` that is not a string cannot be matched to the gated list, and the text of a list `command` is not what the
     shell would run, so neither is read as harmless. A `tool_input` that is not an object is handled by `failsafe_reason` (it blocks a gated tool)."""
     if "tool_name" not in event:
-        return None
+        return "the event has no tool_name (the hook input was empty, not JSON, or not a JSON object)"
     tool = event["tool_name"]
     if not isinstance(tool, str):
         return f"the event has a tool_name that is not a string ({type(tool).__name__})"
+    if not tool.strip():
+        return "the event has an empty tool_name"
     tin = event.get("tool_input")
     if tool in policy.SHELL_TOOLS and isinstance(tin, dict) and tin.get("command") is not None and not isinstance(tin["command"], str):
         return f"the {tool} command is not a string ({type(tin['command']).__name__})"
