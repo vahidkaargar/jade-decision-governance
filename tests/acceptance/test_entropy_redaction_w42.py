@@ -131,6 +131,24 @@ def test_w80_a_counting_run_is_not_a_token():
         assert redact.redact(f"v {text} w") == (f"v {text} w", 0)
 
 
+def _rate(gen, n=2000):
+    return sum(redact._random_looking(gen()) for _ in range(n)) / n
+
+
+def test_w80_the_name_test_costs_more_on_a_token_of_one_or_two_kinds_and_docs_say_so():
+    """W-80 review: long runs of one case or of digits read as name pieces, so a token drawn mostly from one or two character kinds is found less often than a
+    base-62 one. These floors are what docs/05 section 3 states (seeded, synthetic classes); the known limits name the case."""
+    rng = random.Random(80)
+    upper_digit = string.ascii_uppercase + string.digits
+    assert _rate(lambda: "".join(rng.choice(upper_digit) for _ in range(31)) + rng.choice(string.ascii_lowercase)) >= 0.84
+    assert _rate(lambda: "".join(rng.choice(string.ascii_letters) for _ in range(31)) + rng.choice(string.digits)) >= 0.89
+    assert _rate(lambda: "".join(rng.choice("0123456789ABCDEF") for _ in range(30)) + "xY") >= 0.93
+    assert _rate(lambda: "".join(rng.choice(B62) for _ in range(24))) >= 0.95
+    docs = (ROOT / "docs" / "05-threat-model.md").read_text()
+    assert "0 to 1.1 points" not in docs
+    assert "one or two character kinds" in docs.split("**Known limits (accepted risk).**")[1].split("\n")[0]
+
+
 def test_pure_hex_is_not_redacted_and_that_is_the_documented_limit():
     """A 64-digit hex string is a SHA-256 as often as a key: the twins need it (F23). Named in docs/05 section 3 (accepted risk)."""
     for n in (32, 40, 64):
