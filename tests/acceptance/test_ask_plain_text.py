@@ -280,3 +280,26 @@ def test_authorized_keys_next_to_another_risky_command_names_both():
     a = assess("echo k >> ~/.ssh/authorized_keys; git push origin main")
     line = askplain.what_line(a, "Bash")
     assert LOGIN_FILE in line and "This push can force push" in line   # another command in the call: the worst push line
+
+
+@pytest.mark.parametrize("cmd", [
+    "echo k >> ~/.ssh/authorized_keys && cp /tmp/h.sh ~/.claude/hooks/pre.sh",
+    "cp /tmp/k ~/.ssh/authorized_keys; cp /tmp/s.json ~/.claude/settings.json",
+    "cp /tmp/s.json ~/.claude/settings.json; tee -a ~/.ssh/authorized_keys < /tmp/k",
+    "echo k >> ~/.ssh/authorized_keys; git push origin main",
+])
+def test_authorized_keys_with_another_gated_command_keeps_both_risks(cmd):
+    """W-154 review: when the call also does something else that is gated (a hook or settings write), the question still says that it changes what guards the
+    agent, and adds that it can open a login; the login sentence alone would hide the other risk."""
+    a = assess(cmd)
+    assert a.rule_id == "R-13" and len(a.seg_keys) >= 2, (a.rule_id, a.seg_keys)
+    head = askplain.header(a, "Bash")
+    assert head[1].startswith(askplain.RISK_TEXT["R-13"]) and "open a login" in head[1], head
+    assert askplain.RISK_TEXT["R-13"] in askdialog.text_for(a, "Bash", {"command": cmd})
+    question = askchat.question_for("0123456789ab", a, "Bash", {"command": cmd})["question"]
+    assert askplain.RISK_TEXT["R-13"] in question and "open a login" in question
+
+
+def test_two_writes_to_authorized_keys_say_only_that_it_opens_a_login():
+    a = assess("echo k >> ~/.ssh/authorized_keys; cp /tmp/k ~/.ssh/authorized_keys2")
+    assert askplain.header(a, "Bash")[1] == OPENS_LOGIN

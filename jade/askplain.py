@@ -55,6 +55,7 @@ GENERIC_RISK = "This call needs your decision."
 # W-154: a write to authorized_keys is R-13, but the generic R-13 sentence (rules, hooks, settings, installed code) does not say that it opens a login.
 AUTHKEYS_RISK = "This writes a list of keys that are trusted to log in, so it can open a login."
 AUTHKEYS_WHAT = "Write the authorized_keys file, which lists the keys that can log in."
+AUTHKEYS_ALSO = "It also writes a list of keys that are trusted to log in, so it can open a login."   # after the rule's sentence, when the call does more
 _AUTHKEYS_SSH = re.compile(r"\.ssh/authorized_keys2?(?![\w.-])")   # the shape policies/risk.yaml R-13 matches
 _AUTHKEYS_NAME = re.compile(r"(?<![\w.-])authorized_keys2?(?![\w.-])")   # a write target named so, after `cd ~/.ssh`: the gate reads the same file
 
@@ -73,6 +74,17 @@ def _authkeys_call(a, tool: str) -> bool:
     if tool in policy.WRITE_TOOLS:
         return bool(_AUTHKEYS_SSH.search(getattr(a, "subject", "") or ""))
     return any(_writes_authkeys(k) for k in getattr(a, "seg_keys", None) or [])
+
+
+def _risk(a, tool: str) -> str:
+    """The risk line. A call whose only gated work is writing authorized_keys gets the login sentence alone; a call that also does other gated work (a hook or
+    settings write, a push) keeps the sentence of its rule and adds the login sentence, so neither risk is hidden (W-154 review)."""
+    if not _authkeys_call(a, tool):
+        return risk_line(a.rule_id, a.ho_ids)
+    keys = getattr(a, "seg_keys", None) or []
+    if tool in policy.WRITE_TOOLS or all(_writes_authkeys(k) for k in keys):
+        return AUTHKEYS_RISK
+    return f"{risk_line(a.rule_id, a.ho_ids)} {AUTHKEYS_ALSO}"
 
 
 GENERIC_HO = "A rule that only you can decide matches this call."
@@ -562,7 +574,7 @@ def other_count(a) -> int:
 
 def header(a, tool: str) -> list[str]:
     """The lines every question starts with, in this order: what, why it is risky, what else is in the call, and a hint when risky commands are joined."""
-    lines = [what_line(a, tool), AUTHKEYS_RISK if _authkeys_call(a, tool) else risk_line(a.rule_id, a.ho_ids)]
+    lines = [what_line(a, tool), _risk(a, tool)]
     n = other_count(a)
     if n:
         lines.append(f"Also in this call: {n} other command that JADE rates as low risk." if n == 1 else f"Also in this call: {n} other commands that JADE rates as low risk.")
