@@ -35,6 +35,15 @@ rules:
     data_sensitivity: secret
     match: "security (add|delete)-generic-password|ovault secret (set|import|rm|delete)|(?i:vault_key|id_(rsa|ed25519|ecdsa)\\b|\\.pem\\b)|BEGIN [A-Z ]*PRIVATE KEY"
     rationale: "Key material or secret-store mutation"
+  - id: R-25
+    level: critical
+    reversibility: irreversible
+    blast_radius: host
+    # W-202: `rm` with --no-preserve-root (GNU rm takes any unique prefix of a long option, and `--n` starts only this one) on the root of the file system:
+    # `/`, `//`, `/.`, `/..`, `/*`, quoted or not, before or after the flag. The same flag on any other path is R-26. The words are read once by jade/humanonly.py
+    # `no_preserve_root` (the command word must be `rm`; a word after `--` is an operand), which adds the marker this rule matches (jade/policy.py RM_ROOT_MARK).
+    match: "^rm:no-preserve-root:root "
+    rationale: "Recursive delete of the root of the file system with its own guard switched off"
   - id: R-17
     level: high
     reversibility: partially_reversible
@@ -178,6 +187,19 @@ rules:
     files_only: true
     match: "(?i:(?<![\\w.-])\\.git/(?:modules/\\S+?/)?config(?![\\w./-])|/\\.config/git/config(?![\\w.-])|(?<![\\w.-])\\.gitconfig(?![\\w.-]))"
     rationale: "Edits a git config file: an alias, pager, sshCommand or filter set there runs a program the next time git runs"
+  - id: R-26
+    level: high
+    reversibility: irreversible
+    blast_radius: host
+    # W-202: `rm ... --no-preserve-root` (GNU rm takes any unique prefix of a long option, and `--n` starts only this one), before or after the operands, whatever the path:
+    # the /tmp and build-folder exemptions of `rm -rf` (R-11) do not apply to it. On the root itself it is R-25. It comes after every other high rule, so a segment another high
+    # rule already matches (a write to an agent file R-13, a remote shell R-14, a pipe into a shell R-22) keeps that rule. In a line of two commands the first high
+    # segment names the call (R-26 may then be shown instead of R-13, R-14 or R-22), but the other segment's rule stays in `seg_rules`, so memory and Jev treat it as before.
+    # `rm -rf --no-preserve-root /tmp/x` stays R-11 (that rule reads the flag as the first operand of `rm -rf`).
+    # The words are read once by jade/humanonly.py `no_preserve_root`, which adds the marker this rule matches (jade/policy.py RM_NPR_MARK): the command word must be
+    # `rm` (past sudo, doas and VAR=value), so `rm` as a subcommand of another tool (`npm rm --no-save x`, `git rm`) is not this delete, and a word after `--` is an operand.
+    match: "^rm:no-preserve-root(?::root)? "
+    rationale: "Delete with the root guard of rm switched off (--no-preserve-root)"
   - id: R-19
     level: medium
     reversibility: reversible

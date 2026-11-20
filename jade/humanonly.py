@@ -27,6 +27,9 @@ _SAFE_DIRS = {"node_modules", "dist", "build", "target", "coverage", "htmlcov", 
 _SAFE_PREFIXES = ("/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/", "$TMPDIR", "${TMPDIR", "/dev/shm/")
 _SAFE_SUFFIXES = (".pyc", ".pyo", ".egg-info", ".log")
 _RECURSIVE = re.compile(r"^-[A-Za-z]*[rR][A-Za-z]*$")
+_NO_PRESERVE_ROOT = re.compile(r"^--n[\w-]*$")   # GNU rm takes any unique prefix of a long option; `--n` starts only --no-preserve-root
+_NO_PRESERVE_ROOT_RATED = re.compile(r"^--n[\w-]*(?:=.*)?$")   # for the rating also `--no-preserve-root=yes` (rm refuses it, so it is harmless to ask)
+_ROOT_OPERAND = re.compile(r"^/[/.]*\*?$")   # `/`, `//`, `/.`, `/..`, `/*`: the root of the file system
 
 
 @functools.lru_cache(maxsize=16)
@@ -221,7 +224,8 @@ def _remove(prog: str, args: list[str]) -> bool:
     flags = _flags(args)
     if prog in ("rm", "rmdir"):
         recursive = any(_RECURSIVE.match(f) or f == "--recursive" for f in flags)
-        return recursive and bool(ops) and not all(_safe_target(o) for o in ops)
+        unguarded = prog == "rm" and any(_NO_PRESERVE_ROOT.match(f) for f in flags)   # W-202: no target is safe when `rm` is told to drop its guard for `/`
+        return recursive and bool(ops) and (unguarded or not all(_safe_target(o) for o in ops))
     if prog in ("shred", "srm", "wipe"):
         return True
     if prog == "find":
@@ -413,10 +417,28 @@ def shell_classes(bare: str, dirs: tuple[str, ...] = (), cwd: str = "", raw: str
     prog, args = _program(_tokens(bare))
     if not prog:
         return set()
+    if raw and prog == "rm":   # W-202: the segmenter folds `rm -rf --no-preserve-root x` into `rm -rf x`, so the flag is read from the segment as written
+        rprog, rargs = _program(_tokens(raw))
+        if rprog == "rm" and any(_NO_PRESERVE_ROOT.match(f) for f in _flags(rargs)):
+            args = rargs
     if raw and prog == "git":
         extra = tuple(os.path.join(d, c) if d and not os.path.isabs(os.path.expanduser(c)) else os.path.expanduser(c) for c in _git_c_dirs(raw) for d in (dirs or (cwd,)))
         dirs = extra + tuple(dirs or ())
     return _program_classes(prog, args, tuple(dirs or ()), cwd)
+
+
+def no_preserve_root(raw: str, bare: str = "") -> str:
+    """W-202: is the segment, as written, `rm` with --no-preserve-root? '' when not, 'root' when an operand is the root of the file system, else 'any'.
+    One pass over the words: the command word must be `rm` (past `sudo`, `doas` and `VAR=value`, or past the launcher prefixes the gate strips in `bare`:
+    `env`, `timeout 5`, `xargs` ...), so `npm rm --no-save x` is not it, and a word after `--` is an operand. `bare` has the rm flags folded, so they are read from `raw`."""
+    toks = _tokens(raw)
+    prog, args = _program(toks)
+    if prog != "rm" and bare and _program(_tokens(bare))[0] == "rm":
+        at = next((i for i, t in enumerate(toks) if t.rsplit("/", 1)[-1] == "rm"), None)
+        prog, args = ("rm", toks[at + 1:]) if at is not None else (prog, args)
+    if prog != "rm" or not any(_NO_PRESERVE_ROOT_RATED.match(f) for f in _flags(args)):
+        return ""
+    return "root" if any(_ROOT_OPERAND.match(o) for o in _operands(args)) else "any"
 
 
 def is_sql_client(bare: str) -> bool:

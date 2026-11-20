@@ -34,6 +34,8 @@ RISK_TEXT: dict[str, str] = {
     "R-22": "This runs text that is downloaded or decoded while it runs, so nobody can read it first.",
     "R-23": "This edits a git config file, which can make git run a program later.",
     "R-24": "This changes the packages or the build of JADE itself.",
+    "R-25": "This deletes the root of the disk and turns off the safety check of rm, and you cannot undo it.",
+    "R-26": "This deletes files with the safety check of rm turned off, and you cannot undo it.",
     "R-30": "This reads a file that holds a password or key, and it is only recorded.",
     "R-31": "This runs a script or text that the gate cannot read, and it is only recorded.",
     "R-32": "This gives a script or a computed folder to a command that normally only reads.",

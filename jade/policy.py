@@ -49,6 +49,8 @@ EGRESS_MARK = egress.MARK  # marker prefix R-21 matches: curl, wget or nc sendin
 RECORDED_RULES = ("R-30", "R-31", "R-32")  # rules below the permit floor whose hits the hook journals (events `secret_read`, `blind_spot`): not gated, but counted so a soak report can size them
 BLIND_MARK = blind.BLIND_MARK   # marker prefix R-31 matches: `blind:<label> <command>`, a command the classifier cannot read (W-31)
 FETCH_MARK = blind.FETCH_MARK   # marker prefix R-22 matches: fetched or decoded text that runs as code (W-31)
+RM_NPR_MARK = "rm:no-preserve-root "        # marker prefix R-26 matches: `rm` with --no-preserve-root (W-202), from jade/humanonly.py `no_preserve_root`
+RM_ROOT_MARK = "rm:no-preserve-root:root "  # marker prefix R-25 matches: the same on the root of the file system
 GH_MERGE_MARK = "gh:merge-api "   # marker prefix R-10 matches: a `gh api` call that merges a pull request, or whose query or route the gate cannot read (V6-08, N20); the segment text has the quoted query blanked
 _GH_MERGE_MUTATION = re.compile(r"\b(?:mergePullRequest|enablePullRequestAutoMerge|mergeBranch)\b")
 # A GraphQL call whose query is not text on the command line: a file (`-F query=@q.graphql`; gh reads it), stdin (`--input`), a variable or a substitution (`query="$Q"`), or no query
@@ -1890,6 +1892,8 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
             fetched.update(blind.copies_of(words, fetched))   # `mv a b; bash b`: the copy is the fetched file under another name
         if len(words) > 1 and words[0].rsplit("/", 1)[-1] == "gh" and words[1] == "api" and _gh_api_merges(words, text_in):
             marks.append(GH_MERGE_MARK)   # the query is quoted text, so the whole command is read, as for a SQL client below
+        if npr := humanonly.no_preserve_root(seg, _bare(seg)):   # W-202: the segmenter folds `rm` flags to `rm -rf`, so the flag is read from the segment as written
+            marks.append(RM_ROOT_MARK if npr == "root" else RM_NPR_MARK)
         seg_labels = [lab for lab in (blind.script_label(words, known), "computed-cwd" if computed and _computed_write(_bare(seg)) else None) if lab]
         labels.extend(seg_labels)
         marks.extend(f"{BLIND_MARK}{lab} " for lab in seg_labels)

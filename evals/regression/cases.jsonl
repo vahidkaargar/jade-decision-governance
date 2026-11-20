@@ -201,3 +201,6 @@
 {"id": "R203", "class": "gemini_settings_read", "kind": "gate", "command": "cat ~/.gemini/settings.json", "expect": "allow", "note": "W-153: the twin: a read of the file"}
 {"id": "R204", "class": "claude_json_read", "kind": "gate", "command": "jq .mcpServers ~/.claude.json", "expect": "allow", "note": "W-153: the twin: a read of the file"}
 {"id": "R205", "class": "gemini_md_git_add", "kind": "gate", "command": "git add GEMINI.md", "expect": "allow", "note": "W-153: the twin: git add only reads the file"}
+{"id": "R206", "class": "rm_recursive_in_tmp", "kind": "gate", "command": "rm -r /tmp/x", "expect": "allow", "note": "W-202: the twin: a plain recursive delete in /tmp stays low"}
+{"id": "R207", "class": "rm_preserve_root_in_tmp", "kind": "gate", "command": "rm -r --preserve-root /tmp/x", "expect": "allow", "note": "W-202: the twin: --preserve-root keeps the guard on and is not the flag"}
+{"id": "R208", "class": "npm_rm_no_flag", "kind": "gate", "command": "npm rm --no-save left-pad", "expect": "allow", "note": "W-202: the twin: `npm rm` is not the file delete, and --no-save is not --no-preserve-root"}
