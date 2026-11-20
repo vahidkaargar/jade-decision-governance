@@ -238,7 +238,9 @@ OPEN_PERMIT = ("PENDING", "ISSUED")
 # Events whose detail is the record itself, not project text, so retention keeps it (V6-28 review): `jev` is the value the human set (cleared, `jade jev on` read `off`);
 # `jev_accepted` and `jev_allowed` hold only hashes, rule ids and session ids (the command text of a `jev_allowed` label is removed above), and they are what links a
 # Jev yes to the owner's later deny (cleared, a false allow vanished after 90 days and the deny gate opened by itself).
-KEPT_DETAIL = ("jev", "jev_accepted", "jev_allowed")
+# `level` is the value the human set with `jade level` (W-194): `_recorded_level` reads it, and a config level that no event records is refused and shown as
+# written some other way, so a cleared `level` event locked the human out of `jade level` after 90 days.
+KEPT_DETAIL = ("jev", "jev_accepted", "jev_allowed", "level")
 
 
 PURGED_ASK = json.dumps({"purged": True})   # `asks.question_json` is NOT NULL and a reader parses it: a marker, not NULL
@@ -273,7 +275,8 @@ def _purge_rows(con, cutoff: str, *, ask_text: bool) -> dict[str, int]:
             n["permits"] += 1
     n["events"] = con.execute("UPDATE events SET detail_json=json_remove(detail_json,'$.label') WHERE kind='jev_allowed' AND ts<? AND json_extract(detail_json,'$.label') IS NOT NULL",
                               (cutoff,)).rowcount   # the label is command text; the keys beside it are hashes and stay (below)
-    n["events"] += con.execute("UPDATE events SET detail_json=NULL WHERE ts<? AND detail_json IS NOT NULL AND kind NOT IN ('purge', ?, ?, ?)", (cutoff, *KEPT_DETAIL)).rowcount
+    n["events"] += con.execute(f"UPDATE events SET detail_json=NULL WHERE ts<? AND detail_json IS NOT NULL AND kind NOT IN ('purge', {', '.join('?' * len(KEPT_DETAIL))})",
+                               (cutoff, *KEPT_DETAIL)).rowcount
     if ask_text:
         # The chat question (it holds a "Command:" block), the one-line label and the scope labels of an ask that is over: never an ask still open.
         n["asks"] = con.execute(
