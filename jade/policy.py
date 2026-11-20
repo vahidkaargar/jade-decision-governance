@@ -2164,10 +2164,10 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         marks.extend(f"{BLIND_MARK}{lab} " for lab in seg_labels)
         seg_best, bare = classify_segment(seg, dirs, proxied, tuple(marks))
         if env and "$" in seg and LEVELS[seg_best["level"]] < LEVELS[_r13()["level"]]:   # W-82: the command as the shell will run it; only R-13 is taken from this reading
-            for known in _subst_readings(seg, env):
-                key = (known, dirs, tuple(marks))   # the same command with the same value comes back many times in a long text: classified once
+            for reading in _subst_readings(seg, env):   # not `known`: that holds the scripts the command wrote, read by every later segment
+                key = (reading, dirs, tuple(marks))   # the same command with the same value comes back many times in a long text: classified once
                 if key not in subst_seen:
-                    subst_seen[key] = classify_segment(known, dirs, proxied, tuple(marks))[0]
+                    subst_seen[key] = classify_segment(reading, dirs, proxied, tuple(marks))[0]
                 if subst_seen[key]["id"] == "R-13":
                     seg_best = subst_seen[key]
                     break

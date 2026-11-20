@@ -385,6 +385,19 @@ def test_the_glob_budget_spends_only_on_glob_destinations(home):
     assert not gated(sh(f"{pad}; cp /tmp/e/x ~/.cl*/settings.json"))
 
 
+@pytest.mark.parametrize("cmd", [
+    "D=/tmp/x; cp a $D/b; bash x",
+    "D=/tmp/r; cp a $D/b; ./r",
+    "D=/tmp/q; cp a $D/b; sh b",
+    "D=/tmp/q; cp a $D/b; bash x",
+])
+def test_the_variable_reading_keeps_the_scripts_the_command_wrote(home, cmd):
+    """The reading of `$D` must not stand in for the scripts the command wrote: a later script with a one-letter name that the reading happens to contain is
+    still a script the gate cannot read (R-31, low), so the blind-spot record is kept."""
+    a = sh(cmd)
+    assert (a.level, a.rule_id) == ("low", "R-31"), (cmd, a.level, a.rule_id)
+
+
 def test_a_variable_with_a_known_value_is_still_an_unseen_name(home):
     """Accepted false positive: the raw words `$F` are not typed, and the gate takes the higher of its readings, so a value the command set does not lower it."""
     assert is_r13(sh("F=notes.md; cp /tmp/e/$F ~/.claude/"))
