@@ -60,6 +60,14 @@ def test_the_linux_job_still_runs_the_same_gates_as_before(ci):
         assert part in text, part
 
 
+def test_ci_fails_instead_of_skipping_the_w93_modules(ci):
+    # W-201: tests/conftest.py skips the subprocess approval modules where the real approver anchor exists; on a runner that must be an error, for every job.
+    assert ci["env"]["JADE_REQUIRE_APPROVE_MODULES"] == "1"
+    for name, job in ci["jobs"].items():
+        assert job.get("env", {}).get("JADE_REQUIRE_APPROVE_MODULES", "1") == "1", name   # no job turns it off
+    assert "-k " not in run_text(ci["jobs"]["test"])   # the parallel step runs every module, so the listed ones are among them
+
+
 def test_a_macos_job_runs_setup_hook_payloads_and_the_install_check(ci):
     job = ci["jobs"]["macos"]
     assert job["runs-on"].startswith("macos-") and job["runs-on"] != "macos-latest"   # a fixed image, not a moving one

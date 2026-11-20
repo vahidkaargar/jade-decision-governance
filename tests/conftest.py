@@ -20,6 +20,8 @@ def pytest_collection_modifyitems(config, items):
     are skipped there; CI and any machine without the anchor run them. In-process tests are covered by the `isolated` fixture below."""
     if not real_anchor_installed():
         return
+    if os.environ.get("JADE_REQUIRE_APPROVE_MODULES") == "1":   # W-201: CI sets this; a skipped module there would be a silent hole, so the run stops
+        raise pytest.UsageError("W-201: JADE_REQUIRE_APPROVE_MODULES=1 and the real approver trust anchor is installed, so the W-93 modules would be skipped; run on a host without the anchor")
     skip = pytest.mark.skip(reason="W-93: the real approver trust anchor is installed; this module approves permits in a subprocess that would use it (run it in CI or after --uninstall)")
     for item in items:
         if item.module.__name__.rsplit(".", 1)[-1] in SUBPROCESS_APPROVE_MODULES:
