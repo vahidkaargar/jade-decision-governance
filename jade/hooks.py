@@ -471,7 +471,8 @@ def pretool(event: dict, permit=None) -> HookResult:
         return _verdict(mode, f"JADE safety invariant {', '.join(a.blocked)} blocks this {tool} call. No permit can authorize it. "
                               f"Rule text: policies/safety.yaml. Do not rephrase the command to get around the invariant; ask the human.", a.blocked)
     if mode == "enforce" and paths.level() == "off" and OFF_FLOOR_CLASSES & set(a.ho_ids):
-        _journal("gate", "safety_block", a, event)   # V6-16: at level `off` a write to JADE's own live wiring still blocks (the floor of "observe plus floor")
+        # V6-16: at level `off` a write to JADE's own live wiring still blocks (the floor of "observe plus floor"). W-74: the event names the classes that fired, ids only
+        _journal("gate", "safety_block", a, event, floor=sorted(OFF_FLOOR_CLASSES & set(a.ho_ids)))
         return HookResult(2, f"JADE floor: level off blocks this {tool} call. It writes to JADE's own live wiring ({', '.join(sorted(OFF_FLOOR_CLASSES & set(a.ho_ids)))}: "
                              "the hook files, `~/.claude/settings.json`, the install, the JADE config or state). No permit can authorize it at this level. "
                              "Do not rephrase the call to get around the floor; ask the human to do it in their own terminal.")
@@ -531,12 +532,12 @@ def _journal_blind(a: policy.Assessment, event: dict) -> None:
         pass
 
 
-def _journal(entity: str, kind: str, a: policy.Assessment, event: dict) -> None:
+def _journal(entity: str, kind: str, a: policy.Assessment, event: dict, **more) -> None:
     try:
         from . import ledger
 
         db = ledger.open(timeout=LEDGER_TIMEOUT_S)
-        db.event(entity, kind, guard=f"{a.rule_id} {a.level} {','.join(a.blocked)}".strip(), actor="hook", detail=_detail(event, a))
+        db.event(entity, kind, guard=f"{a.rule_id} {a.level} {','.join(a.blocked)}".strip(), actor="hook", detail=_detail(event, a, **more))
         db.close()
     except Exception:  # noqa: BLE001, S110 - journaling must never change the gate verdict
         pass
