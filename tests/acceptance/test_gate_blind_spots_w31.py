@@ -335,6 +335,27 @@ def test_twins_of_a_computed_directory_alias_stay_as_they_were(home, cmd):
     assert not at_least_high(sh(cmd)), cmd
 
 
+@pytest.mark.parametrize("cmd", [
+    "git lg; bash x.sh",
+    "git foo; bash x.sh",
+    "git foo && ./run.sh",
+    'git -C "$D" foo; python3 tools/x.py',
+    'git -C "$D" -C /tmp foo; bash run.sh',
+])
+def test_a_script_run_after_a_git_call_that_is_not_built_in_is_still_a_blind_spot(home, cmd):
+    """The alias lookup must not lose the scripts the command wrote: `git lg; bash x.sh` is low and R-31 (a script the gate cannot read), not an error that
+    fails closed in enforcing mode."""
+    alias_config(home, ALIASES)
+    a = sh(cmd)
+    assert (a.level, a.rule_id) == ("low", "R-31"), (cmd, a.level, a.rule_id)
+
+
+def test_a_script_the_command_wrote_after_a_git_call_that_is_not_built_in_is_read(home):
+    alias_config(home, ALIASES)
+    a = sh("cat > x.sh <<'EOF'\necho hi\nEOF\ngit foo; bash x.sh")
+    assert (a.level, a.rule_id) == ("low", "R-99"), (a.level, a.rule_id)
+
+
 def test_a_computed_directory_alias_lookup_that_fails_invents_nothing(home, monkeypatch):
     alias_config(home, ALIASES)
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(subprocess.TimeoutExpired("git", 2)))

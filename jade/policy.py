@@ -1945,9 +1945,9 @@ def _hidden(text: str, cwd: str, _home: str, _xdg: str) -> tuple[tuple[str, ...]
             for call in git_calls(seg):
                 if not gitalias.candidate(call.sub):
                     continue
-                d, known = _call_dir(call, dirs, cwd)
+                d, d_known = _call_dir(call, dirs, cwd)   # not `known`: that holds the scripts the command wrote, returned below
                 if (expansion := aliases.expand(call.sub, call.args, d)) is not None:
-                    extra.append(f"cd {shlex.quote(d)} && {expansion}" if d and known else expansion)
+                    extra.append(f"cd {shlex.quote(d)} && {expansion}" if d and d_known else expansion)
     return tuple(dict.fromkeys(extra)), known   # one reading per distinct text: 1500 `git -C "$D" nuke` are one expansion, not 1500 to classify
 
 
