@@ -174,9 +174,15 @@ class Ledger:
                 os.close(os.open(p, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600))
                 return
             except FileExistsError:   # nothing was created and no descriptor was opened
-                if not os.path.islink(p):
+                try:
+                    os.stat(p)   # one stat follows the whole chain: an existing target ends here, only a dangling link is walked
                     return
-                p = os.path.join(os.path.dirname(p), os.readlink(p))
+                except FileNotFoundError:
+                    if not os.path.islink(p):
+                        return
+                    p = os.path.join(os.path.dirname(p), os.readlink(p))
+                except OSError:   # ELOOP: a chain longer than the kernel follows is left to SQLite and _lock_down (known limit, docs/05 T15)
+                    return
             except OSError:
                 return
 
