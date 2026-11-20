@@ -192,6 +192,14 @@ PLAIN_HIGH = {
     # V6-08 N20 (gh api merges): a merge through the API is a merge: exact at most, never sent to Jev (`policy.gh_api_merge_in`, as `gh pr merge`)
     "adversarial:A246": ("exact", "a merge through gh api: exact only"), "adversarial:A247": ("exact", "a merge through gh api: exact only"),
     "adversarial:A274": ("exact", "a gh api graphql query the gate cannot read: exact only"), "adversarial:A275": ("exact", "a gh api route with a variable last part: exact only"),
+    # W-191 (KG55, KG60, KG62 to KG67 moved to the adversarial set; low on origin/main, R-10 high now): a write to the default branch or a merge through an API is
+    # rated like a merge, so memory keeps it as an exact answer only, as A246/A247
+    "adversarial:A276": ("exact", "W-191: a ref of the default branch moved through the git refs API: exact only"),
+    "adversarial:A280": ("exact", "W-191: the merge route sent with curl: exact only"),
+    "adversarial:A282": ("exact", "W-191: a file written to the default branch through the contents API: exact only"),
+    "adversarial:A283": ("exact", "W-191: GraphQL createCommitOnBranch: exact only"), "adversarial:A284": ("exact", "W-191: GraphQL updateRef: exact only"),
+    "adversarial:A285": ("exact", "W-191: a default-branch ref made through the git refs API: exact only"),
+    "adversarial:A286": ("exact", "W-191: pulls/N/update-branch: exact only"), "adversarial:A287": ("exact", "W-191: a whole gh api route in a variable: exact only"),
     # the shell start-up files are a human-only class (HO-shell-startup, V6-08 N23) only once a level is set, and the corpus runs with no level and no shell roots (conftest):
     # the call is a plain one here, and the case rows A248 to A263 set `level: low` to see the class (tests/test_case_files.py)
     "adversarial:A248": ("exact", "a shell start-up write with no level set: exact at most"), "adversarial:A249": ("exact", "a shell start-up write with no level set: exact at most"),
