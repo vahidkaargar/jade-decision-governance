@@ -127,7 +127,7 @@ def test_a_dry_run_counts_what_the_purge_would_clear_and_changes_nothing():
     rows_before = counts(db)
     plan = ops.purge_report(db, 90, ask_text=True, dry_run=True)
     assert dump(db) == before and counts(db) == rows_before, "a dry run must leave the ledger as it was (including the audit event)"
-    assert set(plan) == set(TABLES) and all(plan[t] >= 1 for t in TABLES), plan
+    assert set(plan) == {*TABLES, "audit_queue"} and all(plan[t] >= 1 for t in TABLES) and plan["audit_queue"] == 0, plan   # W-210: plant() draws no audit row
     real = ops.purge_report(db, 90, ask_text=True)
     assert real == plan, "the dry run and the purge must clear the same rows"
 
