@@ -1345,7 +1345,7 @@ def knows_rows(db) -> list:
     """What the template reads: the standing allows (live, newest first) and the denies that share a key with one of them. A newer deny hides an older allow;
     the rest of the ledger is not read."""
     since = memory.valid_since()
-    allows = db.con.execute(f"SELECT * FROM human_answers WHERE {memory.ALLOW_SQL} AND confirmed_ts>=? ORDER BY ts DESC, rowid DESC LIMIT 100000", (since[0],)).fetchall()  # noqa: S608
+    allows = db.con.execute(f"SELECT {memory.ANSWER_COLS} FROM human_answers WHERE {memory.ALLOW_SQL} AND confirmed_ts>=? ORDER BY ts DESC, rowid DESC LIMIT 100000", (since[0],)).fetchall()  # noqa: S608
     allows = [r for r in allows if memory.standing(r, since)]
     exact = sorted({r["exact_key"] for r in allows})
     cls = sorted({k for r in allows for k in (r["class_key"], r["family_key"]) if k})
