@@ -4,7 +4,7 @@ Installing a release, upgrading, the versioning policy and a complete uninstall 
 
 What is deployed, what only a human can do, how to verify each step, and how to undo it. Written for a single macOS host; paths are the defaults.
 
-**The author's machine.** The first host this runbook was written on is the author's Mac mini (macOS). JADE runs there in enforce mode with the signed approver (since 2026-11-13). That is one machine. Nothing on it is a promise about yours: `jade check` says what is on for your machine. The public pages (`README.md`, `PRIVACY.md`, the other documents) do not name this machine, and a test keeps it that way.
+**The author's machine.** The first host this runbook was written on is the author's Mac mini (macOS). JADE runs there in enforce mode with the signed approver (since 2026-11-13). On that machine, VALIDATED can come at the earliest on 2026-11-27, after 14 days of enforce (section 5). The approver installer (`docs/10`) was written and tested there; it has not yet run on a second machine. Hardening batch 1 was merged on 2026-11-09 (`CHANGELOG.md`). These facts moved here from the README front page, which names no fact of one machine. That is one machine. Nothing on it is a promise about yours: `jade check` says what is on for your machine. The public pages (`README.md`, `PRIVACY.md`, the other documents) do not name this machine, and a test keeps it that way.
 
 ## 1. Already done by the agent (reversible, local)
 
@@ -217,6 +217,15 @@ Caveats of the global form, read them first: `core.hooksPath` **replaces** the `
 **Default branch with another name, empty remotes.** The guard knows a default branch other than `main` and `master` only from `refs/remotes/<remote>/HEAD` (a clone records it; `git remote set-head <remote> --auto` records it after the fact), from `init.defaultBranch`, or from `jade.protectedBranch`. A repository whose default branch is, say, `trunk`, with none of the three, is not protected on `trunk` by the hook (a push there succeeds); `jade git-hook check <repo>` prints `default branch not recorded` for such a remote and the command to fix it. Remote branch protection covers it regardless. The very first push of `main` to an empty remote is refused as well (it is a push to the default branch): a human does it once with `git push --no-verify -u origin main`.
 
 What defeats the hook, and how JADE treats it: `git push --no-verify`, `git -c core.hooksPath=...`, `git config core.hooksPath ...`, the `GIT_CONFIG_KEY_n=core.hooksPath` and `GIT_CONFIG_PARAMETERS` environment routes, and an edit, `chmod` or `rm` of the hook file are rated high (R-17), so an agent needs a human-approved permit for each. The hook does not stop a human who passes `--no-verify` on purpose; remote protection does. `jade git-hook check` is not part of `jade check`: the guard is optional per repository and a failing check on every machine without it would be noise.
+
+### 2.8 Make the policies yours (overlays)
+
+This text was in the README before; the README keeps the copy commands. The shipped `policies/risk.yaml` and `policies/safety.yaml` are generic. Your production hosts, deploy scripts and retired services go in gitignored overlays in `~/.config/jade/local/` (from a checkout, `policies/local/*.local.yaml`).
+
+- An overlay can add production hosts and paths (`environments`), rules (`rules_prepend`, `rules_override`) and invariants (`invariants_append`).
+- A top-level `hosts:` key is not read. To make a host critical, write an `R-Lxx` rule for it.
+- `jade check` lints the overlay (rows `overlay lint`, `overlay files`). It names the file and rule, never the pattern or host.
+- An overlay cannot remove a shipped invariant or lower a shipped high-risk rule (`policies/loader.py`, `tests/test_policy_overlay.py`).
 
 ## 3. Full rollback
 

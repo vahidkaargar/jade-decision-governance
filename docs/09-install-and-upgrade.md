@@ -6,6 +6,29 @@ For people who install JADE from a release and use it with Claude Code, and for 
 
 A release is a git tag `vX.Y.Z` on the default branch with a GitHub release that carries a wheel, an sdist and `SHA256SUMS`. It is an installable first release that runs in **advisory mode** (the gate records and never blocks). It is not VALIDATED and not production approved: those stages are measured and decided as described in `docs/08` section 5, and nothing in a release changes them. Later releases improve it; `jade upgrade` brings them in.
 
+### What advisory mode does and does not protect
+
+This list was in the README Quick start before; it moved here. The README keeps a short version.
+
+- It does: journal and redact every Jev call, map a probability to accept, abstain or reject, record a `would_block` event (`safety_block` for a safety invariant such as a push to the default branch) for every call the gate would stop in enforce mode and print `[advisory, not blocked]` with the reason, remind the agent at Stop about an abstain or reject it has not dealt with, and refuse to let an agent approve its own permit.
+- It does not: block any command, edit or tool call. A `git push` to the default branch, `terraform destroy` or `rm -rf` runs as it would without JADE. The gate is also a syntactic classifier with known gaps (`docs/05-threat-model.md` T18, T19, T22): a guard rail for an agent that makes mistakes, not a boundary against one that is hostile and runs as your user.
+- Pushes to the default branch are stopped by git and the remote, not by JADE's shell reading: install the pre-push guard and turn on branch protection (`docs/08-deployment-runbook.md` section 2.7).
+- Moving to enforce mode (`jade gate enforce`) is your decision after you have read `jade ledger stats` and `jade decide list` for a week or more (`docs/08-deployment-runbook.md` section 2.2).
+
+### What the code holds, and what the releases added
+
+This text was on the README front page before; it moved here. The README keeps the short Status table.
+
+**Built.** `jade` holds the ledger, the adapter, redaction, the `jev` shim, the question registry, permits, the hook gate, calibration, the bounded improvement loop and the standalone pre-push guard (`jade git-hook`). The acceptance tests of Phases 1–5 pass. 0.2.1 closed the first independent adversarial review. 0.2.2 closed the false-positive pass and made the structural fix for "never push to the default branch" (see `CHANGELOG.md`). The command classifier is defence in depth, not the enforcement of that rule. The enforcement is the pre-push guard and branch protection on the remote, which only a human can install (`docs/08-deployment-runbook.md` section 2.7, W-68, W-69). The residual risks are listed in `docs/05-threat-model.md` and tracked in `BACKLOG.md`.
+
+**What exists.** The design documents, the runtime, six JSON Schema contracts, five policy files with a tested loader, a 12-entry question registry, replayable regression and adversarial cases (`evals/run_cases.py`), the baseline and performance tooling, and the phase acceptance tests. What does not exist yet is listed in `BACKLOG.md` (for example the routing and judgment eval sets, W-49, and several metrics of `docs/04` section 7, W-52). The documents mark each of those as planned. The gate is a syntactic classifier with known residual risks (`docs/05` T2, T3, T18, T19, T22). It is a strong guard rail for an agent that makes mistakes. It is not a boundary against an agent that is adversarial and runs as the same user. Wiring it into an agent harness is a human step on purpose: see `docs/08-deployment-runbook.md`.
+
+**What 0.5 and 0.6 added (docs/12).** A level for the whole machine (`jade level`, set only by you). At `high`, a gated call is one click in the chat or a dialog instead of a terminal permit. At `low` or `medium`, a call you confirmed earlier (`jade review confirm`, `jade knows`) runs with no question. Jev may also answer a plain high call in your place when it is sure enough (`jade review` shows the silent share, your marks and the wrong-rate bound). Human-only classes (live JADE wiring, deletes that cannot be undone, money, public releases) and critical calls are asked every time, and no answer is remembered for them. A failed call closes its decision (`PostToolUseFailure`). Details and the owner page: `docs/12-jev-decides-phase1.md`.
+
+**Signed permit approval (W-38, W-89).** It is merged. With the approver installed, a high or critical permit is approved by a signature that only a separate OS account can make, and `jade gate enforce` refuses without it. Treat the installer as new: it was written and tested on one machine (`docs/10`, `docs/11`).
+
+**Hardening batch 1 (see `CHANGELOG.md`).** It added the wiring checks. `jade check` reports shadowed or disabled hooks in project, managed and plugin settings, lints the private overlay, compares the installed code with the checkout, and validates permit and improvement rows. The permit seal key is protected against Read, Grep and Glob as well as shell. After you pull a change like this, re-install the tool. When the changelog says the hook matcher changed, re-run `jade hooks install` yourself (an agent cannot: SI-09).
+
 ## 2. Versioning policy
 
 JADE follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`, one number in `pyproject.toml`, `jade.__version__`, the newest `CHANGELOG.md` heading and the tag (a test and the release workflow compare them).
@@ -81,6 +104,15 @@ uv tool install --reinstall ./jade_decision_governance-0.7.0-py3-none-any.whl
 ```
 
 Both lines of `SHA256SUMS` (wheel and sdist) must print `OK`. The checksums come from the same release page as the files: they catch a damaged or partial download, not a compromised release. For that, compare the tag's commit with the repository history.
+
+### Which release you are running
+
+This text was on the README front page before; it moved here. You install JADE from GitHub, with the install line in the README Quick start. So you trust the repository `github.com/vahidkaargar/jade-decision-governance`, its owner's account and the release tag at the moment `uv` fetches it. JADE runs on every tool call of your agent, so read what you install.
+
+- `jade upgrade` lists the files that change under `jade/`, `policies/`, `registry/` and `scripts/`, and installs only after you type yes.
+- It does not check a signature or an attestation. JADE publishes no signed tags and no build attestations.
+- A release has a `SHA256SUMS` file. It catches a damaged download. It does not catch a compromised release.
+- The release workflow refuses a tag whose commit is not on `main`, and a tag with no CHANGELOG section.
 
 ## 5. Supported platforms and known limits
 
