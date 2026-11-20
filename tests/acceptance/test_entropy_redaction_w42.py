@@ -117,6 +117,20 @@ def test_a_key_name_is_not_needed_and_does_not_change_the_kind():
     assert "[REDACTED:assignment]" in out and t not in out and hits == 1, "a name the older rules know keeps its own kind"
 
 
+def test_w80_the_name_test_skips_a_hex_heavy_token():
+    """W-80: a name has few long pieces. A hex-heavy token also has long digit runs, so the name test is skipped when every letter is a hex letter."""
+    t = "AC" + "9136682575250def" + "91799e2786d37484"   # pieces average 3.0 with the digit runs: without the skip it would pass
+    pieces = redact._PIECE.findall(t)
+    assert sum(map(len, pieces)) >= redact._PIECE_MEAN * len(pieces)
+    out, hits = redact.redact(f"sid {t} here")
+    assert t not in out and hits == 1
+
+
+def test_w80_a_counting_run_is_not_a_token():
+    for text in ("0123456789ABCDEFabcdef", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"):
+        assert redact.redact(f"v {text} w") == (f"v {text} w", 0)
+
+
 def test_pure_hex_is_not_redacted_and_that_is_the_documented_limit():
     """A 64-digit hex string is a SHA-256 as often as a key: the twins need it (F23). Named in docs/05 section 3 (accepted risk)."""
     for n in (32, 40, 64):
