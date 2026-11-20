@@ -248,16 +248,19 @@ def test_the_hook_count_a_document_states_is_len_ops_hooks():
 
 
 def test_the_counts_the_readme_states_are_the_counts_of_the_files():
+    """The "what exists" counts moved from the README front page to docs/09 section 1; the README Status row points there."""
     from jade import questions
 
-    text = _read("README.md")
+    rel = "docs/09-install-and-upgrade.md"
+    text = _read(rel)
+    assert rel in _read("README.md").split("## Status", 1)[1].split("\n## ", 1)[0], "the README Status table points at the page that holds the counts"
     schemas = [p for p in (ROOT / "schemas").glob("*.schema.json") if not p.name.startswith("_")]
     for pattern, got, what in ((r"JSON Schema contracts", len(schemas), "schemas/*.schema.json"), (r"policy files", len(list((ROOT / "policies").glob("*.yaml"))), "policies/*.yaml"),
                                (r"entry question registry", len(questions.entries()), "questions in the registry")):
-        found = [(n, t) for n, t in _numbers_before(pattern, "README.md")]
-        assert found, f"README no longer states a count for {pattern}"
-        for n, t in found:
-            assert n == got, f"README says '{t}' but {what} has {got}"
+        for doc in ("README.md", rel):   # a count the README states again must be right too
+            for n, t in _numbers_before(pattern, doc):
+                assert n == got, f"{doc} says '{t}' but {what} has {got}"
+        assert list(_numbers_before(pattern, rel)), f"{rel} no longer states a count for {pattern}"
     assert text.count("-entry question registry") == 1
 
 
@@ -274,7 +277,7 @@ def test_the_readme_does_not_state_what_only_the_live_machine_can_say():
     text = _read("README.md")
     for claim in ("maintenance job is loaded", "branch ruleset protect", "four hooks are installed", "reference machine: advisory from"):
         assert claim not in text, f"README states '{claim}': say what `jade check` shows instead"
-    assert "jade check" in text.split("## Status", 1)[1].split("## Why", 1)[0]
+    assert "jade check" in text.split("## Status", 1)[1].split("\n## ", 1)[0]
 
 
 def test_approval_times_are_stated_with_both_ways_to_approve():

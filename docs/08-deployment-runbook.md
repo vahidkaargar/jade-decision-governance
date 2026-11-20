@@ -4,7 +4,7 @@ Installing a release, upgrading, the versioning policy and a complete uninstall 
 
 What is deployed, what only a human can do, how to verify each step, and how to undo it. Written for a single macOS host; paths are the defaults.
 
-**The author's machine.** The first host this runbook was written on is the author's Mac mini (macOS). JADE runs there in enforce mode with the signed approver (since 2026-11-13). That is one machine. Nothing on it is a promise about yours: `jade check` says what is on for your machine. The public pages (`README.md`, `PRIVACY.md`, the other documents) do not name this machine, and a test keeps it that way.
+**The author's machine.** The first host this runbook was written on is the author's Mac mini (macOS). JADE runs there in enforce mode with the signed approver (since 2026-11-13). On that machine, VALIDATED can come at the earliest on 2026-11-27, after 14 days of enforce (section 5). The approver installer (`docs/10`) was written and tested there; it has not yet run on a second machine. Hardening batch 1 was merged on 2026-11-09 (`CHANGELOG.md`). These facts moved here from the README front page, which names no fact of one machine. That is one machine. Nothing on it is a promise about yours: `jade check` says what is on for your machine. The public pages (`README.md`, `PRIVACY.md`, the other documents) do not name this machine, and a test keeps it that way.
 
 ## 1. Already done by the agent (reversible, local)
 
