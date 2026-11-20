@@ -4,6 +4,9 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+### Fixed
+- **docs/02 no longer calls `FAILED` and `OUTCOME_UNKNOWN` terminal (W-166, part of V6-11).** The code never did: `state_machine.TERMINAL` holds six states, and both of these two still have exits (`FAILED` can compensate, roll back or retry; `OUTCOME_UNKNOWN` can reconcile). The page now lists the six and says how the two leave. A new test in `tests/test_docs_truth.py` compares the page with `state_machine.TERMINAL` and `state_machine.T`, so the two cannot drift apart again. Docs and test only: no code changed. Two parts of W-166 stay open for the owner: the README latency numbers need a new measurement, and the registry key fallback is a contract decision.
+
 ## [0.7.0] - 2026-11-19
 
 ### Added

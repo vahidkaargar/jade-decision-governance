@@ -351,3 +351,16 @@ def test_the_ask_text_purge_waits_in_the_backlog_for_the_owner():
     backlog = _read("BACKLOG.md")
     for w in mine:
         assert re.search(rf"^\| {w['id']} \|", backlog, re.M), f"{w['id']} missing from BACKLOG.md"
+
+
+def test_docs_02_terminal_states_are_the_ones_the_state_machine_calls_terminal():
+    """W-166 (V6-11): docs/02 listed FAILED and OUTCOME_UNKNOWN as terminal, but both have exits in `state_machine.T`."""
+    from jade import state_machine
+
+    line = _read("docs/02-contracts-and-state-machine.md").split("Resumable side states", 1)[1].split("\n", 1)[0]
+    listed = line.split("Terminal", 1)[1].split(". ", 1)[0]
+    named = set(re.findall(r"`([A-Z_]+)`", listed))
+    assert named == set(state_machine.TERMINAL), f"docs/02 terminal list {sorted(named)} != state_machine.TERMINAL {sorted(state_machine.TERMINAL)}"
+    for state in ("FAILED", "OUTCOME_UNKNOWN"):
+        assert any(src == state for (src, _ev) in state_machine.T), f"{state} has no exit in T: it would be terminal"
+        assert state not in state_machine.TERMINAL
