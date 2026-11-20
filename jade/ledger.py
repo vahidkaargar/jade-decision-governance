@@ -164,11 +164,21 @@ class Ledger:
 
         Only a file that does not exist yet is opened here (O_EXCL), and never one a connection may already hold. POSIX locks belong to the process: closing
         any descriptor of the database file drops every lock this process's other connections hold on it, and a second process may then run WAL recovery or
-        delete `-wal` and `-shm` under them ("database disk image is malformed", W-95)."""
-        try:
-            os.close(os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600))
-        except OSError:   # FileExistsError: nothing to create and no descriptor was opened
-            pass
+        delete `-wal` and `-shm` under them ("database disk image is malformed", W-95).
+
+        O_EXCL refuses any symlink, even a dangling one, and SQLite would then create the target itself with the umask mode. So a symlink at the
+        path is followed one link at a time and the same O_EXCL open is tried on its target: a file that exists is still never opened."""
+        p = str(self.path)
+        for _ in range(40):   # more links than the kernel follows (Linux 40, macOS 32): a loop ends here
+            try:
+                os.close(os.open(p, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600))
+                return
+            except FileExistsError:   # nothing was created and no descriptor was opened
+                if not os.path.islink(p):
+                    return
+                p = os.path.join(os.path.dirname(p), os.readlink(p))
+            except OSError:
+                return
 
     def _lock_down(self) -> None:
         """Mode 600 on the database and on the sidecars that exist now (an older file, or one made by another tool, is tightened too)."""
