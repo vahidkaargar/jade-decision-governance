@@ -180,8 +180,9 @@ PLAIN_HIGH = {
     "adversarial:A228": ("exact", "R-23, a file tool: exact only"), "adversarial:A229": ("exact", "R-23, a file tool: exact only"),
     "adversarial:A19": ("exact", "R-15 `git -c`: exact only"),
     "regression:R25": ("class", "R-11 `git reset --hard`: an ordinary high call, as at CONTROL in test_autonomy_floor"),
-    # class-eligible and not ordinary: each has a backlog row, and the entry goes when memory closes it (W-137 keeps the R-12 ones)
-    "adversarial:A57": ("class", "BACKLOG W-137: R-12 launchctl bootout of JADE's own agent"), "adversarial:A62": ("class", "BACKLOG W-137: R-12 launchctl remove of JADE's own agent"),
+    # R-12 calls that take JADE's own agent out of launchd (W-137 owner decision: exact only)
+    "adversarial:A57": ("exact", "R-12 launchctl bootout of JADE's own agent: exact only (W-137, owner decision)"),
+    "adversarial:A62": ("exact", "R-12 launchctl remove of JADE's own agent: exact only (W-137, owner decision)"),
     "adversarial:A224": ("exact", "R-15 git config alias that runs a program: exact only (W-137)"), "adversarial:A225": ("exact", "R-15 git config alias: exact only (W-137)"),
     "adversarial:A226": ("exact", "R-15 git config core.sshCommand: exact only (W-137)"), "adversarial:A227": ("exact", "R-15 git config set alias: exact only (W-137)"),
     "adversarial:A38": ("exact", "R-15 GIT_SSH_COMMAND: exact only (W-137)"),

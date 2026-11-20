@@ -3,7 +3,11 @@ writes a git config file from the shell (R-23) is remembered by its exact text a
 `git config alias.p '!sh b'`. The critical rules (R-01 firewall, R-03 deploy, R-04 key and secret store) are never remembered at all (V6-06); that is pinned here too,
 with the calls named in the work item, so that it cannot slip back.
 
-R-12 (service lifecycle: `launchctl`, `brew services`, `docker compose up|down`) stays a kind: whether it should be exact-only is an owner decision (W-137).
+R-12 (service lifecycle), owner decision 2026-11-20: `launchctl bootout`, `unload` and `remove` stop a service and take it out of launchd, so they are remembered by the
+exact text only (one answer for `launchctl bootout gui/501/com.a` must not cover `gui/501/com.b`, which may be the agent that runs JADE's own upkeep). The other R-12
+calls (`launchctl bootstrap|load|kickstart`, `brew services`, `docker compose up|down`) stay a kind.
+
+`security delete-internet-password` and `security delete-keychain` are in HO-delete (a human-only class, so never remembered): see test_human_only_w98b.py.
 """
 
 import pytest
@@ -77,6 +81,72 @@ def test_the_two_such_calls_do_not_share_an_answer():
 
 
 def test_control_an_ordinary_high_call_is_still_a_kind():
-    """The fix is narrow: R-12 and R-11 calls are still class-eligible (R-12 is an owner decision, listed in W-137)."""
+    """The fix is narrow: R-11 calls and the R-12 calls that start or restart a service are still class-eligible."""
     for cmd in ("docker compose up -d", "git reset --hard HEAD~1"):
         assert memory.eligibility(_a(cmd), "Bash", {"command": cmd}, {}) == "class", cmd
+
+
+LAUNCHCTL_STOP = [
+    "launchctl bootout gui/501/com.x",
+    "launchctl unload ~/Library/LaunchAgents/x.plist",
+    "launchctl unload -w x.plist",
+    "launchctl remove com.x",
+    "/bin/launchctl bootout gui/501/x",
+    "launchctl  bootout gui/501/x",
+    "'launchctl' bootout gui/501/x",
+    "env launchctl bootout gui/501/x",
+    "command launchctl remove com.x",
+    "nohup launchctl unload x.plist",
+    "time launchctl bootout gui/501/x",
+    "cd /tmp && launchctl bootout gui/501/x",
+    "(launchctl bootout gui/501/x)",
+    "xargs launchctl bootout < f",
+    "docker compose up -d && launchctl bootout gui/501/x",
+    "launchctl bootout gui/501/x; launchctl bootstrap gui/501 x.plist",
+]
+
+LAUNCHCTL_KIND = [
+    "launchctl bootstrap gui/501 x.plist",
+    "launchctl kickstart -k gui/501/x",
+    "launchctl load x.plist",
+    "brew services restart x",
+    "docker compose down",
+]
+
+
+@pytest.mark.parametrize("cmd", LAUNCHCTL_STOP)
+def test_launchctl_bootout_unload_remove_is_exact_only(cmd):
+    """Owner decision (W-137, R-12): a call that takes a service out of launchd is read from the exact text."""
+    a = _a(cmd)
+    assert a.level == "high" and "R-12" in ({a.rule_id, *a.seg_rules}), (a.rule_id, a.seg_rules)
+    tin = {"command": cmd}
+    assert memory.eligibility(a, "Bash", tin, {}) == "exact"
+    exact, cls, el = memory.keys(a, "Bash", tin, {})
+    assert exact and cls is None and el == "exact"
+    assert not [s for s in scopes.offered(a, "Bash", tin, {}, "/tmp") if s.kind == "kind_project"]
+
+
+def test_two_launchctl_bootouts_do_not_share_an_answer():
+    one, two = "launchctl bootout gui/501/com.a", "launchctl bootout gui/501/com.jade.maintain"
+    assert memory.keys(_a(one), "Bash", {"command": one}, {})[0] != memory.keys(_a(two), "Bash", {"command": two}, {})[0]
+
+
+@pytest.mark.parametrize("cmd", LAUNCHCTL_KIND)
+def test_the_other_service_calls_stay_a_kind(cmd):
+    """The rest of R-12 stays class-eligible (owner decision)."""
+    a = _a(cmd)
+    assert a.rule_id == "R-12"
+    assert memory.eligibility(a, "Bash", {"command": cmd}, {}) == "class"
+
+
+def test_launchctl_bootout_with_sudo_is_still_never():
+    cmd = "sudo launchctl bootout system/com.x"
+    assert memory.eligibility(_a(cmd), "Bash", {"command": cmd}, {}) == "never"
+
+
+@pytest.mark.parametrize("cmd", ["security delete-internet-password -s x", "security delete-keychain x.keychain"])
+def test_keychain_deletes_are_never_remembered(cmd):
+    """HO-delete (owner decision W-137): a human-only class is never remembered, in no form."""
+    a = _a(cmd)
+    assert "HO-delete" in a.ho_ids
+    assert memory.eligibility(a, "Bash", {"command": cmd}, {}) == "never"

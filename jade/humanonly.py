@@ -277,6 +277,19 @@ def _docker_push_is_remote(ops: list[str]) -> bool:
     return not (first and _LOCAL_REGISTRY.match(first))
 
 
+def _security_verb(args: list[str]) -> str:
+    """The command word of macOS `security`, past its own options (`-h -i -l -q -v`, and `-p PROMPT`, whose value may be the next word or joined: `-pX`, `-ipX`)."""
+    i = 0
+    while i < len(args) and args[i].startswith("-") and args[i] != "-":
+        a = args[i]
+        i += 1
+        if a == "--":
+            break
+        if "p" in a[1:] and a.endswith("p"):   # `-p` (or `-ip`) with its value in the next word
+            i += 1
+    return args[i] if i < len(args) else ""
+
+
 def _program_classes(prog: str, args: list[str], dirs: tuple[str, ...], cwd: str) -> set[str]:
     out: set[str] = set()
     flags = _flags(args)
@@ -322,6 +335,8 @@ def _program_classes(prog: str, args: list[str], dirs: tuple[str, ...], cwd: str
         if ("s3" in ops[:3] and ("rm" in ops[:4] or "rb" in ops[:4])) or any(_REMOTE_DELETE_VERB.match(o) for o in ops[:4]):
             out.add(HO_DELETE)
     if prog in ("gcloud", "az", "doctl", "heroku", "fly", "flyctl", "railway") and any(o in ("delete", "destroy", "apps:destroy") for o in ops[:4]):
+        out.add(HO_DELETE)
+    if prog == "security" and _security_verb(args) in ("delete-internet-password", "delete-keychain"):   # W-137 (owner decision): a Keychain item or a whole keychain
         out.add(HO_DELETE)
     if prog == "gh" and ops[1:2] == ["delete"]:   # `gh repo delete`, `gh release delete`: the word after the group; `--title delete` is an option value
         out.add(HO_DELETE)
