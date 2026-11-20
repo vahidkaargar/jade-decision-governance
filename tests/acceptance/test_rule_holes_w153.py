@@ -185,3 +185,47 @@ def test_a_never_rule_that_the_same_segment_matches_stays_with_the_call(cmd, nev
     assert memory.eligibility(a, "Bash", tin, None) == "never"
     assert proxy.skip_reason(a, "Bash", tin, "high") == "fetch-and-exec, egress, or a write to an agent instruction file"
     assert not scopes._is_plain_shell_call(a, "Bash", tin)
+
+
+# ---------------------------------------------------------------- shell spellings of the ref and the route (W-153 review)
+# bash and zsh both print `main`, `refs`, `api` for each spelling below (printf '%s|' ...): the shell resolves a backslash and adjacent quotes before gh runs.
+
+PLAIN_REF_WRITE = "gh api repos/o/r/git/refs/heads/main -X PATCH -f sha=x"
+
+
+@pytest.mark.parametrize("cmd", [
+    "gh api repos/o/r/git/refs/heads/ma\\in -X PATCH -f sha=x",
+    "gh api repos/o/r/git/refs/heads/mai''n -X PATCH -f sha=x",
+    "gh api repos/o/r/git/refs/heads/mai\"\"n -X PATCH -f sha=x",
+    "gh api repos/o/r/git/refs/heads/'main' -X PATCH -f sha=x",
+    "gh api repos/o/r/git/refs -f ref=refs/heads/ma\\in -f sha=x",
+    "gh api repos/o/r/git/refs -f ref=refs/heads/mai''n -f sha=x",
+    "gh api repos/o/r/git/refs -f ref=refs/heads/'ma'in -f sha=x",
+    "gh api repos/o/r/git/ref\\s/heads/main -X PATCH -f sha=x",
+    "gh api repos/o/r/git/re''fs/heads/main -X PATCH -f sha=x",
+    "gh a\\pi repos/o/r/git/refs/heads/main -X PATCH -f sha=x",
+    "gh a''pi repos/o/r/git/refs/heads/main -X PATCH -f sha=x",
+    "gh api repos/o/r/git/refs/heads/main -X PA\\TCH -f sha=x",
+    "gh api repos/o/r/git/refs/heads/$'ma\\x69n' -X PATCH -f sha=x",   # an ANSI-C string is not decoded: read as unreadable, so asked about
+    "gh api --jq '.a | .b' repos/o/r/git/refs/heads/ma\\in -X PATCH -f sha=x",   # a quoted `|` does not end the call in the shell's reading either
+    "gh api -f 'note=a;b' repos/o/r/git/refs/heads/mai''n -X PATCH -f sha=x",
+])
+def test_a_shell_spelling_of_a_ref_write_is_rated_like_the_plain_one(cmd):
+    from jade import memory, proxy
+    a, plain = assess(cmd), assess(PLAIN_REF_WRITE)
+    assert a.rule_id == "R-10" and gated(a)
+    assert memory.eligibility(a, "Bash", {"command": cmd}, None) == memory.eligibility(plain, "Bash", {"command": PLAIN_REF_WRITE}, None)
+    assert proxy.skip_reason(a, "Bash", {"command": cmd}, "high") == proxy.skip_reason(plain, "Bash", {"command": PLAIN_REF_WRITE}, "high")
+
+
+@pytest.mark.parametrize("cmd", [
+    "gh api repos/o/r/git/refs/heads/feat\\ure -X PATCH -f sha=x",
+    "gh api repos/o/r/git/refs/heads/fea''ture -X PATCH -f sha=x",
+    "gh api repos/o/r/git/refs -f ref=refs/heads/fe\\ature -f sha=x",
+    "gh api repos/o/r/git/refs -f ref=refs/heads/'feature' -f sha=x",
+    "gh a\\pi repos/o/r/git/refs/heads/main",
+    "gh api repos/o/r/git/ref\\s/heads/main -X G\\ET",
+    "gh api repos/o/r/git/refs/heads/mai\\nline -X PATCH -f sha=x",
+])
+def test_the_twins_of_the_shell_spellings_stay_as_they_were(cmd):
+    assert not gated(assess(cmd))
