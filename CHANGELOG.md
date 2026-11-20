@@ -4,6 +4,9 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+### Changed
+- **A skill, command or agent file made through `xargs` is now read (W-77, R-18 residual).** `echo ~/.claude/skills/n.md | xargs touch` made a new instruction file and was rated low, because the path is typed in one part of the command and written by another. Now a path that another part of the command names, and that reaches a writer `xargs` on standard input (`touch`, `cp`, `mv`, `tee`, `ln`, `install`, `sh -c` and the other writers R-18 already knows), is put in the place of the `{}` (or after the last word) and the result is rated like a typed command: high, R-18, never remembered. Writing to a file that already exists is still an edit, `rm` and a read are still low, and the words `curl` and `wget` are fed are addresses, so they are not paired. It can only raise a rating, and on 604 commands (the test fixtures and the old cases) none got lower. Already gated before, and now pinned by tests: a `{}` in a destination of `xargs -I{}` and `find -exec ... {}`. Still open, as before and written down in docs/05: a path that only the running shell or a list file knows (`xargs -a list`, `cat list | xargs`), `ln -sf` over an existing file and an edit of an existing file. Those wait for the W-39 decision.
+
 ## [0.7.0] - 2026-11-19
 
 ### Added

@@ -1763,6 +1763,90 @@ def _hidden(text: str, cwd: str, _home: str, _xdg: str) -> tuple[tuple[str, ...]
     return tuple(extra), known
 
 
+_BRACES = "\x06\x06"   # how the segmenter spells the default `{}` of `xargs -I{}`, `xargs -i` and `find -exec ... {}`
+_STDIN_PATH = re.compile(r"[\w./~$@+,:=%{}-]+")
+_XARGS_VALUE_OPTS = frozenset({"-n", "-L", "-P", "-s", "-d", "-E", "-a", "-S", "-R", "--arg-file", "--max-args", "--max-lines", "--max-procs", "--max-chars", "--delimiter",
+                               "--eof"})   # options whose value is the next word when it is not attached
+_XARGS_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+_XARGS_FETCHERS = frozenset({"curl", "wget"})
+XARGS_STDIN_CAP = 8   # xargs segments, and instruction paths named elsewhere, that are paired one by one; above that a writer `xargs` is rated R-18 whole
+
+
+def _xargs_inner(seg: str) -> tuple[str, str | None] | None:
+    """`xargs [options] command ...` as written in one segment: the command it runs (the words after its options) and its replace string
+    (`{}` is the segmenter's `\\x06\\x06`; `-I s`, `-Is`, `-J s`, `--replace=s`, `-i[s]`), None when there is none. None when the segment is not an `xargs`."""
+    words = seg.split(" ")
+    start = next((i for i, w in enumerate(words[:7]) if w.rsplit("/", 1)[-1] == "xargs"), None)
+    if start is None:
+        return None
+    i, repl = start + 1, None
+    while i < len(words) and words[i].startswith("-") and words[i] not in ("-", "--"):
+        o = words[i]
+        if o.startswith("--replace"):
+            repl = o.partition("=")[2] or _BRACES
+        elif o[:2] in ("-I", "-J"):
+            if o[2:]:
+                repl = o[2:]
+            elif i + 1 < len(words):
+                i, repl = i + 1, words[i + 1]
+        elif o[:2] == "-i":
+            repl = o[2:] or _BRACES
+        elif o in _XARGS_VALUE_OPTS:
+            i += 1
+        i += 1
+    if i < len(words) and words[i] == "--":
+        i += 1
+    inner = " ".join(w for w in words[i:] if w)
+    return (inner, repl) if inner else None
+
+
+def _put(text: str, repl: str, path: str) -> str:
+    """`text` with the replace string at the start of a word (or after `>`, `<`, `=`) made `path`. One in the middle of a word (`/tmp/backup/{}`) is a name that was listed,
+    never a whole path, and stays as it is."""
+    return re.sub(r"(?<![^\s<>=])" + re.escape(repl), lambda _: path, text)
+
+
+def _verb(command: str) -> str:
+    return system_bare(_bare(command)).split(" ")[0].rsplit("/", 1)[-1]
+
+
+def _xargs_stdin_readings(rows: list[tuple[str, tuple[str, ...]]]) -> tuple[list[tuple[str, tuple[str, ...], str]], str | None]:
+    """The commands an `xargs` runs when the instruction-file paths the rest of the command names (an `echo`, a `printf`, an `ls -d`, a `find`) are what reaches
+    it on standard input (W-77, R-18): `echo ~/.claude/skills/n.md | xargs touch` is `touch ~/.claude/skills/n.md`. Returns (segment, directories, the real `xargs` segment)
+    for each reading, and the first writer `xargs` segment when the pairing was cut at the cap (`XARGS_STDIN_CAP`), else None. Only a reading is added, the segment itself is
+    classified as before.
+
+    A path word is one the instruction-file pattern of R-18 matches (a directory without its slash too), taken from every segment that is not an `xargs`
+    and holds no replace string. A writer verb (`WRITER_VERBS`) gets the path in the place of the replace string, or after its last word when it has none. A shell
+    (`xargs -I{} sh -c 'echo x > {}'`) is read through the segment of its quoted body that holds the `{}`, the segmenter makes it one. Whole-command scope: the segmenter does not
+    say which segment feeds which, so a path named in another pipeline counts too (the safe direction)."""
+    xs = [(seg, dirs, got) for seg, dirs in rows if (got := _xargs_inner(seg))]
+    if not xs:
+        return [], None
+    rx = _skills_rule_re()
+    holders = [seg for seg, _ in rows if _BRACES in seg and not _xargs_inner(seg)]
+    paths_: list[str] = []
+    for seg, _ in rows:
+        if _xargs_inner(seg) or _BRACES in seg:
+            continue
+        for w in _bare(seg).split(" "):
+            w = w.strip("\"'")
+            if w and w not in paths_ and _STDIN_PATH.fullmatch(w) and rx.search(w if w.endswith("/") else w + "/"):
+                paths_.append(w)
+    if not paths_:
+        return [], None
+    writer = next((seg for seg, _, (inner, _) in xs if _verb(inner) in WRITER_VERBS or _verb(inner) in _XARGS_SHELLS), None)
+    out: list[tuple[str, tuple[str, ...], str]] = []
+    for seg, dirs, (inner, repl) in xs[:XARGS_STDIN_CAP]:
+        verb = _verb(inner)
+        for p in paths_[:XARGS_STDIN_CAP]:
+            if verb in WRITER_VERBS and (repl and repl in inner or verb not in _XARGS_FETCHERS):   # the words a fetcher is fed are addresses, never the file it writes
+                out.append((_put(inner, repl, p) if repl and repl in inner else f"{inner} {p}", dirs, seg))
+            if repl == _BRACES and verb in _XARGS_SHELLS:
+                out.extend((_put(h, _BRACES, p), dirs, seg) for h in holders)
+    return out, writer if len(xs) > XARGS_STDIN_CAP or len(paths_) > XARGS_STDIN_CAP else None
+
+
 def _carried_work_tree(seg: str, cur: str | None) -> str | None:
     """GIT_WORK_TREE after a segment that sets it on its own (`export GIT_WORK_TREE=~`, `GIT_WORK_TREE=~`) or unsets it; any other segment leaves it.
     A plain assignment counts too, although only an exported one reaches git: the safe direction."""
@@ -1811,7 +1895,9 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     sql_client = False   # a segment runs a database client: its statement is quoted text, so the raw command is read for it below
     wroots, mroots, sroots = _wiring_roots(), _mod_roots(), _shell_roots()
     git_wt: str | None = None   # GIT_WORK_TREE an earlier segment exported or assigned (PRE2-6)
+    rows: list[tuple[str, tuple[str, ...]]] = []   # every segment, read-only ones too: what an `xargs` is fed is read from them (W-77)
     for seg, dirs in shellnorm.segments_cwd(scan, cwd, literal_end=len(text_in)):   # a script the command writes keeps `'$X'` live (PRE2-1)
+        rows.append((seg, dirs))
         git_wt = _carried_work_tree(seg, git_wt)
         if seg.startswith(BLIND_MARK):
             labels.append(seg[len(BLIND_MARK):].split(" ", 1)[0])
@@ -1857,6 +1943,17 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         if LEVELS[seg_best["level"]] >= LEVELS[permit_floor()]:
             gated_keys.append(key)
             gated_rules.append(seg_best["id"])
+    if "xargs" in scan:   # W-77: the instruction-file paths another segment names are what a writer `xargs` is fed (R-18); only ever adds a reading
+        readings, cut = _xargs_stdin_readings(rows)
+        found = [(classify_segment(xseg, xdirs, proxied)[0], real) for xseg, xdirs, real in readings]
+        if cut:   # more pairs than the cap: a writer `xargs` next to instruction paths is rated whole
+            found.append((next(r for r in risk()["rules"] if r["id"] == "R-18"), cut))
+        for r, real in found:
+            if best is None or LEVELS[r["level"]] > LEVELS[best["level"]]:
+                best = r
+            if LEVELS[r["level"]] >= LEVELS[permit_floor()]:
+                gated_keys.append(_segment_key(_bare(real)))
+                gated_rules.append(r["id"])
     best = best or risk()["rules"][-1]
     if labels and best["level"] == "low":   # R-31 is low, so it never wins a level comparison: nothing above low matched, and what the gate could not read is the finding
         best = next(r for r in risk()["rules"] if r["id"] == "R-31")
