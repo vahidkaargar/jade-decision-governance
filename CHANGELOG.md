@@ -4,6 +4,9 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+### Changed
+- **W-128 closed: a brace inside a word no longer hides a push to main (no code change).** The row said `git push origin feature a{ :main` was not stopped. It was fixed in 0.7.0 (the five readings of a brace, see the W-129/W-130/W-132 entry) and the row was never closed. Checked on origin/main fe14b39: `a{ :main`, `a} :main`, `x={ :main`, `a{ {x} :main` are rated high by R-10 and blocked by SI-08, and `tests/test_redirect_zsh_and_braces.py` runs them in the real bash and zsh. The row is now `done`. Not changed here: W-130, whose fix is in the same 0.7.0 entry, is still marked open.
+
 ## [0.7.0] - 2026-11-19
 
 ### Added
