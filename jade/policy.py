@@ -1065,7 +1065,7 @@ _STATE_LITERAL = re.compile(r"\.config/jade(?![\w.-])|\.local/share/jade(?![\w.-
 _INSTALL_CMD = re.compile(r"\b(?:uv\s+tool\s+(?:install|upgrade|reinstall)|uv\s+pip\s+install|pip3?\s+install|pipx\s+(?:install|upgrade|reinstall)|python3?\s+-m\s+pip\s+install)\b")
 _UV_TOOL_JADE = re.compile(r"\buv\s+tool\s+(?:uninstall|upgrade|reinstall|install)\b[^;&|]*\bjade|\buv\s+tool\s+(?:uninstall|upgrade|reinstall)\b[^;&|]*--all\b")   # R-13: changes or removes the installed JADE tool itself, whatever it installs from
 _SETTINGS_FILE = re.compile(r"(?:^|/)\.claude/settings(?:\.local)?\.json$")
-_SETTINGS_DISABLE = re.compile(r"disableAllHooks|allowManagedHooksOnly|JADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME|REGISTRY_DIR|SESSION_ID)|CLAUDE_CODE_SESSION_ID|\"hooks\"\s*:\s*(?:\{\s*\}|null)", re.I)
+_SETTINGS_DISABLE = re.compile(r"disableAllHooks|allowManagedHooksOnly|" + paths.gate_env_alternation() + r"|\"hooks\"\s*:\s*(?:\{\s*\}|null)", re.I)   # W-200: the gate variables come from paths.GATE_ENV_VARS
 TERMINAL_TOOLS = frozenset({"mcp__terminal__run_in_terminal"})
 
 

@@ -878,7 +878,8 @@ def stop(event: dict) -> HookResult:
 def _override_notice(db, event: dict) -> list[str]:
     """Environment overrides in force for this hook process that weaken the gate (docs/05 T19, G05): a different policy directory, configuration or
     ledger, or a gate mode below enforce. They are shown to the session and journaled once per session, so a weakened gate is never silent."""
-    weak = [o for o in paths.gate_overrides() if o.weakens]
+    sid = event.get("session_id")
+    weak = [o for o in paths.gate_overrides(host_session_id=sid if isinstance(sid, str) else None) if o.weakens]   # W-200: CLAUDE_CODE_SESSION_ID shows only when it differs from the host's id
     if not weak:
         return []
     names = ", ".join(f"{o.var}={o.value}" for o in weak)
