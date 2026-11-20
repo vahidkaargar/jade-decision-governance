@@ -1905,15 +1905,22 @@ def classify_segment(seg: str, dirs: tuple[str, ...], proxied: bool = False, mar
     return seg_best, real_bare
 
 
-def _call_dir(call: shellnorm.GitCall, dirs: tuple[str, ...], cwd: str) -> str | None:
-    """The directory a git call runs in: the directory of the segment, then each `-C` in turn. None when one is written with a variable or a substitution."""
+def _call_dir(call: shellnorm.GitCall, dirs: tuple[str, ...], cwd: str) -> tuple[str, bool]:
+    """The directory a git call runs in: the directory of the segment, then each `-C` in turn, and whether the gate knows it. A `-C` written with a variable or a
+    substitution makes it unknown until an absolute `-C` names one again; the directory returned then is the last one the gate knew, where the user's own and the
+    system aliases (the same in every directory) are still read (W-31). Only the aliases of the repository the variable names stay unseen."""
     d = (dirs[0] if dirs else "") or cwd
+    known = True
     for c in call.dirs:
         if re.search(r"[$`\x06]", c):
-            return None
+            known = False
+            continue
         c = os.path.expanduser(c)
-        d = c if os.path.isabs(c) else os.path.join(d or os.getcwd(), c)
-    return d
+        if os.path.isabs(c):
+            d, known = c, True
+        elif known:
+            d = os.path.join(d or os.getcwd(), c)
+    return d, known
 
 
 def hidden(text: str, cwd: str = "") -> tuple[list[str], frozenset[str]]:
@@ -1936,11 +1943,12 @@ def _hidden(text: str, cwd: str, _home: str, _xdg: str) -> tuple[tuple[str, ...]
             if is_read_only(seg):
                 continue
             for call in git_calls(seg):
-                if not gitalias.candidate(call.sub) or (d := _call_dir(call, dirs, cwd)) is None:
+                if not gitalias.candidate(call.sub):
                     continue
+                d, known = _call_dir(call, dirs, cwd)
                 if (expansion := aliases.expand(call.sub, call.args, d)) is not None:
-                    extra.append(f"cd {shlex.quote(d)} && {expansion}" if d else expansion)
-    return tuple(extra), known
+                    extra.append(f"cd {shlex.quote(d)} && {expansion}" if d and known else expansion)
+    return tuple(dict.fromkeys(extra)), known   # one reading per distinct text: 1500 `git -C "$D" nuke` are one expansion, not 1500 to classify
 
 
 _BRACES = "\x06\x06"   # how the segmenter spells the default `{}` of `xargs -I{}`, `xargs -i` and `find -exec ... {}`
