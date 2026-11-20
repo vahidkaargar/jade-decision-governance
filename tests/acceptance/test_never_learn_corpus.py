@@ -185,9 +185,9 @@ PLAIN_HIGH = {
     "adversarial:A224": ("exact", "R-15 git config alias that runs a program: exact only (W-137)"), "adversarial:A225": ("exact", "R-15 git config alias: exact only (W-137)"),
     "adversarial:A226": ("exact", "R-15 git config core.sshCommand: exact only (W-137)"), "adversarial:A227": ("exact", "R-15 git config set alias: exact only (W-137)"),
     "adversarial:A38": ("exact", "R-15 GIT_SSH_COMMAND: exact only (W-137)"),
-    "adversarial:A18": ("class", "BACKLOG W-190: `git push --all origin` can push the default branch"),
-    "adversarial:A59": ("class", "BACKLOG W-190: R-16 sed -i on a JADE source file from the shell"),
-    "regression:R16": ("class", "BACKLOG W-190: composio execute GMAIL_SEND_EMAIL"),
+    "adversarial:A18": ("exact", "`git push --all origin` can push the default branch: exact only (W-190)"),
+    "adversarial:A59": ("exact", "R-16 sed -i on a JADE source file from the shell: exact only (W-190)"),
+    "regression:R16": ("never", "composio execute GMAIL_SEND_EMAIL: an action in a connected app, never remembered (W-190)"),
     "adversarial:A244": ("class", "BACKLOG W-190: git send-pack to the default branch is blocked by SI-08 in a repository; with no repository it is the push rule's kind"),
     # V6-08 N20 (gh api merges): a merge through the API is a merge: exact at most, never sent to Jev (`policy.gh_api_merge_in`, as `gh pr merge`)
     "adversarial:A246": ("exact", "a merge through gh api: exact only"), "adversarial:A247": ("exact", "a merge through gh api: exact only"),
