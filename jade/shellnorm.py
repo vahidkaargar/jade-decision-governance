@@ -17,6 +17,7 @@ Nothing here executes anything. Honest limits are listed in docs/05-threat-model
 
 from __future__ import annotations
 
+import contextvars
 import functools
 import re
 import shlex
@@ -64,6 +65,7 @@ SHELL_RE = re.compile(r"^(?:(?:ba|z|da|k|a|fi|c|tc)?sh|source|\.)$")
 INTERP_RE = re.compile(r"^(?:python[\d.]*|pypy\d*|perl\d*|ruby\d*|node(?:js)?|php\d*|osascript|lua\d*|deno|bun|pwsh|powershell|swift|rscript|tclsh|julia|groovy)$")
 STDIN_PATHS = {"/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"}
 CODE_FLAG = re.compile(r"-[a-zA-Z]*[ceEr]|--eval|--print|--command")
+SHELL_CODE_FLAG = re.compile(r"-[a-zA-Z]*c|--command")   # the option of a shell whose value is a program: `-c`; `-e` (exit on error) and `-r` (restricted) take none
 AWK_NAMES = {"awk", "gawk", "mawk", "nawk"}
 SHELL_NAME = re.compile(r"^(?:ba|z|da|k|a|fi|c|tc)?sh$")
 PLAIN = re.compile(r"[^\\'\"$`<\n;(){}&|#]+")
@@ -74,6 +76,44 @@ _INERT = re.compile(r"[;&|<>(){}`]")   # characters a quoted word may hold that 
 
 HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|(\\?)([^\s;&|<>()'\"\\`$]+))")
 HEREDOC_AT = re.compile(r"(?<!<)" + HEREDOC_OP.pattern + r"(?!<)")   # a heredoc operator, not the end of `<<<`
+_HEREDOC_STOP = frozenset(" \t\r\n;&|<>()`$")   # characters that end a delimiter word (a `$` or a backtick is no delimiter this scanner reads)
+
+
+def _heredoc_word_start(s: str, m: re.Match) -> int:
+    """The index of the delimiter word of the heredoc operator `m` matched (HEREDOC_OP or HEREDOC_AT): after `<<`, the `-` and the blanks."""
+    j = m.start() + 2 + len(m.group(1))
+    while j < len(s) and s[j] in " \t":
+        j += 1
+    return j
+
+
+def _heredoc_word(s: str, j: int) -> tuple[str, bool, int]:
+    """(delimiter, quoted, index after it) of the heredoc delimiter word at s[j]: the shell takes the quotes off a word that is quoted in part (`E"O"F`, `E\\OF`, `'E'OF` are all `EOF`),
+    and any quote at all stops the expansion of the body. A quote that is not closed on the line ends the word before it, as the operator pattern read it."""
+    out: list[str] = []
+    quoted = False
+    n = len(s)
+    while j < n and s[j] not in _HEREDOC_STOP:
+        c = s[j]
+        if c in "'\"":
+            e = s.find(c, j + 1)
+            if e < 0 or "\n" in s[j:e]:
+                break
+            out.append(s[j + 1:e])
+            quoted = True
+            j = e + 1
+        elif c == "\\":
+            if j + 1 >= n or s[j + 1] == "\n":
+                break
+            out.append(s[j + 1])
+            quoted = True
+            j += 2
+        else:
+            out.append(c)
+            j += 1
+    return "".join(out), quoted, j
+
+
 # A word that starts with `#` ends the stage: the shell ignores it and the rest of the line (V6-08, N18). Before, ` # x` after `| sh` read as two arguments
 # and hid that the stage reads its pipe as code.
 NEXT_STAGE = re.compile(
@@ -91,22 +131,30 @@ def _unescape_dq(body: str) -> str:
     return re.sub(r'\\([$`"\\])|\\\r?\n', lambda m: m.group(1) or "", body)
 
 
-_ECHO_ESCAPE = re.compile(r"\\(c.*|0[0-7]{1,3}|x[0-9A-Fa-f]{1,2}|[\\abefnrtv]|.)", re.S)
+_ECHO_ESCAPE = re.compile(r"\\(c.*|0[0-7]{1,3}|x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|[\\abefnrtv]|.)", re.S)   # `echo` (zsh, sh): a number is `\0nnn`
+_PRINTF_ESCAPE = re.compile(r"\\(c.*|[0-7]{1,3}|x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|[\\abefnrtv]|.)", re.S)   # `printf`, `print`: `\nnn`, with or without the 0
 
 
-def _echo_escapes(text: str, drop_unknown: bool = False) -> str:
-    """What `echo` of zsh and sh (and `printf`, `print`) prints for `text`: `\\\\` is a backslash, `\\n` a newline, `\\c` ends the output; any other escape stays as it is,
-    or (`drop_unknown`, zsh `print`) loses its backslash."""
+def _echo_escapes(text: str, drop_unknown: bool = False, octal3: bool = False) -> str:
+    """What `echo` of zsh and sh (and `printf`, `print`) prints for `text`: `\\\\` is a backslash, `\\n` a newline, `\\c` ends the output, `\\xhh`, `\\uhhhh` and `\\Uhhhhhhhh` are
+    a character; any other escape stays as it is, or (`drop_unknown`, zsh `print`) loses its backslash. A number is `\\0nnn` (`echo`) or, with `octal3` (`printf`, `print`), `\\nnn`
+    of at most three digits with or without the 0 (W-133, F8 and DIFF-4: `printf 'git pu\\163h'` is `git push`)."""
     def one(m: re.Match) -> str:
         e = m.group(1)
-        if m.group(0)[1] == "c":
+        k = e[0]
+        if k == "c":
             return ""   # `\c` ends the output
-        if len(e) > 1:
-            return chr(int(e[1:], 16 if e[0] == "x" else 8))   # `\0nnn`, `\xhh`
+        code = None
+        if k in "xuU" and len(e) > 1:
+            code = int(e[1:], 16)
+        elif k in "01234567" and (octal3 or len(e) > 1):
+            code = int(e, 8) if octal3 else int(e[1:], 8)
+        if code is not None:
+            return chr(code) if 0 < code < 0x110000 else ""   # a NUL is dropped by the shell that reads the text
         if e in "abefnrtv\\":
             return {"\\": "\\", "n": "\n"}.get(e, " " if e in "tvfr" else "")
         return e if drop_unknown else "\\" + e
-    return _ECHO_ESCAPE.sub(one, text)
+    return (_PRINTF_ESCAPE if octal3 else _ECHO_ESCAPE).sub(one, text)
 
 
 def _code(body: str) -> str:
@@ -131,8 +179,18 @@ def _match_arith(s: str, j: int) -> int:
     return j
 
 
+_ANSI_BASH: contextvars.ContextVar[bool] = contextvars.ContextVar("jade_ansi_bash", default=False)
+
+
 def _ansi_c(s: str, j: int) -> tuple[int, str]:
+    """The end index and the text of the `$'...'` string that starts at s[j].
+
+    `\\cx` is a plain `c` in zsh (the reading of main and the current reading: `$'a\\c b'` is `ac b`), and a control character in bash: the one for a space, `@` or a backtick is a
+    NUL and ends the string (`$'a\\c b'` is `a`), `\\cj` is a newline. The reading of bash is a reading of the whole command of its own (`_skeleton_both_top`, W-133 F10), switched on
+    by `_ANSI_BASH` while it is made."""
+    bash = _ANSI_BASH.get()
     out: list[str] = []
+    cut = -1   # where a NUL ended the string (bash): the text after it is scanned for the closing quote and dropped
     n = len(s)
     while j < n and s[j] != "'":
         c = s[j]
@@ -141,6 +199,16 @@ def _ansi_c(s: str, j: int) -> tuple[int, str]:
             j += 1
             continue
         d = s[j + 1]
+        if bash and d == "c" and j + 2 < n and s[j + 2] != "'":
+            code = 0x7f if s[j + 2] == "?" else ord(s[j + 2]) & 0x1f
+            if not code:
+                cut = len(out) if cut < 0 else cut
+                j += 3
+                continue
+            if 9 <= code <= 13:   # a control character that is a blank or a line end splits the words; any other one only adds a byte to a word, as the plain `c` does
+                out.append(chr(code))
+                j += 3
+                continue
         m = re.compile(r"x([0-9a-fA-F]{1,2})|([0-7]{1,3})|u([0-9a-fA-F]{1,4})|U([0-9a-fA-F]{1,8})").match(s, j + 1)
         if m:
             code = int(m.group(1) or m.group(3) or m.group(4) or m.group(2), 16 if m.group(2) is None else 8)
@@ -149,7 +217,7 @@ def _ansi_c(s: str, j: int) -> tuple[int, str]:
             continue
         out.append({"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "f": "\f", "v": "\v", "e": "\x1b", "E": "\x1b"}.get(d, d))
         j += 2
-    return j + 1, _MARK_CHARS.sub("\x06", "".join(out))   # `$'\x0f'` is a word, not the mark of a brace (DF-6)
+    return j + 1, _MARK_CHARS.sub("\x06", "".join(out if cut < 0 else out[:cut]))   # `$'\x0f'` is a word, not the mark of a brace (DF-6)
 
 
 def _command_word(stage_text: str) -> tuple[str, list[str]]:
@@ -178,7 +246,9 @@ def _stdin_kind(word: str, args: list[str]) -> str | None:
             skip = False
         elif a in ("-o", "+o", "-W", "-X", "-O") or (a == "-l" and w == "osascript"):   # `osascript -l JavaScript` names the language, the script is on stdin
             skip = True
-        elif CODE_FLAG.fullmatch(a):
+        elif (SHELL_CODE_FLAG if kind == "shell" else CODE_FLAG).fullmatch(a):   # for a shell `-e` and `-r` are no code flags (`sh -e -x`, W-133 F6)
+            if kind == "shell" and idx == len(args) - 2 and SHELL_NAME.fullmatch(args[idx + 1].strip("'\"")):
+                return kind   # `sh -c sh`: the shell it starts reads the pipe
             return kind if idx == len(args) - 1 or args[idx + 1:idx + 2] == ["{}"] else None  # `xargs sh -c`, `xargs -I{} sh -c {}`: the script arrives on stdin
         elif not a.startswith("-"):
             return None
@@ -217,12 +287,15 @@ def _leaves_stdin(s: str, at: int) -> bool:
 # The text of a stage up to the first separator the reader below stops at, with a backslash-newline counted as part of it (V6-08 review, N18): the length of the stage, not of the rest of the line.
 _STAGE_EXTENT = re.compile(r"(?:[^\n\\;&|()<>]|\\\r?\n|\\.)*", re.S)
 _CONTINUATION = re.compile(r"\\\r?\n")
+_GROUP_OPEN = re.compile(r"[ \t]*(?:\((?!\()|\{(?=[ \t]))[ \t]*")   # the `(` of a subshell (not `((`) and the `{ ` of a group
 
 
 def _next_stage_kind(s: str, j: int) -> str | None:
     """What the stage that starts at s[j] does with its stdin: the language it reads as code, or None. A stage whose stdin is redirected from a heredoc, a
     here-string or a file does not read the pipe at all (`curl .. | python3 - <<'PY'`). A backslash-newline is no text to the shell, so it is taken out first:
     `sh \\<NL># x` is `sh` and a comment, `| \\<NL>  sh` is `| sh` (V6-08 review, N18)."""
+    while (g := _GROUP_OPEN.match(s, j)):   # `| (sh)`, `| { sh; }`: the group hands its stdin to the first command in it (W-133, F6)
+        j = g.end()
     chunk = s[j:_STAGE_EXTENT.match(s, j).end() + 8]
     if "\\\n" in chunk or "\\\r\n" in chunk:
         s, j = _CONTINUATION.sub("", chunk), 0
@@ -1056,7 +1129,8 @@ class _Scan:
         if "\\" in text and printer.group("name") in ("echo", "printf", "print"):
             # what the program prints is not what it is given: zsh and sh `echo` and `printf` read `\\` and `\n`, zsh `print` also drops the backslash of any
             # other escape (`\>` prints `>`), bash `echo` prints the text as it is. The shell that reads the output may be any of them: every reading is read.
-            readings += [_echo_escapes(text), _echo_escapes(text, drop_unknown=True)]
+            # (W-133) the numbers: `echo` reads `\0nnn`, `printf` and zsh `print` read `\nnn`, and `\u` and `\U` are read by zsh `echo` and `print`, bash 5 `printf` and `echo -e`
+            readings += [_echo_escapes(text, drop, o3) for o3 in (False, True) for drop in (False, True)]
         return " ; ".join([*(self._sub(t) for t in dict.fromkeys(readings)), *([stdin] if stdin else [])])
 
     @staticmethod
@@ -1077,7 +1151,7 @@ class _Scan:
                         acc.append(line)
                     continue
                 for m in HEREDOC_AT.finditer(line):
-                    delim = m.group(2) if m.group(2) is not None else m.group(3) if m.group(3) is not None else m.group(5)
+                    delim = _heredoc_word(line, _heredoc_word_start(line, m))[0]
                     pending.append((delim, bool(m.group(1)), []))
             for _, _, acc in pending:   # a heredoc that is not closed runs to the end of the text
                 out.append("\n".join(acc))
@@ -1416,14 +1490,14 @@ class _Scan:
                 emit("<<<")
                 i += 3
             elif c == "<" and s.startswith("<<", i) and (m := HEREDOC_OP.match(s, i)):
-                quoted = m.group(2) is not None or m.group(3) is not None or bool(m.group(4))
-                delim = m.group(2) if m.group(2) is not None else m.group(3) if m.group(3) is not None else m.group(5)
+                delim, quoted, word_end = _heredoc_word(s, _heredoc_word_start(s, m))   # the whole word: `<<E"O"F` is the delimiter EOF, quoted (W-133, F9)
+                end = max(m.end(), word_end)
                 own = _stdin_kind(*_command_word(cur))
-                after = _rest_of_line_pipes_to_code(s, m.end())
+                after = _rest_of_line_pipes_to_code(s, end)
                 kind = own or after
                 pending.append((delim, quoted, bool(m.group(1)), kind, own not in (None, "shell") and after == "shell"))   # last: a program whose output is piped to a shell
                 emit("<<HEREDOC")
-                i = m.end()
+                i = end
             elif c == "\n":
                 nl = i
                 emit("\n")
@@ -1524,8 +1598,14 @@ class _Scan:
 
 
 @functools.lru_cache(maxsize=16)
-def _skeleton_top(command: str, literal_end: int, legacy: bool = False, ssh: bool = True, targets: bool = False) -> str:
-    return _skeleton(command, 0, None, literal_end, legacy, ssh, targets)
+def _skeleton_top(command: str, literal_end: int, legacy: bool = False, ssh: bool = True, targets: bool = False, ansi_bash: bool = False) -> str:
+    if not ansi_bash:
+        return _skeleton(command, 0, None, literal_end, legacy, ssh, targets)
+    token = _ANSI_BASH.set(True)   # bash's reading of `$'\\c'` for the whole scan, at every depth and in every word list (W-133, F10)
+    try:
+        return _skeleton(command, 0, None, literal_end, legacy, ssh, targets)
+    finally:
+        _ANSI_BASH.reset(token)
 
 
 def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None, literal_end: int | None = None, ssh: bool = True) -> str:
@@ -1747,7 +1827,8 @@ _QUOTED_VAR = re.compile(r"'[^']*\$|\"[^\"]*\$\{")   # the two places the curren
 def _skeleton_both_top(command: str, literal_end: int) -> tuple[tuple[str, bool], ...]:
     """The readings of a command, each as (text, is_current): the current reading; the current reading with a single-quoted `$X` and a double-quoted `${NAME}` read as main read
     them (`literal_end` 0, `legacy`), when the command has one and the two differ; the current reading with every result of a brace word after a redirect operator a target of its own
-    (`git > {a,b} push origin main`, zsh), when the command has one and the two differ; and origin/main's own reading (cut as main cut it). Every one is a command line of its own, so the rating and the push check are the stricter
+    (`git > {a,b} push origin main`, zsh), when the command has one and the two differ; the current reading with bash's `\\c` in `$'...'` (a NUL ends the string), when the command has one and the
+    two differ; and origin/main's own reading (cut as main cut it). Every one is a command line of its own, so the rating and the push check are the stricter
     of all of them: a literal `'$B'` that is one reading's branch name stays the other readings' unknown branch (PR 46 merge review, ADV-1 and ADV-2)."""
     command = _JOIN_CHAR.sub("\x06", command)   # a byte that is the join stays a word
     out = [(_skeleton_top(command, literal_end), True)]
@@ -1759,6 +1840,10 @@ def _skeleton_both_top(command: str, literal_end: int) -> tuple[tuple[str, bool]
         multi = _skeleton_top(command, literal_end, False, True, True)
         if multi != out[0][0]:
             out.append((multi, True))
+    if "$'" in command and "\\c" in command:   # bash ends a `$'...'` string at `\\c ` and reads `\\cj` as a newline, zsh reads `\\c` as a `c`: `git push origin $'main\\c@'` (W-133, F10)
+        ansi = _skeleton_top(command, literal_end, False, True, False, True)
+        if all(ansi != text for text, _ in out):
+            out.append((ansi, True))
     floor = _base_skeleton(command)
     if all(floor != text for text, _ in out):
         out.append((floor, False))
