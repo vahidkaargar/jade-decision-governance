@@ -114,3 +114,26 @@ def test_a_ledger_with_text_freed_before_secure_delete_is_rebuilt_by_the_first_s
     assert db.scrub() is True
     found = [name for name, b in file_bytes(db) if MARK.encode() in b]
     assert not found, found
+
+
+def test_a_purge_that_clears_no_row_runs_no_scrub():
+    """What the docs say (review of W-76): a skipped scrub is repeated only by a later purge that clears at least one row."""
+    db = ledger.open()
+    seen = statements(db)
+    assert ops.purge(db, 90) == 0
+    assert vacuums(seen) == 0 and checkpoints(seen) == 0
+
+
+def test_the_docs_do_not_promise_that_a_skipped_scrub_is_reported_or_repeated():
+    """Review of W-76: no caller reads the result of `Ledger.scrub`, so neither `jade maintain` nor `jade ledger purge` shows a skipped scrub."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    retention = next(p for p in root.joinpath("docs/05-threat-model.md").read_text().split("\n") if p.startswith("**Retention.**"))
+    entry = next(p for p in root.joinpath("CHANGELOG.md").read_text().split("\n- ") if "(W-76, T17)" in p)
+    doc = ledger.Ledger.scrub.__doc__ or ""
+    for name, text in (("docs/05", retention), ("CHANGELOG", entry), ("Ledger.scrub", " ".join(doc.split()))):
+        assert "reports so" not in text and "also reports a checkpoint" not in text and "the next purge repeats it" not in text, name
+        assert "the next purge that clears at least one row" in text, name
+    for name, text in (("docs/05", retention), ("CHANGELOG", entry)):
+        assert "neither `jade maintain` nor `jade ledger purge` shows that a scrub was skipped" in text, name
