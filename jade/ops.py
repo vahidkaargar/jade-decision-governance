@@ -563,20 +563,28 @@ def hooks_status() -> dict[str, bool]:
     return out
 
 
+PRETOOL_PROBE_TOOLS = (*policy.GATED_BUILTIN, "AskUserQuestion", "mcp__server__tool")   # every tool the PreToolUse matcher must cover; the last stands for every MCP tool
+
+
+def _matcher_covers(m: str, tool: str) -> bool:
+    """An empty matcher covers every tool. A matcher that is not a valid regex covers nothing (review of W-141): JADE cannot tell what the host makes of it,
+    so it is never counted as a check."""
+    if not m:
+        return True
+    try:
+        return re.fullmatch(m, tool) is not None
+    except re.error:
+        return False
+
+
 def pretool_matcher_gaps() -> list[str] | None:
-    """Gated tools the installed PreToolUse matcher does not cover (an install made before the matcher grew). None when the hook is not installed."""
+    """Gated tools the installed PreToolUse matcher does not cover (an install made before the matcher grew, or a matcher that is not a valid regex). None
+    when the hook is not installed."""
     data = _read_quiet(settings_path())
     matchers = [g.get("matcher", "") for event, g, _h, p in _jade_hooks(data) if event == "PreToolUse" and p.sub == "pretool"]
     if not matchers:
         return None
-    gaps = []
-    for tool in (*policy.GATED_BUILTIN, "AskUserQuestion", "mcp__server__tool"):
-        try:
-            if not any(re.fullmatch(m, tool) if m else True for m in matchers):
-                gaps.append(tool)
-        except re.error:
-            return [tool]
-    return gaps
+    return [tool for tool in PRETOOL_PROBE_TOOLS if not any(_matcher_covers(m, tool) for m in matchers)]
 
 
 def _require_human(what: str, stdin_isatty: bool | None = None) -> None:
@@ -879,11 +887,16 @@ def _what_blocks_row(pretool_ok: bool | None = None, wiring: list[str] | None = 
             return ("what blocks", None, "nothing blocks: the PreToolUse hook is not installed; run `jade hooks install` in a terminal")
         if wiring is None:
             wiring = wiring_problems(probe=False)   # static facts only: the live probe has run or will run for the `hook wiring` row
+        covered = [t for t in PRETOOL_PROBE_TOOLS if t not in gaps]
+        if not covered:
+            return ("what blocks", None, "nothing blocks: the PreToolUse matcher covers no gated tool (or is not a valid regex), so no call gets a check; "
+                                         "run `jade hooks install` in a terminal")
         _ok, text = blocking_summary()
         if gaps:
             names = ", ".join("every MCP tool" if g == "mcp__server__tool" else g for g in gaps)
+            checked = ", ".join("every MCP tool" if g == "mcp__server__tool" else g for g in covered)
             lead = (f"the PreToolUse matcher does not cover {names}: a call to those tools gets no check at all; run `jade hooks install` in a terminal; "
-                    "every other gated tool is checked as follows: ")
+                    f"every other gated tool ({checked}) is checked as follows: ")
         else:
             lead = ("the PreToolUse hook is out of date (its timeout or failure setting) but still runs, so a crashed or hung gate may let a call run; "
                     "run `jade hooks install` in a terminal; when the gate runs it blocks as follows: ")

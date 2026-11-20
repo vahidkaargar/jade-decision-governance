@@ -233,7 +233,7 @@ def test_what_blocks_names_the_tools_a_matcher_gap_leaves_unchecked(monkeypatch)
     assert not detail.startswith("nothing blocks"), detail
     assert "does not cover Read, Grep, Glob, AskUserQuestion" in detail, detail
     assert "no check at all" in detail and "jade hooks install" in detail, detail
-    assert "every other gated tool is checked as follows: every safety invariant (" in detail, detail
+    assert "every other gated tool (Bash, " in detail and ", every MCP tool) is checked as follows: every safety invariant (" in detail, detail
     assert "held for a human approval" in detail, detail
 
 
@@ -269,6 +269,42 @@ def test_what_blocks_in_the_gap_case_is_unknown_when_the_wiring_has_problems(mon
     ok, detail = rows()["what blocks"]
     assert ok is None and detail.startswith("unknown: the hook wiring has problems"), detail
     assert "does not cover Read" in detail, detail
+
+
+def _install_with_pretool_matchers(matchers):
+    """A real settings file (nothing mocked): `jade hooks install`, then the JADE PreToolUse group once per matcher (review of W-141)."""
+    ops.hooks_install(stdin_isatty=True)
+    p = ops.settings_path()
+    data = json.loads(p.read_text())
+    group = data["hooks"]["PreToolUse"][0]
+    data["hooks"]["PreToolUse"] = [{**group, "matcher": mt} for mt in matchers]
+    p.write_text(json.dumps(data))
+
+
+def test_an_invalid_pretool_matcher_covers_nothing_and_the_row_names_every_tool_it_misses():
+    """Review of W-141: with matchers `Bash` and `(` (not a valid regex) only Bash is checked. `pretool_matcher_gaps` stopped at the first tool on
+    `re.error`, so the row named one tool and said "every other gated tool is checked", which was false for Write, Edit, every MCP tool and the rest."""
+    setup_pair("enforce", "high")
+    _install_with_pretool_matchers(["Bash", "("])
+    gaps = ops.pretool_matcher_gaps()
+    assert "Bash" not in gaps and {"Write", "Edit", "Monitor", "AskUserQuestion", "mcp__server__tool"} <= set(gaps), gaps
+    assert gaps == [t for t in (*policy.GATED_BUILTIN, "AskUserQuestion", "mcp__server__tool") if t != "Bash"], gaps
+    ok, detail = rows()["what blocks"]
+    assert ok is None, detail
+    covered_list = detail.split("does not cover ", 1)[1].split(":", 1)[0]
+    assert "Bash" not in covered_list and "Write" in covered_list and "Edit" in covered_list and "every MCP tool" in covered_list, detail
+    assert "every other gated tool (Bash) is checked as follows: every safety invariant (" in detail, detail
+
+
+def test_a_pretool_matcher_that_covers_no_gated_tool_means_nothing_blocks():
+    """Every matcher invalid (or none that matches a gated tool): no gated call is checked, so the row says "nothing blocks", never "every other tool"."""
+    setup_pair("enforce", "high")
+    _install_with_pretool_matchers(["("])
+    assert ops.pretool_matcher_gaps() == [*policy.GATED_BUILTIN, "AskUserQuestion", "mcp__server__tool"]
+    ok, detail = rows()["what blocks"]
+    assert ok is None, detail
+    assert detail.startswith("nothing blocks: the PreToolUse matcher covers no gated tool"), detail
+    assert "every other gated tool" not in detail and "blocks;" not in detail and "jade hooks install" in detail, detail
 
 
 def test_what_blocks_is_unknown_when_the_hook_wiring_has_problems(monkeypatch):
