@@ -1046,7 +1046,7 @@ def review_lines(db, since_s: float | None) -> list[str]:
     jev = db.con.execute("SELECT latency_ms, cost_usd FROM jev_calls WHERE question_id='q.human_proxy.would_allow' AND ts>=? AND COALESCE(source,'')<>'test' AND state='DONE' "
                          "AND dedup_of IS NULL AND error_kind IS NULL", (since,)).fetchall()
     asked = db.con.execute(f"SELECT COUNT(*) FROM human_answers WHERE COALESCE(ho,0)=0 AND ts>=? AND {live}", (since,)).fetchone()[0]   # noqa: S608
-    from . import proxy
+    from . import audit, proxy
 
     plain_all = proxy.owner_answers(db)
     if not silent and not plain_all and not jev:
@@ -1082,14 +1082,17 @@ def review_lines(db, since_s: float | None) -> list[str]:
         allowed = sum(1 for r in silent if r["kind"] == "jev_allowed")
         lat = sorted(r["latency_ms"] or 0.0 for r in jev)
         out.append(f"Jev for you: {len(jev)} call(s), {allowed} allowed, {len(jev) - allowed} not decided by Jev (shadow, abstain or reject); cost ${sum(r['cost_usd'] or 0.0 for r in jev):.4f}, median latency {lat[len(lat) // 2]:.0f} ms")
-    for r in silent[:5]:
-        did = json.loads(r["detail_json"]).get("decision_id") if r["detail_json"] else None
+    shown = silent[:5]
+    dids = [json.loads(r["detail_json"]).get("decision_id") if r["detail_json"] else None for r in shown]
+    ran = audit.sealed_calls(db, dids)   # W-207: the call that ran (text and folder, sealed when it was drawn), as in the audit walk; an older run has none and keeps the label
+    for r, did in zip(shown, dids, strict=True):
         if r["kind"] == "jev_allowed":
             det = json.loads(r["detail_json"])
             a = {"rule_id": det.get("rule"), "label": det.get("label")}
         else:
             a = db.con.execute("SELECT rule_id, label FROM human_answers WHERE answer_id=?", (r["entity_id"],)).fetchone()
-        out.append(f"  {did}  [{a['rule_id'] if a else '?'}]  {_shown_line(a['label'] if a else '')}  {('(marked ' + marks[did] + ')') if did in marks else ''}".rstrip())
+        what = audit.describe(ran[did], _shown_line) if did in ran else _shown_line(a["label"] if a else "")
+        out.append(f"  {did}  [{a['rule_id'] if a else '?'}]  {what}  {('(marked ' + marks[did] + ')') if did in marks else ''}".rstrip())
     return out
 
 
@@ -1122,7 +1125,7 @@ def review_mark(decision_id: str, mark: str, stdin_isatty: bool | None = None) -
                                      (memory.exact_key(a["hold_key"], a["fingerprints_json"]),)).fetchall() if a else []
         with db.tx():
             db.event(decision_id, "review_mark", guard=f"jade review mark {mark}", actor=f"human:{user()}", detail={"mark": mark, "answer_ids": [r["answer_id"] for r in answers if r["answer_id"]]})
-            if ask.get("channel") == "memory":   # V6-29: a call that ran from a standing answer: evidence for it (right), or its scope is paused (wrong)
+            if ask.get("channel") in ("memory", "jev"):   # V6-29, W-207: a call that ran from a standing answer or by Jev: its drawn row is checked, and a wrong one pauses its scope
                 from . import audit
 
                 audit.on_mark(db, decision_id, mark, [r["answer_id"] for r in answers if r["answer_id"]])

@@ -81,7 +81,7 @@ To roll back: stop the draw by removing the call to `audit.admit` in `memory.ste
 ## 8. Not built here
 
 - Stage 2 (sampling with a chance below 1, a fixed weekly count). The function `audit.stage2_prob` and the `stage` column exist. Nothing sets the stage. Lifting the cap is V6-30, after 59 clean checks from 10 sessions and your written yes.
-- The audit of silent allows by Jev (`jev_allowed`). They are not drawn. (A call that the audit holds, because its scope is paused or a limit was reached, is not given to Jev: Jev can not run it in your place.) V6-30 runs with `jev off`.
+- (Built in W-207: the audit of silent allows by Jev, `jev_allowed`. A Jev yes goes through `audit.admit` and `audit.record` like a standing answer: when the scope is paused, a limit is reached or there is no key, the owner is asked; when it is admitted, the call is drawn with its sealed text and folder, and `jade review mark` checks it. A call that the audit holds before Jev is asked is still not given to Jev. They share the weekly budget with the standing answers.)
 - The pause at an approve rate above 95% for the new asks. The plan marks a pause as a loosening. The approve rate of asks is shown by `jade review` (V6-23).
 - Honeypots (fake asks). Not built (LD-11).
 - The expiry of an unconfirmed hint older than 30 days.

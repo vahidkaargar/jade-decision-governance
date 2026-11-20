@@ -32,7 +32,7 @@ import threading
 import time
 from datetime import timedelta
 
-from . import adapter, ask, ledger, memory, paths
+from . import adapter, ask, audit, ledger, memory, paths
 from .util import canonical, now, parse_ts, sha256, ts
 
 QID = "q.human_proxy.would_allow"
@@ -362,10 +362,16 @@ def step(db, mode: str, a, tool: str, event: dict, fp: dict, cwd: str, started: 
         with db.tx():
             if hooks._si07_hold(db, a):   # another identical call became a decision while Jev was answering: the owner is asked
                 return None
+            drawn = {"scope_key": None, "class_key": cls, "family_key": None, "exact_key": exact, "answer_id": item.call_id, "rule_id": a.rule_id}   # W-207: no answer row; the Jev call stands in
+            adm, why = audit.admit(db, drawn)   # a run Jev cannot have audited (a paused scope, a limit reached, no key) is the owner's question, as for a standing answer
+            if adm is None:
+                audit.refused(db, drawn, why)
+                return None
             did = askchat.run_decision(db, a, tool, cwd, session, item.call_id[-12:], "jev")
             db.event(item.call_id, "jev_allowed", guard=f"{a.rule_id} {a.level}", actor="hook",
                      detail={"decision_id": did, "rule": a.rule_id, "label": decide_label(a), "exact_key": exact, "class_key": cls, "coarse_key": coarse,
                              "p": item.verdict.value, "band": item.verdict.accept})
+            audit.record(db, adm, drawn, did, session, a.subject, cwd)   # the draw, in the same transaction: no row written, no silent run
     except state_machine.IllegalTransition:
         return None
     return HookResult(0, f"JADE: Jev judged this {tool} call from your preferences and past answers (rule {a.rule_id}, P={item.verdict.value:.2f}, needs "
