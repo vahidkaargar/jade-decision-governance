@@ -1489,13 +1489,18 @@ def _into_targets(bare: str) -> list[tuple[str, bool, bool, bool]]:
 
 # W-82: where a copy lands when the words name a DIRECTORY or a glob, so that R-13 (which reads path text) still sees the protected file it writes.
 # `cp /tmp/e/settings.json ~/.claude/` writes `~/.claude/settings.json`, but the words only say `~/.claude/`. The path is the directory and the name of the source, which
-# is typed: the same reading the human-only classes make of an exact file copied under its own name (`_into_targets`). Only a name that is typed counts. A source whose name
-# is not known (a glob, a variable the command did not set to a literal, a tree's content, an archive) is NOT guessed at: whether `cp *.json ~/.claude/` or
-# `tar -xf a.tar -C ~/.claude` should be high is the owner's decision (W-82, docs/05 T19), and those stay as they were.
+# is typed: the same reading the human-only classes make of an exact file copied under its own name (`_into_targets`). Only a name that is typed counts here. A source whose
+# name is not known (a glob, a variable the command did not set to a literal, a tree's content, an archive) is NOT guessed at: it is read by `unseen_into_dedicated` below,
+# which is high only when the directory it lands in is one made for protected files (the owner's decision, W-82, docs/05 T19).
 _DIR_DEST_VERBS = frozenset({"cp", "gcp", "mv", "install", "ln", "rsync", "ditto"})
 _GLOB_CHARS = re.compile(r"[*?\[]")
 DIR_GLOB_CAP = 4096          # matches of a glob destination that are examined
 DIR_GLOB_COMPONENTS = 3      # a glob destination with more wildcard components than this is not expanded (the walk is the cost)
+DIR_GLOB_WALKS = 16          # different glob destinations walked in one command; one past that is read as written (`cp s1* /usr/*/*/; cp s2* /usr/*/*/; ...`)
+_GLOBS: dict[str, list[str]] | None = None   # set for the length of one `assess` only: the glob destinations walked so far
+_DESTS: dict[tuple[str, tuple[str, ...]], list[tuple[str, bool]]] | None = None   # set for the length of one `assess` only: `_dest_bases` answers
+DIR_GLOB_SPEND = 20000       # glob-destination matches handed out in one command; past that a glob destination is read as written
+_GLOB_SPENT: list[int] | None = None   # set for the length of one `assess` only: the matches handed out so far
 
 
 def _glob_matches(pattern: str) -> list[str]:
@@ -1503,6 +1508,12 @@ def _glob_matches(pattern: str) -> list[str]:
     `**` or many wildcard components, whose walk could cost more than the command."""
     if "**" in pattern or sum(1 for c in pattern.split("/") if _GLOB_CHARS.search(c)) > DIR_GLOB_COMPONENTS:
         return []
+    memo = _GLOBS
+    if memo is not None:   # inside one `assess`: a pattern is walked once, and at most DIR_GLOB_WALKS different patterns are walked at all
+        if pattern in memo:
+            return memo[pattern]
+        if len(memo) >= DIR_GLOB_WALKS:
+            return []
     out: list[str] = []
     try:
         for m in glob.iglob(pattern):
@@ -1511,12 +1522,30 @@ def _glob_matches(pattern: str) -> list[str]:
                 break
     except (OSError, ValueError, re.error):
         pass
+    if memo is not None:
+        memo[pattern] = out
     return out
 
 
 def _dest_bases(base: str, dirs: tuple[str, ...]) -> list[tuple[str, bool]]:
     """The destination `base` as (path, is_a_directory) for every directory the command may run in: absolute with symlinks resolved, a glob as what it matches now. A path
-    is a directory when it ends in `/`, is `.` or `..`, or exists as one. A relative path with no directory to resolve it in is read as written."""
+    is a directory when it ends in `/`, is `.` or `..`, or exists as one. A relative path with no directory to resolve it in is read as written. Inside one `assess` the
+    answer for a (base, dirs) is kept: a long command that names one glob destination many times resolves its matches once."""
+    memo = _DESTS
+    if memo is None:
+        return _dest_bases_now(base, dirs)
+    key = (base, dirs)
+    if key not in memo:
+        memo[key] = _dest_bases_now(base, dirs)
+    got = memo[key]
+    if _GLOB_SPENT is not None and _GLOB_CHARS.search(base):   # a glob destination: every match is read by the caller, so the matches handed out in one command are bounded too
+        if _GLOB_SPENT[0] >= DIR_GLOB_SPEND:
+            return [(_pathfold(_expand_home(base.strip("\"'"))), base.endswith("/"))]   # read as written, as a pattern that is not expanded
+        _GLOB_SPENT[0] += len(got)
+    return got
+
+
+def _dest_bases_now(base: str, dirs: tuple[str, ...]) -> list[tuple[str, bool]]:
     base = _expand_home(base.strip("\"'"))
     if not base or "\x00" in base:
         return []
@@ -1569,6 +1598,64 @@ def dir_dest_hit(rule: dict, bare: str, dirs: tuple[str, ...]) -> bool:
     """Does R-13's pattern match a path `dir_dest_paths` gives for this command?"""
     rx = rule["_re"]
     return any(rx.search(p) for p in dir_dest_paths(bare, dirs))
+
+
+# W-82, owner decision 2026-11-20: a name the gate cannot see (a glob or variable source, the contents of a tree, an archive) copied, moved, linked, synced or unpacked
+# into a directory MADE for protected files is R-13 high. Which file lands is not in the words, and in these directories most of what can land is protected: the hook
+# settings, the hooks, the instruction files, `authorized_keys`, the policy files. A directory is dedicated by its own name (the last component, case-folded as R-13
+# reads paths), wherever it is. Not `~/.local/bin`, not `~/.config`, not an ordinary project directory, not a directory inside a dedicated one (`~/.claude/projects/`):
+# there a name that is not typed stays as it was.
+DEDICATED_DIRS = frozenset({".claude", ".vscode", ".cursor", ".codex", ".ssh", "policies", ".ai"})
+
+
+def _dedicated(path: str) -> bool:
+    return os.path.basename(path.rstrip("/")).casefold() in DEDICATED_DIRS
+
+
+def unseen_into_dedicated(bare: str, dirs: tuple[str, ...] = ("",)) -> bool:
+    """Does this copy, move, link, sync or unpack put a name that is not typed into a dedicated directory (W-82)? Built on `_into_targets`, with `mv` as `cp -r`:
+
+    * a source whose name is a glob, a variable or a substitution lands in the destination directory;
+    * a tree copied under its typed name holds contents that are not typed: it lands in `dest/name` when `dest` is a directory, and becomes `dest` when it is not;
+    * a contents copy (`src/`, `src/.`, `cp -T`, ditto) and an unpack (tar, unzip, 7z, cpio, pax) write unseen names into `dest`.
+    The destination is resolved as `dir_dest_paths` resolves it (home, the directories the command may run in, symlinks, a glob destination as what it matches now).
+    The command an `xargs` or a `find -exec` runs is read too: what they feed it (the replace string, or the words `xargs` appends) is a name that is not typed."""
+    words = system_bare(bare).split(" ")
+    inner: str | None = None
+    if (xi := _xargs_inner(" ".join(words))) is not None:
+        cmd, repl = xi
+        inner = _put(cmd, repl, _BRACES) if repl else f"{cmd} {_BRACES}"
+    elif words[0].rsplit("/", 1)[-1] == "find" and (at := next((i for i, w in enumerate(words) if w in shellnorm.FIND_EXEC), None)) is not None:
+        tail = words[at + 1:]
+        inner = " ".join(tail[:next((i for i, w in enumerate(tail) if w in (";", "+", "\\;", "\\", "\x06")), len(tail))])
+    if inner is not None:   # the inner command without its own launcher and system directory (`xargs sudo cp`, `-exec /bin/cp`)
+        words = system_bare(_bare(inner)).split(" ")
+    if not words or not words[0]:
+        return False
+    verb = words[0].rsplit("/", 1)[-1]
+    if verb == "mv":
+        words = ["cp", "-r", *words[1:]]
+    seen: dict[str, list[tuple[str, bool]]] = {}   # one destination for many sources: resolved (and a glob walked) once
+
+    def bases(p: str) -> list[tuple[str, bool]]:
+        if p not in seen:
+            seen[p] = _dest_bases(p, dirs)
+        return seen[p]
+
+    for path, parent_too, exact, unless_dir in _into_targets(" ".join(words)):
+        if exact:
+            base, _, name = path.rpartition("/")
+            if not name or GLOB_OR_EXPANSION.search(name) or "\x01" in name or "\x06" in name:   # the name is not typed: it lands in `base`
+                if _dedicated(base) or any(_dedicated(q) for q, _is_dir in bases(base or "/")):   # the name as written, or where its symlinks lead
+                    return True
+            elif parent_too and _dedicated(name) and any(is_dir for _q, is_dir in bases(base or "/")):   # a tree called `.claude` copied into a directory
+                return True
+        elif unless_dir:
+            if any(not is_dir and (_dedicated(path) or _dedicated(q)) for q, is_dir in bases(path)):   # the tree becomes `dest`
+                return True
+        elif _dedicated(path) or any(_dedicated(q) for q, _is_dir in bases(path)):
+            return True
+    return False
 
 
 def _git_tree_targets(seg: str, calls: list[shellnorm.GitCall], carried: str | None = None) -> list[tuple[str, bool]]:
@@ -1812,7 +1899,8 @@ def classify_segment(seg: str, dirs: tuple[str, ...], proxied: bool = False, mar
     if (rule := _path_rule(abs_ops, abs_files, {"R-16": abs_pkg, "R-18": abs_create}, dirs_t)) and LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
         seg_best = rule
     r13 = _r13()   # W-82: a copy into a directory, a glob or a variable-held destination: R-13 reads the paths it writes (adds a reading, never lowers one)
-    if LEVELS[seg_best["level"]] < LEVELS[r13["level"]] and dir_dest_hit(r13, bare, dirs_t):
+    if LEVELS[seg_best["level"]] < LEVELS[r13["level"]] and (dir_dest_hit(r13, bare, dirs_t) or unseen_into_dedicated(bare, dirs_t)
+                                                              or ("xargs" in seg and unseen_into_dedicated(seg, dirs_t))):   # `bare` has lost the launcher `xargs`
         seg_best = r13
     return seg_best, real_bare
 
@@ -2231,12 +2319,15 @@ def _realpath(path: str) -> str:
 
 def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
     """Classify one tool call. Raises on malformed policy; callers decide how to fail."""
-    global _REALPATHS
+    global _REALPATHS, _GLOBS, _DESTS, _GLOB_SPENT
     outer, _REALPATHS = _REALPATHS, {} if _REALPATHS is None else _REALPATHS
+    outer_globs, _GLOBS = _GLOBS, {} if _GLOBS is None else _GLOBS
+    outer_dests, _DESTS = _DESTS, {} if _DESTS is None else _DESTS
+    outer_spent, _GLOB_SPENT = _GLOB_SPENT, [0] if _GLOB_SPENT is None else _GLOB_SPENT
     try:
         return _assess(tool, tool_input, cwd)
     finally:
-        _REALPATHS = outer
+        _REALPATHS, _GLOBS, _DESTS, _GLOB_SPENT = outer, outer_globs, outer_dests, outer_spent
 
 
 def _assess(tool: str, tool_input: dict, cwd: str) -> Assessment:

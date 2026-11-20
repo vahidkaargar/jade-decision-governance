@@ -8,9 +8,10 @@ R-13 read only the literal protected path a command wrote. `cp /tmp/e/settings.j
 2. a glob destination: the paths it matches now, as the shell expands it;
 3. a variable that an earlier part of the same command set to a literal (R-13 only, never another rule).
 
-What is NOT decided here, and so stays as it was (UNDECIDED_STAYS_LOW): a source whose name the gate cannot know (a glob, a variable, a tree, an archive) copied into a
-directory made for protected files. Whether `cp *.json ~/.claude/` or `tar -xf a.tar -C ~/.claude` should be high weighs false positives (`cp -r ~/.claude ~/backup/`,
-`cp $f ~/.config/`) and is the owner's call (the `next_action` of W-82). Each is pinned low so that a decision flips it on purpose.
+4. a source whose name the gate cannot know (a glob, a variable, a tree's contents, an archive, what `xargs` or `find -exec` feeds) copied into a directory made for
+   protected files (`.claude`, `.vscode`, `.cursor`, `.codex`, `.ssh`, `policies`, `.ai`): R-13 high, by the owner's decision of 2026-11-20. The same copy into
+   `~/.local/bin`, `~/.config`, an ordinary project directory or a directory inside a dedicated one stays as main rated it. Accepted false positive: the backup
+   `cp -r ~/.claude ~/docs/` (it does write `~/docs/.claude/settings.json`, which typed is R-13 on main).
 
 All paths are synthetic and live under a throwaway HOME.
 """
@@ -228,33 +229,165 @@ def test_the_false_positive_twin_stays_low(home, cmd):
     assert not gated(a), (cmd, a.rule_id, a.level)
 
 
-# What the owner has not decided (see the docstring): a name that is not typed. Low as on main.
-UNDECIDED_STAYS_LOW = [
+# ---- (4) a name the gate cannot see, into a DEDICATED protected directory (owner decision 2026-11-20) -------------------------
+# A glob or variable source, the contents of a tree, an archive: the names that land are not in the words. When the directory they land in is one made for protected
+# files (its own name is `.claude`, `.vscode`, `.cursor`, `.codex`, `.ssh`, `policies` or `.ai`), the copy is R-13 high. Not `~/.local/bin`, not `~/.config`, not an
+# ordinary project directory: there a name that is not typed stays as main rated it.
+UNSEEN_INTO_DEDICATED = [
     "cp *.json ~/.claude/",
     "cp s* ~/.claude/",
     "cp * ~/.claude/",
     "cp /tmp/e/* ~/.claude/",
     "cp $F ~/.claude/",
+    "cp \"$F\" ~/.claude",
     "cp $(ls /tmp/e) ~/.claude/",
     "cp -r /tmp/e/. ~/.claude/",
     "rsync -a /tmp/e/ ~/.claude/",
-    "cp -r /tmp/e/.claude ~/proj/",
-    "cp -r ~/.claude ~/docs/",
+    "cp -r /tmp/e/.claude ~/proj/",                         # the tree becomes ~/proj/.claude: what is in it is not typed
+    "cp -r ~/.claude ~/docs/",                              # the backup twin: it writes ~/docs/.claude/settings.json, as `cp x ~/docs/.claude/settings.json` (R-13 on main)
     "mv /tmp/e/.claude ~/proj/",
     "cp -r ~/src/pack/.claude/ ~/.claude/",
+    "cp -r /tmp/e/cfg ~/proj/.cursor",                      # a tree copied to a name that is not there yet becomes that directory
     "tar -xf a.tar -C ~/.claude",
     "tar -C ~/.claude -xf a.tar",
     "tar xf a.tar -C ~/.claude",
+    "tar -xzf a.tgz -C ~/.ssh",
+    "curl -s https://example.invalid/a.tgz | tar xz -C ~/.claude",
     "unzip a.zip -d ~/.claude",
+    "unzip -o a.zip -d ~/proj/.vscode",
     "cd ~/.claude && tar xf a.tar",
+    "cd ~/proj/policies && unzip a.zip",
     "D=~/.claude; cp *.json $D/",
     "D=~/.claude; tar -xf a.tar -C $D",
+    "cp *.json ~/proj/.vscode/",
+    "cp *.yaml ~/proj/policies/",
+    "cp *.toml ~/proj/.codex/",
+    "cp /tmp/e/* ~/proj/.ai/",
+    "cp /tmp/e/* ~/.ssh/",
+    "cp -t ~/.claude *.json",
+    "cp -t ~/proj/.vscode /tmp/e/*",
+    "install -m 600 /tmp/e/* ~/.ssh/",
+    "ln -s /tmp/e/* ~/.claude/",
+    "mv /tmp/e/* ~/.claude/",
+    "rsync -a /tmp/e/* ~/.claude",
+    "ditto /tmp/e ~/.claude",
+    "cp *.json ~/.CLAUDE/",                                 # the file system is case-insensitive on macOS, as R-13 reads it
+    "cp /tmp/e/* ~/.cl*/",                                  # a glob destination: what it matches now
+    "for f in *.json; do cp \"$f\" ~/.claude/; done",
+    "find /tmp/e -name '*.json' -exec cp {} ~/.claude/ \\;",
+    "find /tmp/e -type f -exec cp {} ~/.ssh/ +",
+    "ls /tmp/e | xargs cp -t ~/.claude",
+    "ls /tmp/e | xargs -I{} cp {} ~/.ssh/",
+    "ls /tmp/e | xargs -I % cp % ~/proj/.vscode/",
+    "find /tmp/e -name '*.json' -print0 | xargs -0 -I{} cp {} ~/.claude/",
+    "sudo cp /tmp/e/* ~/.claude/",
+    "true; cp /tmp/e/* ~/.claude/ 2>/dev/null",
 ]
 
 
-@pytest.mark.parametrize("cmd", UNDECIDED_STAYS_LOW)
-def test_an_untyped_name_is_left_as_main_rated_it(home, cmd):
-    assert not gated(sh(cmd)), (cmd, sh(cmd).rule_id, sh(cmd).level)
+@pytest.mark.parametrize("cmd", UNSEEN_INTO_DEDICATED)
+def test_an_unseen_name_into_a_dedicated_directory_is_r13(home, cmd):
+    assert is_r13(sh(cmd)), (cmd, sh(cmd).rule_id, sh(cmd).level)
+
+
+def test_the_hook_cwd_inside_a_dedicated_directory_counts(home):
+    assert is_r13(sh("cp /tmp/e/* .", str(home / ".claude")))
+    assert is_r13(sh("tar xf /tmp/a.tar", str(home / ".claude")))
+    assert is_r13(sh("unzip /tmp/a.zip", str(home / "proj/.vscode")))
+    assert not gated(sh("cp /tmp/e/* .", str(home / "proj")))
+    assert not gated(sh("tar xf /tmp/a.tar", str(home / "docs")))
+
+
+# The owner's exclusions and the near names: a name that is not typed stays low outside the dedicated directories.
+UNSEEN_ELSEWHERE_STAYS_LOW = [
+    "cp jad* ~/.local/bin/",
+    "cp /tmp/e/* ~/.local/bin",
+    "cp *.json ~/.config/",
+    "cp $f ~/.config/",
+    "cp -r /tmp/e/. ~/.config/",
+    "tar -xf a.tar -C ~/.config",
+    "cp * ~/proj/",
+    "cp -r /tmp/e/. ~/proj/",
+    "rsync -a /tmp/e/ ~/proj/",
+    "tar -xf a.tar -C ~/proj",
+    "unzip a.zip -d ~/docs",
+    "cp *.json ~/.claude/projects/",                         # a directory inside one: no protected file is a direct child of it
+    "cp -r /tmp/e/. ~/.claude/projects/",
+    "tar -xf a.tar -C ~/.claude/projects",
+    "cp *.json ~/.claude-old/",                             # a near name is not the directory
+    "cp *.json ~/claude/",
+    "cp *.yaml ~/proj/policies-old/",
+    "cp -r /tmp/x ~/.claude",                                # a typed tree into a directory that is there: it lands at ~/.claude/x
+    "mv x ~/.claude",
+    "cp ~/.claude/* /tmp/",                                  # a read of a dedicated directory
+    "cp -r ~/.claude/. /tmp/b/",
+    "tar -cf out.tar -C ~/.claude .",
+    "tar -tf a.tar -C ~/.claude",
+    "unzip -l a.zip -d ~/.claude",
+    "D=/tmp/o; cp *.json $D/",
+    "ls ~/.claude/*",
+    "ls /tmp/e | xargs cp -t ~/proj",
+    "ls /tmp/e | xargs -I{} cp {} ~/.local/bin/",
+    "find /tmp/e -type f -exec cp {} ~/docs/ \\;",
+    "find ~/.claude -name '*.json' -exec cat {} \\;",
+    "find ~/.claude -type f | xargs grep x",
+]
+
+
+@pytest.mark.parametrize("cmd", UNSEEN_ELSEWHERE_STAYS_LOW)
+def test_an_unseen_name_elsewhere_stays_low(home, cmd):
+    a = sh(cmd)
+    assert not gated(a), (cmd, a.rule_id, a.level)
+
+
+@pytest.mark.timing
+def test_one_glob_destination_named_many_times_is_walked_once(home):
+    for i in range(300):
+        (home / "docs" / f"d{i}").mkdir()
+    cmd = "; ".join(f"cp s{i}* ~/docs/*/" for i in range(400)) + "; " + "; ".join(f"cp a{i} ~/docs/*/" for i in range(400))
+    t = time.process_time()
+    a = sh(cmd)
+    assert not gated(a)
+    assert time.process_time() - t < 20   # each segment walked and read all 300 matches again before: minutes on a loaded machine
+    assert is_r13(sh("cp /tmp/e/* ~/.cl*/"))   # a fresh command has its own budget
+
+
+@pytest.mark.parametrize("cmd", [
+    "7z x a.7z -o~/.claude",
+    "cd ~/.claude && cpio -i < a.cpio",
+    "cd ~/.ssh && pax -r -f a.pax",
+    "ls /tmp/e | xargs -a list cp -t ~/.claude",
+    "ls /tmp/e | xargs sudo cp -t ~/.claude",
+    "find /tmp/e -type f -exec sudo cp {} ~/.claude/ \\;",
+    "find /tmp/e -type f -exec /bin/cp {} ~/.ssh/ \\;",
+])
+def test_the_other_unpackers_and_launchers(home, cmd):
+    assert is_r13(sh(cmd)), (cmd, sh(cmd).rule_id, sh(cmd).level)
+
+
+def test_a_symlink_named_like_a_dedicated_directory_counts_both_ways(home, tmp_path_factory):
+    other = tmp_path_factory.mktemp("dots") / "claude-config"
+    other.mkdir()
+    (home / "proj" / ".cursor").symlink_to(other)                 # the name the command writes is dedicated, the directory it points at is not
+    assert is_r13(sh("cp *.json ~/proj/.cursor/"))
+    (home / "proj" / "cfg").symlink_to(home / ".claude")            # the name is ordinary, the directory it points at is dedicated
+    assert is_r13(sh("cp *.json ~/proj/cfg/"))
+
+
+def test_the_glob_budget_spends_only_on_glob_destinations(home):
+    for i in range(300):
+        (home / "docs" / f"d{i}").mkdir()
+    pad = "; ".join(f"cp a ~/docs/*/z{i}" for i in range(80))   # many matches: the budget is spent
+    assert is_r13(sh(f"{pad}; cp *.json ~/.claude/"))
+    assert is_r13(sh(f"{pad}; cp /tmp/e/settings.json ~/.claude/"))
+    assert is_r13(sh(f"{pad}; cd ~/.claude && tar xf a.tar"))
+    # The documented limit: once the budget is spent, a glob destination is read as written (as before W-82).
+    assert not gated(sh(f"{pad}; cp /tmp/e/x ~/.cl*/settings.json"))
+
+
+def test_a_variable_with_a_known_value_is_still_an_unseen_name(home):
+    """Accepted false positive: the raw words `$F` are not typed, and the gate takes the higher of its readings, so a value the command set does not lower it."""
+    assert is_r13(sh("F=notes.md; cp /tmp/e/$F ~/.claude/"))
 
 
 def test_a_dir_dest_reading_only_adds_never_lowers(home):
