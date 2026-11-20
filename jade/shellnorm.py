@@ -2264,10 +2264,9 @@ def segments_cwd(command: str, cwd: str = "", literal_end: int | None = None) ->
     readings = _skeleton_both_top(command, len(command) if literal_end is None else literal_end)
     for text, current in readings:
         got = _segments_cwd_of(text, cwd, SEG_TOKEN if current else _base().SEG_TOKEN)
-        if not current and _in_order(got, rows):
-            # origin/main's reading adds nothing when each of its rows is already a row, in the same order and with the same directories: the current reading only added
-            # rows to it (a variable read with its value, W-191). Every row is still read, after the same rows or more, so classifying it twice costs time and finds nothing new.
-            continue
+        # origin/main's reading is classified again even when its rows are already rows of the current reading: the policy carries state from row to row (the fetched
+        # file, a computed cd, GIT_WORK_TREE), and main's rows, read after the current ones, find a fetch-then-run in a loop or a write after a computed cd that one
+        # pass over the current rows does not (W-191 review: skipping them made the gate weaker than origin/main).
         for row in got:
             if len(row[0]) > BIG_SEGMENT:   # the plain text a scanner leaves when it stops reading comes out of both readings: a segment of this size is classified once (the cost of reading it twice is the cost of the command twice)
                 if row in big:
@@ -2275,12 +2274,6 @@ def segments_cwd(command: str, cwd: str = "", literal_end: int | None = None) ->
                 big.add(row)
             rows.append(row)
     return rows
-
-
-def _in_order(sub: list, seq: list) -> bool:
-    """Is every item of `sub` in `seq`, in the same order (a subsequence)?"""
-    it = iter(seq)
-    return all(any(x == y for y in it) for x in sub)
 
 
 def _segments_cwd_of(text: str, cwd: str, token: re.Pattern) -> list[tuple[str, tuple[str, ...]]]:
