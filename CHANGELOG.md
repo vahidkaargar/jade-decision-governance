@@ -4,6 +4,9 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+### Fixed
+- **Memory no longer remembers a git call that runs a program as a kind (W-137).** At level low or medium, one confirmed answer to `git config alias.p '!sh a'` also let `git config alias.p '!sh b'` run with no question, because the rules R-15 (`git config` alias, pager, `core.sshCommand`, a `GIT_SSH_COMMAND` variable) and R-23 (a write to a git config file from the shell) were remembered as a kind of call. They are now remembered by the exact text only, like R-14. The firewall, deploy and key rules (R-01, R-03, R-04) were already never remembered (V6-06); a new test pins that with the calls named in the work item. R-12 (`launchctl`, `brew services`, `docker compose up|down`) is not changed: whether it must be exact-only is the owner's decision, so W-137 stays open for it. Only more questions can result; nothing is allowed that was not before.
+
 ## [0.7.0] - 2026-11-19
 
 ### Added

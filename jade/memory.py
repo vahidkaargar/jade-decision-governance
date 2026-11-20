@@ -11,7 +11,7 @@ Two keys per answer:
   safe to generalise has one; the rest is exact-only. `eligibility` is the whole decision.
 
 Never remembered (always asked): a human-only class (docs/12 section 4), the fetch-and-exec and egress rules (R-21, R-22) and the rules that guard the agent's files
-(R-13, R-18), as the top rule or as the rule of any segment, a call the gate blocks, and a call with a secret-shaped value in it. Exact-only: R-14, M-05, M-07, an inline program (`-c`, `-e`, heredoc, here-string, process substitution), a call the gate could not
+(R-13, R-18), as the top rule or as the rule of any segment, a call the gate blocks, and a call with a secret-shaped value in it. Exact-only: R-14, R-15, R-23 (a program that git runs, W-137), M-05, M-07, an inline program (`-c`, `-e`, heredoc, here-string, process substitution), a call the gate could not
 read (blind labels), a git push or merge (the fingerprint carries the head commit), a merge into the default branch, and every write or MCP call (content is part of the key).
 
 Lifetime: a row is valid while its last human confirm or its last use is within 30 days, and never more than 180 days after the confirm.
@@ -33,7 +33,7 @@ USE_DAYS = 30
 CAP_DAYS = 180
 NEAR_CAP_DAYS = 14
 NEVER_RULES = frozenset({"R-21", "R-22", "R-13", "R-18"})   # R-13, R-18: what guards the agent and the files it reads its instructions from (as in proxy.NEVER_RULES)
-EXACT_ONLY_RULES = frozenset({"R-14", "M-05", "M-07"})
+EXACT_ONLY_RULES = frozenset({"R-14", "R-15", "R-23", "M-05", "M-07"})   # R-15, R-23 (W-137): a program that git runs, or a git config file, is read from the exact text
 _PLAIN_WORD = re.compile(r"[\w./:@=+,%-]*")   # a quoted word of these characters only is in the segment key as it is
 _QUOTE_MARK = re.compile(r"""[\\'"`#<]""")   # where `_quoted_form` stops: a backslash, a quote mark, a backtick, a comment, a possible here-doc
 _DQ_BODY = re.compile(r'[^"\\]*(?:\\.[^"\\]*)*', re.S)   # the text of a double-quoted word, up to its closing mark (a backslash takes the next character)
