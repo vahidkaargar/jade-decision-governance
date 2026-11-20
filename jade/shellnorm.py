@@ -79,6 +79,23 @@ HEREDOC_AT = re.compile(r"(?<!<)" + HEREDOC_OP.pattern + r"(?!<)")   # a heredoc
 _HEREDOC_STOP = frozenset(" \t\r\n;&|<>()`$")   # characters that end a delimiter word (a `$` or a backtick is no delimiter this scanner reads)
 
 
+
+def _in_arithmetic(s: str, i: int) -> bool:
+    """Is the `<<` at s[i] a shift, in `((1<<EOF))`, `$[1<<EOF]`, `a[1<<EOF]=x` or the head of a C-style `for ((;;))`: an unclosed `((` or subscript before it on the line and its close after it.
+    Bash and zsh read a shift there, no heredoc starts, and the lines that follow are commands (W-135, F4). Text that is no heredoc is read as commands: when the shell did read a heredoc,
+    its body is read as commands too, never the other way round. Only a short window of the line is looked at."""
+    lo = max(0, i - 400)
+    nl = s.rfind("\n", lo, i)
+    ls = lo if nl < 0 else nl + 1
+    le = s.find("\n", i, i + 400)
+    before, after = s[ls:i], s[i:i + 400 if le < 0 else le]
+    p = before.rfind("((")
+    if p >= 0 and "))" in after and "))" not in before[p:]:   # the last `((` before it is the one that has no `))` yet
+        return True
+    p = before.rfind("[")
+    return p > 0 and "]" in after and "]" not in before[p:] and (before[p - 1] == "$" or before[p - 1].isalnum() or before[p - 1] == "_")
+
+
 def _heredoc_word_start(s: str, m: re.Match) -> int:
     """The index of the delimiter word of the heredoc operator `m` matched (HEREDOC_OP or HEREDOC_AT): after `<<`, the `-` and the blanks."""
     j = m.start() + 2 + len(m.group(1))
@@ -157,26 +174,102 @@ def _echo_escapes(text: str, drop_unknown: bool = False, octal3: bool = False) -
     return (_PRINTF_ESCAPE if octal3 else _ECHO_ESCAPE).sub(one, text)
 
 
+_PROMPT_CONDITION = re.compile(r"%-?\d*\((?P<test>[^)])(?P<d>[^)])(?P<yes>[^)]*?)(?P=d)(?P<no>[^)]*)\)")
+_PRINTF_SPEC = re.compile(r"%(?P<flags>[-+ #0']*)(?P<width>\*|\d*)(?:\.(?P<prec>\*|\d*))?(?P<conv>[a-zA-Z%])")
+PRINTF_ROUNDS = 64          # the rounds a format is written again for the arguments that are left
+PRINTF_CHARS = 100_000      # the characters a rendered format may have
+
+
+def _printf_render(words: list[str]) -> list[str]:
+    """The text `printf FORMAT ARGUMENT...` prints, as words: the format is written again while arguments are left, `%s` and `%b` take an argument (a precision cuts it), `%c` its first
+    character, a number conversion its value, `%%` is a percent. A word list without a format gives none. Never raises: an odd specification writes nothing."""
+    words = [w for w in words if w != "--"]
+    if len(words) < 2 or "%" not in words[0]:
+        return []
+    fmt, args = words[0], words[1:]
+    out: list[str] = []
+    size = used = 0
+    for _ in range(PRINTF_ROUNDS):
+        taken = 0
+        pos = 0
+        for m in _PRINTF_SPEC.finditer(fmt):
+            out.append(fmt[pos:m.start()])
+            pos = m.end()
+            conv = m.group("conv")
+            if conv == "%":
+                out.append("%")
+                continue
+            for star in (m.group("width") == "*", m.group("prec") == "*"):
+                taken += star   # `%*s` takes the width from an argument
+            arg = args[used + taken] if used + taken < len(args) else ""
+            taken += 1
+            prec = m.group("prec")
+            if conv in "sb":
+                out.append(arg[:int(prec)] if prec and prec.isdigit() else arg)
+            elif conv == "c":
+                out.append(arg[:1])
+            elif conv in "diuoxXeEfFgG":
+                out.append(re.sub(r"[^0-9a-zA-Z.+-]", "", arg)[:20] or "0")
+        out.append(fmt[pos:])
+        used += taken
+        size = sum(map(len, out))
+        if used >= len(args) or not taken or size > PRINTF_CHARS:
+            break
+    return ["".join(out)[:PRINTF_CHARS]]
+
+
 def _code(body: str) -> str:
     """Interpreter source or piped text, made searchable: quotes and list punctuation become spaces."""
     t = re.sub(r"\\\r?\n", "", body)
     return re.sub(r"""['"`,\[\]]""", " ", t)
 
 
-def _match_brace(s: str, j: int) -> int:
+def _match_brace(s: str, j: int, dq: bool = False) -> int:
+    """The index after the `}` that closes the `${` whose body starts at s[j]. A brace of the body does not count (bash and zsh close at the first `}` that no quote, no backslash, no
+    `$( )`, no backtick span and no `${ }` inside holds: `${a:-{x}` is closed there), and a `'...'`, `"..."` or `$'...'` span, a backslash pair, a `$(...)`, a backtick span and an inner `${...}`
+    are skipped as the shell skips them. `dq`: the expansion stands inside double quotes (or a heredoc body), where a single quote is no quote (W-135, F2 and B3-2: the old count of braces,
+    which ignored all of it, took the rest of the text for the expansion). A `}` that is not found ends the text."""
+    n = len(s)
     depth = 1
-    while j < len(s) and depth:
-        depth += {"{": 1, "}": -1}.get(s[j], 0)
-        j += 1
-    return j
+    while j < n:
+        c = s[j]
+        if c == "\\":
+            j += 2
+        elif c == "'" and not dq:
+            k = s.find("'", j + 1)
+            j = n if k < 0 else k + 1
+        elif c == '"':
+            j = _dq_end(s, j + 1) + 1
+        elif c == "`":
+            k = j + 1
+            while k < n and s[k] != "`":
+                k += 2 if s[k] == "\\" else 1
+            j = k + 1
+        elif c == "$" and s.startswith("${", j):
+            depth += 1
+            j += 2
+        elif c == "$" and s.startswith("$(", j):
+            j = _skip_span(s, j + 1)
+        elif c == "$" and s.startswith("$'", j) and not dq:
+            j = _ansi_c(s, j + 2)[0]
+        elif c == "}":
+            depth -= 1
+            j += 1
+            if not depth:
+                return j
+        else:
+            j += 1
+    return min(j, n)
 
 
-def _match_arith(s: str, j: int) -> int:
+def _match_arith(s: str, j: int) -> tuple[int, bool]:
+    """(the index after the `))` that closes an expansion `$((` whose inner text starts at s[j], whether the parentheses closed before the text ended).
+    An expansion that is never closed is a syntax error: the shell runs nothing of the command."""
     depth = 2
     while j < len(s) and depth:
         depth += {"(": 1, ")": -1}.get(s[j], 0)
         j += 1
-    return j
+    return j, depth == 0
 
 
 _ANSI_BASH: contextvars.ContextVar[bool] = contextvars.ContextVar("jade_ansi_bash", default=False)
@@ -250,7 +343,7 @@ def _stdin_kind(word: str, args: list[str]) -> str | None:
             if kind == "shell" and idx == len(args) - 2 and SHELL_NAME.fullmatch(args[idx + 1].strip("'\"")):
                 return kind   # `sh -c sh`: the shell it starts reads the pipe
             return kind if idx == len(args) - 1 or args[idx + 1:idx + 2] == ["{}"] else None  # `xargs sh -c`, `xargs -I{} sh -c {}`: the script arrives on stdin
-        elif not a.startswith("-"):
+        elif not a.startswith(("-", "+") if kind == "shell" else "-"):   # `sh +e` switches an option off (W-135, E3-8)
             return None
     return kind
 
@@ -287,6 +380,10 @@ def _leaves_stdin(s: str, at: int) -> bool:
 # The text of a stage up to the first separator the reader below stops at, with a backslash-newline counted as part of it (V6-08 review, N18): the length of the stage, not of the rest of the line.
 _STAGE_EXTENT = re.compile(r"(?:[^\n\\;&|()<>]|\\\r?\n|\\.)*", re.S)
 _CONTINUATION = re.compile(r"\\\r?\n")
+_LAUNCHER_OPTIONS = re.compile(r"\s*\\?(?:(?:/[\w.+-]+)*/)?(?:command|builtin|env|nice|nohup|exec|time)(?:\s+(?:--|-[uCSan]\s+\S+|-[A-Za-z]+(?:\s+\d+)?))+\s+")   # `command -- `, `env -u HOME `: launchers whose options `PREFIX` leaves in front of the program
+_BLANK_LINES = re.compile(r"(?:[ \t]*(?:#[^\n]*)?\n)*")   # the blank lines and comment lines that follow a `|`
+_BLANK_RUN = re.compile(r"(?:[ \t\r]*(?:#[^\n]*)?\n)*[ \t\r]*(?:#[^\n]*)?")   # nothing but blanks, comments and line ends
+_LEAD_REDIRECT = re.compile(r"[ \t]*(?:\d+|&)?(?:>>?&?|<>|<&)[|!]?(?:-|\d+-?|[ \t]*[^\s;&|()<>`$\\]+)")
 _GROUP_OPEN = re.compile(r"[ \t]*(?:\((?!\()|\{(?=[ \t]))[ \t]*")   # the `(` of a subshell (not `((`) and the `{ ` of a group
 
 
@@ -296,6 +393,8 @@ def _next_stage_kind(s: str, j: int) -> str | None:
     `sh \\<NL># x` is `sh` and a comment, `| \\<NL>  sh` is `| sh` (V6-08 review, N18)."""
     while (g := _GROUP_OPEN.match(s, j)):   # `| (sh)`, `| { sh; }`: the group hands its stdin to the first command in it (W-133, F6)
         j = g.end()
+    while (r := _LEAD_REDIRECT.match(s, j)):   # `| 2>&1 sh`, `| >log sh`: a redirect of the output or of another descriptor in front of the shell leaves it reading the pipe (W-135, B3-3)
+        j = r.end()
     chunk = s[j:_STAGE_EXTENT.match(s, j).end() + 8]
     if "\\\n" in chunk or "\\\r\n" in chunk:
         s, j = _CONTINUATION.sub("", chunk), 0
@@ -308,7 +407,14 @@ def _next_stage_kind(s: str, j: int) -> str | None:
     if kind:
         return kind
     words = _peel_launchers([m.group("w"), *m.group("a").split()])
-    return _stdin_kind(words[0], words[1:]) if words else None
+    kind = _stdin_kind(words[0], words[1:]) if words else None
+    if kind or not (stage := m.group(0).strip()):
+        return kind
+    # a launcher with options that NEXT_STAGE took for words (`exec -a x sh`): the stage with the prefix words of the floor taken off (W-135, E3-8)
+    bare = PREFIX.sub("", stage, count=1)
+    if bare and bare != stage and (m2 := NEXT_STAGE.match(bare)):
+        return _stdin_kind(m2.group("w"), m2.group("a").split())
+    return None
 
 
 def _rest_of_line_pipes_to_code(s: str, j: int) -> str | None:
@@ -993,6 +1099,32 @@ def interp_code(args: list[str]) -> str | None:
     return None
 
 
+# A word that is a redirect as `words_of` leaves it: `2>&1`, `>log`, `&>log`, `>|log`, `<&0`, and an operator alone (`>`, `2>`) whose target is the next word. A quoted `'>'` reads the
+# same, so the words without it are an additional reading, never a replacement (W-135, DF-8 and B3-3).
+_REDIRECT_WORD = re.compile(r"(?:\d+|&)?(?:>>?&?|<>|<&|<)[|!]?[^\x01-\x04<>]*")
+_REDIRECT_BARE = re.compile(r"(?:\d+|&)?(?:>>?&?|<>|<&|<)[|!]?")
+
+
+def _without_redirect_words(ws: list[str]) -> list[str]:
+    out: list[str] = []
+    skip = False
+    for w in ws:
+        if skip:
+            skip = False
+        elif _REDIRECT_WORD.fullmatch(w):
+            skip = bool(_REDIRECT_BARE.fullmatch(w))   # the operator stands alone: the next word is its target
+        else:
+            out.append(w)
+    return out
+
+
+def _runs_text(ws: list[str]) -> bool:
+    """Do these words, behind their launchers, run a text they carry: `eval`, a shell, an interpreter, `ssh`, `su`, `script`."""
+    bare = PREFIX.sub("", " ".join(ws), count=1)
+    cmd = _dec(bare.split(" ", 1)[0]).rsplit("/", 1)[-1].lower() if bare else ""
+    return cmd in ("eval", "ssh", "su", "script") or bool(SHELL_NAME.match(cmd) or INTERP_RE.match(cmd))
+
+
 # ------------------------------------------------------------------ the scanner
 
 ENV_ASSIGN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
@@ -1091,7 +1223,16 @@ class _Scan:
 
     def _produced(self, raw: str, kind: str) -> str:
         """What `echo ... | sh` hands to the reader: the echoed words, parsed as shell for a shell, searched as text otherwise. A program that prints
-        (`python3 -c 'print("...")' | sh`) hands over every string it holds."""
+        (`python3 -c 'print("...")' | sh`) hands over every string it holds.
+
+        A launcher with options in front of the printer (`command -- echo`, `command -p printf`, `env -u HOME printf`) is read as the printer as well (W-135, E3-7): the text is read
+        as it was, and again without the launcher and its options."""
+        text = self._produced_text(raw, kind)
+        if kind == "shell" and (m := _LAUNCHER_OPTIONS.match(raw)):
+            text += " ; " + self._produced_text(raw[m.end():], kind)
+        return text
+
+    def _produced_text(self, raw: str, kind: str) -> str:
         raw, here = _here_strings(raw)
         if kind == "shell" and (prog := self._producer_program(raw)):
             return self._interp(prog[0], prog[1], emit_all=True)
@@ -1120,9 +1261,10 @@ class _Scan:
             text = " ".join(_dec(w) for w in words_of(PRODUCER.sub("", raw, count=1)))
             return " ; ".join(p for p in (read(text), stdin) if p)
         if bare:
-            text = " ".join(_dec(w) for w in bare[printer.end():].split())
+            pwords = [_dec(w) for w in bare[printer.end():].split()]
         else:
-            text = " ".join(_dec(w) for w in words_of(PREFIX.sub("", raw.lstrip(), count=1)[printer.end():]))
+            pwords = [_dec(w) for w in words_of(PREFIX.sub("", raw.lstrip(), count=1)[printer.end():])]
+        text = " ".join(pwords)
         if kind != "shell":
             return " ; ".join(p for p in (self._interp(kind, text), stdin) if p)
         readings = [text]
@@ -1131,6 +1273,15 @@ class _Scan:
             # other escape (`\>` prints `>`), bash `echo` prints the text as it is. The shell that reads the output may be any of them: every reading is read.
             # (W-133) the numbers: `echo` reads `\0nnn`, `printf` and zsh `print` read `\nnn`, and `\u` and `\U` are read by zsh `echo` and `print`, bash 5 `printf` and `echo -e`
             readings += [_echo_escapes(text, drop, o3) for o3 in (False, True) for drop in (False, True)]
+        if printer.group("name") == "printf" or (printer.group("name") == "print" and re.search(r"\s-[a-zA-Z]*f", printer.group(0))):
+            # `printf` writes its format once for each round of its arguments, and a precision cuts them: `printf 'git push origin %s;' feature :main` prints two commands (W-135, E3-5)
+            for rendered in _printf_render(pwords):
+                readings.append(rendered)
+                if "\\" in rendered:
+                    readings.append(_echo_escapes(rendered, False, True))
+        if printer.group("name") == "print" and "%(" in text and re.search(r"\s-[a-zA-Z]*P", printer.group(0)):
+            # zsh `print -P` writes the true branch of `%(?.a.b)` when the test holds and the false branch when it does not: both are read (W-135, E3-5)
+            readings += [_PROMPT_CONDITION.sub(lambda m, g=g: m.group(g), text) for g in ("yes", "no")]
         return " ; ".join([*(self._sub(t) for t in dict.fromkeys(readings)), *([stdin] if stdin else [])])
 
     @staticmethod
@@ -1206,13 +1357,23 @@ class _Scan:
             deferred.append(self._produced(inner, "shell"))
 
     def _stage(self, raw: str, deferred: list[str]) -> None:
-        """Effects of one simple command: shell and interpreter programs it carries, writes and exec options of its verb."""
+        """Effects of one simple command: shell and interpreter programs it carries, writes and exec options of its verb.
+
+        A redirect stands anywhere in the words and is no word of the command (`2>&1 bash -c 'x'`, `bash 2>&1 -c 'x'`, `bash -c 2>&1 'x'`): when taking the redirect words out leaves
+        a shell, `eval`, an interpreter, `ssh`, `su` or `script`, that command is read as well (W-135, DF-8 and B3-3). The words as written are read first and as before."""
         if self.budget[0] < 0:
             return
         self.budget[0] -= len(raw)
         ws = words_of(raw)
         if not ws:
             return
+        self._stage_words(ws, deferred)
+        if any(_REDIRECT_WORD.fullmatch(w) for w in ws):
+            alt = _without_redirect_words(ws)
+            if alt and alt != ws and _runs_text(alt):
+                self._stage_words(alt, deferred)
+
+    def _stage_words(self, ws: list[str], deferred: list[str]) -> None:
         enc = " ".join(ws)
         bare = PREFIX.sub("", enc, count=1)
         rest = bare.split(" ") if bare else []
@@ -1272,6 +1433,20 @@ class _Scan:
         if unsafe:
             deferred.append(UNSAFE_MARK + " " + " ".join(_dec(w) for w in ws))
 
+    def _arith(self, i: int) -> tuple[int, list[str]]:
+        """s[i:] starts with `$((`: (the index after it, the texts it carries that are read as commands).
+
+        An arithmetic expansion is the text up to the `))` that closes it; the letters in it are read as before. A shell that finds no `))` where the parentheses close (`$((true); git push origin main)`)
+        reads a command substitution that starts with a subshell: the text is read that way as well, and also where the parentheses inside do not balance (`$((a)+(b))`, which is arithmetic in
+        bash and in zsh). Before, the last two characters of such a substitution were lost, and a push inside it passed (W-135, F3 and B3-4)."""
+        s = self.s
+        j, closed = _match_arith(s, i + 3)
+        inner = s[i + 3:j - 2]
+        texts = [self._sub(inner)] if re.search(r"[A-Za-z]", inner) else []
+        if closed and (s[j - 2:j] != "))" or inner.count("(") != inner.count(")")):
+            texts.append(self._sub(s[i + 2:j - 1 if s[j - 1:j] == ")" else j]))
+        return j, texts
+
     def walk(self, i: int, stop: str | None) -> tuple[str, str, list[str], int]:
         """Inside double quotes (stop='"') or an unquoted heredoc body (stop=None): collect expansions.
 
@@ -1287,12 +1462,9 @@ class _Scan:
                 plain.append(s[i:i + 2])
                 i += 2
             elif c == "$" and s.startswith("$((", i):
-                j = _match_arith(s, i + 3)
-                inner = s[i + 3:j - 2]
-                if re.search(r"[A-Za-z]", inner):
-                    subs.append(self._sub(inner))
+                i, texts = self._arith(i)
+                subs.extend(texts)
                 plain.append("$X")
-                i = j
             elif c == "$" and s.startswith("$(", i):
                 txt, i = self.run(i + 2, ")")
                 subs.append(txt)
@@ -1302,7 +1474,7 @@ class _Scan:
                 subs.append(txt)
                 plain.append("$X")
             elif c == "$" and s.startswith("${", i):
-                j = _match_brace(s, i + 2)
+                j = _match_brace(s, i + 2, True)   # inside double quotes or a heredoc body: a single quote is no quote
                 inner = s[i + 2:j - 1]
                 if "$(" in inner or "`" in inner:
                     subs.append(self._sub(inner))
@@ -1335,18 +1507,27 @@ class _Scan:
         stop = n
         hs_kind: str | None = None
         paren = 0
+        wcur = ""        # like `cur`, but a brace that is a word in some shell does not clear it: the program a heredoc, a here-string or a `<(` is read by (W-135, DF-4)
+        pipe_at = -1     # where the text after the last `|` starts: a newline with nothing but blanks and comments since then continues the pipeline (W-135, E3-6)
 
         def emit(x: str) -> None:
-            nonlocal cur, c_blank
+            nonlocal cur, c_blank, wcur
             out.append(x)
             if c_blank and not x.isspace():
                 c_blank = False
             cur += x
+            wcur += x
             if len(cur) > 700:
                 cur = cur[:300] + cur[-300:]
+            if len(wcur) > 700:
+                wcur = wcur[:300] + wcur[-300:]
+
+        def stdin_kind() -> str | None:
+            """What the program being written reads from its stdin as code, in the stage cut at a brace and in the stage that holds the brace as a word."""
+            return _stdin_kind(*_command_word(cur)) or (_stdin_kind(*_command_word(wcur)) if wcur != cur else None)
 
         def end_stage(sep_at: int, resume: int, pipe: bool, brace: bool = False, word: bool = False) -> None:
-            nonlocal cur, raw_at, hs_kind, c_blank, whole_at
+            nonlocal cur, raw_at, hs_kind, c_blank, whole_at, wcur, pipe_at
             c_blank = c_blank or not brace
             raw = s[raw_at:sep_at]
             if raw.strip():
@@ -1356,24 +1537,30 @@ class _Scan:
                 self._note_assignments(raw)
             else:
                 variants = []
+            if not word and whole_at < raw_at and (full := s[whole_at:sep_at]).strip():
+                self._stage(full, deferred)   # the stage whole, a brace inside a word being a character of it: `x={a sh -c 'git push origin main'` runs the push (W-135, F1)
             if pipe:
                 chain.append(raw)
                 chain.extend(variants)   # `g=curl; $g URL | sh`: the stage that fetches is read with the value of its variable too
                 whole.append(s[whole_at:sep_at])
-                if kind := _next_stage_kind(s, resume):
+                if kind := _next_stage_kind(s, resume if pending else _BLANK_LINES.match(s, resume).end()):
                     done, done_whole = fed.get(kind, (0, 0))   # `a | sh | sh | ...` hands each stage to a shell once, not once per shell
                     fed[kind] = (len(chain), len(whole))
                     deferred.extend(self._produced(r, kind) for r in chain[done:])
                     # the stages as the shell that takes a brace for a word reads them: `echo git push origin main {x | sh` pipes the push to the shell
                     deferred.extend(self._produced(r, kind) for r in dict.fromkeys(whole[done_whole:]) if r not in chain)
                     deferred.extend(self._pipe_marks(chain[done:]))
+                    deferred.extend(self._pipe_marks([r for r in dict.fromkeys(whole[done_whole:]) if r not in chain]))   # `curl https://x/{a}/i.sh | sh`: the fetch is one word of the stage (W-135, DF-2)
+                pipe_at = resume
             else:
+                pipe_at = -1
                 chain.clear()
                 fed.clear()
                 if not word:
                     whole.clear()
             if not word:
                 whole_at = resume
+                wcur = ""
             cur, raw_at, hs_kind = "", resume, None
 
         def literal(plain: str, raw: str, quote: str) -> None:
@@ -1440,12 +1627,9 @@ class _Scan:
             elif c == "$":
                 nxt = s[i + 1:i + 2]
                 if s.startswith("$((", i):
-                    j = _match_arith(s, i + 3)
-                    inner = s[i + 3:j - 2]
-                    if re.search(r"[A-Za-z]", inner):
-                        deferred.append(self._sub(inner))
+                    i, texts = self._arith(i)
+                    deferred.extend(texts)
                     emit("$X")
-                    i = j
                 elif nxt == "(":
                     start = i + 2
                     txt, i = self.run(start, ")")
@@ -1473,11 +1657,11 @@ class _Scan:
                 txt, i = self._backtick(i + 1, False)
                 deferred.append(txt)
                 emit("$X")
-            elif c == "#" and (not cur or cur[-1] in " \t"):  # a comment ends at the newline, whatever a backslash says
+            elif c == "#" and (not cur or cur[-1] in " \t") and (i == 0 or s[i - 1] not in "{}"):  # a comment ends at the newline, whatever a backslash says. A `#` right after a brace is part of a word in bash and zsh: `a{#b; git push origin main` (W-135, DF-1)
                 e = s.find("\n", i)
                 i = n if e < 0 else e
             elif c == "<" and s.startswith("<(", i):  # process substitution: text a shell reads as a script
-                kind = _stdin_kind(*_command_word(cur))
+                kind = stdin_kind()
                 start = i + 2
                 txt, i = self.run(start, ")")
                 deferred.append(txt)
@@ -1486,18 +1670,22 @@ class _Scan:
                     deferred.extend(self._pipe_marks(re.split(r"\||;|&&", s[start:i - 1])))
                 emit("/dev/fd/X")
             elif c == "<" and s.startswith("<<<", i):
-                hs_kind = _stdin_kind(*_command_word(cur))
+                hs_kind = stdin_kind()
                 emit("<<<")
                 i += 3
-            elif c == "<" and s.startswith("<<", i) and (m := HEREDOC_OP.match(s, i)):
+            elif c == "<" and s.startswith("<<", i) and (m := HEREDOC_OP.match(s, i)) and not _in_arithmetic(s, i):
                 delim, quoted, word_end = _heredoc_word(s, _heredoc_word_start(s, m))   # the whole word: `<<E"O"F` is the delimiter EOF, quoted (W-133, F9)
                 end = max(m.end(), word_end)
-                own = _stdin_kind(*_command_word(cur))
+                own = stdin_kind()
                 after = _rest_of_line_pipes_to_code(s, end)
                 kind = own or after
                 pending.append((delim, quoted, bool(m.group(1)), kind, own not in (None, "shell") and after == "shell"))   # last: a program whose output is piped to a shell
                 emit("<<HEREDOC")
                 i = end
+            elif c == "\n" and not pending and pipe_at >= 0 and _BLANK_RUN.fullmatch(s, pipe_at, i):
+                out.append("\n")   # a newline after `|` continues the pipeline: the stage that follows reads the pipe, and the producers are still in the chain (W-135, E3-6)
+                i += 1
+                pipe_at = i   # what came before is blank: the next check reads one line, not the whole run again
             elif c == "\n":
                 nl = i
                 emit("\n")
@@ -1567,6 +1755,8 @@ class _Scan:
             self._stage(raw, deferred)
             if self.assigns:
                 deferred.extend(self._sub(t) for t in self._variable_command(raw, deferred))
+        if whole_at < raw_at and (full := s[whole_at:stop]).strip():
+            self._stage(full, deferred)   # the last stage whole, a brace inside a word being a character of it (W-135, F1)
         self.nest -= 1
         text = _readings("".join(out), braced, escaped)
         return text + "".join(f" ; {d} ; " for d in dict.fromkeys(deferred)), i   # a text produced for several pipes is written once

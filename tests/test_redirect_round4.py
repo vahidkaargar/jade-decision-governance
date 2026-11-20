@@ -251,8 +251,10 @@ ORDINARY_BRACE_LINES = [
 
 @pytest.mark.parametrize("line", ORDINARY_BRACE_LINES)
 def test_an_ordinary_brace_word_has_two_readings_at_most(line):
-    """The reading that cuts at every brace (main), the one that takes it for a word, and the escaped operator both ways: the line a few times, not ten times."""
-    assert len(shellnorm.skeleton(line)) <= 5 * len(line) + 40, line
+    """The reading that cuts at every brace (main), the one that takes it for a word, and the escaped operator both ways: the line a few times, not ten times.
+
+    W-135: the stage is also read whole (a brace being a character of a word), so `find ... -exec grep -l foo {} \\;` carries the `-exec` command in one more spelling: 7 times, not 5."""
+    assert len(shellnorm.skeleton(line)) <= 7 * len(line) + 40, line
 
 
 def test_a_script_with_brace_words_costs_a_few_lines_not_a_few_scripts():
