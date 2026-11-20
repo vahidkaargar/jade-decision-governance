@@ -3,12 +3,14 @@
 Before: a list `command` on an MCP tool was rated by the tool name alone (`["rm", "-rf", "/"]` on a tool called `shell` was a medium call), and an event with no
 `tool_name`, an empty stdin, text that is not JSON, or JSON that is not an object passed in silence. Events go through `hooks.main`, with stdin replaced; nothing is run.
 """
+import dataclasses
 import io
 import json
+import shlex
 
 import pytest
 
-from jade import hooks, policy
+from jade import hooks, ledger, memory, policy, scopes
 
 SESSION = "sess-w209"
 
@@ -144,3 +146,77 @@ def test_an_empty_tool_name_exits_2(name, monkeypatch, capsys):
 def test_a_normal_event_is_not_affected(monkeypatch):
     assert run("pretool", ev("Bash", {"command": "git status"}), monkeypatch) == 0
     assert run("pretool", ev("Read", {"file_path": "/etc/hosts"}), monkeypatch) == 0
+
+
+# ---------------------------------------------------------------- a list command keeps its own answer (W-209 review)
+
+LIST_CASES = [
+    ("mcp__shell__run", ["launchctl", "bootout", "gui/501/x"]),   # R-12 high, a class call as a string
+    ("mcp__shell__run", ["git", "push", "origin", "feature"]),    # M-07 high as a list, R-19 medium as a string
+    ("mcp__shell__run", ["git", "reset", "--hard", "HEAD~1"]),
+]
+
+
+def _keys(tool, tool_input, cwd="/nonexistent-w209"):
+    a = policy.assess(tool, tool_input, cwd)
+    exact, cls, el = memory.keys(a, tool, tool_input, {})
+    return a, exact, cls, el, scopes.keys_for(a, tool, tool_input, {}, cwd)
+
+
+@pytest.mark.parametrize(("tool", "words"), LIST_CASES)
+def test_a_list_command_shares_no_memory_key_with_another_form(tool, words):
+    """On main a list command was rated by the tool name and had its own exact key: an answer for the same command sent through Bash or as a string never ran it.
+    Reading the list must not widen what one standing answer covers: the list call is exact only (no class or scope key) and its exact and hold keys are its own."""
+    a, exact, cls, el, scope_keys = _keys(tool, {"command": words})
+    assert el in ("exact", "never")
+    assert cls is None
+    assert scope_keys == []
+    for other_tool, other_input in [("Bash", {"command": shlex.join(words)}), (tool, {"command": shlex.join(words)}), ("mcp__other__run", {"command": words})]:
+        b, o_exact, _, _, _ = _keys(other_tool, other_input)
+        assert exact != o_exact, (other_tool, other_input)
+        assert a.hold_key != b.hold_key, (other_tool, other_input)
+
+
+@pytest.mark.parametrize("words", [
+    ["git", "reset", "--hard", "HEAD~1"],
+    ["gh", "pr", "merge", "940", "--repo", "github.com/owner/repoA", "--squash"],
+    ["ssh", "host", "uptime"],
+    ["launchctl", "bootout", "gui/501/x"],
+])
+def test_a_list_command_in_a_project_gets_no_scope(tmp_path, words):
+    """In a project with a remote the string form may be offered a project, merge or rule scope; the list form never is."""
+    repo = tmp_path / "repoA"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "config").write_text('[remote "origin"]\n\turl = https://github.com/owner/repoA.git\n')
+    a, _, cls, el, scope_keys = _keys("mcp__shell__run", {"command": words}, str(repo))
+    assert (el in ("exact", "never"), cls, scope_keys) == (True, None, [])
+    assert scopes.offered(a, "mcp__shell__run", {"command": words}, {}, str(repo)) == []
+
+
+def test_a_list_command_keeps_its_rating_and_blocks():
+    """Separating the keys changes no rating: the list form still reads the command (SI-08 above) and never rates below the string form."""
+    for tool, words in LIST_CASES:
+        got, want = policy.assess(tool, {"command": words}, "/nonexistent-w209"), policy.assess(tool, {"command": shlex.join(words)}, "/nonexistent-w209")
+        assert policy.LEVELS[got.level] >= policy.LEVELS[want.level]
+        assert set(want.blocked) <= set(got.blocked)
+
+
+def test_a_standing_bash_answer_does_not_run_the_list_call():
+    """End to end through `memory.lookup`: a confirmed allow (exact, and of the kind in any project) for `launchctl bootout` in Bash leaves the same command as an
+    MCP list to be asked, as on main."""
+    cmd, cwd = "launchctl bootout gui/501/x", "/nonexistent-w209"
+    a = policy.assess("Bash", {"command": cmd}, cwd)
+    exact, cls, _ = memory.keys(a, "Bash", {"command": cmd}, {})
+    offered = [dataclasses.asdict(s) for s in scopes.offered(a, "Bash", {"command": cmd}, {}, cwd) if s.kind == "kind_any"]
+    d = ledger.open(timeout=5)
+    try:
+        for scope in (None, *offered):
+            with d.tx():
+                aid = d.record_human_answer(session=SESSION, decision_id=None, rule_id=a.rule_id, class_key=cls, exact_key=exact, answer="allow", channel="chat",
+                                            label=cmd, scope=scope)
+                d.confirm_answers([aid])
+        assert memory.lookup(d, a, "Bash", {"command": cmd}, {}, cwd) is not None   # the answer stands for the Bash call
+        tin = {"command": cmd.split()}
+        assert memory.lookup(d, policy.assess("mcp__shell__run", tin, cwd), "mcp__shell__run", tin, {}, cwd) is None
+    finally:
+        d.close()

@@ -239,6 +239,13 @@ def mcp_command_is_list(tool_input: dict) -> bool:
     return _mcp_command_read(tool_input)[1]
 
 
+def shares_shell_answers(tool: str, tool_input: dict) -> bool:
+    """True when an answer to this call may be generalised like one to a shell command (a class key, a scope): `runs_shell`, except an MCP command given as a
+    list. Such a call was rated by its tool name before W-209 and stays exact only, with a hold key of its own, so that an answer given for the same command in
+    Bash or as a string never runs it (W-209 review). Everything that adds care to a shell call (SI-08, fingerprints, run fields) still reads it through `runs_shell`."""
+    return runs_shell(tool, tool_input) and not (is_mcp(tool) and mcp_command_is_list(tool_input))
+
+
 @dataclass
 class Assessment:
     level: str
@@ -1675,6 +1682,8 @@ def _assess_tool(tool: str, tool_input: dict, cwd: str) -> Assessment:
         a = _assess_shell(tool, cmd, cwd)
         if by_name or not rule.get("generic"):
             _raise_to(a, _rule_assessment(rule))
+        if by_name:   # a list command keeps the hold key it had before W-209 (tool and input): no answer or hold of another form of the command is shared with it
+            a.hold_key = plan_hash(tool, canonical(tool_input), "")
     else:
         a = _rule_assessment(rule)
         subject = canonical(tool_input)

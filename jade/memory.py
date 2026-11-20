@@ -67,7 +67,7 @@ def eligibility(a, tool: str, tool_input: dict | None, fp: dict | None) -> str:
 
     if a.ho_ids or a.blocked or a.level == "critical" or ({a.rule_id, *(getattr(a, "seg_rules", None) or [])} & NEVER_RULES):   # every segment rule, as `proxy.skip_reason` reads them (V6-06b)
         return "never"
-    if not policy.runs_shell(tool, tool_input or {}):
+    if not policy.shares_shell_answers(tool, tool_input or {}):   # a call that carries no shell text, or an MCP command given as a list (W-209)
         return "exact"
     if a.rule_id in EXACT_ONLY_RULES or set(getattr(a, "seg_rules", []) or []) & EXACT_ONLY_RULES or a.blind or a.rule_id in ("R-31", "R-32"):
         return "exact"
