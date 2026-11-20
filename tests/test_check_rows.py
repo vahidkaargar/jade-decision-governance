@@ -436,15 +436,31 @@ def test_setup_hooks_text_counts_from_hooks(monkeypatch):
     assert "four" not in setup._hooks_change() and f"add {len(ops.HOOKS)} JADE hook entries" in setup._hooks_change()
 
 
-def test_install_summary_names_gate_mode_what_blocks_and_backend_and_writes_nothing():
+def test_install_summary_rows_name_gate_mode_what_blocks_and_backend_and_write_nothing():
     setup_pair("enforce", "off")
     before = sorted(p.name for p in paths.home().iterdir()) if paths.home().exists() else []
-    lines = ops.install_summary()
-    assert lines[0] == "gate mode: enforce"
-    assert lines[1].startswith("what blocks: advisory: ")
-    assert lines[2].startswith("approval backend: tty")
+    rows_ = ops.install_summary_rows()
+    assert [r[0] for r in rows_] == ["gate mode", "what blocks", "approval backend"]   # the row names `jade check` uses
+    (_, ok0, text0), (_, ok1, text1), (_, ok2, text2) = rows_
+    assert text0 == "enforce" and ok0 is True
+    assert text1.startswith("advisory: ") and ok1 is None   # level off: a WARN, as in `jade check`
+    assert text2.startswith("tty") and ok2 is None
     after = sorted(p.name for p in paths.home().iterdir()) if paths.home().exists() else []
     assert before == after
+
+
+def test_install_summary_row_state_follows_the_gate_and_the_backend(monkeypatch):
+    setup_pair("advisory", None)
+    by = {n: (ok, d) for n, ok, d in ops.install_summary_rows()}
+    assert by["gate mode"][0] is None and by["gate mode"][1].startswith("advisory")
+    monkeypatch.setattr(signing, "anchor_state", lambda: ("untrusted", "bad anchor"))
+    by = {n: (ok, d) for n, ok, d in ops.install_summary_rows()}
+    assert by["approval backend"][0] is False and "bad anchor" in by["approval backend"][1]
+
+
+def test_install_summary_rows_render_like_check_rows():
+    rows_ = [("gate mode", True, "enforce"), ("what blocks", None, "x"), ("approval backend", False, "y")]
+    assert ops.install_summary_lines(rows_) == ["ok    gate mode: enforce", "WARN  what blocks: x", "FAIL  approval backend: y"]
 
 
 def test_jade_hooks_install_prints_the_summary(capsys):
@@ -452,5 +468,5 @@ def test_jade_hooks_install_prints_the_summary(capsys):
     assert cli.main(["hooks", "install"]) in (0, None)
     out = capsys.readouterr().out
     assert "hooks installed in" in out
-    assert "gate mode: advisory" in out and "what blocks: advisory gate mode, no level set: nothing blocks" in out and "approval backend: " in out
+    assert "WARN  gate mode: advisory" in out and "what blocks: advisory gate mode, no level set: nothing blocks" in out and "approval backend: " in out
     assert json.loads(ops.settings_path().read_text())["hooks"].keys() >= set(ops.HOOKS)

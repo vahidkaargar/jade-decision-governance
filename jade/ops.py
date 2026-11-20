@@ -2479,11 +2479,15 @@ def _approval_row() -> tuple[str, bool | None, str]:
     return ("approval backend", ok, text)
 
 
-def install_summary() -> list[str]:
-    """V6-10 (DX-H4): what `jade hooks install` leaves in force: the effective gate mode, what the hook blocks, and the approval backend. Reads the config,
-    the policy and the trust anchor only: nothing is written and no default changes."""
-    env = " (JADE_GATE_MODE in this environment)" if os.environ.get("JADE_GATE_MODE") else ""
-    return [f"gate mode: {paths.gate_mode()}{env}", f"what blocks: {blocking_summary()[1]}", f"approval backend: {_approval_state()[1]}"]
+def install_summary_rows() -> list[tuple[str, bool | None, str]]:
+    """V6-10 (DX-H4), W-140: what `jade hooks install` leaves in force, as rows (name, ok, detail) with the names and the states `jade check` uses: the effective
+    gate mode, what the hook blocks, and the approval backend. Reads the config, the policy and the trust anchor only: nothing is written and no default changes."""
+    _, gate_ok, gate_text = _gate_mode_row()
+    if os.environ.get("JADE_GATE_MODE") and "JADE_GATE_MODE" not in gate_text:
+        gate_text += " (JADE_GATE_MODE in this environment)"
+    blocks_ok, blocks_text = blocking_summary()
+    backend_ok, backend_text = _approval_state()
+    return [("gate mode", gate_ok, gate_text), ("what blocks", blocks_ok, blocks_text), ("approval backend", backend_ok, backend_text)]
 
 
 CHECK_PREFIX = {True: "ok  ", False: "FAIL", None: "WARN"}   # V6-10: WARN is not safe or not known, and never changes the exit code
@@ -2494,9 +2498,18 @@ def check_failed(ok) -> bool:
     return ok is not None and not ok
 
 
+def check_line(name: str, ok, detail: str) -> str:
+    """One row as `jade check` prints it; `jade hooks install` prints its summary rows the same way."""
+    return f"{CHECK_PREFIX[ok if ok is None else bool(ok)]}  {name}: {detail}"
+
+
+def install_summary_lines(rows) -> list[str]:
+    return [check_line(name, ok, detail) for name, ok, detail in rows]
+
+
 def print_check(rows) -> int:
     for name, ok, detail in rows:
-        print(f"{CHECK_PREFIX[ok if ok is None else bool(ok)]}  {name}: {detail}")
+        print(check_line(name, ok, detail))
     failed = [n for n, ok, _ in rows if check_failed(ok)]
     if failed:
         print(f"jade check: {len(failed)} failed ({', '.join(failed)})", file=sys.stderr)
