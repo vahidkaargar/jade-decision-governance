@@ -316,6 +316,8 @@ def _ansi_c(s: str, j: int) -> tuple[int, str]:
 def _command_word(stage_text: str) -> tuple[str, list[str]]:
     bare = PREFIX.sub("", stage_text.lstrip(), count=1).strip()
     toks = bare.split()
+    if toks and toks[0].rsplit("/", 1)[-1].lower() in _STAGE_LAUNCHERS:
+        toks = _peel_launchers(toks) or toks   # `stdbuf -oL sh <<EOF`: the program the launcher starts reads the heredoc (W-135)
     return (toks[0].rsplit("/", 1)[-1].lower(), toks[1:]) if toks else ("", [])
 
 
@@ -363,8 +365,13 @@ def _peel_launchers(words: list[str]) -> list[str]:
             peeled = peeled[peeled.index("-c") + 1:] if "-c" in peeled else []
         elif w in _STAGE_LAUNCHERS:
             peeled = peeled[1:]
+            listed = False
             while peeled and peeled[0].startswith("-"):
-                peeled = peeled[2:] if peeled[0] in ("-u", "-g", "-C", "-c", "-n", "-p") and len(peeled[0]) == 2 else peeled[1:]
+                valued = ("-u", "-g", "-C", "-c", "-n", "-p") + (("-i", "-o", "-e") if w == "stdbuf" else ("--cpu-list",) if w == "taskset" else ())   # `stdbuf -o L sh`: the mode is the next word (W-135)
+                listed = listed or peeled[0] in ("-c", "--cpu-list")
+                peeled = peeled[2:] if peeled[0] in valued else peeled[1:]
+            if peeled and ((w == "chrt" and peeled[0].isdigit()) or (w == "taskset" and not listed and re.fullmatch(r"(?:0x)?[0-9a-fA-F,]+", peeled[0]))):
+                peeled = peeled[1:]   # `chrt -o 0 sh`, `taskset 1 sh`: the priority and the CPU mask come before the program (W-135)
         if peeled == words:
             break
         words = peeled
@@ -426,6 +433,40 @@ def _rest_of_line_pipes_to_code(s: str, j: int) -> str | None:
         kind = _next_stage_kind(line, m.end())
         if kind:
             return kind
+    return None
+
+
+def _heredoc_end(s: str, i: int, pending: list) -> int:
+    """Where the text after the heredoc bodies starts, the first body starting at s[i]: the lines up to each delimiter in turn, as `_Scan._heredoc_bodies` reads them."""
+    n = len(s)
+    for delim, _quoted, tabs, *_ in pending:
+        while i < n:
+            e = s.find("\n", i)
+            e = n if e < 0 else e
+            line = s[i:e]
+            i = e + 1 if e < n else n
+            if (line.lstrip("\t") if tabs else line).rstrip("\r") == delim:
+                break
+    return i
+
+
+_LATER_LINES = 16   # how many lines ending in `|` are followed to the stage that reads the pipe
+
+
+def _later_stage_reads_code(s: str, j: int) -> str | None:
+    """What the stage at s[j], after blank and comment lines, or a later stage of its pipeline reads as code: a `|` on its line, or a `|` that ends the line and the
+    stage on the next (`cat <<EOF |`, the body, `EOF`, `cat |`, `sh`; W-135, E3-6). Fail closed: a `|` in a quote at the end of a line is taken for a pipe."""
+    n = len(s)
+    for _ in range(_LATER_LINES):
+        j = _BLANK_LINES.match(s, j).end()
+        if kind := _next_stage_kind(s, j) or _rest_of_line_pipes_to_code(s, j):
+            return kind
+        e = s.find("\n", j)
+        e = n if e < 0 else e
+        bar = s.rfind("|", j, e)
+        if bar < 0 or e >= n or not _BLANK_RUN.fullmatch(s, bar + 1, e):
+            return None
+        j = e + 1
     return None
 
 
@@ -1118,6 +1159,16 @@ def _without_redirect_words(ws: list[str]) -> list[str]:
     return out
 
 
+def _launched(ws: list[str]) -> list[str] | None:
+    """The words from the program on, when a stage launcher (`stdbuf`, `doas`, `setsid` ...) that `PREFIX` leaves in place starts it, else None."""
+    bare = PREFIX.sub("", " ".join(ws), count=1)
+    words = bare.split(" ") if bare else []
+    if not words or _dec(words[0]).rsplit("/", 1)[-1].lower() not in _STAGE_LAUNCHERS:
+        return None
+    peeled = _peel_launchers(words)
+    return peeled if peeled and peeled != words else None
+
+
 def _runs_text(ws: list[str]) -> bool:
     """Do these words, behind their launchers, run a text they carry: `eval`, a shell, an interpreter, `ssh`, `su`, `script`."""
     bare = PREFIX.sub("", " ".join(ws), count=1)
@@ -1368,10 +1419,14 @@ class _Scan:
         if not ws:
             return
         self._stage_words(ws, deferred)
+        alt = ws
         if any(_REDIRECT_WORD.fullmatch(w) for w in ws):
             alt = _without_redirect_words(ws)
             if alt and alt != ws and _runs_text(alt):
                 self._stage_words(alt, deferred)
+        for words in dict.fromkeys(map(tuple, (ws, alt))):   # `stdbuf -oL bash -c 'x'`, `stdbuf -oL 2>&1 bash -c 'x'`: the program the launcher starts, read as if it stood alone (W-135)
+            if (launched := _launched(list(words))) and _runs_text(launched):
+                self._stage_words(launched, deferred)
 
     def _stage_words(self, ws: list[str], deferred: list[str]) -> None:
         enc = " ".join(ws)
@@ -1526,6 +1581,16 @@ class _Scan:
             """What the program being written reads from its stdin as code, in the stage cut at a brace and in the stage that holds the brace as a word."""
             return _stdin_kind(*_command_word(cur)) or (_stdin_kind(*_command_word(wcur)) if wcur != cur else None)
 
+        def feed(kind: str) -> None:
+            """The stages of the pipeline so far are text that a reader of `kind` (a shell, an interpreter) at its end runs."""
+            done, done_whole = fed.get(kind, (0, 0))   # `a | sh | sh | ...` hands each stage to a shell once, not once per shell
+            fed[kind] = (len(chain), len(whole))
+            deferred.extend(self._produced(r, kind) for r in chain[done:])
+            # the stages as the shell that takes a brace for a word reads them: `echo git push origin main {x | sh` pipes the push to the shell
+            deferred.extend(self._produced(r, kind) for r in dict.fromkeys(whole[done_whole:]) if r not in chain)
+            deferred.extend(self._pipe_marks(chain[done:]))
+            deferred.extend(self._pipe_marks([r for r in dict.fromkeys(whole[done_whole:]) if r not in chain]))   # `curl https://x/{a}/i.sh | sh`: the fetch is one word of the stage (W-135, DF-2)
+
         def end_stage(sep_at: int, resume: int, pipe: bool, brace: bool = False, word: bool = False) -> None:
             nonlocal cur, raw_at, hs_kind, c_blank, whole_at, wcur, pipe_at
             c_blank = c_blank or not brace
@@ -1544,13 +1609,7 @@ class _Scan:
                 chain.extend(variants)   # `g=curl; $g URL | sh`: the stage that fetches is read with the value of its variable too
                 whole.append(s[whole_at:sep_at])
                 if kind := _next_stage_kind(s, resume if pending else _BLANK_LINES.match(s, resume).end()):
-                    done, done_whole = fed.get(kind, (0, 0))   # `a | sh | sh | ...` hands each stage to a shell once, not once per shell
-                    fed[kind] = (len(chain), len(whole))
-                    deferred.extend(self._produced(r, kind) for r in chain[done:])
-                    # the stages as the shell that takes a brace for a word reads them: `echo git push origin main {x | sh` pipes the push to the shell
-                    deferred.extend(self._produced(r, kind) for r in dict.fromkeys(whole[done_whole:]) if r not in chain)
-                    deferred.extend(self._pipe_marks(chain[done:]))
-                    deferred.extend(self._pipe_marks([r for r in dict.fromkeys(whole[done_whole:]) if r not in chain]))   # `curl https://x/{a}/i.sh | sh`: the fetch is one word of the stage (W-135, DF-2)
+                    feed(kind)
                 pipe_at = resume
             else:
                 pipe_at = -1
@@ -1688,12 +1747,25 @@ class _Scan:
                 pipe_at = i   # what came before is blank: the next check reads one line, not the whole run again
             elif c == "\n":
                 nl = i
-                emit("\n")
+                # `cat <<EOF |`, the body, `EOF`, then `sh`: the line ends in a `|`, so the pipeline goes on after the heredoc bodies, and the stage there reads them (W-135, E3-6)
+                piped = bool(pending) and pipe_at >= 0 and bool(_BLANK_RUN.fullmatch(s, pipe_at, nl))
+                if piped:
+                    out.append("\n")
+                else:
+                    emit("\n")
                 i += 1
                 if pending:
+                    if piped and (later := _later_stage_reads_code(s, _heredoc_end(s, i, pending))):
+                        pending = [(d, q, t, k or later, p or (k not in (None, "shell") and later == "shell")) for d, q, t, k, p in pending]
+                        feed(later)
                     i = self._heredoc_bodies(i, pending, deferred)
                     pending = []
-                end_stage(nl, i, False)
+                if piped:
+                    if whole_at == raw_at:
+                        whole_at = i
+                    raw_at = pipe_at = i   # the stage after the `|` starts after the bodies, which are no words of it
+                else:
+                    end_stage(nl, i, False)
             elif c == "{" and (j := _brace_span(s, i)) > 0:  # brace expansion word, not a command group
                 emit(s[i:j])
                 i = j
