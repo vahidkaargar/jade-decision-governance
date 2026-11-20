@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+### Changed
+- **A shorter README.** The front page now says what JADE is, where it runs, its status, the Quick start, the two settings, what leaves your machine, what a blocked command looks like, which documents to read, how to develop, and how to add policy overlays. Long detail moved to the documents, and nothing was deleted: the speed table to `docs/04` section 4d; the measured baseline and the facts about Jev through OpenRouter to `docs/00` (section 3 and section 1c); what the code holds, what 0.5 and 0.6 added, signed approval, hardening batch 1 and the full advisory-mode list to `docs/09` section 1; which release you are running (the trust root) to `docs/09` section 4; the facts of the author's machine to `docs/08`; the layout, the classifier one-liner, baseline mining and the live probes to `CONTRIBUTING.md`. The README names no fact of one machine on one day (W-171) and now counts 13 architecture decisions. `tests/test_front_page.py` and `tests/test_docs_truth.py` check the same facts at their new place.
+- **Clearer `jade` help.** Every command, subcommand and option of `jade`, `jade ask` and `jev` has a one-line help, each top-level command has a short description, and the common ones end with one example. The words are the same everywhere: gate mode, level, permit, ledger. Text only: no command, flag, default or exit code changed.
+
 ## [0.7.0] - 2026-11-19
 
 ### Added
