@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextvars
 import functools
+import itertools
 import re
 import shlex
 from dataclasses import dataclass, field, replace
@@ -28,8 +29,46 @@ from . import blind, interp
 MAX_DEPTH = 8
 MAX_NEST = 60
 BUDGET = 4_000_000     # characters the scanner may read across all nested levels; past it the rest is searched as plain text
+WORD_WORK = 16_000   # characters of stages that may be read again with the values of the variables in their words, for the whole text (W-191); past it the text is asked about
 VARIABLE_WORK = 1500  # characters of nested stages (and one for each flat stage) that may be read again with the values of the variable that is their command word, for the whole text (V6-08 review)
 _NESTED_OPEN = re.compile(r"\$\(|`|[<>]\(")   # a stage that holds one of these holds another text that is read, and may hold a stage of this kind again
+_VAR_REF = re.compile(r"\$(?:\{(\w+)\}|(\w+))")   # `$v`, `${v}`: a variable a stage may name in any word (W-191)
+_VAR_STAGE = re.compile(r'[ \t]*"?\$(?:\{(\w+)\}|(\w+))"?(?=[\s;&|)]|$)')   # a stage that is a variable as its command word (`| $h`, `| "$h"`)
+_DQ_WORD = re.compile(r'"((?:[^"\\\s]|\\.)*)"')   # a double-quoted text with no blank in it: one word (`"$b"`, `"HEAD:$b"`)
+
+
+def _word_var_refs(raw: str) -> list[re.Match]:
+    """The `$v` / `${v}` of a stage that are words or parts of words of this stage: outside quotes, or in a double-quoted text with no blank (`"$b"`, `"HEAD:$b"`).
+    A variable in a single-quoted text is not expanded here, and one in a double-quoted text with blanks (`sh -c "$g push"`, `eval "git $v ..."`) is in a text
+    that a nested reading reads with the same values: reading it here too only repeats readings (W-191, CPU time)."""
+    out: list[re.Match] = []
+    i, n = 0, len(raw)
+    while i < n:
+        c = raw[i]
+        if c == "\\":
+            i += 2
+        elif c == "'":
+            j = raw.find("'", i + 1)
+            i = n if j < 0 else j + 1
+        elif c == '"':
+            m = _DQ_WORD.match(raw, i)
+            if m:
+                out.extend(_VAR_REF.finditer(raw, m.start(1), m.end(1)))
+                i = m.end()
+            else:
+                j = i + 1
+                while j < n and raw[j] != '"':
+                    j += 2 if raw[j] == "\\" else 1
+                i = j + 1
+        elif c == "$" and (m := _VAR_REF.match(raw, i)):
+            out.append(m)
+            i = m.end()
+        else:
+            i += 1
+    return out
+
+
+_MAX_COMBINATIONS = 64   # readings of one stage with every combination of the values of its variables; past it the stage is asked about (`cap:var-readings`)
 HERE_ALLOWANCE = 6_000_000  # characters more that the here-strings of a chain may be read for: a text that the budget charged already comes back once per level
 UNSAFE_MARK = "@unsafe!"   # prefix of the copy of a stage whose verb can write or run something, so rules see its resolved operands
 UNSAFE_GIT = "git:unsafe-config "
@@ -1203,7 +1242,10 @@ class _Scan:
         self.literal_end = literal_end if depth == 0 else 0
         self.legacy = len(budget) > 3 and budget[3]   # origin/main's reading of `"${NAME}"` (`$X`): the third reading of `_skeleton_both_top`
         self.ssh = not (len(budget) > 4 and budget[4] is False)   # False: `ssh host 'cmd'` is one word list, `cmd` is not read as a command (the scope check, jade/scopes.py)
-        self.assigns: dict[str, list[str]] = {}   # `g=git` earlier in this text: the literal values a variable was given (V6-08, N19)
+        # `g=git` earlier in this text: the literal values a variable was given (V6-08, N19). One table for the whole command, at every depth: the text of `eval "$g push"`,
+        # `sh -c "$g push"` or a heredoc is read with the values the outer text gave (W-191). A child shell does not see a variable that is not exported, so `sh -c '$g ...'`
+        # gets a reading too many: an extra question, never a hidden command.
+        self.assigns: dict[str, list[str]] = budget[7] if len(budget) > 8 else {}
 
     def _note_assignments(self, raw: str) -> None:
         """A stage that is only `NAME=value` words (or `export NAME=value`) gives a shell variable a value. Every plain literal value a name was given is kept,
@@ -1225,6 +1267,8 @@ class _Scan:
                 known = self.assigns.setdefault(name, [])
                 if val not in known and len(known) < 4:
                     known.append(val)
+                    if len(self.budget) > 8:
+                        self.budget[8] += 1   # the table changed: a text read before is read again (`_sub` keys its memo on this count)
 
     def _variable_command(self, raw: str, deferred: list[str]) -> list[str]:
         """The stage with its command word, a variable set earlier in this text (`$g`, `${g}`), written as each value it was given: `g=git; $g push origin main` is
@@ -1233,25 +1277,79 @@ class _Scan:
         doubles the work (or more) per level (V6-08 review). A stage with a nested substitution costs its length for each value, a flat stage costs one for each value.
         Past the count the stage is not read with its values and the text carries the `cap:var-readings` mark, which risk.yaml rates R-10 (high): a text that long is asked about, so that
         padding in front of a `$g push origin main` cannot switch the reading off (integration review of the V6-08 cap; a recorded-only mark would be looser than uncapped)."""
+        named: list[str] = []
+        out = self._command_word_values(raw, deferred, named)
+        return out + [t for t in self._word_values(raw, deferred, named) if t not in out]
+
+    def _command_word_values(self, raw: str, deferred: list[str], named: list[str]) -> list[str]:
         lead = raw.lstrip()
         bare = PREFIX.sub("", lead, count=1)
         m = re.match(r'"?\$(?:\{(\w+)\}|(\w+))"?', bare)   # `"$g"` expands as `$g` does (a single-quoted `'$g'` does not)
         if not m or not (values := self.assigns.get(m.group(1) or m.group(2))):
             return []
-        if len(self.budget) > 5:
-            cost = len(values) * (len(raw) if _NESTED_OPEN.search(raw) else 1)
-            if self.budget[5] < cost:
-                deferred.append(VAR_CAP + "...")   # rated R-10 (asked about), not R-31: a cap that only records would let padding switch the reading off (integration review)
-                return []
-            self.budget[5] -= cost
+        named.append(m.group(1) or m.group(2))
+        if not self._charge(len(values), raw, deferred):
+            return []
         head = lead[:len(lead) - len(bare)]
         return [head + v + bare[m.end():] for v in values]
+
+    def _charge(self, readings: int, raw: str, deferred: list[str]) -> bool:
+        if len(self.budget) > 5:
+            cost = readings * (len(raw) if _NESTED_OPEN.search(raw) else 1)
+            if self.budget[5] < cost:
+                deferred.append(VAR_CAP + "...")   # rated R-10 (asked about), not R-31: a cap that only records would let padding switch the reading off (integration review)
+                return False
+            self.budget[5] -= cost
+        return True
+
+    def _word_values(self, raw: str, deferred: list[str], named: list[str]) -> list[str]:
+        """The stage with every variable that has known values written as them, in every combination: `v=push; git $v origin main` is also read as
+        `git push origin main`, `b=main; git push origin HEAD:$b` as `git push origin HEAD:main` (W-191, KG58). Each reading is charged its length to `WORD_WORK`;
+        past it, or past `_MAX_COMBINATIONS`, the text carries the `cap:var-readings` mark (asked about)."""
+        spans = [m for m in _word_var_refs(raw) if (m.group(1) or m.group(2)) in self.assigns]
+        names = list(dict.fromkeys(m.group(1) or m.group(2) for m in spans))
+        if not names or (len(spans) == 1 and names == named):
+            return []   # the one variable is the command word: `_command_word_values` read (and charged) these readings already
+        readings = 1
+        for n in names:
+            readings *= len(self.assigns[n])
+            if readings > _MAX_COMBINATIONS:
+                deferred.append(VAR_CAP + "...")
+                return []
+        if len(self.budget) > 9:
+            cost = readings * len(raw)   # by characters: each reading is a whole stage read again and classified again, however flat it is
+            if self.budget[9] < cost:
+                deferred.append(VAR_CAP + "...")
+                return []
+            self.budget[9] -= cost
+        out: list[str] = []
+        for values in itertools.product(*(self.assigns[n] for n in names)):
+            table = dict(zip(names, values, strict=True))
+            parts, at = [], 0
+            for m in spans:
+                parts += [raw[at:m.start()], table[m.group(1) or m.group(2)]]
+                at = m.end()
+            t = "".join(parts) + raw[at:]
+            if t != raw and t not in out:
+                out.append(t)
+        return out
+
+    def _variable_reader(self, s: str, j: int) -> str | None:
+        """The stage after a `|` is a variable with known values (`h=sh; curl URL | $h`): what the stage reads from the pipe as code, for any of the values (W-191, KG59)."""
+        m = _VAR_STAGE.match(s, j)
+        if not m or not (values := self.assigns.get(m.group(1) or m.group(2))):
+            return None
+        rest = s[m.end():m.end() + 4096]   # the reader and its options are at the start of the stage
+        for v in values:
+            if kind := _next_stage_kind(v + rest, 0):
+                return kind
+        return None
 
     def _sub(self, text: str, step: float = 1) -> str:
         """The skeleton of a nested text. A text that is read again at the same depth (the stages of a pipeline are produced once per `|`, a text is read for every
         reading of its caller) is read once: a chain of pipelines would otherwise read it as many times as it has pipes, per level."""
         seen = self.budget[2] if len(self.budget) > 2 else None
-        key = (text, self.depth + step)
+        key = (text, self.depth + step, self.budget[8] if len(self.budget) > 8 else 0)   # a text read again after a new value of a variable is read with it (W-191)
         if seen is not None and key in seen:
             return seen[key]
         out = skeleton(text, self.depth + step, self.budget)
@@ -1608,7 +1706,8 @@ class _Scan:
                 chain.append(raw)
                 chain.extend(variants)   # `g=curl; $g URL | sh`: the stage that fetches is read with the value of its variable too
                 whole.append(s[whole_at:sep_at])
-                if kind := _next_stage_kind(s, resume if pending else _BLANK_LINES.match(s, resume).end()):
+                at = resume if pending else _BLANK_LINES.match(s, resume).end()
+                if kind := _next_stage_kind(s, at) or (self._variable_reader(s, at) if self.assigns else None):
                     feed(kind)
                 pipe_at = resume
             else:
@@ -1889,8 +1988,9 @@ def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None, li
 def _skeleton(command: str, _depth: int, _budget: list[int] | None, literal_end: int = 0, legacy: bool = False, ssh: bool = True, targets: bool = False) -> str:
     # `legacy`, `ssh` and `targets` ride in the budget, which every nested scan shares: origin/main's reading of a quoted `${NAME}` (`$X`, see `_Scan`), the reading of an ssh remote command
     # and the reading of a brace word after a redirect operator as several targets (`expand_braces`), at every depth.
-    # Slot 5 is the work left for reading variable commands with their values (`VARIABLE_WORK`).
-    budget = _budget if _budget is not None else [BUDGET, HERE_ALLOWANCE, {}, legacy, ssh, VARIABLE_WORK, targets]
+    # Slot 5 is the work left for reading variable commands with their values (`VARIABLE_WORK`). Slot 7 is the table of the values variables were given, for the whole
+    # command at every depth, slot 8 counts its changes, and slot 9 is the work left for reading the variables in the words of a stage (`WORD_WORK`) (W-191).
+    budget = _budget if _budget is not None else [BUDGET, HERE_ALLOWANCE, {}, legacy, ssh, VARIABLE_WORK, targets, {}, 0, WORD_WORK]
     budget[0] -= len(command)
     command = _MARK_CHARS.sub("\x06", command)   # a byte that is one of the marks stays a word
     if _depth > MAX_DEPTH or budget[0] < 0:
@@ -2161,14 +2261,26 @@ def segments_cwd(command: str, cwd: str = "", literal_end: int | None = None) ->
     """
     rows: list[tuple[str, tuple[str, ...]]] = []
     big: set[tuple[str, tuple[str, ...]]] = set()
-    for text, _, token in _parts(command, literal_end):
-        for row in _segments_cwd_of(text, cwd, token):
+    readings = _skeleton_both_top(command, len(command) if literal_end is None else literal_end)
+    for text, current in readings:
+        got = _segments_cwd_of(text, cwd, SEG_TOKEN if current else _base().SEG_TOKEN)
+        if not current and _in_order(got, rows):
+            # origin/main's reading adds nothing when each of its rows is already a row, in the same order and with the same directories: the current reading only added
+            # rows to it (a variable read with its value, W-191). Every row is still read, after the same rows or more, so classifying it twice costs time and finds nothing new.
+            continue
+        for row in got:
             if len(row[0]) > BIG_SEGMENT:   # the plain text a scanner leaves when it stops reading comes out of both readings: a segment of this size is classified once (the cost of reading it twice is the cost of the command twice)
                 if row in big:
                     continue
                 big.add(row)
             rows.append(row)
     return rows
+
+
+def _in_order(sub: list, seq: list) -> bool:
+    """Is every item of `sub` in `seq`, in the same order (a subsequence)?"""
+    it = iter(seq)
+    return all(any(x == y for y in it) for x in sub)
 
 
 def _segments_cwd_of(text: str, cwd: str, token: re.Pattern) -> list[tuple[str, tuple[str, ...]]]:
