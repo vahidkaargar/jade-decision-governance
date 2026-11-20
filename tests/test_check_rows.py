@@ -216,6 +216,61 @@ def test_what_blocks_says_nothing_blocks_when_the_pretool_hook_is_missing():
     assert "blocks;" not in detail and "jade hooks install" in detail
 
 
+def _pretool_out_of_date(monkeypatch, gaps):
+    """The PreToolUse entry is installed but `hooks_status` calls it out of date, with `gaps` as `pretool_matcher_gaps` reports them (W-141)."""
+    monkeypatch.setattr(ops, "hooks_status", lambda: {**dict.fromkeys(ops.HOOKS, True), "PreToolUse": False})
+    monkeypatch.setattr(ops, "pretool_matcher_gaps", lambda: gaps)
+    monkeypatch.setattr(ops, "wiring_problems", lambda probe=True: [])
+
+
+def test_what_blocks_names_the_tools_a_matcher_gap_leaves_unchecked(monkeypatch):
+    """W-141: a matcher that misses some tools still runs for the others, so the row must not say "nothing blocks". It names the uncovered tools and still says
+    what blocks for the covered ones."""
+    _pretool_out_of_date(monkeypatch, ["Read", "Grep", "Glob", "AskUserQuestion"])
+    setup_pair("enforce", "high")
+    ok, detail = rows()["what blocks"]
+    assert ok is None, detail
+    assert not detail.startswith("nothing blocks"), detail
+    assert "does not cover Read, Grep, Glob, AskUserQuestion" in detail, detail
+    assert "no check at all" in detail and "jade hooks install" in detail, detail
+    assert "every other gated tool is checked as follows: every safety invariant (" in detail, detail
+    assert "held for a human approval" in detail, detail
+
+
+def test_what_blocks_says_every_mcp_tool_when_the_matcher_misses_mcp(monkeypatch):
+    _pretool_out_of_date(monkeypatch, ["mcp__server__tool"])
+    setup_pair("enforce", "high")
+    ok, detail = rows()["what blocks"]
+    assert "does not cover every MCP tool" in detail and "mcp__server__tool" not in detail, detail
+
+
+def test_what_blocks_says_the_hook_still_runs_when_only_its_timeout_or_failure_setting_is_old(monkeypatch):
+    """W-141: no matcher gap, but the entry is out of date (a short timeout, or no onFailure): the hook still runs, so "nothing blocks" would be false too."""
+    _pretool_out_of_date(monkeypatch, [])
+    setup_pair("enforce", "high")
+    ok, detail = rows()["what blocks"]
+    assert ok is None, detail
+    assert not detail.startswith("nothing blocks"), detail
+    assert "out of date" in detail and "still runs" in detail and "crashed or hung gate may let a call run" in detail, detail
+    assert "jade hooks install" in detail and "every safety invariant (" in detail, detail
+
+
+def test_what_blocks_in_the_gap_case_keeps_the_gate_mode_words(monkeypatch):
+    _pretool_out_of_date(monkeypatch, ["Read"])
+    setup_pair("advisory", "high")
+    ok, detail = rows()["what blocks"]
+    assert ok is None and "does not cover Read" in detail and "advisory gate mode" in detail, detail
+
+
+def test_what_blocks_in_the_gap_case_is_unknown_when_the_wiring_has_problems(monkeypatch):
+    _pretool_out_of_date(monkeypatch, ["Read"])
+    monkeypatch.setattr(ops, "wiring_problems", lambda probe=True: ["disableAllHooks is true in x: the host runs no hook at all"])
+    setup_pair("enforce", "high")
+    ok, detail = rows()["what blocks"]
+    assert ok is None and detail.startswith("unknown: the hook wiring has problems"), detail
+    assert "does not cover Read" in detail, detail
+
+
 def test_what_blocks_is_unknown_when_the_hook_wiring_has_problems(monkeypatch):
     monkeypatch.setattr(ops, "hooks_status", lambda: dict.fromkeys(ops.HOOKS, True))
     monkeypatch.setattr(ops, "wiring_problems", lambda probe=True: ["disableAllHooks is true in x: the host runs no hook at all"])

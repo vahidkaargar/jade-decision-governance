@@ -867,12 +867,29 @@ def _list_b_row() -> tuple[str, bool, str]:
 
 
 def _what_blocks_row(pretool_ok: bool | None = None, wiring: list[str] | None = None) -> tuple[str, bool | None, str]:
-    """`blocking_summary` for the mode and level in force, unless the PreToolUse hook is missing or out of date (then nothing blocks) or the wiring has
-    problems (then it is not known). `check` passes what it already found, so the live wiring probe is not run twice."""
+    """`blocking_summary` for the mode and level in force, unless the PreToolUse hook is missing (then nothing blocks) or the wiring has problems (then it is
+    not known). A PreToolUse hook that is installed but out of date still runs (W-141): a matcher gap leaves only the named tools unchecked, and an old timeout
+    or failure setting only weakens what a crashed or hung gate does; the row then says that and still says what blocks. `check` passes what it already found,
+    so the live wiring probe is not run twice."""
     if pretool_ok is None:
         pretool_ok = hooks_status().get("PreToolUse", False)
     if not pretool_ok:
-        return ("what blocks", None, "nothing blocks: the PreToolUse hook is not installed or is out of date; run `jade hooks install` in a terminal")
+        gaps = pretool_matcher_gaps()
+        if gaps is None:
+            return ("what blocks", None, "nothing blocks: the PreToolUse hook is not installed; run `jade hooks install` in a terminal")
+        if wiring is None:
+            wiring = wiring_problems(probe=False)   # static facts only: the live probe has run or will run for the `hook wiring` row
+        _ok, text = blocking_summary()
+        if gaps:
+            names = ", ".join("every MCP tool" if g == "mcp__server__tool" else g for g in gaps)
+            lead = (f"the PreToolUse matcher does not cover {names}: a call to those tools gets no check at all; run `jade hooks install` in a terminal; "
+                    "every other gated tool is checked as follows: ")
+        else:
+            lead = ("the PreToolUse hook is out of date (its timeout or failure setting) but still runs, so a crashed or hung gate may let a call run; "
+                    "run `jade hooks install` in a terminal; when the gate runs it blocks as follows: ")
+        if wiring:
+            lead = "unknown: the hook wiring has problems (see the `hook wiring` row), so the hook may not run; " + lead
+        return ("what blocks", None, lead + text)
     if wiring is None:
         wiring = wiring_problems()
     ok, text = blocking_summary()
