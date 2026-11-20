@@ -149,6 +149,27 @@ def test_w80_the_name_test_costs_more_on_a_token_of_one_or_two_kinds_and_docs_sa
     assert "one or two character kinds" in docs.split("**Known limits (accepted risk).**")[1].split("\n")[0]
 
 
+W80_MISSED = ("VLcB13HDTILPKJUZGJ8BJLXLVEFOO8HD", "wmWJENZY9nyvAHYHbeLbjdj1", "gen-dec-1794181304-4Jycyr69ytF3irspnjbw")   # found before W-80, passed after
+
+
+@pytest.mark.parametrize("token", W80_MISSED)
+def test_w80_a_secret_the_name_test_misses_is_stored_and_can_reach_jev_and_the_docs_say_so(token):
+    """W-80 review: a gated command with a missed token is no longer `redacted`, so memory and Jev may decide it (memory.step, proxy.step skip only a redacted
+    call), the token is stored as it is (`decide.scrub`) and is sent to the Jev provider. Accepted with the owner decision of no new detectors; docs/05 and the
+    CHANGELOG must say it."""
+    from jade import decide
+
+    cmd = f"git push origin feature {token}"
+    assert redact.redact(cmd, secrets_only=True) == (cmd, 0)
+    assert token in str(decide.scrub(cmd))
+    docs = (ROOT / "docs" / "05-threat-model.md").read_text()
+    limits = docs.split("**Known limits (accepted risk).**")[1].split("\n")[0]
+    t15 = next(line for line in docs.split("\n") if line.startswith("| T15 | Data retention"))
+    entry = next(p for p in (ROOT / "CHANGELOG.md").read_text().split("\n- ") if "(W-80, rest of W-42)" in p)
+    for name, text in (("docs/05 known limits", limits), ("docs/05 T15", t15), ("CHANGELOG", entry)):
+        assert "a standing answer or Jev can decide it, its text is stored in the ledger with the secret, and it is sent to the Jev provider" in text, name
+
+
 def test_pure_hex_is_not_redacted_and_that_is_the_documented_limit():
     """A 64-digit hex string is a SHA-256 as often as a key: the twins need it (F23). Named in docs/05 section 3 (accepted risk)."""
     for n in (32, 40, 64):
