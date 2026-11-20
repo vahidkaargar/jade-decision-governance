@@ -9,7 +9,9 @@ import subprocess
 import pytest
 
 import jade
-from jade import cli, hooks, ops, paths, policy, signing, util
+from jade import cli, hooks, ops, paths, policy, proxy, signing, util
+from tests.acceptance import test_memory_w101 as m
+from tests.acceptance.test_jev_proxy_w102 import KIND, Prov, owner_answers, prefs
 
 MODES = paths.GATE_MODES
 LEVELS = (None, "off", "low", "medium", "high")
@@ -27,10 +29,10 @@ def invariant_ids() -> list[str]:
     return sorted(i["id"] for i in policy.safety()["invariants"])
 
 
-def setup_pair(mode: str, level: str | None) -> None:
-    if level is not None:
-        ops.set_level(level, stdin_isatty=True)   # a recorded level: a raw config write would be the "not recorded" FAIL row
-    ops.set_gate_mode(mode, stdin_isatty=True)
+def setup_pair(mode: str, level: str | None, again: bool = False) -> None:
+    """`again`: the pair is set after a gated call already ran in this test (the W-142 probes), and enforce then asks for the signed backend or the journaled override."""
+    ops.set_level("unset" if level is None else level, stdin_isatty=True)   # a recorded level (an unset one too, W-142: the same test sets several pairs): a raw config write would be the "not recorded" FAIL row
+    ops.set_gate_mode(mode, stdin_isatty=True, allow_unsigned=again)
 
 
 def rows() -> dict[str, tuple]:
@@ -43,16 +45,34 @@ def blocks(mode: str, sid: str) -> bool:
 
 
 def risk_gated(mode: str, level: str | None) -> bool:
-    """pretool hands a high-risk call to `_gate` in advisory mode at level off, else in the gate mode."""
-    return mode != "off" and ("advisory" if level == "off" else mode) == "enforce"
+    """Is a plain high-risk call held for a human at this pair? Asked of the real `hooks.pretool` (W-142), never worked out again here: the call is
+    `m.CMD` with no session id, so neither `memory.step` nor `proxy.step` can let it run, and an exit 2 with a pending permit is the hold."""
+    setup_pair(mode, level, again=True)
+    a = policy.assess("Bash", {"command": m.CMD}, "/tmp")
+    assert a.level == "high" and not a.blocked and not a.ho_ids, (a.level, a.blocked, a.ho_ids)   # the probe call is a plain high call: no invariant decides it
+    res = hooks.pretool({"tool_name": "Bash", "tool_input": {"command": m.CMD}, "cwd": "/tmp", "permission_mode": "auto"})
+    return res.exit_code == 2 and "needs a human-approved permit" in res.stderr
 
 
-def no_human_paths(mode: str, level: str | None) -> list[str]:
-    """Who may let a gated high or critical call run in `_gate` without a human, before askchat: memory.step (a confirmed answer) at enforce and level
-    low or medium; proxy.step (Jev) at enforce and level low, medium or high, but at level high it is shadow only (it records and decides nothing)."""
-    if mode != "enforce":
-        return []
-    return ["memory", "Jev"] if level in ("low", "medium") else []
+def no_human_paths(mode: str, level: str | None, monkeypatch) -> list[str]:
+    """Who really lets a gated high call run with no human at this pair (W-142): the real `hooks.pretool` is called, never a copy of `_gate`. First (at
+    enforce, level medium) a confirmed answer is stored for `m.CMD` and the deny gate and a fixture Jev that says yes are set up for `KIND`; then the pair
+    is set and each call is made in a session of its own. `memory` and `Jev` are named when the hook answered with the words of that branch (exit 0)."""
+    setup_pair("enforce", "medium", again=True)
+    m.ask_and_allow(m.CMD)   # first: while Jev is not set up, the owner is asked
+    m.confirm_all()
+    monkeypatch.setattr(proxy, "make_provider", Prov(p=0.95))
+    prefs()
+    owner_answers()
+    setup_pair(mode, level, again=True)
+    out = []
+    by_memory = hooks.pretool(m.call(m.CMD, "sess-w142-memory"))
+    if by_memory.exit_code == 0 and "allowed from your confirmed answer" in by_memory.stderr:
+        out.append("memory")
+    by_jev = hooks.pretool(m.call(KIND, "sess-w142-jev"))
+    if by_jev.exit_code == 0 and "Jev judged this" in by_jev.stderr:
+        out.append("Jev")
+    return out
 
 
 @pytest.fixture
@@ -62,12 +82,34 @@ def wired(monkeypatch):
     monkeypatch.setattr(ops, "wiring_problems", lambda probe=True: [])
 
 
+# ------------------------------------------------------------------ W-142: the probes ask the real hook, so each has a positive twin
+
+@pytest.mark.parametrize("level", ["low", "medium"])
+def test_the_probe_sees_both_ways_to_run_with_no_human_at_enforce_and_low_or_medium(level, wired, monkeypatch):
+    """The positive twin: a probe that always answered "none" would make the table below pass for the wrong reason."""
+    assert no_human_paths("enforce", level, monkeypatch) == ["memory", "Jev"]
+
+
+@pytest.mark.parametrize("mode,level", [("enforce", "high"), ("enforce", None), ("enforce", "off"), ("advisory", "medium"), ("off", "medium")])
+def test_the_probe_sees_no_way_to_run_with_no_human_where_the_hook_has_none(mode, level, wired, monkeypatch):
+    assert no_human_paths(mode, level, monkeypatch) == []
+
+
+def test_the_hold_probe_sees_a_hold_at_enforce_and_none_in_advisory_or_at_level_off(wired):
+    assert risk_gated("enforce", None) is True
+    assert risk_gated("enforce", "high") is True
+    assert risk_gated("enforce", "off") is False
+    assert risk_gated("advisory", "high") is False
+    assert risk_gated("off", "high") is False
+
+
 # ------------------------------------------------------------------ the table over every gate mode and level pair
 
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("level", LEVELS)
-def test_what_blocks_row_matches_the_hook_for_every_pair(mode, level, wired):
-    setup_pair(mode, level)
+def test_what_blocks_row_matches_the_hook_for_every_pair(mode, level, wired, monkeypatch):
+    gated = risk_gated(mode, level)   # the real hook, asked first: it sets the pair itself and leaves it set
+    bypass = no_human_paths(mode, level, monkeypatch)
     ok, detail = rows()["what blocks"]
     ids = invariant_ids()
     if level is None and mode != "off":   # policy.py runs the SI-12 checks only once a level is set: the row must say so, not list it as active
@@ -75,13 +117,12 @@ def test_what_blocks_row_matches_the_hook_for_every_pair(mode, level, wired):
         ids = [s for s in ids if s != "SI-12"]
     firm = [s for s in ids if blocks(mode, s)]
     soft = [s for s in ids if not blocks(mode, s)]
-    gated = risk_gated(mode, level)
-    bypass = no_human_paths(mode, level)
     if not soft and gated and bypass:   # the invariants block, but a high call may run with no human: never "ok" (V6-10 F1)
         assert ok is None, detail
         assert ", ".join(ids) + ") blocks" in detail
         assert "held for a human approval" not in detail
-        assert "confirmed answer" in detail and "Jev" in detail and "without a human" in detail, detail
+        assert "without a human" in detail, detail
+        assert ("confirmed answer" in detail) == ("memory" in bypass) and ("Jev" in detail) == ("Jev" in bypass), (bypass, detail)   # the row names each path the real hook has, and only those
     elif not soft and gated:
         assert ok is True, detail
         assert ", ".join(ids) + ") blocks" in detail and "held for a human approval" in detail
