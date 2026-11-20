@@ -1561,6 +1561,16 @@ def _dest_bases_now(base: str, dirs: tuple[str, ...]) -> list[tuple[str, bool]]:
     return list(dict.fromkeys(out)) or [(_pathfold(base), textual)]
 
 
+def _typed_dir_dest(words: list[str]) -> bool:
+    """Is the destination of this copy a directory by its words alone: a `-t DIR` (cp, install, ln), or a last operand that ends in `/`? It holds even when the
+    directory is not there yet (`mkdir -p d && cp f d/`). Mirrors how `_into_targets` picks the destination."""
+    verb, args = words[0].rsplit("/", 1)[-1], [_word(w) for w in words[1:] if w]
+    if verb not in ("rsync", "ditto") and _target_dir(args):
+        return True
+    ops = _rsync_operands(args) if verb == "rsync" else operands(args)
+    return len(ops) >= 2 and ops[-1].endswith("/")
+
+
 def dir_dest_paths(bare: str, dirs: tuple[str, ...] = ("",)):
     """The paths a copy, move, link or sync writes when it names a directory (W-82), one at a time: R-13 reads each as if it had been typed.
 
@@ -1574,11 +1584,14 @@ def dir_dest_paths(bare: str, dirs: tuple[str, ...] = ("",)):
         return
     if verb == "mv":
         words = ["cp", "-r", *words[1:]]
+    typed_dir = _typed_dir_dest(words)
     for path, _parent_too, exact, unless_dir in _into_targets(" ".join(words)):
         if exact:
             base, _, name = path.rpartition("/")
             if not name or GLOB_OR_EXPANSION.search(name) or "\x01" in name:
                 continue
+            if typed_dir:   # `dir/name` lost the `/` the destination was typed with: put it back, so a directory the command has yet to make is still one
+                base += "/"
         elif unless_dir:
             base, name = path, ""
         else:

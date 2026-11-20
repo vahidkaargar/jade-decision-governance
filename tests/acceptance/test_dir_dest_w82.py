@@ -160,6 +160,32 @@ def test_a_variable_set_in_the_same_command_is_read(home, cmd):
     assert is_r13(sh(cmd)), (cmd, sh(cmd).rule_id, sh(cmd).level)
 
 
+@pytest.mark.parametrize("cmd", [
+    "mkdir -p ~/newproj/.claude && cp /tmp/e/settings.json ~/newproj/.claude/",
+    "mkdir -p ~/np && cp /tmp/e/CLAUDE.md ~/np/",
+    "mkdir -p ~/newproj/.claude && mv /tmp/e/settings.json ~/newproj/.claude/",
+    "mkdir -p ~/newproj/.claude && install -m 644 /tmp/e/settings.json ~/newproj/.claude/",
+    "mkdir -p ~/newproj/.claude && cp -t ~/newproj/.claude /tmp/e/settings.json",
+    "mkdir -p ~/newproj/.claude && cp /tmp/e/x.txt /tmp/e/settings.json ~/newproj/.claude/",
+    "cp /tmp/e/settings.json ~/newproj/.claude/",
+])
+def test_a_typed_name_into_a_directory_that_does_not_exist_yet_is_read(home, cmd):
+    """A destination that ends in `/` (or a `-t DIR`) is a directory even when it is not there yet (the same command makes it): the typed name lands in it, as
+    `cp *.json ~/newproj/.claude/` (a name the gate cannot see) is already read."""
+    assert not (home / "newproj").exists() and not (home / "np").exists()
+    assert is_r13(sh(cmd)), (cmd, sh(cmd).rule_id, sh(cmd).level)
+
+
+@pytest.mark.parametrize("cmd", [
+    "mkdir -p ~/np && cp /tmp/e/x.txt ~/np/",
+    "mkdir -p ~/newproj/.claude && cp /tmp/e/x.txt ~/newproj/.claude/",
+    "cp /tmp/e/settings.json ~/newproj/conf/",
+    "cp /tmp/e/settings.json ~/newproj/.claude",   # no `/` and not there: the copy is a file named `.claude`
+])
+def test_the_twin_of_a_typed_name_into_a_new_directory_stays_low(home, cmd):
+    assert not gated(sh(cmd)), (cmd, sh(cmd).rule_id, sh(cmd).level)
+
+
 def test_the_last_values_are_kept_not_the_first(home):
     pad = "; ".join(f"D=/tmp/p{i}" for i in range(20))
     assert is_r13(sh(f"D=~/.claude; {pad}; D=~/.claude; cp /tmp/e/settings.json $D/"))
