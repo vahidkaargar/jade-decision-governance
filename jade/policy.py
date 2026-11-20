@@ -81,19 +81,12 @@ _GH_REF_WATCHED = re.compile(r"(?i:^(?:refs/)?(?:heads/(?:main|master)(?![\w.-])
 _GH_REF_MUTATION = re.compile(r"\b(?:updateRefs?|createRef|deleteRef|createCommitOnBranch)\s*\(")   # GraphQL: the same write, by mutation
 
 
+_CALL_BODY = re.compile(r"""(?:[^'";&|\n]+|'[^']*'?|"[^"]*"?)*""")   # text up to an unquoted `;`, `&`, `|` or newline; a quote left open runs to the end
+
+
 def _call_end(text: str, begin: int, limit: int) -> int:
     """Where the `gh api` call that starts at `begin` ends: at an unquoted `;`, `&`, `|` or newline, or at `limit` (the next call). A quoted `|` (a jq filter) does not end it."""
-    quote = ""
-    for i in range(begin, limit):
-        c = text[i]
-        if quote:
-            if c == quote:
-                quote = ""
-        elif c in "'\"":
-            quote = c
-        elif c in ";&|\n":
-            return i
-    return limit
+    return _CALL_BODY.match(text, begin, limit).end()
 
 
 @lru_cache(maxsize=8)   # the whole command is read once per `gh api` segment: without the cache a command of many segments costs the square
@@ -122,7 +115,17 @@ def _gh_ref_write(text: str) -> bool:
     return False
 
 
-_SHELL_SEP = frozenset(";&|\n")
+_SEP_SPACE = str.maketrans(";&|\n", "    ")
+_DQ_ESC = re.compile(r'\\([\\"$`])')
+_SHELL_TOKEN = re.compile(r"""'([^']*)'?|"((?:[^"\\]|\\[\s\S])*\\?)"?|\\([\s\S])""")   # a single-quoted string, a double-quoted one, an escaped character (open quotes run to the end)
+
+
+def _dequote_token(m: re.Match) -> str:
+    if m.group(1) is not None:
+        return m.group(1).translate(_SEP_SPACE)
+    if m.group(2) is not None:
+        return _DQ_ESC.sub(r"\1", m.group(2)).translate(_SEP_SPACE)
+    return "" if m.group(3) == "\n" else m.group(3).translate(_SEP_SPACE)   # a backslash before a newline joins the lines
 
 
 @lru_cache(maxsize=8)
@@ -130,52 +133,42 @@ def _shell_dequoted(text: str) -> str:
     """The text as the shell passes its words on (W-153 review): a backslash outside quotes and every quote character are taken off, so `ma\\in`, `mai''n` and `'ma'in`
     read `main`, as bash and zsh read them. A `;`, `&`, `|` or newline that is quoted or escaped is data, not the end of a command: it becomes a space, so `_call_end`
     still finds the end of each call. Inside double quotes a backslash is kept unless it escapes `"`, `\\`, `$` or a backtick, as in the shell."""
-    out: list[str] = []
-    quote, i, n = "", 0, len(text)
-    while i < n:
-        c = text[i]
-        if quote == "'":
-            if c == "'":
-                quote = ""
-            else:
-                out.append(" " if c in _SHELL_SEP else c)
-        elif quote == '"':
-            if c == '"':
-                quote = ""
-            elif c == "\\" and i + 1 < n and text[i + 1] in '"\\$`':
-                i += 1
-                out.append(text[i])
-            else:
-                out.append(" " if c in _SHELL_SEP else c)
-        elif c in "'\"":
-            quote = c
-        elif c == "\\" and i + 1 < n:
-            i += 1
-            if text[i] != "\n":   # a backslash before a newline joins the lines
-                out.append(" " if text[i] in _SHELL_SEP else text[i])
-        else:
-            out.append(c)
-        i += 1
-    return "".join(out)
+    return _SHELL_TOKEN.sub(_dequote_token, text)
+
+
+_QUOTE_DROP = str.maketrans({"'": None, '"': None, "\\": None, ";": " ", "&": " ", "|": " ", "\n": " "})
+
+
+def _dequoted_view(text: str) -> str | None:
+    """`_shell_dequoted(text)` when it can hold a `gh api` or `glab api` call the text as written does not show, else None (nothing to read twice). The test is a quick
+    superset: with every quote and backslash deleted (a backslash before a newline with its newline), the words must already be there."""
+    if "'" not in text and '"' not in text and "\\" not in text:
+        return None
+    if not _GH_API_WORDS.search(text.replace("\\\n", "").translate(_QUOTE_DROP)):
+        return None
+    return _shell_dequoted(text)
 
 
 def _gh_ref_write_any(text: str) -> bool:
     """`_gh_ref_write` on the text as written or as the shell passes it on (`_shell_dequoted`): `refs/heads/ma\\in` and `gh a''pi` are a write to main too."""
-    return _gh_ref_write(text) or _gh_ref_write(_shell_dequoted(text))
+    return _gh_ref_write(text) or ((d := _dequoted_view(text)) is not None and _gh_ref_write(d))
 
 
 def gh_api_merge_in(text: str) -> bool:
     """Does the text of a call hold a `gh api` call that merges a pull request, or whose query or route the gate cannot read (`_gh_api_merges`)? Read from the plain text of
     the call, so it errs towards yes. Memory keeps such a call as an exact answer at most and Jev never judges it, as for `gh pr merge` (integration of V6-08 and V6-06b).
     The text is read as written and as the shell passes it on (`_shell_dequoted`, W-153 review: `gh a\\pi` is `gh api`)."""
-    return any(bool(_GH_API_WORDS.search(t)) and (bool(_GH_REST_MERGE.search(t)) or _gh_api_merges(t.split(), t)) for t in dict.fromkeys((text, _shell_dequoted(text))))
+    if _GH_API_WORDS.search(text) and (_GH_REST_MERGE.search(text) or _gh_api_merges(text.split(), text)):
+        return True
+    t = _dequoted_view(text)
+    return t is not None and bool(_GH_API_WORDS.search(t)) and (bool(_GH_REST_MERGE.search(t)) or _gh_api_merges(t.split(), t))
 
 
 def _gh_api_merges(words: list[str], text: str) -> bool:
     """`words` is a `gh api` call: it merges a pull request, or its query or route is one the gate cannot read (so it is asked about)."""
     if _GH_MERGE_MUTATION.search(text) or _GH_ROUTE_UNREAD.search(text) or _gh_ref_write_any(text):
         return True
-    if any(w.rstrip("/").rsplit("/", 1)[-1] == "graphql" for w in words[2:]):
+    if "graphql" in " ".join(words[2:]) and any(w.rstrip("/").rsplit("/", 1)[-1] == "graphql" for w in words[2:]):   # the join is a quick test: a huge call pays the word loop only when a word can be `graphql`
         return bool(_GH_QUERY_UNREAD.search(text)) or not _GH_QUERY_FIELD.search(text) or bool(_GH_REF_MUTATION.search(text))
     return False
 PATH_RULES = ("R-01", "R-04", "R-12", "R-13", "R-16", "R-18", "R-24")  # the rules about where a write lands: they also see relative operands made absolute
