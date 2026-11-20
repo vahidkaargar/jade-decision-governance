@@ -4,6 +4,9 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+### Fixed
+- **A long word with braces no longer makes the gate slow (W-152). Speed only: the gate reads the same text as before.** The pattern that finds a brace word (`m{a,}in`) took cubic time on a long word that has `{` and no `}` after it: 1000 `{` before a `,` took 10 s in the gate and 2000 took over a minute, so a long word could pass the 6 s hook budget (a slow hook, not a bypass). `expand_braces` now reads each run of non-blank characters once, in linear time, and the frozen copy of main's reading (`shellnorm_base`, which is not edited) is given the same function. It gives the same text as the old pattern for every string tried (all strings up to 7 characters of `{ } , ; a space`, 9000 random strings, and the gate's reading of 2936 commands from the test fixtures and eval files plus 4000 random brace commands: 0 differences from main). `tests/test_brace_word_linear.py` holds the equivalence checks and a cost test (8 times the word takes at most 24 times as long). Still slow, and not part of this change: `_brace_span` reads to the end of the word at every `{` (quadratic, about 2 s for 2000 braces in the gate), `brace_expand` is quadratic on `{x{x{x...,}` and raises `RecursionError` on thousands of `{a,b}` groups; both are unchanged from main.
+
 ## [0.7.0] - 2026-11-19
 
 ### Added

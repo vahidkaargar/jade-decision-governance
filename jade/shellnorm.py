@@ -475,18 +475,31 @@ def brace_expand(word: str, cap: int = 2048) -> list[str]:
     return [word]
 
 
-BRACE_WORD = re.compile(r"[^\s;&|()<>`]*\{[^\s]*\}[^\s;&|()<>`]*")
+BRACE_WORD_OLD = r"[^\s;&|()<>`]*\{[^\s]*\}[^\s;&|()<>`]*"   # the pattern as it was, kept for the test that the two read alike
+# Same words as the pattern above, in linear time (W-152). That pattern took cubic time on a long word with `{` and no `}` after it (`{{{{...,`: 8 times the braces took about
+# 500 times as long): every start position tried every `{` before it, and every try read to the end of the word. A word is a whole run of non-blank characters, and it
+# holds at most one brace word: the match ends after the last `}` of the run (and the characters that follow it up to a separator), so nothing is left to match after it.
+_BRACE_RUN = re.compile(r"(?<!\S)[^{\s]*\{\S*\}\S*")   # a run of non-blank characters that holds a `{` and a `}` after it, read from its first character
+_BRACE_STOP = re.compile(r"[;&|()<>`]")   # the separators the word's ends do not cross (the middle may)
+
+
+def _brace_run(m: re.Match) -> str:
+    t = m.group()
+    if _BRACE_STOP.search(t) is None:   # the usual run holds no separator: the word is all of it
+        w, start, end = t, 0, len(t)
+    else:
+        first, last = t.find("{"), t.rfind("}")   # the pattern made sure there is a `}` after the first `{`
+        start = max(t.rfind(c, 0, first) for c in ";&|()<>`") + 1   # after the last separator before the `{` (0 when there is none)
+        stops = [i for c in ";&|()<>`" if (i := t.find(c, last)) >= 0]   # the first separator after the `}` (the end of the run when there is none)
+        end = min(stops) if stops else len(t)
+        w = t[start:end]
+    return t[:start] + (" ".join(brace_expand(w)) if "," in w else w) + t[end:]
 
 
 def expand_braces(text: str) -> str:
     if "{" not in text or "," not in text:
         return text
-
-    def one(m: re.Match) -> str:
-        w = m.group()
-        return " ".join(brace_expand(w)) if "," in w else w
-
-    return BRACE_WORD.sub(one, text)
+    return _BRACE_RUN.sub(_brace_run, text)
 
 
 def _brace_span(s: str, i: int) -> int:
@@ -1775,6 +1788,10 @@ def _base():
         # The frozen copy is not edited (its hash is pinned), but its pattern for `2>&1` and `>/dev/null` took quadratic time on a long run of digits (V6-08, WT W-104). The
         # linear pattern matches the same text (tests/test_null_redirect_linear.py), so main's reading is the same and only its cost changes.
         shellnorm_base.NULL_REDIRECT = NULL_REDIRECT
+    if shellnorm_base.expand_braces is not expand_braces:
+        # The same for its brace-word pattern (W-152): it took cubic time on a long word with `{` and no `}` after it. `brace_expand` is the same text in both files, and
+        # tests/test_brace_word_linear.py checks that this function gives the same text as the old pattern for every input it tries.
+        shellnorm_base.expand_braces = expand_braces
     return shellnorm_base
 
 
