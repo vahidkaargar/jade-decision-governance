@@ -15,6 +15,7 @@ import time
 import pytest
 
 from jade import policy, shellnorm
+from tests.loadproof import retry_under_load
 from tests.test_redirect_anywhere import cur_segments, si08
 from tests.test_redirect_zsh_and_braces import confirm_real_push, really_pushes
 
@@ -224,6 +225,7 @@ def test_a_clear_group_still_cuts_the_command():
 
 @pytest.mark.timing
 @pytest.mark.parametrize("group", ["{ echo a; }", "f() { echo a; }"])
+@retry_under_load
 def test_a_script_of_brace_groups_costs_about_what_the_same_commands_cost(group):
     def cost(piece: str) -> float:
         command = "; ".join([piece] * 2000 + ["git push origin feature"])

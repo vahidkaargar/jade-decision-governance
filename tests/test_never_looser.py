@@ -324,3 +324,58 @@ def test_the_push_shapes_and_seeds_are_in_the_payload_set():
     nl = _nl()
     assert {"git push", "git push origin HEAD", "git push origin @", "git push origin ma*", "git push origin HEAD:ma[i]n"} <= set(nl.PUSH_SHAPES)
     assert all(isinstance(p, list) and all(isinstance(s, str) for s in p) for p in nl.SEED_PARTS)
+
+
+# ---- W-156: the per-command bound counts CPU seconds, so a busy machine cannot make ref-a "time out" and the check exit 2 -------------------------
+def _classify_with(monkeypatch, nl, assess):
+    """Run `classify_all` in this process on one command, with `policy.assess` replaced by `assess`."""
+    from types import SimpleNamespace
+
+    from jade import hooks, policy
+
+    monkeypatch.setattr(policy, "assess", lambda tool, tool_input, cwd="": assess() or SimpleNamespace(blocked=[], level="low", rule_id=None))
+    monkeypatch.setattr(hooks, "_on_default_branch", lambda cwd, command: False)
+    return nl.classify_all(["echo hi"], "/tmp")["echo hi"]
+
+
+def test_time_spent_waiting_is_not_counted_against_the_per_command_bound(monkeypatch):
+    """A command that waits (the process is not running: a busy machine, a git lookup) for longer than the bound is still classified."""
+    import time
+
+    nl = _nl()
+    monkeypatch.setattr(nl, "PER_COMMAND_S", 0.2)
+    out = _classify_with(monkeypatch, nl, lambda: time.sleep(0.8))
+    assert "error" not in out, out
+
+
+@pytest.mark.timing
+def test_a_command_that_burns_more_cpu_than_the_bound_is_still_an_error(monkeypatch):
+    import time
+
+    nl = _nl()
+    monkeypatch.setattr(nl, "PER_COMMAND_S", 0.2)
+
+    def burn():
+        t = time.process_time()
+        while time.process_time() - t < 5:
+            pass
+
+    assert _classify_with(monkeypatch, nl, burn) == {"error": "TimeoutError"}
+
+
+def test_a_hang_is_still_stopped_by_the_wall_clock_backstop(monkeypatch):
+    import time
+
+    nl = _nl()
+    monkeypatch.setattr(nl, "WALL_BACKSTOP_S", 0.3)
+    assert _classify_with(monkeypatch, nl, lambda: time.sleep(5)) == {"error": "TimeoutError"}
+
+
+def test_classify_all_leaves_no_timer_and_no_handler_behind(monkeypatch):
+    import signal
+
+    nl = _nl()
+    before = (signal.getsignal(signal.SIGALRM), signal.getsignal(signal.SIGPROF))
+    _classify_with(monkeypatch, nl, lambda: None)
+    assert (signal.getsignal(signal.SIGALRM), signal.getsignal(signal.SIGPROF)) == before
+    assert signal.getitimer(signal.ITIMER_REAL)[0] == 0 and signal.getitimer(signal.ITIMER_PROF)[0] == 0

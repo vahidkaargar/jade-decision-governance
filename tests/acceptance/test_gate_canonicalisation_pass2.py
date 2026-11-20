@@ -12,6 +12,7 @@ import pytest
 
 from jade import hooks, policy
 from jade.util import LEVELS
+from tests.loadproof import retry_under_load
 
 SESSION = "s" * 8
 
@@ -299,12 +300,13 @@ def test_f03_comments_and_braces_that_are_not_commands_stay_as_before(cmd):
 # ---------------------------------------------------------------- N1: classifier cost
 
 def _timed(cmd: str) -> float:
-    t = time.perf_counter()
+    t = time.process_time()   # CPU time: other processes taking the machine do not move it (W-156)
     assess(cmd)
-    return time.perf_counter() - t
+    return time.process_time() - t
 
 
 @pytest.mark.timing
+@retry_under_load
 def test_n1_many_quoted_words_cost_is_linear_not_quadratic():
     small = _timed("echo " + "'a' " * 5000)
     big = _timed("echo " + "'a' " * 40000)
@@ -316,6 +318,7 @@ def test_n1_many_quoted_words_cost_is_linear_not_quadratic():
 
 
 @pytest.mark.timing
+@retry_under_load
 def test_n1_nested_shell_quoting_is_bounded_and_still_found():
     assert _timed(_nest("git push origin main", 10)) < 5.0
     assert "SI-08" in assess(_nest("git push origin main", 7)).blocked
@@ -355,6 +358,7 @@ def test_n1_work_budget_exhaustion_degrades_to_text_search_not_open(monkeypatch)
 
 
 @pytest.mark.timing
+@retry_under_load
 def test_n1_huge_quoted_input_cost_stays_bounded():
     # A real-size input (1.2 MB). Measured in CPU seconds of this process: other processes taking the machine's time make the wall clock grow 3 to 6 times (14.7 s wall for 2.3 s CPU
     # under load) and not this. A slowdown in the gate itself shows in both. It is 2.3 s here and the bound stays at 10 s.
@@ -504,6 +508,7 @@ def test_probe_cd_to_a_computed_directory_is_a_documented_limit():
 
 
 @pytest.mark.timing
+@retry_under_load
 def test_n1_huge_command_is_not_masked_and_cost_stays_bounded():
     from jade import inert
 

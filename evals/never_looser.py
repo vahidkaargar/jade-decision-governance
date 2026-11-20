@@ -25,7 +25,8 @@ A command is reported when ref-b
     not be resolved for a call at or above the permit floor, which the hook blocks), or
   - loses the permit gate (`gate_lost`: ref-a rates it at or above `permit_required_at`, ref-b below; at an enforcing level the hook
     blocks the first and runs the second).
-An error or a per-command timeout in ref-b counts as letting the call through and is printed as such.
+An error or a per-command timeout in ref-b counts as letting the call through and is printed as such. The per-command timeout is 20 CPU seconds of the
+child (a loaded machine cannot trip it), with a 600 s wall clock bound as a backstop for a hang.
 
 The payload set is the union, over this checkout, ref-a and ref-b, of: every `command` in `evals/**/*.jsonl` (a row with a `seed` is run with
 its files created in its own directory under the scratch dir, `{tmp}` replaced by it, the way evals/run_cases.py runs it; a seed path not under
@@ -89,7 +90,8 @@ SEED_PARTS = [   # one payload or more for each rule and invariant the case file
     ["OLLAMA_HOST=0.0", ".0.0 ollama serve"], ["python3 -m http.server --bind 0.0", ".0.0 8000"],
     ["echo sk-", "Hh8Gg7Ff6Ee5Dd4Cc3Bb2Aa1Zz"], ["export GH=ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],
 ]
-PER_COMMAND_S = 20.0   # a classifier slower than this on one command is a finding in itself (the hook budget is 6 s)
+PER_COMMAND_S = 20.0   # a classifier that needs more CPU seconds than this on one command is a finding in itself (the hook budget is 6 s)
+WALL_BACKSTOP_S = 600.0   # wall clock bound per command, for a hang only: waiting is not counted by PER_COMMAND_S, so a busy machine cannot trip it (W-156)
 CHILD_S = 3600
 CWDS = ("empty", "repo-main", "repo-feature")
 
@@ -305,14 +307,25 @@ def _alarm(_sig, _frame):
 
 
 def classify_all(commands: list[str], cwd: str) -> dict[str, dict]:
+    # The per-command bound is CPU time of this process (ITIMER_PROF, SIGPROF): the wall clock grows with the load of other processes, so on a busy machine a command that needs
+    # 3 s alone passed the old 20 s wall bound, ref-a "timed out" and the check exited 2 (W-156). A wall clock bound stays as a backstop for a hang (ITIMER_REAL, SIGALRM).
+    old = (signal.signal(signal.SIGALRM, _alarm), signal.signal(signal.SIGPROF, _alarm))
+    try:
+        return _classify_each(commands, cwd)
+    finally:
+        signal.signal(signal.SIGALRM, old[0])
+        signal.signal(signal.SIGPROF, old[1])
+
+
+def _classify_each(commands: list[str], cwd: str) -> dict[str, dict]:
     from jade import hooks, policy
     from jade.util import at_least
 
     floor = policy.permit_floor()
-    signal.signal(signal.SIGALRM, _alarm)
     out = {}
     for c in commands:
-        signal.setitimer(signal.ITIMER_REAL, PER_COMMAND_S)
+        signal.setitimer(signal.ITIMER_PROF, PER_COMMAND_S)
+        signal.setitimer(signal.ITIMER_REAL, WALL_BACKSTOP_S)
         try:
             a = policy.assess("Bash", {"command": c}, cwd)
             blocked = set(a.blocked)
@@ -329,6 +342,7 @@ def classify_all(commands: list[str], cwd: str) -> dict[str, dict]:
         except Exception as e:  # noqa: BLE001 - TimeoutError included: reported, never counted as a block
             out[c] = {"error": type(e).__name__}
         finally:
+            signal.setitimer(signal.ITIMER_PROF, 0)
             signal.setitimer(signal.ITIMER_REAL, 0)
     return out
 
