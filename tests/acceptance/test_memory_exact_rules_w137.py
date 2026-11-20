@@ -1,10 +1,12 @@
 """W-137: what memory may generalise. A call that makes git run a program (R-15 `git config alias.x '!..'`, `core.sshCommand`, a `GIT_SSH_COMMAND` variable) or that
-writes a git config file from the shell (R-23) is remembered by its exact text at most, never as a kind: one confirmed `git config alias.p '!sh a'` must not cover
-`git config alias.p '!sh b'`. The critical rules (R-01 firewall, R-03 deploy, R-04 key and secret store) are never remembered at all (V6-06); that is pinned here too,
+writes a git config file from the shell (R-23) is remembered by its exact text at most, never as a kind: one confirmed `git config alias.p '!sh a'` in one project must
+not cover the same call in another project (on main the kind key, and so the `kind_any` scope, did). The kind key always held the quoted words, so `'!sh b'` was a
+different kind on main too. The critical rules (R-01 firewall, R-03 deploy, R-04 key and secret store) are never remembered at all (V6-06); that is pinned here too,
 with the calls named in the work item, so that it cannot slip back.
 
 R-12 (service lifecycle), owner decision 2026-11-20: `launchctl bootout`, `unload` and `remove` stop a service and take it out of launchd, so they are remembered by the
-exact text only (one answer for `launchctl bootout gui/501/com.a` must not cover `gui/501/com.b`, which may be the agent that runs JADE's own upkeep). The other R-12
+exact text only (one answer for `launchctl bootout gui/501/com.a` in one project must not cover the same bootout in every other project; another service, such
+as the agent that runs JADE's own upkeep, was a different kind on main too, because the kind key holds the target). The other R-12
 calls (`launchctl bootstrap|load|kickstart`, `brew services`, `docker compose up|down`) stay a kind.
 
 `security delete-internet-password` and `security delete-keychain` are in HO-delete (a human-only class, so never remembered): see test_human_only_w98b.py.
@@ -74,9 +76,21 @@ def test_a_chain_with_one_such_segment_is_exact_only():
     assert memory.eligibility(a, "Bash", {"command": cmd}, {}) == "exact"
 
 
+def _no_kind_answer(cmd, cwds=("/work/one", "/work/two")):
+    """The call has no kind key and is offered no kind scope in any of `cwds`, so an answer given in one project cannot cover the same text in another (on main
+    the `kind_any` key of the same text was the same in every project). Exact keys always differ between two texts, so comparing them proves nothing."""
+    tin = {"command": cmd}
+    for cwd in cwds:
+        a = policy.assess("Bash", tin, cwd)
+        assert memory.keys(a, "Bash", tin, {})[1] is None, (cmd, cwd)
+        assert not [s.kind for s in scopes.offered(a, "Bash", tin, {}, cwd) if s.kind in ("kind_project", "kind_any")], (cmd, cwd)
+
+
 def test_the_two_such_calls_do_not_share_an_answer():
-    """The point of the fix: the answer to the first call does not decide the second."""
+    """The point of the fix: an answer in one project does not decide the same call in another project, nor the other call."""
     one, two = "git config alias.p '!sh a'", "git config alias.p '!sh b'"
+    for cmd in (one, two):
+        _no_kind_answer(cmd)
     assert memory.keys(_a(one), "Bash", {"command": one}, {})[0] != memory.keys(_a(two), "Bash", {"command": two}, {})[0]
 
 
@@ -127,7 +141,10 @@ def test_launchctl_bootout_unload_remove_is_exact_only(cmd):
 
 
 def test_two_launchctl_bootouts_do_not_share_an_answer():
+    """An answer for one bootout in one project does not cover the same bootout in another project (on main its `kind_any` key did)."""
     one, two = "launchctl bootout gui/501/com.a", "launchctl bootout gui/501/com.jade.maintain"
+    for cmd in (one, two):
+        _no_kind_answer(cmd)
     assert memory.keys(_a(one), "Bash", {"command": one}, {})[0] != memory.keys(_a(two), "Bash", {"command": two}, {})[0]
 
 
