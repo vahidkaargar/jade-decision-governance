@@ -9,6 +9,7 @@ and treats read-only commands as low (see the `read_only` list in risk.yaml).
 from __future__ import annotations
 
 import fnmatch
+import glob
 import os
 import re
 import shlex
@@ -620,6 +621,10 @@ def _is_target_dir_option(w: str) -> bool:
 
 def _skills_rule_re() -> re.Pattern:
     return next(r for r in risk()["rules"] if r["id"] == "R-18")["_re"]
+
+
+def _r13() -> dict:
+    return next(r for r in risk()["rules"] if r["id"] == "R-13")
 
 
 def _relocates(src: str, dirs: tuple[str, ...]) -> bool:
@@ -1482,6 +1487,90 @@ def _into_targets(bare: str) -> list[tuple[str, bool, bool, bool]]:
     return []
 
 
+# W-82: where a copy lands when the words name a DIRECTORY or a glob, so that R-13 (which reads path text) still sees the protected file it writes.
+# `cp /tmp/e/settings.json ~/.claude/` writes `~/.claude/settings.json`, but the words only say `~/.claude/`. The path is the directory and the name of the source, which
+# is typed: the same reading the human-only classes make of an exact file copied under its own name (`_into_targets`). Only a name that is typed counts. A source whose name
+# is not known (a glob, a variable the command did not set to a literal, a tree's content, an archive) is NOT guessed at: whether `cp *.json ~/.claude/` or
+# `tar -xf a.tar -C ~/.claude` should be high is the owner's decision (W-82, docs/05 T19), and those stay as they were.
+_DIR_DEST_VERBS = frozenset({"cp", "gcp", "mv", "install", "ln", "rsync", "ditto"})
+_GLOB_CHARS = re.compile(r"[*?\[]")
+DIR_GLOB_CAP = 4096          # matches of a glob destination that are examined
+DIR_GLOB_COMPONENTS = 3      # a glob destination with more wildcard components than this is not expanded (the walk is the cost)
+
+
+def _glob_matches(pattern: str) -> list[str]:
+    """The paths a glob destination stands for now, as the shell expands it (`*` and `?` do not match a leading dot). Bounded: `DIR_GLOB_CAP` matches, and no pattern with
+    `**` or many wildcard components, whose walk could cost more than the command."""
+    if "**" in pattern or sum(1 for c in pattern.split("/") if _GLOB_CHARS.search(c)) > DIR_GLOB_COMPONENTS:
+        return []
+    out: list[str] = []
+    try:
+        for m in glob.iglob(pattern):
+            out.append(m)
+            if len(out) >= DIR_GLOB_CAP:
+                break
+    except (OSError, ValueError, re.error):
+        pass
+    return out
+
+
+def _dest_bases(base: str, dirs: tuple[str, ...]) -> list[tuple[str, bool]]:
+    """The destination `base` as (path, is_a_directory) for every directory the command may run in: absolute with symlinks resolved, a glob as what it matches now. A path
+    is a directory when it ends in `/`, is `.` or `..`, or exists as one. A relative path with no directory to resolve it in is read as written."""
+    base = _expand_home(base.strip("\"'"))
+    if not base or "\x00" in base:
+        return []
+    textual = base.endswith("/") or base.rstrip("/").rsplit("/", 1)[-1] in (".", "..")
+    out: list[tuple[str, bool]] = []
+    for d in dirs or ("",):
+        if not d and not os.path.isabs(base):
+            continue
+        pat = base if os.path.isabs(base) else os.path.join(d, base)
+        for p in (_glob_matches(pat) if _GLOB_CHARS.search(pat) else [pat]):
+            q = normalise_path(p)
+            out.append((q, textual or os.path.isdir(q)))
+    return list(dict.fromkeys(out)) or [(_pathfold(base), textual)]
+
+
+def dir_dest_paths(bare: str, dirs: tuple[str, ...] = ("",)):
+    """The paths a copy, move, link or sync writes when it names a directory (W-82), one at a time: R-13 reads each as if it had been typed.
+
+    Built on `_into_targets`, with `mv` as `cp -r`. A file copied into a directory is `dir/name` (and `dir/name/` for what a tree called so holds). A tree copied to a name
+    that is not a directory yet becomes that directory: `dir/`. A destination that is a glob is every path it matches now: a file it matches is written itself, a directory
+    holds the copy. A name that is not typed (a glob or variable source, a contents copy, an archive) gives nothing. It only produces paths; the caller takes a rating
+    from them only when it is higher than what the command already has."""
+    words = system_bare(bare).split(" ")
+    verb = words[0].rsplit("/", 1)[-1]
+    if verb not in _DIR_DEST_VERBS:
+        return
+    if verb == "mv":
+        words = ["cp", "-r", *words[1:]]
+    for path, _parent_too, exact, unless_dir in _into_targets(" ".join(words)):
+        if exact:
+            base, _, name = path.rpartition("/")
+            if not name or GLOB_OR_EXPANSION.search(name) or "\x01" in name:
+                continue
+        elif unless_dir:
+            base, name = path, ""
+        else:
+            continue
+        for q, is_dir in _dest_bases(base or "/", dirs):
+            head = q.rstrip("/")
+            if exact and not is_dir:   # a file that is there is written itself (a glob destination that matched one)
+                yield q
+            elif exact:
+                yield f"{head}/{name}"
+                yield f"{head}/{name}/"
+            elif not is_dir:   # a tree copied to a name that is not a directory yet becomes that directory
+                yield f"{head}/"
+
+
+def dir_dest_hit(rule: dict, bare: str, dirs: tuple[str, ...]) -> bool:
+    """Does R-13's pattern match a path `dir_dest_paths` gives for this command?"""
+    rx = rule["_re"]
+    return any(rx.search(p) for p in dir_dest_paths(bare, dirs))
+
+
 def _git_tree_targets(seg: str, calls: list[shellnorm.GitCall], carried: str | None = None) -> list[tuple[str, bool]]:
     """The work trees a git call writes (`-C D`, `--work-tree D`, `-c core.worktree=D`, `GIT_WORK_TREE=D` in the segment or set by an earlier one
     (`carried`), else the directory it runs in), and the directory a clone or a new worktree fills: a work tree that is home, or holds a start-up file, is
@@ -1722,6 +1811,9 @@ def classify_segment(seg: str, dirs: tuple[str, ...], proxied: bool = False, mar
     abs_create = abs_files if cview == view else abs_ops if cview is None else _absolute_operands("x " + cview, dirs) if cview else ""
     if (rule := _path_rule(abs_ops, abs_files, {"R-16": abs_pkg, "R-18": abs_create}, dirs_t)) and LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
         seg_best = rule
+    r13 = _r13()   # W-82: a copy into a directory, a glob or a variable-held destination: R-13 reads the paths it writes (adds a reading, never lowers one)
+    if LEVELS[seg_best["level"]] < LEVELS[r13["level"]] and dir_dest_hit(r13, bare, dirs_t):
+        seg_best = r13
     return seg_best, real_bare
 
 
@@ -1860,6 +1952,53 @@ def _carried_work_tree(seg: str, cur: str | None) -> str | None:
     return cur
 
 
+_VAR_USE = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
+_VAR_VALUE = re.compile(r"[\w./+:=@%,~${}-]*")   # a plain literal, or one built from variables an earlier part set: no substitution, no space, no glob
+ENV_VALUES = 4   # values kept for one variable: the last that were set (`D=~/.claude; false && D=/tmp/o; cp x $D/` is read with each)
+ENV_NAMES = 32   # variables kept per command
+ENV_LENGTH = 400   # a value longer than this is not kept: `B=$A$A$A; C=$B$B$B` grows by a factor at every step
+
+
+def _subst_vars(text: str, env: dict[str, list[str]], k: int = 0) -> str:
+    """`text` with each `$NAME` or `${NAME}` that an earlier part of the command set to a literal written as that value (W-82): the k-th of its values from the last one, or
+    the first it has. One that is not known stays."""
+    def value(m: re.Match) -> str:
+        vals = env.get(m.group(1) or m.group(2))
+        return m.group(0) if not vals else vals[-1 - k] if k < len(vals) else vals[0]
+    return _VAR_USE.sub(value, text)
+
+
+def _subst_readings(text: str, env: dict[str, list[str]]) -> list[str]:
+    """The command written with the last value of each variable, then with the one before it, and so on: every reading that differs from the text itself."""
+    names = {g for m in _VAR_USE.finditer(text) for g in m.groups() if g in env}
+    rounds = max((len(env[n]) for n in names), default=0)
+    return list(dict.fromkeys(r for k in range(rounds) if (r := _subst_vars(text, env, k)) != text))
+
+
+def _note_assignments(seg: str, env: dict[str, list[str]]) -> None:
+    """A segment that is only `NAME=value` words (or `export NAME=value`) gives a variable a value. A value that is a substitution, has a space or a glob, is too long, or
+    is not a plain literal is not kept. Every plain value is kept (the last `ENV_VALUES`), and neither an unknown value nor `unset` forgets one: a branch may or may not
+    have run, and the reading is only ever added."""
+    words = [w for w in seg.split(" ") if w]
+    while words and words[0] in ("then", "do", "else", "if", "while", "until", "!", "time"):   # `if x; then D=~/.claude; fi`
+        words = words[1:]
+    if words and words[0] in shellnorm.EXPORTISH:
+        words = [w for w in words[1:] if not w.startswith("-")]
+    if not words or not all(shellnorm.ENV_ASSIGN.match(w) for w in words):
+        return
+    for w in words:
+        name, val = shellnorm.ENV_ASSIGN.match(w).groups()
+        if not _VAR_VALUE.fullmatch(val) or len(val) > ENV_LENGTH or (name not in env and len(env) >= ENV_NAMES):
+            continue
+        val = _subst_vars(val, env)
+        if len(val) <= ENV_LENGTH:
+            vals = env.setdefault(name, [])
+            if val in vals:
+                vals.remove(val)
+            vals.append(val)
+            del vals[:-ENV_VALUES]
+
+
 def _computed_write(bare: str) -> bool:
     """A segment that writes a path relative to the working directory: a redirect, the destination of `cp`, an output option, an in-place edit, a writer verb."""
     view = files_view(bare)
@@ -1896,8 +2035,11 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     wroots, mroots, sroots = _wiring_roots(), _mod_roots(), _shell_roots()
     git_wt: str | None = None   # GIT_WORK_TREE an earlier segment exported or assigned (PRE2-6)
     rows: list[tuple[str, tuple[str, ...]]] = []   # every segment, read-only ones too: what an `xargs` is fed is read from them (W-77)
+    subst_seen: dict[tuple, dict] = {}
+    env: dict[str, list[str]] = {}   # `D=~/.claude` earlier in this command: a later `$D` is read as its value too (W-82)
     for seg, dirs in shellnorm.segments_cwd(scan, cwd, literal_end=len(text_in)):   # a script the command writes keeps `'$X'` live (PRE2-1)
         rows.append((seg, dirs))
+        _note_assignments(seg, env)
         git_wt = _carried_work_tree(seg, git_wt)
         if seg.startswith(BLIND_MARK):
             labels.append(seg[len(BLIND_MARK):].split(" ", 1)[0])
@@ -1925,6 +2067,14 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         labels.extend(seg_labels)
         marks.extend(f"{BLIND_MARK}{lab} " for lab in seg_labels)
         seg_best, bare = classify_segment(seg, dirs, proxied, tuple(marks))
+        if env and "$" in seg and LEVELS[seg_best["level"]] < LEVELS[_r13()["level"]]:   # W-82: the command as the shell will run it; only R-13 is taken from this reading
+            for known in _subst_readings(seg, env):
+                key = (known, dirs, tuple(marks))   # the same command with the same value comes back many times in a long text: classified once
+                if key not in subst_seen:
+                    subst_seen[key] = classify_segment(known, dirs, proxied, tuple(marks))[0]
+                if subst_seen[key]["id"] == "R-13":
+                    seg_best = subst_seen[key]
+                    break
         if best is None or LEVELS[seg_best["level"]] > LEVELS[best["level"]]:
             best = seg_best
         if si12_roots and not si12 and _si12_segment(seg, dirs, cwd, si12_roots):

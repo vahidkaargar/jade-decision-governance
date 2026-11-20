@@ -184,6 +184,7 @@ def test_known_gap_a_path_nobody_names_is_not_seen(home, cmd):
     assert not gated(sh(cmd)), cmd
 
 
+@pytest.mark.timing
 def test_cost_stays_small_on_a_huge_and_a_pathological_command(home):
     """Compared with origin/main in the work log of this item (run alone): the new code reads each `xargs` once, pairs at most 8 by 8 and only when a writer `xargs`
     and an instruction path are both there. The bound here is loose, because the machine is loaded."""
