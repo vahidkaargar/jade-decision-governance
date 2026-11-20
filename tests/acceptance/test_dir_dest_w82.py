@@ -177,6 +177,19 @@ def test_a_typed_name_into_a_directory_that_does_not_exist_yet_is_read(home, cmd
 
 
 @pytest.mark.parametrize("cmd", [
+    "cp /tmp/e/x ~/.claude/set*/",
+    "cp /tmp/e/x ~/.claude/set*",
+    "cp /tmp/e/x ~/.claude/*/",
+    "cp /tmp/e/settings.json ~/.cl*/",
+    "cp -t ~/.cl*/ /tmp/e/settings.json",
+])
+def test_a_glob_destination_typed_with_a_slash_is_still_what_it_matches(home, cmd):
+    """The `/` put back for a directory that is not there yet must not change what a glob destination matches: `~/.claude/set*/` still stands for the file
+    `settings.json` it matches now, as without the `/`."""
+    assert is_r13(sh(cmd)), (cmd, sh(cmd).rule_id, sh(cmd).level)
+
+
+@pytest.mark.parametrize("cmd", [
     "mkdir -p ~/np && cp /tmp/e/x.txt ~/np/",
     "mkdir -p ~/newproj/.claude && cp /tmp/e/x.txt ~/newproj/.claude/",
     "cp /tmp/e/settings.json ~/newproj/conf/",

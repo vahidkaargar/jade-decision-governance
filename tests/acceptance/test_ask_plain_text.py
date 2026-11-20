@@ -272,7 +272,7 @@ def test_the_rule_sentence_of_r13_is_unchanged_for_callers_that_pass_only_the_ru
 
 def test_the_authorized_keys_sentences_are_short_and_plain():
     assert askplain.AUTHKEYS_RISK == OPENS_LOGIN and askplain.AUTHKEYS_WHAT == LOGIN_FILE
-    for sentence in (OPENS_LOGIN, LOGIN_FILE):
+    for sentence in (OPENS_LOGIN, LOGIN_FILE, askplain.AUTHKEYS_ALSO):
         assert sentence.endswith(".") and sentence.count(". ") == 0 and words(sentence) <= 20
 
 

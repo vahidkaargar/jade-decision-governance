@@ -1590,8 +1590,8 @@ def dir_dest_paths(bare: str, dirs: tuple[str, ...] = ("",)):
             base, _, name = path.rpartition("/")
             if not name or GLOB_OR_EXPANSION.search(name) or "\x01" in name:
                 continue
-            if typed_dir:   # `dir/name` lost the `/` the destination was typed with: put it back, so a directory the command has yet to make is still one
-                base += "/"
+            if typed_dir and not _GLOB_CHARS.search(base):   # `dir/name` lost the `/` the destination was typed with: put it back, so a directory the command
+                base += "/"                                    # has yet to make is still one. Not for a glob: `set*/` would match directories only, not the file it reads
         elif unless_dir:
             base, name = path, ""
         else:
