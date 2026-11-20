@@ -66,12 +66,15 @@ STDIN_PATHS = {"/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"}
 CODE_FLAG = re.compile(r"-[a-zA-Z]*[ceEr]|--eval|--print|--command")
 AWK_NAMES = {"awk", "gawk", "mawk", "nawk"}
 SHELL_NAME = re.compile(r"^(?:ba|z|da|k|a|fi|c|tc)?sh$")
-PLAIN = re.compile(r"[^\\'\"$`<\n;(){}&|#]+")
+PLAIN = re.compile(r"(?:[^\\'\"$`<\n;(){}&|#>]+|>(?!&?\())+")   # a `>` is plain unless it opens an output process substitution (`>(`, `>&(`: W-120)
+PLAIN_PRIOR = re.compile(r"[^\\'\"$`<\n;(){}&|#]+")   # the pattern as it was before W-120: the `prior` reading (see `_skeleton_both_top`)
 # Characters that Python calls white space and that the shell does not split a word at (bash and zsh split at a space, a tab and a newline): `a<U+2003>b` is one word. They are
 # written as the encoded blank, so a later `split()` of the text keeps the word whole (V6-08 review, N19).
 _SPACELIKE = re.compile("[\x0b\x0c\x1c-\x1f\x85\xa0  -     　]")
 _INERT = re.compile(r"[;&|<>(){}`]")   # characters a quoted word may hold that the splitter and the redirect check would read as syntax
 
+NAMED_FD = re.compile(r"\{[A-Za-z_]\w*\}(?=[<>])")   # `{fd}>log`: zsh and bash 4.1+ read it as a redirect that names a descriptor, not as a word (W-120)
+OUT_SUBST = re.compile(r">&?\(")   # `>(cmd)`, `&>(cmd)`, `2>(cmd)`, `>&(cmd)`: an output process substitution, one word that is the path of a pipe (W-120)
 HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|(\\?)([^\s;&|<>()'\"\\`$]+))")
 HEREDOC_AT = re.compile(r"(?<!<)" + HEREDOC_OP.pattern + r"(?!<)")   # a heredoc operator, not the end of `<<<`
 # A word that starts with `#` ends the stage: the shell ignores it and the rest of the line (V6-08, N18). Before, ` # x` after `| sh` read as two arguments
@@ -945,6 +948,7 @@ class _Scan:
         # expanded, so `'$X'` there stays a live expansion (security review PRE2-1).
         self.literal_end = literal_end if depth == 0 else 0
         self.legacy = len(budget) > 3 and budget[3]   # origin/main's reading of `"${NAME}"` (`$X`): the third reading of `_skeleton_both_top`
+        self.prior = len(budget) > 6 and budget[6]   # the reading as it was before W-120 (a named descriptor is a word, `>(` opens a group): the extra reading of `_skeleton_both_top`
         self.ssh = not (len(budget) > 4 and budget[4] is False)   # False: `ssh host 'cmd'` is one word list, `cmd` is not read as a command (the scope check, jade/scopes.py)
         self.assigns: dict[str, list[str]] = {}   # `g=git` earlier in this text: the literal values a variable was given (V6-08, N19)
 
@@ -1329,7 +1333,7 @@ class _Scan:
                 stop = i
                 i += 1
                 break
-            if m := PLAIN.match(s, i):
+            if m := (PLAIN_PRIOR if self.prior else PLAIN).match(s, i):
                 emit(_SPACELIKE.sub("\x01", m.group()))
                 i = m.end()
             elif c == "\\":
@@ -1410,6 +1414,11 @@ class _Scan:
                     deferred.append(self._produced(s[start:i - 1], kind))
                     deferred.extend(self._pipe_marks(re.split(r"\||;|&&", s[start:i - 1])))
                 emit("/dev/fd/X")
+            elif c == ">" and not self.prior and (m := OUT_SUBST.match(s, i)):  # output process substitution: the shell passes the path of a pipe; it is no group that cuts the command (W-120)
+                start = m.end()
+                txt, i = self.run(start, ")")
+                deferred.append(txt)
+                emit("/dev/fd/X" if not cur or cur[-1] in " \t" else ">/dev/fd/X")   # an argument, or the target of a redirect written against the word before it
             elif c == "<" and s.startswith("<<<", i):
                 hs_kind = _stdin_kind(*_command_word(cur))
                 emit("<<<")
@@ -1431,6 +1440,8 @@ class _Scan:
                     i = self._heredoc_bodies(i, pending, deferred)
                     pending = []
                 end_stage(nl, i, False)
+            elif c == "{" and not self.prior and (not cur or cur[-1] in " \t") and (m := NAMED_FD.match(s, i)):   # a named descriptor in front of a redirect is no word: the redirect is read as `>log` (W-120)
+                i = m.end()
             elif c == "{" and (j := _brace_span(s, i)) > 0:  # brace expansion word, not a command group
                 emit(s[i:j])
                 i = j
@@ -1523,8 +1534,8 @@ class _Scan:
 
 
 @functools.lru_cache(maxsize=16)
-def _skeleton_top(command: str, literal_end: int, legacy: bool = False, ssh: bool = True) -> str:
-    return _skeleton(command, 0, None, literal_end, legacy, ssh)
+def _skeleton_top(command: str, literal_end: int, legacy: bool = False, ssh: bool = True, prior: bool = False) -> str:
+    return _skeleton(command, 0, None, literal_end, legacy, ssh, prior)
 
 
 def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None, literal_end: int | None = None, ssh: bool = True) -> str:
@@ -1543,10 +1554,10 @@ def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None, li
     return _skeleton(command, _depth, _budget)
 
 
-def _skeleton(command: str, _depth: int, _budget: list[int] | None, literal_end: int = 0, legacy: bool = False, ssh: bool = True) -> str:
+def _skeleton(command: str, _depth: int, _budget: list[int] | None, literal_end: int = 0, legacy: bool = False, ssh: bool = True, prior: bool = False) -> str:
     # `legacy` and `ssh` ride in the budget, which every nested scan shares: origin/main's reading of a quoted `${NAME}` (`$X`, see `_Scan`) and the reading of an ssh remote command, at every depth.
     # The last slot is the work left for reading variable commands with their values (`VARIABLE_WORK`).
-    budget = _budget if _budget is not None else [BUDGET, HERE_ALLOWANCE, {}, legacy, ssh, VARIABLE_WORK]
+    budget = _budget if _budget is not None else [BUDGET, HERE_ALLOWANCE, {}, legacy, ssh, VARIABLE_WORK, prior]
     budget[0] -= len(command)
     command = _MARK_CHARS.sub("\x06", command)   # a byte that is one of the marks stays a word
     if _depth > MAX_DEPTH or budget[0] < 0:
@@ -1738,6 +1749,7 @@ JOIN = "\x17"
 _JOIN_CHAR = re.compile(JOIN)
 
 
+_W120_FORMS = re.compile(r">&?\(|\{[A-Za-z_]\w*\}[<>]")   # the two spellings the reading changed for (W-120): an output process substitution, a named descriptor
 _QUOTED_VAR = re.compile(r"'[^']*\$|\"[^\"]*\$\{")   # the two places the current reading differs from main's: a single-quoted `$X`, a double-quoted `${NAME}`
 
 
@@ -1752,6 +1764,12 @@ def _skeleton_both_top(command: str, literal_end: int) -> tuple[tuple[str, bool]
         loose = _skeleton_top(command, 0, True)
         if loose != out[0][0]:
             out.append((loose, True))
+    if _W120_FORMS.search(command):
+        # The reading the gate had before W-120, kept beside the new one: a named descriptor (`{fd}>log`) is a word there and `>(cmd)` opens a group. A shell that does not know
+        # `{fd}>` (bash before 4.1) reads the word, and the new reading drops it, so no command is rated lower than it was (the differential of that change found eight).
+        for text in dict.fromkeys(_skeleton_top(command, *args, prior=True) for args in ((literal_end, False), *(((0, True),) if len(out) > 1 else ()))):
+            if all(text != seen for seen, _ in out):
+                out.append((text, True))
     floor = _base_skeleton(command)
     if all(floor != text for text, _ in out):
         out.append((floor, False))

@@ -1,0 +1,61 @@
+"""W-120: a named descriptor redirect (`{fd}>log`) and an output process substitution (`>(cat)`) written in a push must not hide the push to the default branch.
+
+`git {fd}>log push origin feature :main`: zsh (and bash 4.1 and later) take `{fd}>log` as a redirect and run `git push origin feature :main`; the scanner read `{fd}` as
+a brace word that sat between `git` and `push`, so the call was rated low and nothing was blocked. `git push origin feature >(cat) :main`: the shell hands git the path
+of a pipe as one more argument and runs the push; the scanner read `(cat)` as a group that cut the push short in front of `:main`.
+Each case is also run in the real zsh and bash (a recording `git`): when a shell pushes to the default branch, the gate must stop the command.
+"""
+
+import re
+import shutil
+
+import pytest
+
+from jade import policy
+from tests.test_redirect_anywhere import inserted, pushes_to_default, ran_git, si08
+
+NAMED_FD = ["{fd}>log", "{fd}>>log", "{fd}> log", "{fd}>|log", "{fd}>&2", "{fd}>&-", "{fd}<in", "{fd}<&0", "{out}>log", "{_f1}>log"]
+PROCESS_SUBST = ["2>(cat)", "&>>(cat)", ">(cat)", "&>(cat)", ">&(cat)", "> >(cat)", "&> >(cat)", "2> >(cat)", "{fd}>(cat)"]
+PUSHES = ["git push origin feature :main", "git push origin main", "git push origin feature +feature:main"]
+
+
+@pytest.mark.parametrize("redirect", NAMED_FD + PROCESS_SUBST)
+@pytest.mark.parametrize("base", PUSHES)
+def test_a_push_to_main_with_the_redirect_anywhere_is_stopped(base, redirect):
+    for command in inserted(base, redirect):
+        if redirect in PROCESS_SUBST and command.split(" ").index("push") > command.split(" ").index(redirect.split(" ")[0]):
+            continue   # `git >(cat) push ...` hands git a pipe path in front of `push`: git runs no push (the real-shell test below is the proof of the rest)
+        assert si08(command), command
+
+
+@pytest.mark.parametrize("redirect", NAMED_FD + PROCESS_SUBST)
+@pytest.mark.parametrize("base", PUSHES[:2])
+def test_the_gate_stops_every_command_a_real_shell_pushes_to_main(base, redirect, tmp_path):
+    (tmp_path / "in").write_text("x")
+    for command in inserted(base, redirect):
+        for shell in ("zsh", "bash"):
+            if shutil.which(shell) and pushes_to_default(ran_git(command, shell, tmp_path)):
+                assert si08(command), f"{shell} pushes to the default branch and the gate does not stop {command!r}"
+
+
+@pytest.mark.parametrize("redirect", NAMED_FD + PROCESS_SUBST)
+def test_a_push_of_a_named_branch_with_the_redirect_is_not_stopped(redirect):
+    for command in inserted("git push origin feature", redirect):
+        assert not si08(command), command
+
+
+@pytest.mark.parametrize("redirect", NAMED_FD)
+def test_a_named_fd_redirect_in_front_of_the_subcommand_is_rated_as_the_redirect_without_its_name(redirect):
+    unnamed = re.sub(r"^\{\w+\}", "", redirect)
+    for plain in ("git status", "git push origin feature", "git log -1"):
+        want = policy.assess("Bash", {"command": plain.replace("git ", f"git {unnamed} ", 1)}, cwd="/tmp").level
+        command = plain.replace("git ", f"git {redirect} ", 1)
+        assert policy.assess("Bash", {"command": command}, cwd="/tmp").level == want, command
+
+
+@pytest.mark.parametrize("command", [
+    "echo {a,b}", "echo {fd}", "echo x{fd}>log", "git push origin feature {fd}", "git push origin feature {fd} {fd}",
+    "ls {a,b}>log", "{ git push origin feature; }", "git tag -d v1 && { echo done; }",
+])
+def test_a_brace_that_is_not_a_named_fd_is_read_as_it_was(command):
+    assert not si08(command), command
