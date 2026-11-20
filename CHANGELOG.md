@@ -4,6 +4,9 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+### Fixed
+- **The daily retention purge no longer holds the ledger lock for as long as it has rows (W-76, T17).** `jade maintain` cleared all old text in one transaction, so at a large ledger a hook that needed the write lock waited out its 1.5 s and a high-risk call was blocked. The purge now finds the rows with a read (no write lock), then writes them in batches of `ops.PURGE_BATCH` (1000) rows, one short transaction each, and frees the lock for `ops.PURGE_PAUSE_S` (50 ms) between two batches. Each row is checked again when it is written, so a row that changed meanwhile is judged on what it is now. The same rows are cleared as before; a dry run still runs in one transaction that is rolled back and gives the same counts. The one `purge` audit event now holds the totals and is also written when a batch fails part way (the rows cleared by then stay cleared; a later run finishes; a Ctrl-C is handled the same way, but a process killed by a signal can leave cleared rows with no event, and a stopped run skips the scrub). Measured on a synthetic ledger of 930k rows with a second process taking the lock like a hook: the longest wait fell from 1.64 s (two waits over 1.5 s) to 44 ms (none), and the first big purge takes 39 s instead of 4.9 s; a second run takes 0.65 s. **Not fixed:** the scrub after a purge (`VACUUM` and a checkpoint) is still one hold of the lock (6.7 to 8.8 s at 930k rows), because SQLite cannot run `VACUUM` in pieces. W-76 stays open for it. `jade ledger purge --test-rows` is unchanged. See docs/04 4c and docs/08.
+
 ## [0.7.0] - 2026-11-19
 
 ### Added

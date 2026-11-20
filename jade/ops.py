@@ -10,10 +10,12 @@ import plistlib
 import re
 import shlex
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 from datetime import timedelta
 from pathlib import Path
@@ -245,69 +247,142 @@ PURGED_ASK = json.dumps({"purged": True})   # `asks.question_json` is NOT NULL a
 PURGE_TABLES = ("jev_calls", "decisions", "permits", "events", "asks", "human_answers")
 
 
+PURGE_BATCH = 1000      # rows one purge transaction may write (W-76): the write lock is held for one batch, then freed
+PURGE_PAUSE_S = 0.05    # the lock stays free this long between two batches, so a hook that waits for it can take it (its busy handler polls, it does not queue)
+
+
 class _DryRun(Exception):
     """Raised inside the purge transaction of a dry run so that it rolls back."""
 
 
-def _purge_rows(con, cutoff: str, *, ask_text: bool) -> dict[str, int]:
-    """Clear the text, inside the caller's transaction, and count the rows cleared per table. One place, so a dry run and a purge cannot disagree."""
-    n = dict.fromkeys(PURGE_TABLES, 0)
-    n["jev_calls"] = con.execute("UPDATE jev_calls SET state_text=NULL, question_text=NULL WHERE ts<? AND (state_text IS NOT NULL OR question_text IS NOT NULL)",
-                                 (cutoff,)).rowcount
-    for r in con.execute("SELECT decision_id, doc_json FROM decisions WHERE updated_at<? AND json_extract(doc_json,'$.objective') IS NOT ?", (cutoff, PURGED)).fetchall():
-        doc = json.loads(r["doc_json"])
-        doc["objective"] = PURGED
-        doc["candidate_actions"] = [{**act, "description": PURGED} if isinstance(act, dict) else act for act in doc.get("candidate_actions", [])]
-        doc["constraints"], doc["assumptions"], doc["evidence_refs"] = [], [], []
-        con.execute("UPDATE decisions SET doc_json=? WHERE decision_id=?", (json.dumps(doc, ensure_ascii=False), r["decision_id"]))
-        n["decisions"] += 1
-    for r in con.execute("SELECT permit_id, scope FROM permits WHERE issued_at<? AND (state NOT IN ('PENDING','ISSUED') OR expires_at<=?) AND scope LIKE '{%'",
-                         (cutoff, ts())).fetchall():
-        try:
-            ctx = json.loads(r["scope"])
-        except ValueError:
-            continue
-        if isinstance(ctx, dict) and "subject" in ctx and ctx["subject"] != PURGED:
-            keep = {k: v for k, v in ctx.items() if k in ("tool", "length", "rule", "bound", "session_id", "agent_id", "permission_mode", "hash_cwd")}
-            con.execute("UPDATE permits SET scope=? WHERE permit_id=?", (json.dumps({**keep, "subject": PURGED, "purged": True}), r["permit_id"]))
-            n["permits"] += 1
-    n["events"] = con.execute("UPDATE events SET detail_json=json_remove(detail_json,'$.label') WHERE kind='jev_allowed' AND ts<? AND json_extract(detail_json,'$.label') IS NOT NULL",
-                              (cutoff,)).rowcount   # the label is command text; the keys beside it are hashes and stay (below)
-    n["events"] += con.execute("UPDATE events SET detail_json=NULL WHERE ts<? AND detail_json IS NOT NULL AND kind NOT IN ('purge', ?, ?, ?)", (cutoff, *KEPT_DETAIL)).rowcount
+def _between_batches() -> None:
+    time.sleep(PURGE_PAUSE_S)
+
+
+def _purge_steps(cutoff: str, now_ts: str, *, ask_text: bool) -> list:
+    """The retention purge as `(table, where, args, apply)` steps. `where` picks the rows to clear (the same clause is read to find them and checked again when they are
+    written, so a row that changed in between is judged on what it is now); `apply(con, rowids)` clears those rows, inside the caller's transaction, and returns how many it
+    changed. One place for every statement, so a dry run (one transaction that is rolled back) and a purge (one short transaction per batch) cannot disagree.
+    `cutoff` and `now_ts` are read once for the whole run."""
+    def bulk(table: str, set_sql: str, set_args: tuple, where: str, args: tuple):
+        def apply(con, rowids):
+            marks = ",".join("?" * len(rowids))
+            return con.execute(f"UPDATE {table} SET {set_sql} WHERE rowid IN ({marks}) AND ({where})", (*set_args, *rowids, *args)).rowcount   # noqa: S608 - constant text
+        return table, where, args, apply
+
+    decisions_where = "updated_at<? AND json_extract(doc_json,'$.objective') IS NOT ?"
+
+    def decisions(con, rowids):
+        marks = ",".join("?" * len(rowids))
+        rows = con.execute(f"SELECT decision_id, doc_json FROM decisions WHERE rowid IN ({marks}) AND ({decisions_where})", (*rowids, cutoff, PURGED)).fetchall()  # noqa: S608
+        for r in rows:
+            doc = json.loads(r["doc_json"])
+            doc["objective"] = PURGED
+            doc["candidate_actions"] = [{**act, "description": PURGED} if isinstance(act, dict) else act for act in doc.get("candidate_actions", [])]
+            doc["constraints"], doc["assumptions"], doc["evidence_refs"] = [], [], []
+            con.execute("UPDATE decisions SET doc_json=? WHERE decision_id=?", (json.dumps(doc, ensure_ascii=False), r["decision_id"]))
+        return len(rows)
+
+    permits_where = "issued_at<? AND (state NOT IN ('PENDING','ISSUED') OR expires_at<=?) AND scope LIKE '{%'"
+
+    def permits(con, rowids):
+        marks = ",".join("?" * len(rowids))
+        rows = con.execute(f"SELECT permit_id, scope FROM permits WHERE rowid IN ({marks}) AND ({permits_where})", (*rowids, cutoff, now_ts)).fetchall()  # noqa: S608
+        cleared = 0
+        for r in rows:
+            try:
+                ctx = json.loads(r["scope"])
+            except ValueError:
+                continue
+            if isinstance(ctx, dict) and "subject" in ctx and ctx["subject"] != PURGED:
+                keep = {k: v for k, v in ctx.items() if k in ("tool", "length", "rule", "bound", "session_id", "agent_id", "permission_mode", "hash_cwd")}
+                con.execute("UPDATE permits SET scope=? WHERE permit_id=?", (json.dumps({**keep, "subject": PURGED, "purged": True}), r["permit_id"]))
+                cleared += 1
+        return cleared
+
+    steps = [
+        bulk("jev_calls", "state_text=NULL, question_text=NULL", (), "ts<? AND (state_text IS NOT NULL OR question_text IS NOT NULL)", (cutoff,)),
+        ("decisions", decisions_where, (cutoff, PURGED), decisions),
+        ("permits", permits_where, (cutoff, now_ts), permits),
+        # the label is command text; the keys beside it are hashes and stay (below)
+        bulk("events", "detail_json=json_remove(detail_json,'$.label')", (), "kind='jev_allowed' AND ts<? AND json_extract(detail_json,'$.label') IS NOT NULL", (cutoff,)),
+        bulk("events", "detail_json=NULL", (), "ts<? AND detail_json IS NOT NULL AND kind NOT IN ('purge', ?, ?, ?)", (cutoff, *KEPT_DETAIL)),
+    ]
     if ask_text:
         # The chat question (it holds a "Command:" block), the one-line label and the scope labels of an ask that is over: never an ask still open.
-        n["asks"] = con.execute(
-            "UPDATE asks SET question_json=?, label=CASE WHEN label IS NULL THEN NULL ELSE ? END, scopes_json=CASE WHEN scopes_json IS NULL THEN NULL ELSE '[]' END "
-            "WHERE created_ts<? AND NOT (status IN ('PENDING','SHOWN') AND expires_ts>?) "
+        steps.append(bulk(
+            "asks", "question_json=?, label=CASE WHEN label IS NULL THEN NULL ELSE ? END, scopes_json=CASE WHEN scopes_json IS NULL THEN NULL ELSE '[]' END", (PURGED_ASK, PURGED),
+            "created_ts<? AND NOT (status IN ('PENDING','SHOWN') AND expires_ts>?) "
             "AND (question_json<>? OR (label IS NOT NULL AND label<>?) OR (scopes_json IS NOT NULL AND scopes_json<>'[]'))",
-            (PURGED_ASK, PURGED, cutoff, ts(), PURGED_ASK, PURGED)).rowcount
+            (cutoff, now_ts, PURGED_ASK, PURGED)))
         # The label of an answer is what `jade review confirm` and `jade knows` print. A standing answer keeps it while it decides (30 days after its last use,
         # 180 at most), and so does an allow the human has not confirmed yet (it can be confirmed for 180 days); the keys, the answer and the rule stay for good.
         cap, use = memory.valid_since()
-        n["human_answers"] = con.execute(
-            "UPDATE human_answers SET label=CASE WHEN label IS NULL THEN NULL ELSE ? END, scope_label=CASE WHEN scope_label IS NULL THEN NULL ELSE ? END "
-            "WHERE ts<? AND ((label IS NOT NULL AND label<>?) OR (scope_label IS NOT NULL AND scope_label<>?)) "
+        steps.append(bulk(
+            "human_answers", "label=CASE WHEN label IS NULL THEN NULL ELSE ? END, scope_label=CASE WHEN scope_label IS NULL THEN NULL ELSE ? END", (PURGED, PURGED),
+            "ts<? AND ((label IS NOT NULL AND label<>?) OR (scope_label IS NOT NULL AND scope_label<>?)) "
             "AND NOT (answer='allow' AND strength='strong' AND COALESCE(source,'')<>'test' AND confirmed_ts>=? AND COALESCE(last_used_ts, confirmed_ts)>=?) "
             "AND NOT (answer='allow' AND strength='hint' AND ts>=?)",
-            (PURGED, PURGED, cutoff, PURGED, PURGED, cap, use, cap)).rowcount
-    return n
+            (cutoff, PURGED, PURGED, cap, use, cap)))
+    return steps
+
+
+def _purge_candidates(con, table: str, where: str, args: tuple) -> list[int]:
+    """The rowids a step would clear. A read, so it takes no write lock (the ledger is in WAL mode); the rows are judged again when they are written."""
+    return [r[0] for r in con.execute(f"SELECT rowid FROM {table} WHERE {where}", args)]   # noqa: S608 - constant text
 
 
 def purge_report(db: ledger.Ledger, older_than_days: int = 90, *, ask_text: bool = False, dry_run: bool = False) -> dict[str, int]:
-    """The retention purge, with the rows cleared per table. `dry_run` runs the same statements and rolls them back, so the ledger, its audit event and its file
-    are as they were. `ask_text` also clears the chat question and the labels of ended asks and of answers (DX-H2); it is off until the owner says yes, so
-    `jade maintain` never turns it on."""
+    """The retention purge, with the rows cleared per table. `dry_run` runs the same statements in one transaction and rolls it back, so the ledger, its audit event and
+    its file are as they were. `ask_text` also clears the chat question and the labels of ended asks and of answers (DX-H2); it is off until the owner says yes, so
+    `jade maintain` never turns it on.
+
+    A purge writes at most `PURGE_BATCH` rows per transaction and frees the write lock for `PURGE_PAUSE_S` between two batches (W-76): a hook waits at most 1.5 s for that
+    lock and then blocks a high-risk call (docs/05 T17), so the time the lock is held must not grow with the rows. Finding the rows is a read and takes no lock. The one
+    `purge` audit event is written at the end, with the totals, also when a batch fails part way (the rows cleared by then stay cleared, a later run finishes the rest).
+    The scrub that follows is one hold of the lock."""
+    now_ts = ts()
     cutoff = ts(now() - timedelta(days=older_than_days))
-    out: dict[str, int] = {}
-    try:
-        with db.tx() as con:
-            out = _purge_rows(con, cutoff, ask_text=ask_text)
-            if dry_run:
+    batch = max(1, int(PURGE_BATCH))
+    steps = _purge_steps(cutoff, now_ts, ask_text=ask_text)
+    out = dict.fromkeys(PURGE_TABLES, 0)
+    if dry_run:
+        try:
+            with db.tx() as con:
+                for table, where, args, apply in steps:
+                    rowids = _purge_candidates(con, table, where, args)
+                    for i in range(0, len(rowids), batch):
+                        out[table] += apply(con, rowids[i:i + batch])
                 raise _DryRun
-            if (total := sum(out.values())):
+        except _DryRun:
+            return out
+
+    def audit(*, best_effort: bool) -> None:
+        if not (total := sum(out.values())):
+            return
+        try:
+            with db.tx() as con:
                 db.event("ledger", "purge", guard=f"older than {older_than_days} d", detail={"rows": total, "tables": {t: c for t, c in out.items() if c}}, con=con)
-    except _DryRun:
-        return out
+        except sqlite3.Error:
+            if not best_effort:
+                raise
+
+    wrote = False   # the previous transaction wrote, so the lock is freed for a moment before the next one
+    try:
+        for table, where, args, apply in steps:
+            rowids = _purge_candidates(db.con, table, where, args)
+            for i in range(0, len(rowids), batch):
+                if wrote:
+                    _between_batches()
+                with db.tx() as con:
+                    out[table] += apply(con, rowids[i:i + batch])
+                wrote = True
+    except BaseException as stop:   # a Ctrl-C too: the rows cleared by then stay cleared, so the audit event must not be lost (a kill signal still can lose it)
+        audit(best_effort=True)
+        if isinstance(stop, Exception) and sum(out.values()):
+            db.scrub()
+        raise
+    audit(best_effort=False)
     if sum(out.values()):
         db.scrub()   # the cleared text must not stay readable in the file's free pages or the write-ahead log
     return out

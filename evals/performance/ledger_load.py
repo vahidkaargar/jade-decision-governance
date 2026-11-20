@@ -340,8 +340,8 @@ def drop_w58_indexes(path: Path) -> list[str]:
 
 
 def maintain_timings(src: Path, workdir: Path) -> dict:
-    """The daily job's steps on a COPY of the ledger. `purge` holds the write lock for its whole transaction; a hook waits at most
-    hooks.LEDGER_TIMEOUT_S for it and then fails closed for a high-risk call, so that duration is the number that matters."""
+    """The daily job's steps on a COPY of the ledger. Since W-76 `purge` writes in short batches, so its total time is not the lock hold; the scrub is still one hold.
+    A hook waits at most hooks.LEDGER_TIMEOUT_S for the lock and then fails closed for a high-risk call, so the longest hold is the number that matters."""
     import shutil
 
     from jade import decide, hooks, improve, ledger, ops, permits
