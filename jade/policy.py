@@ -1749,12 +1749,26 @@ def _use_identity(seg: str) -> str:
     return IDENTITY_FILE.sub("-i $KEY", seg) if bare.split(" ", 1)[0].rsplit("/", 1)[-1] in REMOTE_SHELL_VERBS else seg
 
 
-def classify_segment(seg: str, dirs: tuple[str, ...], proxied: bool = False, marks: tuple[str, ...] = ()) -> tuple[dict, str]:
+# W-153 review: the rules whose answer memory never keeps and Jev never judges (memory.NEVER_RULES, proxy.NEVER_RULES) or that keep a call exact or human-only
+# (memory.EXACT_ONLY_RULES, R-17 with HO_R17). A rule that comes earlier in risk.yaml (R-10 before R-13 and R-18) names the segment; these are still read
+# for it, so `seg_rules` holds them and a call is not looser because of the order of the rules. All of them are high: the segment is gated when one matches.
+ALSO_KEPT = ("R-13", "R-14", "R-17", "R-18", "R-21", "R-22")
+
+
+def _also_hits(also: list[str], text: str, files: str | None, alt: dict[str, str] | None, dirs: tuple[str, ...], path_only: bool = False) -> None:
+    """Add to `also` every rule of `ALSO_KEPT` that this view of the segment matches (see `classify_segment`). `path_only`: only the path rules (the view of absolute operands)."""
+    for r in risk()["rules"]:
+        if r["id"] in ALSO_KEPT and r["id"] not in also and (not path_only or r["id"] in PATH_RULES) \
+                and (t := alt[r["id"]] if alt and r["id"] in alt else _seen_by(r, text, files)) and _hit(r, t, dirs):
+            also.append(r["id"])
+
+
+def classify_segment(seg: str, dirs: tuple[str, ...], proxied: bool = False, marks: tuple[str, ...] = (), also: list[str] | None = None) -> tuple[dict, str]:
     """The rule one simple command (a segment of `shellnorm.segments_cwd`) matches, and the command with launcher prefixes and git options gone.
 
     The command is looked at as written and with its operands made absolute for every directory it may run in; a `files_only` rule (R-13, R-16)
     reads only what the command writes (`files_view`). `marks` are marker prefixes (`blind:script-file `, `fetch:exec `) that the caller found for this segment and that rules
-    read together with its text."""
+    read together with its text. When `also` is a list, the rules of `ALSO_KEPT` that the segment matches are added to it, whichever rule is returned."""
     real_bare = _bare(seg)
     seg = _use_identity(seg)
     bare, calls = _analyse(seg)
@@ -1773,12 +1787,17 @@ def classify_segment(seg: str, dirs: tuple[str, ...], proxied: bool = False, mar
         rule = _first_match(text, files, alt, dirs_t)
         if seg_best is None or LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
             seg_best = rule
+        if also is not None and LEVELS[rule["level"]] >= LEVELS["high"]:   # an ALSO_KEPT rule is high: it can only hit a view whose first match is high or critical
+            _also_hits(also, text, files, alt, dirs_t)
     abs_ops = _absolute_operands(seg, dirs)
     abs_files = abs_ops if view is None else _absolute_operands("x " + view, dirs) if view else ""
     abs_pkg = _absolute_operands(seg if view is None else "x " + view, dirs, package=True) if view != "" else ""
     abs_create = abs_files if cview == view else abs_ops if cview is None else _absolute_operands("x " + cview, dirs) if cview else ""
-    if (rule := _path_rule(abs_ops, abs_files, {"R-16": abs_pkg, "R-18": abs_create}, dirs_t)) and LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
+    path_alt = {"R-16": abs_pkg, "R-18": abs_create}
+    if (rule := _path_rule(abs_ops, abs_files, path_alt, dirs_t)) and LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
         seg_best = rule
+    if also is not None and rule and LEVELS[rule["level"]] >= LEVELS["high"]:
+        _also_hits(also, abs_ops, abs_files, path_alt, dirs_t, path_only=True)
     return seg_best, real_bare
 
 
@@ -1897,7 +1916,8 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         seg_labels = [lab for lab in (blind.script_label(words, known), "computed-cwd" if computed and _computed_write(_bare(seg)) else None) if lab]
         labels.extend(seg_labels)
         marks.extend(f"{BLIND_MARK}{lab} " for lab in seg_labels)
-        seg_best, bare = classify_segment(seg, dirs, proxied, tuple(marks))
+        also: list[str] = []
+        seg_best, bare = classify_segment(seg, dirs, proxied, tuple(marks), also)
         if best is None or LEVELS[seg_best["level"]] > LEVELS[best["level"]]:
             best = seg_best
         if si12_roots and not si12 and _si12_segment(seg, dirs, cwd, si12_roots):
@@ -1916,6 +1936,7 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         if LEVELS[seg_best["level"]] >= LEVELS[permit_floor()]:
             gated_keys.append(key)
             gated_rules.append(seg_best["id"])
+            gated_rules.extend(also)   # W-153 review: a never-learned rule the segment also matches (`git update-ref refs/heads/main HEAD > AGENTS.md` is R-10 and R-13)
     best = best or risk()["rules"][-1]
     if labels and best["level"] == "low":   # R-31 is low, so it never wins a level comparison: nothing above low matched, and what the gate could not read is the finding
         best = next(r for r in risk()["rules"] if r["id"] == "R-31")

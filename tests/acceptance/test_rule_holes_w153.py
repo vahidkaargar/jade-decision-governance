@@ -161,3 +161,27 @@ def test_update_ref_is_never_a_remembered_kind_and_never_sent_to_jev():
 
 def test_gh_api_merge_in_does_not_see_a_ref_read():
     assert not policy.gh_api_merge_in("gh api repos/o/r/git/refs/heads/main")
+
+
+# ---------------------------------------------------------------- a rule that is never learned is not lost behind R-10 (W-153 review)
+
+@pytest.mark.parametrize("cmd,never", [
+    ("git update-ref refs/heads/main HEAD > AGENTS.md", "R-13"),
+    ("git update-ref refs/heads/main HEAD > .mcp.json", "R-13"),
+    ("git update-ref refs/heads/main HEAD 2> CLAUDE.md", "R-13"),
+    ("git update-ref refs/heads/main HEAD > ~/.ssh/authorized_keys", "R-13"),
+    ("git update-ref -d refs/heads/main > ~/.claude.json", "R-13"),
+    ("git update-ref refs/heads/main HEAD > ~/.claude/skills/x/SKILL.md", "R-18"),
+    ("gh pr merge 1 > AGENTS.md", "R-13"),                       # the same shape with an older R-10 form (it was `exact` on 0.7.0 too)
+    ("gh api repos/o/r/git/refs/heads/main -X PATCH -f sha=x > CLAUDE.md", "R-13"),
+])
+def test_a_never_rule_that_the_same_segment_matches_stays_with_the_call(cmd, never):
+    """R-10 comes before R-13 and R-18 in risk.yaml, so it names the segment; the never-learned rule the same segment also matches stays in `seg_rules`:
+    memory never keeps the answer and Jev never judges it, as when that rule named the call."""
+    from jade import memory, proxy, scopes
+    a = assess(cmd)
+    tin = {"command": cmd}
+    assert gated(a) and never in a.seg_rules
+    assert memory.eligibility(a, "Bash", tin, None) == "never"
+    assert proxy.skip_reason(a, "Bash", tin, "high") == "fetch-and-exec, egress, or a write to an agent instruction file"
+    assert not scopes._is_plain_shell_call(a, "Bash", tin)
