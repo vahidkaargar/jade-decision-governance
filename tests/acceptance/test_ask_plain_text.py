@@ -211,3 +211,72 @@ def test_the_merge_sentence_names_the_real_target(cmd, line):
 def test_a_value_flag_before_the_number_does_not_name_a_pull_request(cmd, line):
     a = assess(cmd)
     assert a.seg_keys and askplain.what_line(a, "Bash") == line, a.seg_keys
+
+
+# W-154: a write to authorized_keys is R-13, and the question says that it opens a login, not only that it changes guard files.
+OPENS_LOGIN = "This writes a list of keys that are trusted to log in, so it can open a login."
+LOGIN_FILE = "Write the authorized_keys file, which lists the keys that can log in."
+
+
+@pytest.mark.parametrize("cmd", [
+    "echo ssh-ed25519 AAAA >> ~/.ssh/authorized_keys",
+    "cat key.pub >> ~/.ssh/authorized_keys2",
+    "cat > ~/.ssh/authorized_keys",
+    "echo k | tee -a ~/.ssh/authorized_keys",
+    "cp k.pub /home/u/.ssh/authorized_keys",
+    "cd ~/.ssh && cat k.pub >> authorized_keys",
+])
+def test_a_shell_write_to_authorized_keys_says_it_opens_a_login(cmd):
+    a = assess(cmd)
+    assert a.rule_id == "R-13" and a.seg_keys
+    head = askplain.header(a, "Bash")
+    assert head[0] == LOGIN_FILE and head[1] == OPENS_LOGIN
+    question = askchat.question_for("0123456789ab", a, "Bash", {"command": cmd})["question"]
+    assert "R-13" in question and OPENS_LOGIN in question
+    assert OPENS_LOGIN in askdialog.text_for(a, "Bash", {"command": cmd})
+
+
+@pytest.mark.parametrize("tool,tool_input", [
+    ("Write", {"file_path": "/Users/someone/.ssh/authorized_keys", "content": "ssh-ed25519 AAAA"}),
+    ("Edit", {"file_path": "/Users/someone/.ssh/authorized_keys2", "old_string": "a", "new_string": "b"}),
+])
+def test_a_write_tool_on_authorized_keys_says_it_opens_a_login(tool, tool_input):
+    a = policy.assess(tool, tool_input, cwd="/tmp")
+    assert a.rule_id == "R-13"
+    head = askplain.header(a, tool)
+    assert head[0] == LOGIN_FILE and head[1] == OPENS_LOGIN
+
+
+@pytest.mark.parametrize("cmd", [
+    "echo hi >> CLAUDE.md",
+    "echo authorized_keys > CLAUDE.md",   # a mention, not a write to the file
+    "echo x > ~/.claude/settings.json",
+    "cp k.pub ~/.claude/settings.json",
+])
+def test_another_r13_write_keeps_the_generic_sentence(cmd):
+    a = assess(cmd)
+    assert a.rule_id == "R-13"
+    head = askplain.header(a, "Bash")
+    assert head[1] == askplain.RISK_TEXT["R-13"] and head[0] != LOGIN_FILE
+
+
+def test_a_write_tool_on_another_protected_file_keeps_the_generic_sentence():
+    a = policy.assess("Write", {"file_path": "/Users/someone/proj/CLAUDE.md", "content": "x"}, cwd="/tmp")
+    assert a.rule_id == "R-13"
+    assert askplain.header(a, "Write") == ["Write a file.", askplain.RISK_TEXT["R-13"]]
+
+
+def test_the_rule_sentence_of_r13_is_unchanged_for_callers_that_pass_only_the_rule():
+    assert askplain.risk_line("R-13") == "This changes the rules, hooks, settings or installed code that guard the agent."
+
+
+def test_the_authorized_keys_sentences_are_short_and_plain():
+    assert askplain.AUTHKEYS_RISK == OPENS_LOGIN and askplain.AUTHKEYS_WHAT == LOGIN_FILE
+    for sentence in (OPENS_LOGIN, LOGIN_FILE):
+        assert sentence.endswith(".") and sentence.count(". ") == 0 and words(sentence) <= 20
+
+
+def test_authorized_keys_next_to_another_risky_command_names_both():
+    a = assess("echo k >> ~/.ssh/authorized_keys; git push origin main")
+    line = askplain.what_line(a, "Bash")
+    assert LOGIN_FILE in line and "This push can force push" in line   # another command in the call: the worst push line

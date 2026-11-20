@@ -52,6 +52,27 @@ RISK_TEXT: dict[str, str] = {
     "M-99": "This tool has no rule yet, and it is only recorded.",
 }
 GENERIC_RISK = "This call needs your decision."
+# W-154: a write to authorized_keys is R-13, but the generic R-13 sentence (rules, hooks, settings, installed code) does not say that it opens a login.
+AUTHKEYS_RISK = "This writes a list of keys that are trusted to log in, so it can open a login."
+AUTHKEYS_WHAT = "Write the authorized_keys file, which lists the keys that can log in."
+_AUTHKEYS_SSH = re.compile(r"\.ssh/authorized_keys2?(?![\w.-])")   # the shape policies/risk.yaml R-13 matches
+_AUTHKEYS_NAME = re.compile(r"(?<![\w.-])authorized_keys2?(?![\w.-])")   # a write target named so, after `cd ~/.ssh`: the gate reads the same file
+
+
+def _writes_authkeys(key: str) -> bool:
+    """Does one gated segment write an authorized_keys file? A reader (`cat ~/.ssh/authorized_keys`) and a mention (`echo authorized_keys > CLAUDE.md`) do not: the
+    write targets are read the way R-13 reads them (`policy.files_view`); a command that may write any operand counts whole, and then only the path R-13 matches counts."""
+    view = policy.files_view(key)
+    return bool(_AUTHKEYS_SSH.search(key) if view is None else _AUTHKEYS_NAME.search(view))
+
+
+def _authkeys_call(a, tool: str) -> bool:
+    """Is this call, rated R-13, a write to an authorized_keys file? A Write or Edit names the path; a shell call is read from its gated segments."""
+    if a.rule_id != "R-13":
+        return False
+    if tool in policy.WRITE_TOOLS:
+        return bool(_AUTHKEYS_SSH.search(getattr(a, "subject", "") or ""))
+    return any(_writes_authkeys(k) for k in getattr(a, "seg_keys", None) or [])
 
 
 GENERIC_HO = "A rule that only you can decide matches this call."
@@ -474,6 +495,8 @@ def _branch_line(key: str, line: str) -> str:
 def _render(key: str) -> str:
     if key == "git push" or key.startswith("git push "):
         return _push_line(key)
+    if _writes_authkeys(key):
+        return AUTHKEYS_WHAT
     for rx, text in SEGMENT_TEXT:
         if m := rx.search(key):
             line = m.expand(text)
@@ -509,6 +532,8 @@ def what_line(a, tool: str) -> str:
     if tool.startswith("mcp__"):
         parts = show_safely(tool, one_line=True).split("__")
         return f"Use {parts[1]}: {parts[-1].replace('_', ' ')}." if len(parts) > 2 else f"Use the tool {show_safely(tool, one_line=True)}."
+    if tool in policy.WRITE_TOOLS and _authkeys_call(a, tool):
+        return AUTHKEYS_WHAT
     if tool in ("Write", "MultiEdit", "NotebookEdit"):
         return "Write a file."
     if tool == "Edit":
@@ -537,7 +562,7 @@ def other_count(a) -> int:
 
 def header(a, tool: str) -> list[str]:
     """The lines every question starts with, in this order: what, why it is risky, what else is in the call, and a hint when risky commands are joined."""
-    lines = [what_line(a, tool), risk_line(a.rule_id, a.ho_ids)]
+    lines = [what_line(a, tool), AUTHKEYS_RISK if _authkeys_call(a, tool) else risk_line(a.rule_id, a.ho_ids)]
     n = other_count(a)
     if n:
         lines.append(f"Also in this call: {n} other command that JADE rates as low risk." if n == 1 else f"Also in this call: {n} other commands that JADE rates as low risk.")
