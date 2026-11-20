@@ -4,6 +4,9 @@ All notable changes to this project are documented here. Format: Keep a Changelo
 
 ## [Unreleased]
 
+### Fixed
+- **Opening a second ledger connection no longer drops the locks of the first (W-95).** `Ledger.__init__` made sure the database file existed by opening it and closing it again. On Linux and macOS the file locks belong to the process, so closing any descriptor of the file drops all locks that the process's other SQLite connections hold on it. Another process could then run WAL recovery, or delete the `-wal` and `-shm` files, under the first connection, and that connection read a stale shared-memory map ("database disk image is malformed"). This is the most likely cause of the rare CI failure in `test_the_decision_and_the_permit_move_together_under_parallel_calls` (Linux, Python 3.13). The file is now created only when it does not exist yet (`O_EXCL`), so an existing ledger is never opened and closed there. Nothing changes for a normal single-connection hook call; the mode 600 creation is the same. New tests in `tests/test_ledger_posix_locks_w95.py` check from a second process that a second connection keeps the first one's lock (the test failed before the change). The CI failure itself was not reproduced (the Linux container image was not on the machine and this work ran without network), so the cause is a strong reading of the code plus a lock test that fails before the change and passes after it, not a reproduced CI failure. If the flake comes back, look at `ledger.open()` again.
+
 ## [0.7.0] - 2026-11-19
 
 ### Added

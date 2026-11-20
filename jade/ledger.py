@@ -160,10 +160,14 @@ class Ledger:
 
     def _create_private(self) -> None:
         """Create the database file mode 600 before SQLite opens it. SQLite gives `-wal` and `-shm` the mode of the main file, so no sidecar
-        is ever group- or world-readable, whatever the umask (docs/05 T15)."""
+        is ever group- or world-readable, whatever the umask (docs/05 T15).
+
+        Only a file that does not exist yet is opened here (O_EXCL), and never one a connection may already hold. POSIX locks belong to the process: closing
+        any descriptor of the database file drops every lock this process's other connections hold on it, and a second process may then run WAL recovery or
+        delete `-wal` and `-shm` under them ("database disk image is malformed", W-95)."""
         try:
-            os.close(os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600))
-        except OSError:
+            os.close(os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600))
+        except OSError:   # FileExistsError: nothing to create and no descriptor was opened
             pass
 
     def _lock_down(self) -> None:
