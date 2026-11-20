@@ -2358,3 +2358,78 @@ def git_calls(text: str) -> tuple[str, list[GitCall]]:
         out.append("git")
         i = j
     return " ".join(out), calls
+
+
+# ------------------------------------------------------------------ a variable that may be empty or unset (W-133: F7, F11 `${X-git}`)
+
+_VAR_WORD = re.compile(r"\$(?:[A-Za-z_]\w*|\d|[@*])")   # a word of the skeleton that is one expansion: `$x`, `$1`, `$@`, `$X` (`${..}`, `$(..)`, a backtick)
+_UNSET_DEFAULT = re.compile(r"\$\{[A-Za-z_]\w*:?[-=]([^\s{}$`'\"\\;&|()<>]*)\}")   # `${X-git}`, `${X:-git}`, `${X=git}`: the word they give when X is unset
+_UNQUOTED_EXPANSION = re.compile(r"\\.|'[^']*'?|\$'(?:\\.|[^'\\])*'?|\"(?:\\.|[^\"\\])*\"?|\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*|\d|[@*])|(\$[({]|`)", re.S)
+
+
+def unquoted_variables(command: str) -> frozenset[str]:
+    """The names of the variables the command expands outside quotes (`$x`, `${x}`, `$1`), and `X` (the skeleton's word for `$(..)`, a backtick and `${..}` with an
+    operator) when it has one of those outside quotes. A quoted `"$x"` that is empty is an empty word, not no word, so it is never taken out. The scan is a regex,
+    not the shell: a quote it reads wrongly costs this extra reading only, never a reading the gate had before."""
+    names: set[str] = set()
+    for m in _UNQUOTED_EXPANSION.finditer(command):
+        if m.group(1) or m.group(2):
+            names.add(m.group(1) or m.group(2))
+        elif m.group(3):
+            names.add("X")
+    return frozenset(names)
+
+
+def unset_default_reading(command: str) -> str | None:
+    """The command with each `${NAME-word}`, `${NAME:-word}`, `${NAME=word}` and `${NAME:=word}` written as its word (what the shell runs when NAME is unset), or None
+    when it has none. A text reading for SI-08 only (owner decision W-133, narrow): the hook adds it to the readings it has and counts it only when it finds a push
+    to the default branch in it."""
+    if "${" not in command:
+        return None
+    out = _UNSET_DEFAULT.sub(lambda m: m.group(1), command)
+    return out if out != command else None
+
+
+def unset_variable_pushes(call: GitCall, unquoted: frozenset[str]) -> list[GitCall]:
+    """The pushes `call` is when its variable words are empty (W-133, F7): `git $x push origin :main` with x unset is `git push origin :main`. Two readings: the
+    variables in front of the subcommand taken out (`git $x push $r :main` keeps `$r` as the remote), and every variable word of the push taken out
+    (`git push $x origin` is `git push origin`). A variable glued to other text (`ma${x}in`) is not read. For SI-08 only: the hook counts one of these only when it
+    finds a push to the default branch in it, so a reading that is not what the shell runs can only add a block, never lift one. `unquoted`: the names
+    `unquoted_variables` found in the command; a variable word of another name is quoted and stays (an empty word)."""
+    if not unquoted or ("$" not in call.sub and not any("$" in a for a in call.args)):
+        return []
+
+    def empty(w: str) -> bool:
+        return bool(_VAR_WORD.fullmatch(w)) and w[1:] in unquoted
+
+    out: list[GitCall] = []
+    if empty(call.sub):
+        words = [call.sub, *call.args]
+        kept: list[str] = []
+        i = 0
+        while i < len(words):
+            w = words[i]
+            if empty(w):
+                i += 1
+                continue
+            if w in GLOBAL_NOARG or (w.partition("=")[0] in GLOBAL_VALUE and "=" in w):
+                kept.append(w)
+                i += 1
+                continue
+            if w in GLOBAL_VALUE:
+                kept.extend(words[i:i + 2])
+                i += 2
+                continue
+            kept.extend(words[i:])
+            break
+        for c in git_calls("git " + " ".join(kept))[1][:1]:
+            c.dirs = [*call.dirs, *c.dirs]
+            c.git_dir = c.git_dir or call.git_dir
+            c.work_tree = c.work_tree or call.work_tree
+            if c.sub == "push":
+                out.append(c)
+    for c in [*out, call] if call.sub == "push" else list(out):
+        args = [a for a in c.args if not empty(a)]
+        if args != c.args:
+            out.append(replace(c, args=args, dirs=list(c.dirs)))
+    return out

@@ -4,12 +4,16 @@ Each command here is a push to the default branch by a spelling the gate did not
 pushes to the default branch, the gate must stop the command. Where the real shell of this machine does not read the spelling (bash 3.2 has no `printf '\\u'`) the gate still
 reads it, because the shell that runs the text may be any other (bash 5, a zsh).
 
-Not closed here, and named in work-items.jsonl (W-133): F7 (`git $x push origin :main`, a variable that may be unset: the text is read, never evaluated), F11 (a push
-built with `eval $x`, `$(echo git)`, `xargs`: evaluation), SEG-4 (`echo main | xargs git push origin`).
+F7 and the `${X-git}` spelling of F11 are closed at the end of this file by the owner's narrow rule: an unquoted variable in a push may be empty or unset, and the
+push is read that way as well, only to find a push to the default branch. Still open, and named in work-items.jsonl (W-133): the rest of F11 (`eval $x`,
+`$(echo git)`, `$GIT`: evaluation) and SEG-4 (`echo main | xargs git push origin`: rated high, not blocked).
 """
+
+import subprocess
 
 import pytest
 
+from jade import hooks
 from tests.test_redirect_anywhere import agrees_with_the_shell, si08
 
 PUSH = "git push origin HEAD:main"
@@ -161,3 +165,83 @@ def test_ansi_c_backslash_c_never_lowers_the_rating(command, floor):
 @pytest.mark.parametrize("word", ["then", "do", "else", "elif", "if", "while", "until", "time", "!", "always"])
 def test_a_keyword_word_before_a_brace_does_not_cut_the_push(word):
     assert si08(f"git push origin feature {word} {{ :main"), word
+
+
+# ---------------------------------------------------------------- F7 and F11 `${X-git}`: a variable that may be empty or unset (owner decision 2026-11-20, narrow)
+#
+# An unquoted variable in a push is also read as empty (unset), and `${X-word}` / `${X:-word}` as its default word, only to find a push to the default branch. The
+# command is never rated lower: the reading is added to the ones the gate has. The real shells run each command with the variables unset.
+
+UNSET_PUSHES = [
+    "git $x push origin :main",
+    "git $x push origin main",
+    "git $x push origin HEAD:main",
+    "git $x push origin feature :main",
+    "git $x $y push origin main",
+    "git $x --no-pager push origin main",
+    "git --no-pager $x push origin +feature:main",
+    "git ${x} push origin main",
+    "git ${x:+-p} push origin main",
+    "git $(true) push origin main",
+    "git `true` push origin main",
+    "git $x push $r :main",
+    "git $1 push origin main",
+    "/usr/bin/git $x push origin main",
+    "cd . && git $x push origin main",
+    "${X-git} push origin main",
+    "${X:-git} push origin :main",
+    "\"${GIT-git}\" push origin main",
+    "${X-git} $y push origin main",
+    "git ${X-push} origin main",
+]
+
+
+@pytest.mark.parametrize("command", UNSET_PUSHES)
+def test_an_unset_variable_that_leaves_a_push_to_the_default_branch_is_stopped(command, tmp_path):
+    assert si08(command), command
+    agrees_with_the_shell(command, tmp_path)
+
+
+@pytest.mark.parametrize("command", [
+    "git $x push origin feature",
+    "git $x push origin feature:topic",
+    "git $x status",
+    "git $x log main",
+    "git $x checkout main",
+    "${X-git} push origin feature",
+    "${X-echo} push origin main",
+    "git ${X-status} origin main",
+    "echo '${X-git} push origin main'",
+    "git $x push origin mainline",
+    "$x push origin main",
+])
+def test_an_unset_variable_that_leaves_no_push_to_the_default_branch_is_not_stopped(command):
+    assert not si08(command), command
+
+
+def _repo(path, branch):
+    for argv in (["init", "-q", "-b", branch, str(path)], ["-C", str(path), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"],
+                 ["-C", str(path), "remote", "add", "origin", "https://example.invalid/x.git"]):
+        subprocess.run(["git", *argv], check=True)
+    return str(path)
+
+
+@pytest.mark.parametrize("command", ["git push $x origin", "git $x push $y origin", "git $x push"])
+def test_an_unset_variable_that_leaves_a_bare_push_is_read_on_the_branch(command, tmp_path):
+    """`git push $x origin` with x unset is `git push origin`: on main it pushes main (push.default simple), on a feature branch it does not."""
+    assert hooks._on_default_branch(_repo(tmp_path / "m", "main"), command), command
+    assert not hooks._on_default_branch(_repo(tmp_path / "f", "feature"), command), command
+
+
+@pytest.mark.parametrize("command", ['git push "$x" origin', 'git "$x" push', "git push '$x' origin", 'git push "${x}" origin', 'git "$(true)" push'])
+def test_a_quoted_variable_is_an_empty_word_not_no_word(command, tmp_path):
+    """A quoted `"$x"` that is empty is still a word (an empty one): `git push "" origin` names no remote. Only an unquoted variable is taken out (the real-command
+    dry run found `cd .../$d; ... git push origin --delete "$b"`, whose `"$b"` must not be read as no word)."""
+    assert not hooks._on_default_branch(_repo(tmp_path / "m", "main"), command), command
+
+
+def test_a_push_in_a_directory_named_by_a_variable_counts_only_a_named_default_branch(tmp_path):
+    repo = _repo(tmp_path / "m", "main")
+    assert hooks._on_default_branch(repo, 'cd "$d" && git $x push origin main')
+    assert not hooks._on_default_branch(repo, 'cd "$d" && git $x push origin HEAD')
+    assert not hooks._on_default_branch(repo, 'git -C "$d" $x push origin')
