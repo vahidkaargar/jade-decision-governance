@@ -816,7 +816,7 @@ def build_parser() -> argparse.ArgumentParser:
                        description="Classify one Bash command and create a PENDING permit for it. It prints the command a human runs to approve it.")
     rq.add_argument("--command", required=True, help="the exact Bash command the permit is for")
     rq.add_argument("--cwd", help="the working folder of the command (default: the current folder)")
-    for name, text in (("show", "print one permit as JSON"), ("approve", "approve a PENDING permit (a human terminal only)"), ("revoke", "revoke a permit so it can never be used")):
+    for name, text in (("show", "print one permit as JSON"), ("approve", "approve a PENDING permit (human terminal only)"), ("revoke", "revoke a permit so it can never be used")):
         x = pm.add_parser(name, allow_abbrev=False, help=text, description=text[:1].upper() + text[1:] + ".") if name == "show" else pm.add_parser(name, help=text, description=text[:1].upper() + text[1:] + ".")   # `--raw` is spelled out: SI-09 lists that spelling only
         x.add_argument("permit_id", help="the permit id, such as prm_0123456789ab")
         if name == "show":
@@ -851,12 +851,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     k = sub.add_parser("ack", help="record what was done about abstain/reject answers",
                        description="Record what was done about Jev answers that were not a yes (exit 3, 4, 5 or 6) and have no record yet. An agent reaches only "
-                                   "its own session's answers and needs a --note. Every ack is journaled.",
+                                   "its own session's answers. Every ack needs a --note and is journaled.",
                        epilog="example: jade ack --all --as revised --note \"added the missing test\"")
     k.add_argument("call_ids", nargs="*", help="the call ids to acknowledge")
     k.add_argument("--all", action="store_true", help="every answer that still needs a record")
     k.add_argument("--as", dest="as_", required=True, choices=("revised", "escalated", "reported", "dropped"), help="what was done")
-    k.add_argument("--note", default="", help="what was done, in a few words (an agent must give one); journaled")
+    k.add_argument("--note", default="", help="what was done, in a few words (required); journaled")
 
     sub.add_parser("question", help="list or lint the question registry",
                    description="List the questions in the registry, or lint the registry (exit 1 when an entry has problems).").add_argument(
@@ -869,7 +869,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--claim", help="the claim to check")
     r.add_argument("--evidence", help="the evidence as text")
     r.add_argument("--evidence-file", help="read the evidence from a file")
-    r.add_argument("--command", help="the command the decision is about; its risk rule is applied")
+    r.add_argument("--command", help="the command the claim is about; PF-02 checks it against the safety invariants")
     r.add_argument("-o", "--option", action="append", help="one option of a choice (repeat)")
     r.add_argument("--risk", default="low", choices=("low", "medium", "high", "critical"), help="the risk of the action (default: low)")
     r.add_argument("--done", action="store_true", help="the agent is about to claim completion")
@@ -908,21 +908,22 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--phase", type=int, choices=range(0, 6), help="add: roadmap phase 0 to 5")
 
     lb = sub.add_parser("label", help="calibration labels: the adjudication queue, and labels a human writes",
-                        description="Calibration labels say whether a Jev answer was right (docs/04). An agent may read the queue; only a human at a terminal "
-                                    "writes a label.").add_subparsers(dest="action", required=True)
-    lb.add_parser("auto", help="turn recorded outcomes into labels (a human terminal only)", description="Join recorded outcomes into labels. A human terminal only.")
+                        description="A calibration label is the true answer to the question Jev was asked; for a verify call: did the claim hold "
+                                    "(docs/04 section 2). An agent may read the queue; only a human at a terminal writes a label.").add_subparsers(dest="action", required=True)
+    lb.add_parser("auto", help="turn recorded outcomes into labels (human terminal only)", description="Join recorded outcomes into labels. It needs a human terminal.")
     lb.add_parser("queue", help="list the answers that wait for a human label (read-only)", description="List the answers that wait for a human label, up to the weekly cap.")
-    ls = lb.add_parser("set", help="write one label: was this answer right? (a human terminal only)",
-                       description="Write one adjudicated label for one Jev call. A human terminal only.", epilog="example: jade label set <call_id> yes --note \"tests passed\"")
+    ls = lb.add_parser("set", help="write one label: the true answer to the question (human terminal only)",
+                       description="Write one adjudicated label for one Jev call: the true answer to its question, not a verdict on Jev's answer. "
+                                   "It needs a human terminal.", epilog="example: jade label set <call_id> yes --note \"tests passed\"")
     ls.add_argument("call_id", help="the Jev call id, from `jade label queue`")
-    ls.add_argument("value", choices=("yes", "no"), help="yes: the answer was right; no: it was wrong")
+    ls.add_argument("value", choices=("yes", "no"), help="yes: the true answer is yes (the claim held); no: it is no")
     ls.add_argument("--note", help="why, in a few words")
 
     e = sub.add_parser("eval", help="offline evaluation: metrics, baseline conditions, routing cases, threshold proposals",
                        description="Offline evaluation of Jev answers against labels (docs/04). Nothing here changes a threshold; propose only records "
                                    "candidates.").add_subparsers(dest="action", required=True)
     e.add_parser("run", help="print the metrics per calibration group as JSON", description="Print the metrics per calibration group at the current bands, and what is still missing.").add_argument(
-        "--protected", action="store_true", help="include the protected split (a human terminal only)")
+        "--protected", action="store_true", help="include the protected split (human terminal only)")
     e.add_parser("conditions", help="compare the baseline conditions of docs/04 section 8", description="Compare the baseline conditions of docs/04 section 8 on the labelled rows.")
     e.add_parser("routing", help="confusion matrix of the router on the hand-written routing cases (offline)").add_argument("--cases", help="a routing cases file (default: evals/routing/cases.jsonl of the checkout)")
     e.add_parser("propose", help="propose new accept thresholds from the labels as improvement candidates",
@@ -945,13 +946,13 @@ def build_parser() -> argparse.ArgumentParser:
     sh.add_argument("--version", type=int, required=True, help="the challenger version of that question")
     sh.add_argument("--limit", type=int, default=100, help="at most this many stored states (default 100)")
     im.add_parser("freeze", help="turn the kill switch on: no promotion runs", description="Create the FREEZE file: the improvement loop stops promoting.")
-    im.add_parser("unfreeze", help="turn the kill switch off (a human terminal only)", description="Remove the FREEZE file. A human terminal only.")
+    im.add_parser("unfreeze", help="turn the kill switch off (human terminal only)", description="Remove the FREEZE file. It needs a human terminal.")
 
     sub.add_parser("hooks", help="show, install or remove JADE's hooks in ~/.claude/settings.json",
                    description="Show, install or remove JADE's hook entries in the Claude Code settings file. status exits 1 when a hook is missing. install and "
                                "uninstall need a human terminal; install keeps a backup. Open a new Claude Code session afterwards.").add_argument(
         "action", choices=("status", "install", "uninstall"), help="status reads; install adds every JADE hook; uninstall removes them")
-    pgate = sub.add_parser("gate", help="show or set the gate mode: off, advisory or enforce (setting it is human only)",
+    pgate = sub.add_parser("gate", help="show or set the gate mode: off, advisory or enforce (setting it: human terminal only)",
                            description="The gate mode is the safety floor. advisory records what the gate would block and blocks nothing; enforce blocks; "
                                        "off runs nothing. status prints it. Setting it needs a human terminal; enforce needs the signed approver (docs/10).",
                            epilog="example: jade gate advisory")
@@ -966,17 +967,17 @@ def build_parser() -> argparse.ArgumentParser:
     preview.add_argument("rest", nargs="*", help="with mark: DECISION_ID right|wrong")
     preview.add_argument("--since", help="a window such as 90m, 24h or 7d (default: all time)")
     preview.add_argument("--all", action="store_true", help="with confirm: take every group of a rule below high risk (a high one is still asked), at most 10 groups, then one typed yes")
-    pknows = sub.add_parser("knows", help="list, forget or edit the answers JADE remembers (rm and edit: human only)",
+    pknows = sub.add_parser("knows", help="list, forget or edit the answers JADE remembers (rm and edit: human terminal only)",
                             description="The standing answers JADE remembers (docs/12). list reads them; rm forgets one; edit opens your preferences text in your "
                                         "editor. rm and edit need a human terminal.")
     pknows.add_argument("action", choices=("list", "rm", "edit"), help="list, rm (forget one) or edit (your preferences text)")
     pknows.add_argument("id", nargs="?", help="with rm: the id of the standing answer")
-    plevel = sub.add_parser("level", help="show or set the level (the autonomy setting): unset, off, low, medium or high; setting it is human only",
+    plevel = sub.add_parser("level", help="show or set the level (the autonomy setting): unset, off, low, medium or high; setting it: human terminal only",
                             description="The level is the autonomy setting (docs/12): how much JADE may answer in your place, and whether text may leave your "
                                         "machine. With no argument it prints the level. Setting it needs a human terminal and is journaled.",
                             epilog="example: jade level off")
     plevel.add_argument("value", nargs="?", choices=("unset", "off", "low", "medium", "high"), help="the new level (none: print the level)")
-    pjev = sub.add_parser("jev", help="show or set the jev setting (may a model be asked at all); setting it is human only",
+    pjev = sub.add_parser("jev", help="show or set the jev setting (may a model be asked at all); setting it: human terminal only",
                           description="The jev setting says whether a model may be asked at all: on, off, or unset for the default. With no argument it prints "
                                       "the setting. Setting it needs a human terminal and is journaled.")
     pjev.add_argument("value", nargs="?", choices=("unset", "on", "off"), help="on, off, or unset for the default (none: print the setting)")
@@ -1011,16 +1012,16 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("version", help="print the code version, commit, ledger schema version and policy_version",
                    description="Print the code version, commit, ledger schema version and policy_version (the same text as `jade --version`).").add_argument(
         "--json", action="store_true", help="print the same data as JSON")
-    up = sub.add_parser("upgrade", help="install a release with uv, then run jade check from it; human only (--check only reads)",
+    up = sub.add_parser("upgrade", help="install a release with uv, then run jade check from it; human terminal only (--check only reads)",
                         description="Install a release with uv, then run `jade check` from the new install. It lists the files that change and installs only after "
-                                    "you type yes. It never touches the ledger, your overlays, settings.json or CLAUDE.md. A human terminal only; --check only reads.",
+                                    "you type yes. It never touches the ledger, your overlays, settings.json or CLAUDE.md. It needs a human terminal; --check only reads.",
                         epilog="example: jade upgrade --check")
     ug = up.add_mutually_exclusive_group()
     ug.add_argument("--check", action="store_true", help="read-only: installed version, latest release, CHANGELOG headings in between")
     ug.add_argument("--ref", help="a release tag (vX.Y.Z) or a full commit hash to install (default: the latest release)")
-    su = sub.add_parser("setup", help="the first-run wizard that wires JADE into Claude Code; human only (--status only reads)",
+    su = sub.add_parser("setup", help="the first-run wizard that wires JADE into Claude Code; human terminal only (--status only reads)",
                         description="The first-run wizard. It asks y/N before each step: advisory gate mode, hooks, skill, maintenance job, the Jev section of an "
-                                    "existing CLAUDE.md, then a check. It backs up what it edits and never sets enforce. A human terminal only; --status only reads.",
+                                    "existing CLAUDE.md, then a check. It backs up what it edits and never sets enforce. It needs a human terminal; --status only reads.",
                         epilog="example: jade setup --status")
     sg = su.add_mutually_exclusive_group()
     sg.add_argument("--yes", action="store_true", help="apply every step without asking (still needs an interactive terminal)")

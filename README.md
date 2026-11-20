@@ -5,12 +5,7 @@
 
 JADE is a design and a small Python runtime for one problem: **an AI coding agent asks a decision model "is this right?" and then acts on the answer as if it were permission.**
 
-JADE sits between Claude Code and [TypeSafe Jev](https://docs.typesafe.ai), a System One decision model that returns typed probabilities. It decides when an agent may act on such an answer:
-
-- Every model call is journaled. An error never counts as "yes".
-- A probability maps to accept, abstain or reject through thresholds per task family. Abstain is a real exit code.
-- A side effect above a risk level needs a single-use approval that only a human can give. That is a signed **execution permit** you approve in your own terminal (30 minutes). Or, once you set a level with `jade level`, it is an Allow answer in the chat or a dialog (10 minutes, one call, never for live JADE wiring). Nobody can approve a safety invariant, such as a push to the default branch.
-- Prompts and thresholds improve offline, by measurement. That loop cannot touch its own safety rules.
+JADE sits between Claude Code and [TypeSafe Jev](https://docs.typesafe.ai), a System One decision model that returns typed probabilities. It journals every model call, and an error never counts as "yes". It maps a probability to accept, abstain or reject with thresholds per task family, and a risky side effect waits for a single-use approval that only a human can give. Prompts and thresholds improve offline, by measurement, and that loop cannot touch its own safety rules.
 
 > **Guiding invariant.** No model output (the decision model, a reasoning model, an evaluator, or an improvement agent) can authorize a side effect, weaken protected policy, declare an unobserved outcome successful, or bypass a human approval boundary.
 
@@ -38,11 +33,9 @@ Claude Code is the only harness JADE is wired into, and macOS is the tested plat
 | VALIDATED | No — needs 14 days of real ledger data in enforce mode, labelled outcomes and one full improvement cycle (`docs/08` section 5) |
 | PRODUCTION_APPROVED | No — a human decision (`docs/08`) |
 
-The gate reads commands by their text and has known gaps (`docs/05-threat-model.md`). It is a strong guard rail for an agent that makes mistakes, not a wall against a hostile agent that runs as your user. Open items are in `BACKLOG.md`.
-
 ## Quick start (Claude Code)
 
-This release is **enforce-ready**. It installs in advisory mode: it records what it would have blocked and blocks nothing. After you install the approver (`scripts/install-approver.sh`, `docs/10`), `jade gate enforce` makes the gate block. It is not VALIDATED and not production approved (see Status). Every step that wires JADE into Claude Code is a human step in your own terminal; an agent cannot run it for you.
+This release is **enforce-ready**: it installs in advisory mode, and after you install the approver (`scripts/install-approver.sh`, `docs/10`), `jade gate enforce` makes the gate block. It is not VALIDATED and not production approved (see Status). Every step that wires JADE into Claude Code is a human step in your own terminal; an agent cannot run it for you.
 
 **Requirements**
 
@@ -57,13 +50,13 @@ uv tool install git+https://github.com/vahidkaargar/jade-decision-governance@v0.
 jade --version
 ```
 
-If `uv` answers `Executable already exists: jev`, an older `jev` script sits in uv's tool bin directory and nothing was installed (not even `jade`). Move it aside (`mv ~/.local/bin/jev ~/.local/bin/jev.orig`) and run the install again, or add `--force` to overwrite it.
+If `uv` answers `Executable already exists: jev`, nothing was installed: see `docs/09-install-and-upgrade.md` section 6.
 
 **2. Wire it into Claude Code**
 
 ```bash
 jade setup --status      # read-only: what is done and what is missing
-jade setup               # asks y/N before each change: advisory gate, an explicit `jev off` when the key is not set, hooks, skill, maintenance job, and the Jev section of an existing CLAUDE.md
+jade setup               # asks y/N before each change (docs/08 section 2.0 lists the steps)
 ```
 
 `jade setup` needs an interactive terminal and refuses inside an agent. It backs up `settings.json` and `CLAUDE.md` before it edits them. It never sets enforce mode. Open a new Claude Code session afterwards: Claude Code reads hooks at session start.
@@ -83,15 +76,13 @@ echo $?                  # 0 accept, 3 abstain, 4 reject, 5 provider unavailable
 jade ledger stats        # what your agents actually did, including the would_block and safety_block events
 ```
 
-Only exit code 0 is a yes. Give `jev` raw evidence (a log, a diff, a command's output), not your own summary. Claude Code learns about `jev` from the skill that `jade setup` installs. `jade setup` only replaces the `## Jev` section of an existing `~/.claude/CLAUDE.md`. When you have none, or none with that heading, it skips the step: add the output of `jade claude-md show` to your CLAUDE.md yourself.
+Only exit code 0 is a yes. Give `jev` raw evidence (a log, a diff, a command's output), not your own summary. Claude Code learns about `jev` from the skill that `jade setup` installs. With no Jev section in your `~/.claude/CLAUDE.md`, add the output of `jade claude-md show` yourself.
 
 **What advisory mode does and does not protect**
 
 - It does: journal and redact every Jev call, record a `would_block` event for every call the gate would stop in enforce mode, and refuse to let an agent approve its own permit.
 - It does not: block any command, edit or tool call. A `git push` to the default branch or `rm -rf` runs as it would without JADE.
-- Moving to enforce mode (`jade gate enforce`) is your decision. Make it after you have read `jade ledger stats` and `jade decide list` for a week or more (`docs/08-deployment-runbook.md` section 2.2).
-
-The full list is in `docs/09-install-and-upgrade.md` section 1.
+- Moving to enforce mode (`jade gate enforce`) is your decision. Make it after you have read `jade ledger stats` and `jade decide list` for a week or more (`docs/08-deployment-runbook.md` section 2.2). The full list: `docs/09-install-and-upgrade.md` section 1.
 
 **Upgrade** (in your own terminal; the ledger, your overlays, `settings.json` and `CLAUDE.md` are not touched)
 
@@ -114,7 +105,7 @@ The full rollback table is in `docs/08-deployment-runbook.md` section 3. Complet
 
 **Report a problem**
 
-Open an issue at https://github.com/vahidkaargar/jade-decision-governance/issues. Add the output of `jade version` (code version, commit, ledger schema version, policy_version; also `jade --version`) and `jade check --offline` (check the text for paths you do not want to share), the command you ran and what you expected. A bug that lets an agent act without a human approval, or leaks text redaction should have removed, goes to a private security advisory instead: `SECURITY.md`.
+Open an issue at https://github.com/vahidkaargar/jade-decision-governance/issues with the output of `jade version` and `jade check --offline` (remove paths you do not want to share), the command you ran and what you expected. A bug that lets an agent act without a human approval, or leaks text redaction should have removed, goes to a private security advisory: `SECURITY.md`.
 
 ## Two settings, read separately
 
@@ -180,9 +171,12 @@ Permit prm_xxxxxxxxxxxx is PENDING. Ask the human to run in their own terminal: 
 Then retry the identical command (single use, 30 minutes). You cannot approve it yourself; do not rephrase the command to avoid the gate. Continue with other work meanwhile.
 ```
 
-Nobody can ever approve the first call. The second call waits for you: you read the command in your own terminal and type the code, and the agent retries the same command once. Any other command does not match the permit.
+Nobody can approve a safety invariant, so nobody can approve the first call. The second call waits for a single-use approval from you:
 
-What really stops a push to the default branch is git and the remote; JADE reading the command is a second layer. `jade git-hook script` prints a standalone pre-push guard, and `jade git-hook check <repo>` says whether a repository runs it. Branch protection on the remote covers every other client. A human installs both (`docs/08-deployment-runbook.md` section 2.7, with the rest of the manual wiring and its undo).
+- a signed **execution permit**: you read the command in your own terminal and type the code, and the agent retries the same command once (30 minutes);
+- or, once you set a level with `jade level`, an Allow answer in the chat or a dialog (10 minutes, one call, never for live JADE wiring).
+
+Any other command does not match the approval. What really stops a push to the default branch is git and the remote, with the pre-push guard (`jade git-hook script`) and branch protection: `docs/08-deployment-runbook.md` section 2.7.
 
 ## Read in this order
 
@@ -224,18 +218,16 @@ The repository layout, the risk classifier one-liner, baseline mining from your 
 
 ## Make the policies yours
 
-The shipped `policies/risk.yaml` and `policies/safety.yaml` are generic. Your production hosts, deploy scripts and retired services go in gitignored overlays:
+The shipped `policies/risk.yaml` and `policies/safety.yaml` are generic. Your production hosts, deploy scripts and retired services go in overlays that git ignores:
 
 ```bash
-# run from a checkout of this repository; the same two example files are in the installed package (`policies/local/` in its site-packages directory)
+# from a checkout; the installed package holds the same two example files in `policies/local/`
 mkdir -p ~/.config/jade/local
 cp policies/local/risk.local.example.yaml   ~/.config/jade/local/risk.local.yaml
 cp policies/local/safety.local.example.yaml ~/.config/jade/local/safety.local.yaml
 ```
 
-(For development from a checkout, `policies/local/*.local.yaml` is gitignored; the installed tool reads `~/.config/jade/local/`.)
-
-An overlay can add production hosts and paths (`environments`), rules (`rules_prepend`, `rules_override`) and invariants (`invariants_append`). A top-level `hosts:` key is not read. To make a host critical, write an `R-Lxx` rule for it. `jade check` lints the overlay (rows `overlay lint`, `overlay files`) and names the file and rule, never the pattern or host. An overlay cannot remove a shipped invariant or lower a shipped high-risk rule (`policies/loader.py`, `tests/test_policy_overlay.py`).
+An overlay can add hosts, rules and invariants, but it cannot remove a shipped invariant or lower a shipped high-risk rule. The keys, and how `jade check` lints an overlay: `docs/08-deployment-runbook.md` section 2.8.
 
 ## Contributing, security, license
 

@@ -218,6 +218,15 @@ Caveats of the global form, read them first: `core.hooksPath` **replaces** the `
 
 What defeats the hook, and how JADE treats it: `git push --no-verify`, `git -c core.hooksPath=...`, `git config core.hooksPath ...`, the `GIT_CONFIG_KEY_n=core.hooksPath` and `GIT_CONFIG_PARAMETERS` environment routes, and an edit, `chmod` or `rm` of the hook file are rated high (R-17), so an agent needs a human-approved permit for each. The hook does not stop a human who passes `--no-verify` on purpose; remote protection does. `jade git-hook check` is not part of `jade check`: the guard is optional per repository and a failing check on every machine without it would be noise.
 
+### 2.8 Make the policies yours (overlays)
+
+This text was in the README before; the README keeps the copy commands. The shipped `policies/risk.yaml` and `policies/safety.yaml` are generic. Your production hosts, deploy scripts and retired services go in gitignored overlays in `~/.config/jade/local/` (from a checkout, `policies/local/*.local.yaml`).
+
+- An overlay can add production hosts and paths (`environments`), rules (`rules_prepend`, `rules_override`) and invariants (`invariants_append`).
+- A top-level `hosts:` key is not read. To make a host critical, write an `R-Lxx` rule for it.
+- `jade check` lints the overlay (rows `overlay lint`, `overlay files`). It names the file and rule, never the pattern or host.
+- An overlay cannot remove a shipped invariant or lower a shipped high-risk rule (`policies/loader.py`, `tests/test_policy_overlay.py`).
+
 ## 3. Full rollback
 
 | Layer | Command |
