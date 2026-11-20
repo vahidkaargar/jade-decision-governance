@@ -340,7 +340,8 @@ def drop_w58_indexes(path: Path) -> list[str]:
 
 
 def maintain_timings(src: Path, workdir: Path) -> dict:
-    """The daily job's steps on a COPY of the ledger. Since W-76 `purge` writes in short batches, so its total time is not the lock hold; the scrub is still one hold.
+    """The daily job's steps on a COPY of the ledger. Since W-76 `purge` writes in short batches, so its total time is not the lock hold; the scrub is one hold only the first time
+    (the one `VACUUM` of a file); a copy of a ledger that already had it only checkpoints.
     A hook waits at most hooks.LEDGER_TIMEOUT_S for the lock and then fails closed for a high-risk call, so the longest hold is the number that matters."""
     import shutil
 

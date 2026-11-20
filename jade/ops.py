@@ -340,7 +340,7 @@ def purge_report(db: ledger.Ledger, older_than_days: int = 90, *, ask_text: bool
     A purge writes at most `PURGE_BATCH` rows per transaction and frees the write lock for `PURGE_PAUSE_S` between two batches (W-76): a hook waits at most 1.5 s for that
     lock and then blocks a high-risk call (docs/05 T17), so the time the lock is held must not grow with the rows. Finding the rows is a read and takes no lock. The one
     `purge` audit event is written at the end, with the totals, also when a batch fails part way (the rows cleared by then stay cleared, a later run finishes the rest).
-    The scrub that follows is one hold of the lock."""
+    The scrub that follows is a short checkpoint; only the first scrub of a ledger file is a full `VACUUM`, one hold of the lock (`Ledger.scrub`)."""
     now_ts = ts()
     cutoff = ts(now() - timedelta(days=older_than_days))
     batch = max(1, int(PURGE_BATCH))

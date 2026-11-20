@@ -2,7 +2,7 @@
 
 A hook waits at most `hooks.LEDGER_TIMEOUT_S` (1.5 s) for the lock and then blocks a high-risk call (docs/05 T17). The purge used to clear every old row inside one
 `BEGIN IMMEDIATE`; the time it held the lock grew with the rows. Now each batch is its own transaction and the lock is free between two of them. The scrub
-(`VACUUM`) is one lock hold and is not covered here.
+(one `VACUUM` per ledger file, then a checkpoint) is covered in tests/test_scrub_once_w76.py.
 """
 
 from __future__ import annotations
