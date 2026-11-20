@@ -11,7 +11,7 @@ from jade import audit, hooks, ledger, ops
 from jade.util import ts
 from tests.acceptance import test_memory_w101 as m
 from tests.acceptance.test_jev_proxy_w102 import KIND, asked, prov, ready  # noqa: F401  (fixtures: Jev on, past the band of owner answers)
-from tests.acceptance.test_memory_audit_v629 import queue, scopes, set_audit
+from tests.acceptance.test_memory_audit_v629 import queue, scopes, set_audit, sql
 from tests.acceptance.test_memory_w101 import OTHER, SESSION, enforce, medium, real_terminal_check  # noqa: F401  (fixtures)
 from tests.acceptance.test_review_marks_w103 import decision_ids, finish, mark
 
@@ -75,6 +75,50 @@ def test_a_paused_scope_stops_jev_from_running_the_next_call_of_that_kind(ready)
     r = hooks.pretool(m.call(KIND, OTHER))
     assert asked(r)
     assert len(events("jev_allowed")) == 1
+
+
+def test_with_the_default_limits_jev_runs_at_most_ten_calls_of_a_kind_a_week_and_then_the_owner_is_asked(ready):
+    """The real numbers the CHANGELOG and docs/17 give (review of W-207): at stage 1 every admitted run is drawn, so `weekly_count` (10) is the most Jev can let run."""
+    outcome = []
+    for i in range(12):
+        session = f"sess-w207-{i}"
+        r = hooks.pretool(m.call(KIND, session))
+        outcome.append("asked" if asked(r) else "jev")
+        finish(KIND, session)
+    assert outcome == ["jev"] * 10 + ["asked", "asked"]
+    assert len(queue()) == 10
+    assert {e["guard"] for e in events("audit_refused")} == {"weekly_count"}
+
+
+def test_a_kind_jev_ran_59_times_is_asked_about_and_the_count_is_not_reset_by_time(ready):
+    _, did = jev_run()
+    finish(KIND, SESSION)
+    [sc] = scopes().values()
+    sql("UPDATE audit_scopes SET runs=? WHERE scope_id=?", (audit.DEFAULTS.stage1_cap, sc["scope_id"]))
+    sql("UPDATE audit_queue SET drawn_ts='2000-01-01T00:00:00Z'")   # the weekly window is empty: only the cap is left
+    r = hooks.pretool(m.call(KIND, OTHER))
+    assert asked(r)
+    assert [e["guard"] for e in events("audit_refused")] == ["stage1_cap"]
+    d = m.db()
+    try:
+        with d.tx():
+            assert audit.resume(d, sc["scope_id"]) is False   # only a paused scope starts again at 0: a scope at the cap is not paused
+    finally:
+        d.close()
+
+
+def test_the_changelog_and_docs_17_give_the_real_limits_of_jev_runs():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    log = root.joinpath("CHANGELOG.md").read_text()
+    entry = next(p for p in log.split("\n- ") if "(W-207, V6-29)" in p)
+    assert "a little more often" not in entry
+    for text in (entry, root.joinpath("docs/17-memory-audit.md").read_text()):
+        assert "at most 10 calls of one kind in 7 days" in text, "the weekly count per scope"
+        assert "10 in all scopes in 7 days, shared with the standing answers" in text, "the weekly budget"
+        assert "after 59 runs of one kind Jev decides no more calls of that kind" in text, "the stage 1 cap"
+        assert "only a wrong mark and then `jade review confirm`" in text, "the only way the count starts again"
 
 
 # ------------------------------------------------------------------ the verdict
