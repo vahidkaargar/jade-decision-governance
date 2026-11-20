@@ -364,3 +364,47 @@ def test_docs_02_terminal_states_are_the_ones_the_state_machine_calls_terminal()
     for state in ("FAILED", "OUTCOME_UNKNOWN"):
         assert any(src == state for (src, _ev) in state_machine.T), f"{state} has no exit in T: it would be terminal"
         assert state not in state_machine.TERMINAL
+
+
+# ---- W-171 (d11 checklist 4): the README names no fact that is true of one machine on one day ---------------------------------
+ISO_DATE = re.compile(r"\b20\d\d-\d\d-\d\d\b")
+LIVE_STATE = (r"\bsince 20\d\d-\d\d-\d\d", r"\bearliest 20\d\d-\d\d-\d\d", r"\b(?:has|have|had|is|are) (?:been |now )?loaded\b", r"\bnot yet (?:been )?run\b",
+              r"\bon the author's machine\b", r"\bin the author's machine\b", r"\bcurrently\b", r"\bright now\b", r"\bas of (?:today|now)\b")
+# The Status table rows that may hold a date, and which dates: a decision of the maintainer is a fact of the project, not of a machine.
+STATUS_DATES_ALLOWED = {"DESIGN_READY": {"2026-11-09"}}
+
+
+def _readme_status_rows() -> dict[str, str]:
+    section = _read("README.md").split("## Status", 1)[1].split("\n## ", 1)[0]
+    return {m.group(1): m.group(2) for m in re.finditer(r"^\| ([A-Z_]+(?: \([a-z]+\))?) \| (.+) \|$", section, re.M)}
+
+
+def test_the_readme_names_no_live_state_word_or_machine_fact():
+    """The README is read on someone else's machine. A date of enforce, a loaded job or a second install is a fact of one machine on one day: `jade check` says it."""
+    text = _read("README.md")
+    for pattern in LIVE_STATE:
+        m = re.search(pattern, text, re.I)
+        assert not m, f"README says {m.group(0)!r}, a fact of one machine on one day: say what `jade check` shows instead (W-171)"
+
+
+def test_the_readme_status_table_holds_a_date_only_where_a_row_is_allowed_one():
+    rows = _readme_status_rows()
+    assert set(rows) >= {"DESIGN_READY", "IMPLEMENTED", "LIVE (enforce)", "VALIDATED", "PRODUCTION_APPROVED"}, f"the Status table changed its rows: {sorted(rows)}"
+    for stage, state in rows.items():
+        extra = set(ISO_DATE.findall(state)) - STATUS_DATES_ALLOWED.get(stage, set())
+        assert not extra, f"README Status row {stage} holds the date {sorted(extra)}: only {STATUS_DATES_ALLOWED} may (W-171)"
+    assert "jade check" in rows["LIVE (enforce)"], "the LIVE row must send the reader to `jade check`"
+
+
+def test_the_readme_architecture_decision_count_is_the_count_of_adrs():
+    adrs = len(re.findall(r"^## ADR-\d+", _read("docs/01-adrs.md"), re.M))
+    found = [(n, t) for n, t in _numbers_before(r"architecture decisions", "README.md")]
+    assert found, "README no longer states a count of architecture decisions"
+    for n, t in found:
+        assert n == adrs, f"README says '{t}' but docs/01-adrs.md has {adrs} ADRs (W-171)"
+
+
+@pytest.mark.parametrize("line", ["| LIVE (enforce) | Run on the author's machine, since 2026-11-13.", "the daily job has been loaded on this Mac", "earliest 2026-11-27 (14 days)",
+                                  "The installer has not yet been run on a second machine", "it is currently on"])
+def test_the_live_state_patterns_catch_what_the_readme_used_to_say(line):
+    assert any(re.search(p, line, re.I) for p in LIVE_STATE)
