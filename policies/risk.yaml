@@ -50,7 +50,9 @@ rules:
     level: high
     reversibility: partially_reversible
     blast_radius: public
-    match: "^cap:var-readings |\\b(gh pr merge|gh release (create|merge)|glab mr merge|npm publish|cargo publish|twine upload|docker push|composio execute)\\b|^gh:merge-api |\\b(?:gh|glab) api\\b[^;&|]*(?<![\\w-])(?:pulls|merge_requests)/[^\\s/]+/merge(?![\\w-])|\\bgh api\\b[^;&|]*(?<![\\w-])repos/[^\\s/]+/[^\\s/]+/merges(?![\\w-])|\\bgit (?:send-pack|http-push)\\b|\\bgit push\\b(?!(?:\\s+(?:-u|-q|--set-upstream|--quiet))*\\s+\\w[\\w.-]*\\s+(?!main\\b|master\\b|v?[0-9]|HEAD\\b)\\w[\\w./-]*(?:\\s*(?:$|[;&|)]|2>&1)))"
+    # W-153: `git update-ref` (it moves a ref with no push) is matched unless it plainly names one other branch (`refs/heads/feature`, any letter case of main and master counted
+    # as the default branch). `gh api` calls that write a git ref (the refs REST route, `updateRef` and the like) carry the `gh:merge-api` marker that jade/policy.py `_gh_ref_write` adds.
+    match: "^cap:var-readings |\\b(gh pr merge|gh release (create|merge)|glab mr merge|npm publish|cargo publish|twine upload|docker push|composio execute)\\b|^gh:merge-api |\\b(?:gh|glab) api\\b[^;&|]*(?<![\\w-])(?:pulls|merge_requests)/[^\\s/]+/merge(?![\\w-])|\\bgh api\\b[^;&|]*(?<![\\w-])repos/[^\\s/]+/[^\\s/]+/merges(?![\\w-])|\\bgit (?:send-pack|http-push)\\b|\\bgit push\\b(?!(?:\\s+(?:-u|-q|--set-upstream|--quiet))*\\s+\\w[\\w.-]*\\s+(?!main\\b|master\\b|v?[0-9]|HEAD\\b)\\w[\\w./-]*(?:\\s*(?:$|[;&|)]|2>&1)))|\\bgit update-ref\\b(?!(?:\\s+(?:-d|--no-deref|--create-reflog))*\\s+(?:refs/)?heads/(?!(?i:main|master)(?:\\s|$))[\\w./-]+(?:\\s|$))"
     rationale: "External side effect: merge, release, publish, connected-app action, or a git push that is not a plain push of one named branch (bare push, force, delete, tag, default branch, refspec)"
   - id: R-11
     level: high
@@ -75,12 +77,13 @@ rules:
     # V6-08 (N23): the agent's own instruction and tool-list files in ANY project (`CLAUDE.md`, `CLAUDE.local.md`, `.mcp.json`, `.vscode/settings.json` and `tasks.json`, which is the
     # shape of CVE-2025-53773, another harness's `.codex/config.toml` and `.cursor/mcp.json`), and `~/.ssh/authorized_keys`: a line written there is run, read as an instruction or
     # trusted at the next login. Shell start-up files are not here: they are the human-only class HO-shell-startup (PR 46, a write is high once the human has set a level).
+    # W-153 adds the other harnesses' files: `GEMINI.md` (any project), `.gemini/settings.json` and the user-level `~/.claude.json` (it holds `mcpServers`).
     # `files_only` (like R-16): the rule looks at what a command WRITES (the destination of cp/rsync/ln/install, the archive of tar -c, redirect
     # targets, the output options of an otherwise read-only tool), or at the whole segment for a command that may write any operand, and never
     # at a command named in `inert_for_files` or a `read_only` verb without a redirect: `git add AGENTS.md`, `cp ~/.claude/settings.json /tmp/b`,
     # `printf 'policies/local/' > .gitignore` are not changes to a protected file. A Write/Edit path is always a target.
     files_only: true
-    match: "(?i:\\.claude/(settings[\\w.-]*\\.json|hooks/|CLAUDE\\.md)|\\bAGENTS\\.md\\b|(?<![\\w.-])CLAUDE(?:\\.local)?\\.md(?![\\w.-])|(?<![\\w.-])\\.mcp\\.json(?![\\w-])|\\.vscode/(?:settings|tasks)\\.json|\\.codex/config\\.toml|\\.cursor/(?:rules|mcp\\.json)|\\.ssh/authorized_keys2?(?![\\w.-])|\\.ai/rules\\.md|policies/(?:[\\w-]+\\.(?:yaml|py)|local/)|\\.config/jade(?![\\w.-])|\\.local/share/jade(?![\\w.-])|jade\\.sqlite(?:-(?:wal|shm|journal))?(?![\\w.])|calibration/current\\.json|uv/tools/jade(?:-decision-governance)?(?![\\w-])|evals/[^/\\s]+/protected/|\\.local/bin/(?:jade|jev)(?![\\w.-])|\\buv tool (?:uninstall|upgrade|reinstall)\\b[^;&|]*\\bjade|\\buv tool install\\b[^;&|]*\\bjade|\\buv tool (?:uninstall|upgrade|reinstall)\\b[^;&|]*--all\\b)|\\bjade (improve (promote|rollback)|ledger purge|label set)\\b"
+    match: "(?i:\\.claude/(settings[\\w.-]*\\.json|hooks/|CLAUDE\\.md)|\\bAGENTS\\.md\\b|(?<![\\w.-])CLAUDE(?:\\.local)?\\.md(?![\\w.-])|(?<![\\w.-])\\.mcp\\.json(?![\\w-])|\\.vscode/(?:settings|tasks)\\.json|\\.codex/config\\.toml|\\.cursor/(?:rules|mcp\\.json)|(?<![\\w.-])GEMINI\\.md(?![\\w.-])|\\.gemini/settings\\.json(?![\\w.-])|(?<![\\w.-])\\.claude\\.json(?![\\w.-])|\\.ssh/authorized_keys2?(?![\\w.-])|\\.ai/rules\\.md|policies/(?:[\\w-]+\\.(?:yaml|py)|local/)|\\.config/jade(?![\\w.-])|\\.local/share/jade(?![\\w.-])|jade\\.sqlite(?:-(?:wal|shm|journal))?(?![\\w.])|calibration/current\\.json|uv/tools/jade(?:-decision-governance)?(?![\\w-])|evals/[^/\\s]+/protected/|\\.local/bin/(?:jade|jev)(?![\\w.-])|\\buv tool (?:uninstall|upgrade|reinstall)\\b[^;&|]*\\bjade|\\buv tool install\\b[^;&|]*\\bjade|\\buv tool (?:uninstall|upgrade|reinstall)\\b[^;&|]*--all\\b)|\\bjade (improve (promote|rollback)|ledger purge|label set)\\b"
     rationale: "Changes agent policy, hooks, JADE's own ledger, config or installed code, or another protected target"
   - id: R-16
     level: high

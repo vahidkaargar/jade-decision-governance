@@ -65,6 +65,61 @@ _GH_API_WORDS = re.compile(r"(?<![\w.-])(?:gh|glab)\s+api(?![\w.-])")
 _GH_REST_MERGE = re.compile(r"(?<![\w-])(?:pulls|merge_requests)/[^\s/]+/merge(?![\w-])|(?<![\w-])repos/[^\s/]+/[^\s/]+/merges(?![\w-])")   # the routes risk.yaml R-10 rates by name
 
 
+# W-153: a write to a git ref through the REST refs API (`repos/O/R/git/refs[/heads/main]`, PATCH, POST or DELETE) is a push by another door (SI-08, KG55, KG65). It is read from the
+# span of one `gh api` call (up to its own end: an unquoted `;`, `&`, `|` or newline), so a GET in another call does not hide it. A call is a write when it names a method other than GET and HEAD, or names none and gives a
+# field or a body (gh then sends a POST). The ref is the route tail (`heads/main`) or, on the bare `git/refs` route, the `ref=` field. A ref that is the default branch (main or master,
+# in any letter case: the Mac disk does not tell them apart), a tag, a variable or a file the gate cannot read, a body (`--input`) or a missing ref is asked about; a plain other branch is not.
+_GH_ONLY_API = re.compile(r"(?<![\w.-])gh\s+api(?![\w.-])")
+_GH_REFS_ROUTE = re.compile(r"""(?<![\w-])(?:repos/[^\s/]+/[^\s/]+|repositories/[^\s/]+)/git/refs(?![\w.-])(?:/([^\s'"]*))?""")
+_GH_METHOD = re.compile(r"""(?<![\w-])(?:-X|--method)(?:\s+|=)?["']?([A-Za-z$`]\w*)""")
+_GH_BODY_FLAG = re.compile(r"(?<![\w-])(?:-[fF]|--field|--raw-field|--input)(?![\w-])|(?<![\w-])-[fF][^\s=-]")
+_GH_INPUT_FLAG = re.compile(r"(?<![\w-])--input(?![\w-])")
+_GH_REF_FIELD = re.compile(r"""(?<![\w-])ref=["']?([^\s"']*)""")
+_GH_REF_WATCHED = re.compile(r"(?i:^(?:refs/)?(?:heads/(?:main|master)(?![\w.-])|tags/)|[$`{])")   # `{branch}` is a gh placeholder: gh fills it with the current branch
+_GH_REF_MUTATION = re.compile(r"\b(?:updateRefs?|createRef|deleteRef|createCommitOnBranch)\s*\(")   # GraphQL: the same write, by mutation
+
+
+def _call_end(text: str, begin: int, limit: int) -> int:
+    """Where the `gh api` call that starts at `begin` ends: at an unquoted `;`, `&`, `|` or newline, or at `limit` (the next call). A quoted `|` (a jq filter) does not end it."""
+    quote = ""
+    for i in range(begin, limit):
+        c = text[i]
+        if quote:
+            if c == quote:
+                quote = ""
+        elif c in "'\"":
+            quote = c
+        elif c in ";&|\n":
+            return i
+    return limit
+
+
+@lru_cache(maxsize=8)   # the whole command is read once per `gh api` segment: without the cache a command of many segments costs the square
+def _gh_ref_write(text: str) -> bool:
+    """Does a `gh api` call in the text write a git ref that is the default branch, a tag, or one the gate cannot read? (W-153.) Errs towards yes."""
+    calls = list(_GH_ONLY_API.finditer(text))
+    for i, call in enumerate(calls):
+        span = text[call.end():_call_end(text, call.end(), calls[i + 1].start() if i + 1 < len(calls) else len(text))]
+        route = _GH_REFS_ROUTE.search(span)
+        if not route:
+            continue
+        verbs = [v.upper() for v in _GH_METHOD.findall(span)]
+        if verbs:
+            if all(v in ("GET", "HEAD") for v in verbs):
+                continue
+        elif not _GH_BODY_FLAG.search(span):
+            continue
+        tail = route.group(1) or ""
+        if tail.strip("/"):
+            if _GH_REF_WATCHED.search(tail):
+                return True
+            continue
+        values = _GH_REF_FIELD.findall(span)
+        if _GH_INPUT_FLAG.search(span) or not values or any(v.startswith("@") or _GH_REF_WATCHED.search(v) for v in values):
+            return True
+    return False
+
+
 def gh_api_merge_in(text: str) -> bool:
     """Does the text of a call hold a `gh api` call that merges a pull request, or whose query or route the gate cannot read (`_gh_api_merges`)? Read from the plain text of
     the call, so it errs towards yes. Memory keeps such a call as an exact answer at most and Jev never judges it, as for `gh pr merge` (integration of V6-08 and V6-06b)."""
@@ -73,10 +128,10 @@ def gh_api_merge_in(text: str) -> bool:
 
 def _gh_api_merges(words: list[str], text: str) -> bool:
     """`words` is a `gh api` call: it merges a pull request, or its query or route is one the gate cannot read (so it is asked about)."""
-    if _GH_MERGE_MUTATION.search(text) or _GH_ROUTE_UNREAD.search(text):
+    if _GH_MERGE_MUTATION.search(text) or _GH_ROUTE_UNREAD.search(text) or _gh_ref_write(text):
         return True
     if any(w.rstrip("/").rsplit("/", 1)[-1] == "graphql" for w in words[2:]):
-        return bool(_GH_QUERY_UNREAD.search(text)) or not _GH_QUERY_FIELD.search(text)
+        return bool(_GH_QUERY_UNREAD.search(text)) or not _GH_QUERY_FIELD.search(text) or bool(_GH_REF_MUTATION.search(text))
     return False
 PATH_RULES = ("R-01", "R-04", "R-12", "R-13", "R-16", "R-18", "R-24")  # the rules about where a write lands: they also see relative operands made absolute
 WRITE_KEYS = ("file_path", "notebook_path", "path", "filePath", "file", "filepath", "target_file", "file_name", "filename", "target")

@@ -192,6 +192,8 @@ PLAIN_HIGH = {
     # V6-08 N20 (gh api merges): a merge through the API is a merge: exact at most, never sent to Jev (`policy.gh_api_merge_in`, as `gh pr merge`)
     "adversarial:A246": ("exact", "a merge through gh api: exact only"), "adversarial:A247": ("exact", "a merge through gh api: exact only"),
     "adversarial:A274": ("exact", "a gh api graphql query the gate cannot read: exact only"), "adversarial:A275": ("exact", "a gh api route with a variable last part: exact only"),
+    # W-153: a write to a git ref by the refs API or a GraphQL mutation (`policy.gh_api_merge_in`) and `git update-ref` (`memory.MERGE`): a move of the branch with no push, exact at most, never sent to Jev
+    **{f"adversarial:A{n}": ("exact", "W-153: a ref write by gh api, or git update-ref: exact only") for n in (276, 277, 278, 280, 281, 282, 283, 284, 285, 286, 290, 291)},
     # the shell start-up files are a human-only class (HO-shell-startup, V6-08 N23) only once a level is set, and the corpus runs with no level and no shell roots (conftest):
     # the call is a plain one here, and the case rows A248 to A263 set `level: low` to see the class (tests/test_case_files.py)
     "adversarial:A248": ("exact", "a shell start-up write with no level set: exact at most"), "adversarial:A249": ("exact", "a shell start-up write with no level set: exact at most"),
