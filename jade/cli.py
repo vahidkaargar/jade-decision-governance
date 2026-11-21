@@ -598,9 +598,10 @@ def _ops(a) -> int:
                 print("\n".join(f"{'installed' if v else 'MISSING  '}  {k}" for k, v in st.items()))
                 return 0 if all(st.values()) else 1
             if a.action == "install":
-                backup = ops.hooks_install()
+                host = ops.host_version()   # one `claude --version` for the write and the summary
+                backup = ops.hooks_install(host=host)
                 print(f"hooks installed in {ops.settings_path()} ({f'backup {backup}' if backup else 'no earlier file, no backup'}). New sessions pick them up.")
-                print("\n".join(ops.install_summary_lines(ops.install_summary_rows())))
+                print("\n".join(ops.install_summary_lines(ops.install_summary_rows(host=host))))
             else:
                 print(f"removed {ops.hooks_uninstall()} hook entr(ies)")
         elif a.cmd == "gate":

@@ -676,6 +676,31 @@ def test_the_install_summary_runs_no_hook(monkeypatch, mode):
     assert ran == [], ran
 
 
+def test_jade_hooks_install_reads_the_host_version_once(monkeypatch, capsys):
+    """Review of W-140: the install summary read `claude --version` a second time (about 90% of its CPU). `jade hooks install` reads it once and hands it to
+    the write and to the summary; the rows are the same as when the summary reads it itself."""
+    setup_pair("enforce", None)
+    calls = []
+
+    def fake():
+        calls.append(1)
+        return (2, 1, 314)
+
+    monkeypatch.setattr(ops, "host_version", fake)
+    monkeypatch.setattr(ops, "probe_hook", lambda parsed, timeout_s=15.0: None)
+    assert cli.main(["hooks", "install"]) in (0, None)
+    out = capsys.readouterr().out
+    assert len(calls) == 1, calls
+    assert "ok    what blocks: every active safety invariant (" in out, out
+    del calls[:]
+    rows_read = ops.install_summary_rows()
+    assert len(calls) == 1   # called on its own, the summary still reads the version itself
+    assert ops.install_summary_rows(host=(2, 1, 314)) == rows_read and len(calls) == 1
+    # an old host does not honour onFailure: handed in, it is used as given
+    assert ops.hooks_status(host=(2, 1, 200)).get("PreToolUse") is True and ops.hooks_status(host=(2, 1, 314)).get("PreToolUse") is True
+    assert ops.hooks_status(host=None).get("PreToolUse") is True
+
+
 def test_jade_hooks_install_prints_the_summary(capsys, probe_ok):
     setup_pair("advisory", None)
     assert cli.main(["hooks", "install"]) in (0, None)
