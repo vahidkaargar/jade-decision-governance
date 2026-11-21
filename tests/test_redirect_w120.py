@@ -53,6 +53,55 @@ def test_a_named_fd_redirect_in_front_of_the_subcommand_is_rated_as_the_redirect
         assert policy.assess("Bash", {"command": command}, cwd="/tmp").level == want, command
 
 
+# A backslash-newline inside the spelling: the shell takes the two characters out before it reads the line, so `git {fd}\<newline>>log push origin main` (zsh) and
+# `git push origin >\<newline>(cat) main` (bash) push to main, and the gate must read them as the spelling written in one piece (W-120 review).
+CONTINUED_FROM = ["{fd}>log", "{fd}<in", "{fd}>&2", "{fd}>(cat)", *PROCESS_SUBST]
+CONTINUATION = "\\\n"
+
+
+def continued(redirect: str) -> list[str]:
+    """`redirect` with a backslash-newline at each place in its operator: inside and around the `{name}`, between the characters of `&>`, `2>`, `>&` and `>(`."""
+    stop = redirect.index("(") + 1 if "(" in redirect else len(redirect) - len(re.sub(r"^.*?[<>]&?", "", redirect))
+    return [redirect[:k] + CONTINUATION + redirect[k:] for k in range(1, stop) if redirect[k - 1:k + 1] != "> "]
+
+
+CONTINUED = [(r, c) for r in dict.fromkeys(CONTINUED_FROM) for c in continued(r)]
+
+
+def test_the_continued_spellings_cover_the_review_cases():
+    spelled = {c for _, c in CONTINUED}
+    for want in ["{fd}\\\n>log", "{f\\\nd}>log", ">\\\n(cat)", ">&\\\n(cat)", "2>\\\n(cat)", "{fd}\\\n>(cat)", "&\\\n>(cat)"]:
+        assert want in spelled, want
+
+
+@pytest.mark.parametrize(("redirect", "spelling"), CONTINUED)
+@pytest.mark.parametrize("base", [*PUSHES, "git push origin feature"])
+def test_a_continued_spelling_is_read_as_the_spelling_in_one_piece(base, redirect, spelling):
+    for whole, command in zip(inserted(base, redirect), inserted(base, spelling), strict=True):
+        assert si08(command) == si08(whole), (command, whole)
+        got = policy.assess("Bash", {"command": command}, cwd="/tmp").level
+        assert got == policy.assess("Bash", {"command": whole}, cwd="/tmp").level, (command, whole)
+
+
+@pytest.mark.parametrize("command", [
+    "git {fd}\\\n>log push origin main", "git {f\\\nd}>log push origin main", "git push origin >\\\n(cat) main", "git push origin feature >\\\n(cat) :main",
+    "git push origin feature >&\\\n(cat) :main", "git push origin feature 2>\\\n(cat) :main", "git push origin feature {fd}\\\n>(cat) :main",
+    "git push origin feature &\\\n>(cat) :main", "git {fd}\\\n>log push origin feature :main",
+])
+def test_the_review_cases_with_a_continuation_are_stopped(command):
+    assert si08(command), command
+
+
+@pytest.mark.parametrize(("redirect", "spelling"), CONTINUED)
+def test_the_gate_stops_every_continued_command_a_real_shell_pushes_to_main(redirect, spelling, tmp_path):
+    (tmp_path / "in").write_text("x")
+    for base in PUSHES[:2]:
+        for command in inserted(base, spelling):
+            for shell in ("zsh", "bash"):
+                if shutil.which(shell) and pushes_to_default(ran_git(command, shell, tmp_path)):
+                    assert si08(command), f"{shell} pushes to the default branch and the gate does not stop {command!r}"
+
+
 @pytest.mark.parametrize("command", [
     "echo {a,b}", "echo {fd}", "echo x{fd}>log", "git push origin feature {fd}", "git push origin feature {fd} {fd}",
     "ls {a,b}>log", "{ git push origin feature; }", "git tag -d v1 && { echo done; }",

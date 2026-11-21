@@ -66,15 +66,20 @@ STDIN_PATHS = {"/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"}
 CODE_FLAG = re.compile(r"-[a-zA-Z]*[ceEr]|--eval|--print|--command")
 AWK_NAMES = {"awk", "gawk", "mawk", "nawk"}
 SHELL_NAME = re.compile(r"^(?:ba|z|da|k|a|fi|c|tc)?sh$")
-PLAIN = re.compile(r"(?:[^\\'\"$`<\n;(){}&|#>]+|>(?!&?\())+")   # a `>` is plain unless it opens an output process substitution (`>(`, `>&(`: W-120)
+# A backslash-newline: the shell takes it out of the line before it reads a word or an operator, so `>\<newline>(cat)` is `>(cat)` and `{f\<newline>d}>log` is
+# `{fd}>log`. The scanner drops it where it meets it; the patterns of the W-120 spellings let it stand anywhere in the spelling (W-120 review).
+_CONT = r"(?:\\\r?\n)*"
+PLAIN = re.compile(r"(?:[^\\'\"$`<\n;(){}&|#>]+|>(?!" + _CONT + "&?" + _CONT + r"\())+")   # a `>` is plain unless it opens an output process substitution (`>(`, `>&(`: W-120)
 PLAIN_PRIOR = re.compile(r"[^\\'\"$`<\n;(){}&|#]+")   # the pattern as it was before W-120: the `prior` reading (see `_skeleton_both_top`)
 # Characters that Python calls white space and that the shell does not split a word at (bash and zsh split at a space, a tab and a newline): `a<U+2003>b` is one word. They are
 # written as the encoded blank, so a later `split()` of the text keeps the word whole (V6-08 review, N19).
 _SPACELIKE = re.compile("[\x0b\x0c\x1c-\x1f\x85\xa0  -     　]")
 _INERT = re.compile(r"[;&|<>(){}`]")   # characters a quoted word may hold that the splitter and the redirect check would read as syntax
 
-NAMED_FD = re.compile(r"\{[A-Za-z_]\w*\}(?=[<>])")   # `{fd}>log`: zsh and bash 4.1+ read it as a redirect that names a descriptor, not as a word (W-120)
-OUT_SUBST = re.compile(r">&?\(")   # `>(cmd)`, `&>(cmd)`, `2>(cmd)`, `>&(cmd)`: an output process substitution, one word that is the path of a pipe (W-120)
+_NAMED_FD = r"\{" + _CONT + r"[A-Za-z_](?:\w|\\\r?\n)*\}"   # `{fd}`, with a backslash-newline anywhere in it
+NAMED_FD = re.compile(_NAMED_FD + "(?=" + _CONT + "[<>])")   # `{fd}>log`: zsh and bash 4.1+ read it as a redirect that names a descriptor, not as a word (W-120)
+OUT_SUBST = re.compile(">" + _CONT + "&?" + _CONT + r"\(")   # `>(cmd)`, `&>(cmd)`, `2>(cmd)`, `>&(cmd)`: an output process substitution, one word that is the path of a pipe (W-120)
+_AMP_CONT = re.compile(r"(?:\\\r?\n)+>")   # `&\<newline>>log` is `&>log`: the `&` is part of the redirect, it does not end the command (W-120 review)
 HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|(\\?)([^\s;&|<>()'\"\\`$]+))")
 HEREDOC_AT = re.compile(r"(?<!<)" + HEREDOC_OP.pattern + r"(?!<)")   # a heredoc operator, not the end of `<<<`
 # A word that starts with `#` ends the stage: the shell ignores it and the rest of the line (V6-08, N18). Before, ` # x` after `| sh` read as two arguments
@@ -262,6 +267,21 @@ def _enc(text: str) -> str:
 
 def _dec(text: str) -> str:
     return text.replace("\x01", " ").replace("\x02", "\t").replace("\x03", "\n").replace("\x04", "\r")
+
+
+def _char_before_continuations(s: str, i: int) -> str:
+    """The character in front of s[i] once the backslash-newlines right before it are taken out ("" at the start of the text): `>\\<newline>&2` is `>&2`.
+    A newline after an even run of backslashes is a real newline (the backslashes escape each other), so it ends the scan and is the character returned."""
+    j = i
+    while j >= 2 and s[j - 1] == "\n":
+        k = j - 1 - (s[j - 2] == "\r")   # `\<CR><LF>`, which the scanner also takes for a continuation
+        b = k
+        while b and s[b - 1] == "\\":
+            b -= 1
+        if (k - b) % 2 == 0:
+            break
+        j = k - 1
+    return s[j - 1] if j else ""
 
 
 def _skip_span(s: str, j: int) -> int:
@@ -1474,7 +1494,7 @@ class _Scan:
                 end_stage(i, i + 1, False)
                 i += 1
             elif c == "&":
-                if (i and s[i - 1] in "<>") or s[i + 1:i + 2] == ">":
+                if (i and s[i - 1] in "<>") or s[i + 1:i + 2] == ">" or (not self.prior and (_AMP_CONT.match(s, i + 1) or _char_before_continuations(s, i) in ("<", ">"))):   # `&\<nl>>log`, `>\<nl>&2`
                     emit(c)
                     i += 1
                 else:
@@ -1749,7 +1769,9 @@ JOIN = "\x17"
 _JOIN_CHAR = re.compile(JOIN)
 
 
-_W120_FORMS = re.compile(r">&?\(|\{[A-Za-z_]\w*\}[<>]")   # the two spellings the reading changed for (W-120): an output process substitution, a named descriptor
+# The spellings the reading changed for (W-120): an output process substitution, a named descriptor, each with a backslash-newline anywhere in it, and `&` with a
+# backslash-newline between it and the `>` or `<` of its redirect (`&\<nl>>log`, `>\<nl>&2`).
+_W120_FORMS = re.compile(OUT_SUBST.pattern + "|" + NAMED_FD.pattern + r"|&(?:\\\r?\n)+>|[<>](?:\\\r?\n)+&")
 _QUOTED_VAR = re.compile(r"'[^']*\$|\"[^\"]*\$\{")   # the two places the current reading differs from main's: a single-quoted `$X`, a double-quoted `${NAME}`
 
 
