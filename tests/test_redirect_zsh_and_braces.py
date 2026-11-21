@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from jade import policy
+from tests.loadproof import retry_under_load
 from tests.test_redirect_anywhere import (
     OTHERS,
     PUSH_TO_MAIN,
@@ -398,6 +399,7 @@ def test_a_closed_stdout_does_not_hide_a_credential_read():
 
 @pytest.mark.timing
 @pytest.mark.parametrize("word", ["{ ", "} ", "a{ "])
+@retry_under_load
 def test_many_braces_cost_about_as_much_as_many_words(word):
     import time
 

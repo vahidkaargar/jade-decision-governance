@@ -609,15 +609,19 @@ def host_version() -> tuple[int, int, int] | None:
     return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
 
 
-def _wants_on_failure(event: str) -> bool:
-    """Only the PreToolUse hook fails closed: a crashed or hung gate then blocks the call instead of letting it run (probe cell 9). Older hosts ignore the field."""
+HOST_UNREAD = object()   # `host` argument default: read the version with `host_version()`; `jade hooks install` reads it once and passes it on (review of W-140)
+
+
+def _wants_on_failure(event: str, host=HOST_UNREAD) -> bool:
+    """Only the PreToolUse hook fails closed: a crashed or hung gate then blocks the call instead of letting it run (probe cell 9). Older hosts ignore the field.
+    `host` is the version `host_version()` returned (None: unknown); left out, it is read here."""
     if event != "PreToolUse":
         return False
-    v = host_version()
+    v = host_version() if host is HOST_UNREAD else host
     return v is not None and v >= ON_FAILURE_MIN_HOST
 
 
-def _entry_current(event: str, g: dict, h: dict) -> bool:
+def _entry_current(event: str, g: dict, h: dict, host=HOST_UNREAD) -> bool:
     """Is one installed JADE entry what `hooks install` writes now? A timeout may be longer than ours (an operator's choice), never shorter, and `onFailure`
     is required on PreToolUse when the host honours it. Matchers are not compared here: `pretool_matcher_gaps` (PreToolUse, where a wider matcher is fine)
     and `wiring_problems` (the other events) report them with the exact fix."""
@@ -625,12 +629,12 @@ def _entry_current(event: str, g: dict, h: dict) -> bool:
     timeout = h.get("timeout")
     if not isinstance(timeout, (int, float)) or timeout < want_timeout:
         return False
-    return not (_wants_on_failure(event) and h.get("onFailure") != "block")
+    return not (_wants_on_failure(event, host) and h.get("onFailure") != "block")
 
 
-def hooks_status() -> dict[str, bool]:
+def hooks_status(host=HOST_UNREAD) -> dict[str, bool]:
     data = _read_quiet(settings_path())
-    current = {(event, parsed.sub) for event, g, h, parsed in _jade_hooks(data) if event in HOOKS and _entry_current(event, g, h)}
+    current = {(event, parsed.sub) for event, g, h, parsed in _jade_hooks(data) if event in HOOKS and _entry_current(event, g, h, host)}
     gaps = pretool_matcher_gaps()
     out = {event: (event, sub) in current for event, (_m, sub, _t) in HOOKS.items()}
     if gaps:
@@ -638,20 +642,28 @@ def hooks_status() -> dict[str, bool]:
     return out
 
 
+PRETOOL_PROBE_TOOLS = (*policy.GATED_BUILTIN, "AskUserQuestion", "mcp__server__tool")   # every tool the PreToolUse matcher must cover; the last stands for every MCP tool
+
+
+def _matcher_covers(m: str, tool: str) -> bool:
+    """An empty matcher covers every tool. A matcher that is not a valid regex covers nothing (review of W-141): JADE cannot tell what the host makes of it,
+    so it is never counted as a check."""
+    if not m:
+        return True
+    try:
+        return re.fullmatch(m, tool) is not None
+    except re.error:
+        return False
+
+
 def pretool_matcher_gaps() -> list[str] | None:
-    """Gated tools the installed PreToolUse matcher does not cover (an install made before the matcher grew). None when the hook is not installed."""
+    """Gated tools the installed PreToolUse matcher does not cover (an install made before the matcher grew, or a matcher that is not a valid regex). None
+    when the hook is not installed."""
     data = _read_quiet(settings_path())
     matchers = [g.get("matcher", "") for event, g, _h, p in _jade_hooks(data) if event == "PreToolUse" and p.sub == "pretool"]
     if not matchers:
         return None
-    gaps = []
-    for tool in (*policy.GATED_BUILTIN, "AskUserQuestion", "mcp__server__tool"):
-        try:
-            if not any(re.fullmatch(m, tool) if m else True for m in matchers):
-                gaps.append(tool)
-        except re.error:
-            return [tool]
-    return gaps
+    return [tool for tool in PRETOOL_PROBE_TOOLS if not any(_matcher_covers(m, tool) for m in matchers)]
 
 
 def _require_human(what: str, stdin_isatty: bool | None = None) -> None:
@@ -677,8 +689,9 @@ def _strip_jade_hooks(data: dict) -> int:
     return removed
 
 
-def hooks_install(stdin_isatty: bool | None = None) -> Path | None:
-    """Add every JADE hook of HOOKS to the Claude settings file, keeping every other setting and hook. Returns the backup path (None when there was no file)."""
+def hooks_install(stdin_isatty: bool | None = None, host=HOST_UNREAD) -> Path | None:
+    """Add every JADE hook of HOOKS to the Claude settings file, keeping every other setting and hook. Returns the backup path (None when there was no file).
+    `host` is the Claude Code version when the caller already read it (`host_version()`); left out, it is read here."""
     _require_human("jade hooks install", stdin_isatty)
     p = settings_path()
     data = _load_settings(p)
@@ -687,13 +700,21 @@ def hooks_install(stdin_isatty: bool | None = None) -> Path | None:
     hooks = data.setdefault("hooks", {})
     for event, (matcher, sub, timeout) in HOOKS.items():
         entry = {"hooks": [{"type": "command", "command": hook_command(sub), "timeout": timeout}]}
-        if _wants_on_failure(event):
+        if _wants_on_failure(event, host):
             entry["hooks"][0]["onFailure"] = "block"
         if matcher:
             entry["matcher"] = matcher
         hooks.setdefault(event, []).append(entry)
     atomic_write(p, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
     return backup
+
+
+def hooks_install_with_summary(stdin_isatty: bool | None = None) -> tuple[Path | None, list[tuple[str, bool | None, str]]]:
+    """`jade hooks install`: the human check first (a refused call runs nothing), then one `claude --version` for the write and for the summary rows."""
+    _require_human("jade hooks install", stdin_isatty)
+    host = host_version()
+    backup = hooks_install(stdin_isatty, host=host)
+    return backup, install_summary_rows(host=host)
 
 
 def hooks_uninstall(stdin_isatty: bool | None = None) -> int:
@@ -941,19 +962,49 @@ def _list_b_row() -> tuple[str, bool, str]:
             "(the floor of level `off` is another thing: it needs gate mode enforce)")
 
 
-def _what_blocks_row(pretool_ok: bool | None = None, wiring: list[str] | None = None) -> tuple[str, bool | None, str]:
-    """`blocking_summary` for the mode and level in force, unless the PreToolUse hook is missing or out of date (then nothing blocks) or the wiring has
-    problems (then it is not known). `check` passes what it already found, so the live wiring probe is not run twice."""
+NOT_RUN_HERE = " (the hooks were not run here: `jade check` runs each one once to prove it decides)"
+
+
+def _what_blocks_row(pretool_ok: bool | None = None, wiring: list[str] | None = None, probe: bool = True, host=HOST_UNREAD) -> tuple[str, bool | None, str]:
+    """`blocking_summary` for the mode and level in force, unless the PreToolUse hook is missing (then nothing blocks) or the wiring has problems (then it is
+    not known). A PreToolUse hook that is installed but out of date still runs (W-141): a matcher gap leaves only the named tools unchecked, and an old timeout
+    or failure setting only weakens what a crashed or hung gate does; the row then says that and still says what blocks. `check` passes what it already found
+    (the live wiring probe, run whenever a JADE PreToolUse entry is registered and printed as the `hook wiring` row), so the probe is not run twice and
+    the row never points to a row that is not printed. With no `wiring`, `probe` says whether to run the live probe (True) or to read the static facts only
+    (False, the install summary, W-140): the row then says the hooks were not run here and points to `jade check`, because a hook that crashes when run
+    is seen only by the live probe."""
+    probed = wiring is not None or probe   # `check` passes the live probe's result; the install summary passes nothing and probe=False
+    where = "see the `hook wiring` row" if probed else "`jade check` names them in its `hook wiring` row"
     if pretool_ok is None:
-        pretool_ok = hooks_status().get("PreToolUse", False)
+        pretool_ok = hooks_status(host).get("PreToolUse", False)
     if not pretool_ok:
-        return ("what blocks", None, "nothing blocks: the PreToolUse hook is not installed or is out of date; run `jade hooks install` in a terminal")
+        gaps = pretool_matcher_gaps()
+        if gaps is None:
+            return ("what blocks", None, "nothing blocks: the PreToolUse hook is not installed; run `jade hooks install` in a terminal")
+        if wiring is None:
+            wiring = wiring_problems(probe=probe)   # `check` passes the live result it printed as the `hook wiring` row
+        covered = [t for t in PRETOOL_PROBE_TOOLS if t not in gaps]
+        if not covered:
+            return ("what blocks", None, "nothing blocks: the PreToolUse matcher covers no gated tool (or is not a valid regex), so no call gets a check; "
+                                         "run `jade hooks install` in a terminal")
+        _ok, text = blocking_summary()
+        if gaps:
+            names = ", ".join("every MCP tool" if g == "mcp__server__tool" else g for g in gaps)
+            checked = ", ".join("every MCP tool" if g == "mcp__server__tool" else g for g in covered)
+            lead = (f"the PreToolUse matcher does not cover {names}: a call to those tools gets no check at all; run `jade hooks install` in a terminal; "
+                    f"every other gated tool ({checked}) is checked as follows: ")
+        else:
+            lead = ("the PreToolUse hook is out of date (its timeout or failure setting) but still runs, so a crashed or hung gate may let a call run; "
+                    "run `jade hooks install` in a terminal; when the gate runs it blocks as follows: ")
+        if wiring:
+            lead = f"unknown: the hook wiring has problems ({where}), so the hook may not run; " + lead
+        return ("what blocks", None, lead + text + ("" if wiring or probed else NOT_RUN_HERE))
     if wiring is None:
-        wiring = wiring_problems()
+        wiring = wiring_problems(probe=probe)
     ok, text = blocking_summary()
     if wiring:
-        return ("what blocks", None, "unknown: the hook wiring has problems (see the `hook wiring` row), so the hook may not run; when it runs: " + text)
-    return ("what blocks", ok, text)
+        return ("what blocks", None, f"unknown: the hook wiring has problems ({where}), so the hook may not run; when it runs: " + text)
+    return ("what blocks", ok, text + ("" if probed else NOT_RUN_HERE))
 
 
 def parse_since(value: str) -> float:
@@ -2319,8 +2370,9 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
     st = hooks_status()
     missing = [k for k, v in st.items() if not v]
     rows.append(("hooks installed", not missing, f"all {len(HOOKS)}: {', '.join(HOOKS)}" if not missing else f"missing or out of date: {', '.join(missing)}: run `jade hooks install` in a terminal"))
+    gaps = pretool_matcher_gaps()
     problems = None
-    if not missing:
+    if not missing or gaps is not None:   # review of W-141: a registered PreToolUse entry is probed live even when out of date, so `what blocks` never says a dead hook checks
         problems = wiring_problems()
         rows.append(("hook wiring", not problems, "binary runs, hooks enabled, a synthetic event is decided" if not problems else "; ".join(problems)))
     shadow = shadow_problems()
@@ -2331,7 +2383,6 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
     rows.append(("settings shadowing", not shadow, f"no managed or plugin settings file, and no project settings file under {scanned} up to its repo root, disables or shadows the hooks "
                  "(run `jade check` from the project you work in to scan that one)" if not shadow else "; ".join(shadow)))
     rows.append(_repo_config_row())
-    gaps = pretool_matcher_gaps()
     if gaps is not None:
         rows.append(("pretool matcher", not gaps, "covers every gated tool" if not gaps else f"does not cover {', '.join(gaps)}: re-run `jade hooks install` in a terminal"))
     rows.append(_gate_mode_row())
@@ -2557,11 +2608,18 @@ def _approval_row() -> tuple[str, bool | None, str]:
     return ("approval backend", ok, text)
 
 
-def install_summary() -> list[str]:
-    """V6-10 (DX-H4): what `jade hooks install` leaves in force: the effective gate mode, what the hook blocks, and the approval backend. Reads the config,
-    the policy and the trust anchor only: nothing is written and no default changes."""
-    env = " (JADE_GATE_MODE in this environment)" if os.environ.get("JADE_GATE_MODE") else ""
-    return [f"gate mode: {paths.gate_mode()}{env}", f"what blocks: {blocking_summary()[1]}", f"approval backend: {_approval_state()[1]}"]
+def install_summary_rows(host=HOST_UNREAD) -> list[tuple[str, bool | None, str]]:
+    """V6-10 (DX-H4), W-140: what `jade hooks install` leaves in force, as rows (name, ok, detail) with the names and the states `jade check` uses: the effective
+    gate mode, what the hook blocks, and the approval backend. `what blocks` is the row `jade check` prints (`_what_blocks_row`) with the static wiring facts
+    only: disabled hooks or a missing binary make it "unknown", but no hook is run (review of W-140: the live probe made install cost about 1.6 s of CPU and
+    tens of seconds of wall time on a busy machine), so the row says the hooks were not run here and points to `jade check`. It reads the config, the policy,
+    the Claude settings and the trust anchor: nothing is written and no default changes. `host` is the Claude Code version `jade hooks install` already read, so
+    `claude --version` runs once per install (about 90% of the summary's CPU was a second run of it)."""
+    _, gate_ok, gate_text = _gate_mode_row()
+    if os.environ.get("JADE_GATE_MODE") and "JADE_GATE_MODE" not in gate_text:
+        gate_text += " (JADE_GATE_MODE in this environment)"
+    backend_ok, backend_text = _approval_state()
+    return [("gate mode", gate_ok, gate_text), _what_blocks_row(probe=False, host=host), ("approval backend", backend_ok, backend_text)]
 
 
 CHECK_PREFIX = {True: "ok  ", False: "FAIL", None: "WARN"}   # V6-10: WARN is not safe or not known, and never changes the exit code
@@ -2572,9 +2630,18 @@ def check_failed(ok) -> bool:
     return ok is not None and not ok
 
 
+def check_line(name: str, ok, detail: str) -> str:
+    """One row as `jade check` prints it; `jade hooks install` prints its summary rows the same way."""
+    return f"{CHECK_PREFIX[ok if ok is None else bool(ok)]}  {name}: {detail}"
+
+
+def install_summary_lines(rows) -> list[str]:
+    return [check_line(name, ok, detail) for name, ok, detail in rows]
+
+
 def print_check(rows) -> int:
     for name, ok, detail in rows:
-        print(f"{CHECK_PREFIX[ok if ok is None else bool(ok)]}  {name}: {detail}")
+        print(check_line(name, ok, detail))
     failed = [n for n, ok, _ in rows if check_failed(ok)]
     if failed:
         print(f"jade check: {len(failed)} failed ({', '.join(failed)})", file=sys.stderr)

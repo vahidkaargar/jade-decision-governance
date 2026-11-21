@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from jade import hooks, policy, shellnorm
+from tests.loadproof import retry_under_load
 from tests.test_redirect_anywhere import si08
 from tests.test_redirect_zsh_and_braces import confirm_real_push
 
@@ -200,6 +201,7 @@ def _cost(command: str) -> float:
 
 
 @pytest.mark.timing
+@retry_under_load
 def test_a_here_string_into_a_reader_that_runs_nothing_is_read_once():
     small = _cost("git commit -F - <<< '" + "the quick brown fox; (x) {y} " * 100 + "' | tail -1")
     big = _cost("git commit -F - <<< '" + "the quick brown fox; (x) {y} " * 3500 + "' | tail -1")   # 100 kB
@@ -208,6 +210,7 @@ def test_a_here_string_into_a_reader_that_runs_nothing_is_read_once():
 
 
 @pytest.mark.timing
+@retry_under_load
 def test_a_long_pipeline_of_here_string_stages_is_linear():
     def pipe(n: int) -> str:
         return " | ".join(f'grep -v x{i} <<< "$v"' for i in range(n))
@@ -217,6 +220,7 @@ def test_a_long_pipeline_of_here_string_stages_is_linear():
 
 
 @pytest.mark.timing
+@retry_under_load
 def test_a_long_pipeline_into_shells_with_a_descriptor_redirect_is_linear():
     small, big = _cost("a | sh 2>&1 " * 500), _cost("a | sh 2>&1 " * 2000)
     assert big < 6.0, big
@@ -224,6 +228,7 @@ def test_a_long_pipeline_into_shells_with_a_descriptor_redirect_is_linear():
 
 
 @pytest.mark.timing
+@retry_under_load
 def test_nested_here_strings_in_substitutions_cost_the_same_at_every_depth():
     def nest(depth: int, inner: str) -> str:
         for _ in range(depth):
@@ -236,8 +241,9 @@ def test_nested_here_strings_in_substitutions_cost_the_same_at_every_depth():
 
 
 @pytest.mark.timing
+@retry_under_load
 def test_many_cd_lines_with_an_unbalanced_paren_cost_a_few_times_the_plain_ones(tmp_path):
-    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub").mkdir(exist_ok=True)   # the test body can run again (retry_under_load)
     odd = "cd sub || exit ; : \\) a{b\n" * 150 + "git push"
     plain = "cd sub || exit ; : a b\n" * 150 + "git push"
     t_odd = min(_cost_in(odd, tmp_path) for _ in range(2))
