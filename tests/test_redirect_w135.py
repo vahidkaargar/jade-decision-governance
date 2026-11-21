@@ -348,6 +348,7 @@ def test_a_brace_word_in_a_pipeline_does_not_clear_the_producer(command, tmp_pat
 
 # ---------------------------------------------------------------- the readings added here cost no more than a few times what origin/main paid (a loose bound: a slow machine must not fail it)
 
+@pytest.mark.timing
 @pytest.mark.parametrize("command", [
     "echo " + "$(( " * 2000 + "git push origin feature",
     "echo x |" + " " * 100000 + "\n" * 3000 + "sh",

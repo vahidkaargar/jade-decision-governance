@@ -62,7 +62,7 @@ WRAPPED_PRINTERS = ["/bin/echo", "command echo", "env echo", "builtin echo", "ni
 
 
 @pytest.mark.parametrize("printer", WRAPPED_PRINTERS)
-@pytest.mark.parametrize("consumer", ["sh", "bash", "zsh", "env sh", "sh -s", "nice sh", "nohup sh", "exec sh", "time sh"])
+@pytest.mark.parametrize("consumer", ["env sh", "sh", "bash", "zsh", "sh -s", "nice sh", "nohup sh", "exec sh", "time sh"])
 def test_a_wrapped_printer_piped_to_a_shell_is_read(printer, consumer, tmp_path):
     command = f"{printer} '{PUSH}' | {consumer}"
     assert si08(command), command
@@ -120,7 +120,7 @@ def test_a_heredoc_written_to_a_file_and_run_with_a_launcher_is_read(tmp_path):
 # ---------------------------------------------------------------- a heredoc delimiter that is quoted in part (F9)
 
 @pytest.mark.parametrize("delimiter", ["E\"O\"F", "E'O'F", "\"E\"OF", "EO\\F", "'EOF'", "\"EOF\"", "\\EOF", "E\"\"OF"])
-@pytest.mark.parametrize("consumer", ["sh", "bash --norc", "zsh -s", "sh -e"])
+@pytest.mark.parametrize("consumer", ["bash --norc", "sh", "zsh -s", "sh -e"])
 def test_a_quoted_heredoc_delimiter_keeps_a_trailing_backslash_a_backslash(delimiter, consumer, tmp_path):
     command = f"{consumer} <<{delimiter}\n{PUSH}\\\nEOF"   # no line joining in a quoted heredoc: the shell reads `git push origin HEAD:main\` and then runs `EOF`
     assert si08(command), command
