@@ -634,6 +634,14 @@ def hooks_install(stdin_isatty: bool | None = None, host=HOST_UNREAD) -> Path | 
     return backup
 
 
+def hooks_install_with_summary(stdin_isatty: bool | None = None) -> tuple[Path | None, list[tuple[str, bool | None, str]]]:
+    """`jade hooks install`: the human check first (a refused call runs nothing), then one `claude --version` for the write and for the summary rows."""
+    _require_human("jade hooks install", stdin_isatty)
+    host = host_version()
+    backup = hooks_install(stdin_isatty, host=host)
+    return backup, install_summary_rows(host=host)
+
+
 def hooks_uninstall(stdin_isatty: bool | None = None) -> int:
     """Remove only JADE's hook entries. A missing settings file is nothing to remove (0). Returns the number of entries removed."""
     _require_human("jade hooks uninstall", stdin_isatty)

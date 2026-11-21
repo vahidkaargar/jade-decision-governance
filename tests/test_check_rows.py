@@ -697,8 +697,27 @@ def test_jade_hooks_install_reads_the_host_version_once(monkeypatch, capsys):
     assert len(calls) == 1   # called on its own, the summary still reads the version itself
     assert ops.install_summary_rows(host=(2, 1, 314)) == rows_read and len(calls) == 1
     # an old host does not honour onFailure: handed in, it is used as given
-    assert ops.hooks_status(host=(2, 1, 200)).get("PreToolUse") is True and ops.hooks_status(host=(2, 1, 314)).get("PreToolUse") is True
-    assert ops.hooks_status(host=None).get("PreToolUse") is True
+    # a hook entry without `onFailure` is current for a host that ignores it and out of date for one that honours it: the version handed in is the one used
+    data = json.loads(ops.settings_path().read_text())
+    for g in data["hooks"]["PreToolUse"]:
+        for h in g["hooks"]:
+            h.pop("onFailure", None)
+    ops.settings_path().write_text(json.dumps(data))
+    del calls[:]
+    assert ops.hooks_status(host=(2, 1, 314)).get("PreToolUse") is False
+    assert ops.hooks_status(host=(2, 1, 200)).get("PreToolUse") is True and ops.hooks_status(host=None).get("PreToolUse") is True
+    assert calls == []
+
+
+def test_a_refused_jade_hooks_install_reads_no_host_version(monkeypatch):
+    """The human check comes before anything runs: a call from a non-terminal spawns no `claude --version`."""
+    setup_pair("enforce", None)
+    calls = []
+    monkeypatch.setattr(util, "human_tty_refusal", lambda *a, **k: "no terminal")   # the suite's autouse fixture says "a human"; here there is none
+    monkeypatch.setattr(ops, "host_version", lambda: calls.append(1))
+    with pytest.raises(ops.HumanOnly):
+        ops.hooks_install_with_summary(stdin_isatty=False)
+    assert calls == []
 
 
 def test_jade_hooks_install_prints_the_summary(capsys, probe_ok):
