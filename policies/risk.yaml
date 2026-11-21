@@ -35,6 +35,15 @@ rules:
     data_sensitivity: secret
     match: "security (add|delete)-generic-password|ovault secret (set|import|rm|delete)|(?i:vault_key|id_(rsa|ed25519|ecdsa)\\b|\\.pem\\b)|BEGIN [A-Z ]*PRIVATE KEY"
     rationale: "Key material or secret-store mutation"
+  - id: R-25
+    level: critical
+    reversibility: irreversible
+    blast_radius: host
+    # W-202: `rm` with --no-preserve-root (GNU rm takes any unique prefix of a long option, and `--n` starts only this one) on the root of the file system:
+    # `/`, `//`, `/.`, `/..`, `/*`, quoted or not, before or after the flag. The same flag on any other path is R-26. The words are read once by jade/humanonly.py
+    # `no_preserve_root` (the command word must be `rm`; a word after `--` is an operand), which adds the marker this rule matches (jade/policy.py RM_ROOT_MARK).
+    match: "^rm:no-preserve-root:root "
+    rationale: "Recursive delete of the root of the file system with its own guard switched off"
   - id: R-17
     level: high
     reversibility: partially_reversible
@@ -50,7 +59,9 @@ rules:
     level: high
     reversibility: partially_reversible
     blast_radius: public
-    match: "^cap:var-readings |\\b(gh pr merge|gh release (create|merge)|glab mr merge|npm publish|cargo publish|twine upload|docker push|composio execute)\\b|^gh:merge-api |\\b(?:gh|glab) api\\b[^;&|]*(?<![\\w-])(?:pulls|merge_requests)/[^\\s/]+/merge(?![\\w-])|\\bgh api\\b[^;&|]*(?<![\\w-])repos/[^\\s/]+/[^\\s/]+/merges(?![\\w-])|\\bgit (?:send-pack|http-push)\\b|\\bgit push\\b(?!(?:\\s+(?:-u|-q|--set-upstream|--quiet))*\\s+\\w[\\w.-]*\\s+(?!main\\b|master\\b|v?[0-9]|HEAD\\b)\\w[\\w./-]*(?:\\s*(?:$|[;&|)]|2>&1)))"
+    # W-153: `git update-ref` (it moves a ref with no push) is matched unless it plainly names one other branch (`refs/heads/feature`, any letter case of main and master counted
+    # as the default branch). `gh api` calls that write a git ref (the refs REST route, `updateRef` and the like) carry the `gh:merge-api` marker that jade/policy.py `_gh_ref_write` adds.
+    match: "^cap:var-readings |\\b(gh pr merge|gh release (create|merge)|glab mr merge|npm publish|cargo publish|twine upload|docker push|composio execute)\\b|^gh:merge-api |\\b(?:gh|glab) api\\b[^;&|]*(?<![\\w-])(?:pulls|merge_requests)/[^\\s/]+/merge(?![\\w-])|\\bgh api\\b[^;&|]*(?<![\\w-])repos/[^\\s/]+/[^\\s/]+/merges(?![\\w-])|\\bgit (?:send-pack|http-push)\\b|\\bgit push\\b(?!(?:\\s+(?:-u|-q|--set-upstream|--quiet))*\\s+\\w[\\w.-]*\\s+(?!main\\b|master\\b|v?[0-9]|HEAD\\b)\\w[\\w./-]*(?:\\s*(?:$|[;&|)]|2>&1)))|\\bgit update-ref\\b(?!(?:\\s+(?:-d|--no-deref|--create-reflog))*\\s+(?:refs/)?heads/(?!(?i:main|master)(?:\\s|$))[\\w./-]+(?:\\s|$))"
     rationale: "External side effect: merge, release, publish, connected-app action, or a git push that is not a plain push of one named branch (bare push, force, delete, tag, default branch, refspec)"
   - id: R-11
     level: high
@@ -75,12 +86,13 @@ rules:
     # V6-08 (N23): the agent's own instruction and tool-list files in ANY project (`CLAUDE.md`, `CLAUDE.local.md`, `.mcp.json`, `.vscode/settings.json` and `tasks.json`, which is the
     # shape of CVE-2025-53773, another harness's `.codex/config.toml` and `.cursor/mcp.json`), and `~/.ssh/authorized_keys`: a line written there is run, read as an instruction or
     # trusted at the next login. Shell start-up files are not here: they are the human-only class HO-shell-startup (PR 46, a write is high once the human has set a level).
+    # W-153 adds the other harnesses' files: `GEMINI.md` (any project), `.gemini/settings.json` and the user-level `~/.claude.json` (it holds `mcpServers`).
     # `files_only` (like R-16): the rule looks at what a command WRITES (the destination of cp/rsync/ln/install, the archive of tar -c, redirect
     # targets, the output options of an otherwise read-only tool), or at the whole segment for a command that may write any operand, and never
     # at a command named in `inert_for_files` or a `read_only` verb without a redirect: `git add AGENTS.md`, `cp ~/.claude/settings.json /tmp/b`,
     # `printf 'policies/local/' > .gitignore` are not changes to a protected file. A Write/Edit path is always a target.
     files_only: true
-    match: "(?i:\\.claude/(settings[\\w.-]*\\.json|hooks/|CLAUDE\\.md)|\\bAGENTS\\.md\\b|(?<![\\w.-])CLAUDE(?:\\.local)?\\.md(?![\\w.-])|(?<![\\w.-])\\.mcp\\.json(?![\\w-])|\\.vscode/(?:settings|tasks)\\.json|\\.codex/config\\.toml|\\.cursor/(?:rules|mcp\\.json)|\\.ssh/authorized_keys2?(?![\\w.-])|\\.ai/rules\\.md|policies/(?:[\\w-]+\\.(?:yaml|py)|local/)|\\.config/jade(?![\\w.-])|\\.local/share/jade(?![\\w.-])|jade\\.sqlite(?:-(?:wal|shm|journal))?(?![\\w.])|calibration/current\\.json|uv/tools/jade(?:-decision-governance)?(?![\\w-])|evals/[^/\\s]+/protected/|\\.local/bin/(?:jade|jev)(?![\\w.-])|\\buv tool (?:uninstall|upgrade|reinstall)\\b[^;&|]*\\bjade|\\buv tool install\\b[^;&|]*\\bjade|\\buv tool (?:uninstall|upgrade|reinstall)\\b[^;&|]*--all\\b)|\\bjade (improve (promote|rollback)|ledger purge|label set)\\b"
+    match: "(?i:\\.claude/(settings[\\w.-]*\\.json|hooks/|CLAUDE\\.md)|\\bAGENTS\\.md\\b|(?<![\\w.-])CLAUDE(?:\\.local)?\\.md(?![\\w.-])|(?<![\\w.-])\\.mcp\\.json(?![\\w-])|\\.vscode/(?:settings|tasks)\\.json|\\.codex/config\\.toml|\\.cursor/(?:rules|mcp\\.json)|(?<![\\w.-])GEMINI\\.md(?![\\w.-])|\\.gemini/settings\\.json(?![\\w.-])|(?<![\\w.-])\\.claude\\.json(?![\\w.-])|\\.ssh/authorized_keys2?(?![\\w.-])|\\.ai/rules\\.md|policies/(?:[\\w-]+\\.(?:yaml|py)|local/)|\\.config/jade(?![\\w.-])|\\.local/share/jade(?![\\w.-])|jade\\.sqlite(?:-(?:wal|shm|journal))?(?![\\w.])|calibration/current\\.json|uv/tools/jade(?:-decision-governance)?(?![\\w-])|evals/[^/\\s]+/protected/|\\.local/bin/(?:jade|jev)(?![\\w.-])|\\buv tool (?:uninstall|upgrade|reinstall)\\b[^;&|]*\\bjade|\\buv tool install\\b[^;&|]*\\bjade|\\buv tool (?:uninstall|upgrade|reinstall)\\b[^;&|]*--all\\b)|\\bjade (improve (promote|rollback)|ledger purge|label set)\\b"
     rationale: "Changes agent policy, hooks, JADE's own ledger, config or installed code, or another protected target"
   - id: R-16
     level: high
@@ -179,6 +191,19 @@ rules:
     files_only: true
     match: "(?i:(?<![\\w.-])\\.git/(?:modules/\\S+?/)?config(?![\\w./-])|/\\.config/git/config(?![\\w.-])|(?<![\\w.-])\\.gitconfig(?![\\w.-]))"
     rationale: "Edits a git config file: an alias, pager, sshCommand or filter set there runs a program the next time git runs"
+  - id: R-26
+    level: high
+    reversibility: irreversible
+    blast_radius: host
+    # W-202: `rm ... --no-preserve-root` (GNU rm takes any unique prefix of a long option, and `--n` starts only this one), before or after the operands, whatever the path:
+    # the /tmp and build-folder exemptions of `rm -rf` (R-11) do not apply to it. On the root itself it is R-25. It comes after every other high rule, so a segment another high
+    # rule already matches (a write to an agent file R-13, a remote shell R-14, a pipe into a shell R-22) keeps that rule. In a line of two commands the first high
+    # segment names the call (R-26 may then be shown instead of R-13, R-14 or R-22), but the other segment's rule stays in `seg_rules`, so memory and Jev treat it as before.
+    # `rm -rf --no-preserve-root /tmp/x` stays R-11 (that rule reads the flag as the first operand of `rm -rf`).
+    # The words are read once by jade/humanonly.py `no_preserve_root`, which adds the marker this rule matches (jade/policy.py RM_NPR_MARK): the command word must be
+    # `rm` (past sudo, doas and VAR=value), so `rm` as a subcommand of another tool (`npm rm --no-save x`, `git rm`) is not this delete, and a word after `--` is an operand.
+    match: "^rm:no-preserve-root(?::root)? "
+    rationale: "Delete with the root guard of rm switched off (--no-preserve-root)"
   - id: R-19
     level: medium
     reversibility: reversible

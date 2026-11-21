@@ -382,6 +382,22 @@ def _gap_status(c: dict, problems: list[str]) -> tuple[str, list[str]]:
 
 
 def main(files: list[str]) -> int:
+    """Replay the files; the runner never uses the approver trust anchor installed on the machine (W-155, as the test suite does since W-93): a lifecycle case
+    approves a permit, and with the anchor present that goes through the signed backend, which runs `sudo` and needs a terminal."""
+    from jade import signing
+
+    real_anchor = signing.DEFAULT_ANCHOR
+    with tempfile.TemporaryDirectory() as none:
+        signing.DEFAULT_ANCHOR = Path(none) / "no-approver-anchor"   # a path that does not exist, so the terminal backend is the one a case sees
+        try:
+            return _replay(files)
+        finally:
+            signing.DEFAULT_ANCHOR = real_anchor
+
+
+def _replay(files: list[str]) -> int:
+    from jade import signing
+
     failures = total = gaps = delivery_only = 0
     by_lang: dict[str, list[int]] = {}
     for f in files or DEFAULT:
@@ -391,6 +407,7 @@ def main(files: list[str]) -> int:
             c = json.loads(line)
             with tempfile.TemporaryDirectory() as d:
                 os.environ.update(JADE_HOME=d, JADE_CONFIG=d, JADE_GATE_MODE="enforce")
+                os.environ.pop(signing.ANCHOR_ENV, None)   # with no anchor at the default path `anchor_path` would read this override: not the host's either
                 for k in __import__("jade.util", fromlist=["AGENT_ENV"]).AGENT_ENV:
                     os.environ.pop(k, None)
                 from jade import policy, questions, thresholds

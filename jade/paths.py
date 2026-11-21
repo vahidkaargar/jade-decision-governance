@@ -180,6 +180,24 @@ def jev(recorded=None) -> str:
     return "on" if level() in ("low", "medium") else "off"
 
 
+# W-200: the one list of the variables that move the gate (SI-11). policies/safety.yaml (SI-11 description and patterns) cannot import it, so
+# tests/test_gate_env_lists_w200.py fails when a pattern, the settings-file check or a report names a different set.
+GATE_ENV_VARS = ("JADE_GATE_MODE", "JADE_POLICY_DIR", "JADE_CONFIG", "JADE_HOME", "JADE_APPROVER_ANCHOR", "JADE_REGISTRY_DIR", "JADE_SESSION_ID", "CLAUDE_CODE_SESSION_ID")
+HOST_SESSION_VAR = "CLAUDE_CODE_SESSION_ID"   # the host sets it in every session, so a value in the process environment is an override only when it differs from the host's own id
+
+
+def is_gate_env_var(name: object) -> bool:
+    return isinstance(name, str) and (name.startswith("JADE_") or name in GATE_ENV_VARS)
+
+
+def gate_env_alternation() -> str:
+    """The names of GATE_ENV_VARS as one regular-expression alternation, for the checks that read text. The `JADE_` names share their prefix
+    (`JADE_(?:A|B)|OTHER`), which the regular-expression engine scans about three times faster than eight whole names."""
+    mine = [re.escape(n[5:]) for n in GATE_ENV_VARS if n.startswith("JADE_")]
+    other = [re.escape(n) for n in GATE_ENV_VARS if not n.startswith("JADE_")]
+    return "|".join([f"JADE_(?:{'|'.join(mine)})", *other])
+
+
 class Override(NamedTuple):
     var: str
     value: str
@@ -195,10 +213,12 @@ def _same(a: str, b: Path) -> bool:
         return False
 
 
-def gate_overrides(env: Mapping[str, str] | None = None, source: str = "environment") -> list[Override]:
+def gate_overrides(env: Mapping[str, str] | None = None, source: str = "environment", host_session_id: str | None = None) -> list[Override]:
     """The one list of variables that move what the gate reads: its mode, its policies, its configuration (local overlays and `gate_mode`) and its
     ledger (pins, the permit seal key, SI-07 history), and `JADE_SOURCE=test`, which changes no decision but hides what the ledger shows of them. `env` is the process environment, or the `env` block of a Claude settings file, which the host
-    hands to every hook (docs/05 T19). A variable set to the value the default already gives is listed but does not weaken anything."""
+    hands to every hook (docs/05 T19). A variable set to the value the default already gives is listed but does not weaken anything.
+    `CLAUDE_CODE_SESSION_ID` is set by the host in every session: in the process environment it is listed only when `host_session_id` (the id the host
+    put in the hook event) is given and differs from it; in a settings `env` block it is always listed, because the host never writes it there."""
     env = os.environ if env is None else env
     out: list[Override] = []
 
@@ -219,6 +239,8 @@ def gate_overrides(env: Mapping[str, str] | None = None, source: str = "environm
         add("JADE_APPROVER_ANCHOR", not _same(env["JADE_APPROVER_ANCHOR"], signing.DEFAULT_ANCHOR), "reads the approver public key from another file than the root-owned default")
     if env.get("JADE_SESSION_ID"):   # V6-18 a: names the session whose SI-07 hold `jade decide outcome` releases and whose answers `jade ack` clears; a persisted old id lifts a hold that is not its own
         add("JADE_SESSION_ID", True, "fixes the session id the CLI uses, so an old id could release an SI-07 hold or acknowledge answers of another session")
+    if env.get(HOST_SESSION_VAR) and (source != "environment" or (host_session_id and env[HOST_SESSION_VAR] != host_session_id)):   # W-200
+        add(HOST_SESSION_VAR, True, "fixes the session id the CLI reads when JADE_SESSION_ID is unset, so an old id could release an SI-07 hold or acknowledge answers of another session")
     if env.get("JADE_SOURCE") == "test":   # W-72: tags every row, so a persisted tag hides gated calls from the statistics and the pending-permit notice
         add("JADE_SOURCE", True, "tags every ledger row `test`, which leaves its gated calls out of `jade ledger stats` and out of the pending-permit notice")
     for var in ("JADE_REGISTRY_DIR", "JADE_CLAUDE_SETTINGS", "JADE_BIN"):

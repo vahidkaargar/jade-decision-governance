@@ -2,7 +2,7 @@
 
 N26: a `tool_name` that is not a string, a shell `command` that is a list, a `tool_input` that is not an object, and a hook name JADE does not know. A gated-looking
 call must exit 2, and an unknown name must exit non-zero, instead of passing in silence. N27: a hook that runs out of time for a neutral MCP tool; today's result
-is pinned and written down in docs/05.
+is pinned and written down in docs/05. An event with no `tool_name` is blocked since W-209 (tests/acceptance/test_gate_residuals_w209.py).
 
 This file is separate from test_gate_failure_modes.py because that module is skipped as a whole on a machine that has the real approver installed (W-93);
 nothing here approves a permit. Events go through `hooks.main`, with stdin replaced; nothing is run.
@@ -70,12 +70,10 @@ def test_the_verdict_for_a_malformed_event_follows_the_gate_mode(monkeypatch, ca
     ev("Bash", None),
     ev("Read", {"file_path": "/etc/hosts"}),
     ev("mcp__skills_rules__skills_search", {"query": "x", "limit": [1, 2]}),
-    ev("mcp__x__exec_in_pod", {"command": ["ls", "-la"]}),   # an MCP tool may take a list for `command` by its own schema: it is rated by its name, as before
+    ev("mcp__x__exec_in_pod", {"command": ["ls", "-la"]}),   # an MCP tool may take a list for `command` by its own schema: it is rated by its name and, since W-209, by the command the list spells
     ev("WebSearch", {"query": ["a"]}),
-    {"session_id": SESSION},                                  # no tool at all: not a tool call
-    {},
 ])
-def test_well_formed_and_non_tool_events_are_not_blocked_by_the_shape_check(event, monkeypatch):
+def test_well_formed_events_are_not_blocked_by_the_shape_check(event, monkeypatch):
     got = run("pretool", event, monkeypatch)
     if event.get("tool_name") == "mcp__x__exec_in_pod":
         assert got == 2   # rated high by its name (M-07), not by the shape check
