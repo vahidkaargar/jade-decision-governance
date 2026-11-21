@@ -124,6 +124,30 @@ def test_more_pairs_than_the_cap_is_rated_whole(home):
     assert not gated(sh(paths + "xargs grep x"))   # not a writer
 
 
+@pytest.mark.parametrize("cmd", [
+    "echo ~/.claude/skills/n.md | xargs -I@ sh -c 'echo x > @'",
+    "echo ~/.claude/skills/n.md | xargs -I % bash -c 'touch %'",
+    "echo ~/.claude/skills/n.md | xargs -I QQ zsh -c 'cp /tmp/x QQ'",
+    "echo ~/.claude/skills/n.md | xargs -i sh -c 'echo x > {}'",
+])
+def test_a_shell_body_with_any_replace_string_is_read(home, cmd):
+    """W-77 review, wave 4: the body of `sh -c` was read only for the default `{}`, so `xargs -I@ sh -c 'echo x > @'` stayed low. `-I` replaces the string
+    inside every argument (BSD and GNU), so the body holds it as written."""
+    a = sh(cmd)
+    assert is_r18(a), (cmd, a.rule_id, a.level)
+
+
+@pytest.mark.parametrize("cmd", [
+    "echo ~/.claude/skills/n.md | xargs -I@ sh -c 'echo @ > /tmp/q'",       # the path is only read out
+    "echo ~/.claude/skills/n.md | xargs -I % bash -c 'cat %'",
+    "echo /tmp/n.md | xargs -I@ sh -c 'echo x > @'",                         # no instruction path anywhere
+    "echo ~/.claude/skills/n.md | xargs -J % sh -c 'touch %'",               # BSD -J replaces only a whole argument, never one inside the quoted body
+])
+def test_the_twin_of_a_shell_body_with_a_replace_string_stays_low(home, cmd):
+    a = sh(cmd)
+    assert not gated(a), (cmd, a.rule_id, a.level)
+
+
 # ---- twins: the same shape that creates nothing -----------------------------------------------------------------------------
 STDIN_TWINS = [
     "echo ~/.claude/skills/old.md | xargs touch",                       # an existing file is an edit
@@ -176,6 +200,7 @@ KNOWN_GAPS = [
     "cat /tmp/list | xargs touch",
     "xargs touch < /tmp/list",
     "echo $P | xargs touch",                                                 # a path in a variable
+    "echo ~/.claude/skills/n.md | xargs --replace=QQ sh -c 'touch QQ'",     # GNU `--replace=s` before a shell: the segmenter does not split out the quoted body
 ]
 
 

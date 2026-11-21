@@ -2145,7 +2145,11 @@ def _xargs_stdin_readings(rows: list[tuple[str, tuple[str, ...]]]) -> tuple[list
     if not xs:
         return [], None
     rx = _skills_rule_re()
-    holders = [seg for seg, _ in rows if _BRACES in seg and not _xargs_inner(seg)]
+    holders: dict[str, list[str]] = {}   # per replace string of a shell `xargs`: the segments that hold it, where the segmenter put the quoted body (W-77 review)
+    for _seg, _dirs, (inner, repl) in xs:
+        if repl and repl not in holders and _verb(inner) in _XARGS_SHELLS:
+            at = re.compile(r"(?<![^\s<>=])" + re.escape(repl))   # where `_put` puts the path: at the start of a word, or after `>`, `<`, `=`
+            holders[repl] = [seg for seg, _ in rows if repl in seg and at.search(seg) and not _xargs_inner(seg)][:XARGS_STDIN_CAP + 1]
     paths_: list[str] = []
     for seg, _ in rows:
         if _xargs_inner(seg) or _BRACES in seg:
@@ -2163,9 +2167,10 @@ def _xargs_stdin_readings(rows: list[tuple[str, tuple[str, ...]]]) -> tuple[list
         for p in paths_[:XARGS_STDIN_CAP]:
             if verb in WRITER_VERBS and (repl and repl in inner or verb not in _XARGS_FETCHERS):   # the words a fetcher is fed are addresses, never the file it writes
                 out.append((_put(inner, repl, p) if repl and repl in inner else f"{inner} {p}", dirs, seg))
-            if repl == _BRACES and verb in _XARGS_SHELLS:
-                out.extend((_put(h, _BRACES, p), dirs, seg) for h in holders)
-    return out, writer if len(xs) > XARGS_STDIN_CAP or len(paths_) > XARGS_STDIN_CAP else None
+            if repl and verb in _XARGS_SHELLS:
+                out.extend((_put(h, repl, p), dirs, seg) for h in holders[repl][:XARGS_STDIN_CAP])
+    over = len(xs) > XARGS_STDIN_CAP or len(paths_) > XARGS_STDIN_CAP or any(len(h) > XARGS_STDIN_CAP for h in holders.values())
+    return out, writer if over else None
 
 
 def _carried_work_tree(seg: str, cur: str | None) -> str | None:
