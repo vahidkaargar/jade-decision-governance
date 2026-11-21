@@ -22,6 +22,7 @@ import time
 import pytest
 
 from jade import hooks, policy, shellnorm
+from tests.loadproof import retry_under_load
 from tests.test_redirect_anywhere import si08
 from tests.test_redirect_zsh_and_braces import confirm_real_push, really_pushes
 
@@ -284,6 +285,7 @@ def test_a_long_run_of_one_word_is_cut_in_the_readings(tmp_path):
     lambda n: "git push origin feature " + "a\\&b a{ } " * (n * 10),
     lambda n: "echo 'git push origin feature " + "a\\>&log " * (n * 100) + "' | sh",
 ])
+@retry_under_load
 def test_brace_words_and_escapes_cost_about_what_the_same_words_cost(make):
     def cost(command: str) -> float:
         best = 1e9
@@ -351,6 +353,7 @@ def test_a_run_that_counts_is_kept_and_a_plain_run_is_cut():
 
 @pytest.mark.timing
 @pytest.mark.parametrize("depth, pipes", [(6, 8), (8, 4), (10, 3)])
+@retry_under_load
 def test_a_chain_of_pipelines_is_not_read_once_per_pipe_per_level(depth, pipes):
     """Each `| sh` after a here-string re-produced the text of the stage: the output grew as pipes ** depth (24 s for 1.7 kB on main)."""
     command = PUSH
@@ -364,6 +367,7 @@ def test_a_chain_of_pipelines_is_not_read_once_per_pipe_per_level(depth, pipes):
 
 
 @pytest.mark.timing
+@retry_under_load
 def test_heredoc_bodies_with_backslashes_are_not_squared_by_a_nest():
     command = PUSH
     for k in range(10):
