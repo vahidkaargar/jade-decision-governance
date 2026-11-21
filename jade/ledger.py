@@ -171,21 +171,33 @@ class Ledger:
         A chain longer than the kernel follows in one lookup (macOS 32, Linux 40) fails the stat with ELOOP, but SQLite resolves links itself and
         opens it anyway, so the chain is then resolved by `os.path.realpath` (one link per step, no kernel limit) and the O_EXCL open is tried there."""
         p = str(self.path)
+        walking = False   # True once one stat has shown that the chain dangles: the walk then costs one readlink per link, not a stat of the rest of the chain
         for _ in range(42):   # 40 links (Linux) one at a time, then the create attempt at the end of the chain; macOS follows 32. A loop ends here
             try:
                 os.close(os.open(p, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600))
                 return
             except FileExistsError:   # nothing was created and no descriptor was opened
+                pass
+            except OSError:
+                return
+            if not walking:
                 try:
                     os.stat(p)   # one stat follows the whole chain: an existing target ends here, only a dangling link is walked
                     return
                 except FileNotFoundError:
-                    if not os.path.islink(p):
+                    walking = True
+                except OSError:   # ELOOP: a chain longer than one lookup follows, or a loop. Walk it with readlink only (a syscall per link, SQLite follows at most 200)
+                    for _ in range(200):
+                        try:
+                            p = os.path.join(os.path.dirname(p), os.readlink(p))
+                        except OSError:   # the end of the chain: not a link (it exists, or does not yet)
+                            break
+                    else:   # 200 links and still a link: a loop, or more than SQLite follows; it cannot open it either
                         return
-                    p = os.path.join(os.path.dirname(p), os.readlink(p))
-                except OSError:   # ELOOP: a long chain (or a loop, which realpath leaves as a link, so the loop bound ends it)
-                    p = os.path.realpath(p)
-            except OSError:
+                    continue
+            try:
+                p = os.path.join(os.path.dirname(p), os.readlink(p))
+            except OSError:   # not a link (the target appeared meanwhile): it exists, so it is not opened
                 return
 
     def _lock_down(self) -> None:

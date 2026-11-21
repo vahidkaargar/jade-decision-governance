@@ -166,6 +166,26 @@ def test_a_dangling_chain_the_kernel_still_follows_gets_a_0600_target_before_sql
     assert target.stat().st_mode & 0o777 == 0o600
 
 
+@pytest.mark.parametrize("n", [1, 20, 31, 40])
+def test_walking_a_dangling_chain_costs_one_stat_not_one_per_link(tmp_path, monkeypatch, n):
+    # Each stat of a chain walks all of the links left in it, so a stat per link is quadratic (7x main for 31 links); one stat shows the chain dangles and the
+    # walk goes on one link per step with readlink only.
+    calls = []
+
+    class Counting(LinuxStat):
+        @staticmethod
+        def stat(p, *a, **kw):
+            calls.append(p)
+            return LinuxStat.stat(p, *a, **kw)
+
+    monkeypatch.setattr(ledger, "os", Counting())
+    path = link_chain(tmp_path, n)
+    obj = ledger.Ledger.__new__(ledger.Ledger)
+    obj.path = path
+    obj._create_private()
+    assert (tmp_path / "ledger.sqlite").exists() and len(calls) <= 1, calls
+
+
 @pytest.mark.parametrize("n", [1, LONG])
 def test_an_existing_0644_ledger_behind_links_is_tightened_with_its_wal_and_shm(tmp_path, n):
     # SQLite puts -wal and -shm next to the file it really opened, not next to the link; JADE used to chmod `<link>-wal` and miss them.
