@@ -969,6 +969,10 @@ class _Scan:
         self.literal_end = literal_end if depth == 0 else 0
         self.legacy = len(budget) > 3 and budget[3]   # origin/main's reading of `"${NAME}"` (`$X`): the third reading of `_skeleton_both_top`
         self.prior = len(budget) > 6 and budget[6]   # the reading as it was before W-120 (a named descriptor is a word, `>(` opens a group): the extra reading of `_skeleton_both_top`
+        # A long text with a W-120 spelling: its runs of one word, or of up to eight words, are written four or five times (`_collapse_runs_kept_parity`), in the
+        # words of a stage and in the text of the reading. That reading joins what main cut at a brace or a `(`, and one long stage with a `git` in every unit costs
+        # the square of its length; main writes four repeats in the readings of a long text with braces (`_chunk_readings`). The prior reading is not cut (W-120 review).
+        self.collapse = not self.prior and self.n > DENSE and _W120_FORMS.search(s) is not None
         self.ssh = not (len(budget) > 4 and budget[4] is False)   # False: `ssh host 'cmd'` is one word list, `cmd` is not read as a command (the scope check, jade/scopes.py)
         self.assigns: dict[str, list[str]] = {}   # `g=git` earlier in this text: the literal values a variable was given (V6-08, N19)
 
@@ -1162,6 +1166,8 @@ class _Scan:
         ws = words_of(raw)
         if not ws:
             return
+        if self.collapse and len(raw) > DENSE:
+            ws = _collapse_runs_kept_parity(" ".join(ws) + " ").split(" ")[:-1]
         enc = " ".join(ws)
         bare = PREFIX.sub("", enc, count=1)
         rest = bare.split(" ") if bare else []
@@ -1525,6 +1531,8 @@ class _Scan:
                 deferred.extend(self._sub(t) for t in self._variable_command(raw, deferred))
         self.nest -= 1
         text = _readings("".join(out), braced, escaped)
+        if self.collapse and len(text) > DENSE:
+            text = _collapse_runs_kept_parity(text)
         return text + "".join(f" ; {d} ; " for d in dict.fromkeys(deferred)), i   # a text produced for several pipes is written once
 
     def _heredoc_bodies(self, i: int, pending: list, deferred: list[str]) -> int:
@@ -1671,6 +1679,15 @@ def _collapse_runs(text: str) -> str:
     """Four repeats of a word (or of up to eight words) say all that a long run of them does: the same segments are read again and again. A run that moves the
     directory, or counts (`cd`, `pushd`, `popd`, `-C ..`, `--git-dir`, `--work-tree`, `..`: each repeat goes one more level), is kept."""
     return RUN_OF_WORDS.sub(lambda m: m.group(0) if COUNTED.search(m.group(1)) else m.group(1) * 4, text)
+
+
+def _collapse_runs_kept_parity(text: str) -> str:
+    """`_collapse_runs` that keeps four repeats of a run when it has an even number and five when it has an odd one. A word that takes the next word as its value
+    (`--upload-pack <program>`) then reads the word after the run as the whole run does: a run of `--upload-pack` that is odd in number hands it the program."""
+    def keep(m: re.Match) -> str:
+        unit = m.group(1)
+        return m.group(0) if COUNTED.search(unit) else unit * (4 + (len(m.group(0)) // len(unit)) % 2)
+    return RUN_OF_WORDS.sub(keep, text)
 
 
 MOVES_DIRECTORY = re.compile(r"(?<![^\s;&|(){}])(?:cd|pushd|popd)(?![^\s;&|(){}])")
