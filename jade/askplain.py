@@ -93,6 +93,25 @@ def risk_line(rule_id: str, ho_ids=()) -> str:
     return RISK_TEXT.get(rule_id, GENERIC_RISK)
 
 
+# W-153 review 2: `git update-ref` is R-10, but it moves a ref on this Mac only; the R-10 sentence ("outside this Mac") would be false for it.
+UPDATE_REF_RISK = "This moves or deletes a git branch or tag on this Mac, and a later push can publish it."
+_UPDATE_REF_KEY = re.compile(r"^git(?:\s+-\S+(?:\s+(?!update-ref\b)\S+)?)*\s+update-ref\b")
+
+
+def risk_lines(a) -> list[str]:
+    """The risk sentences of a call: the sentence of the rule that names it, then the sentence of every never-learned or human-only rule (`policy.also_kept`) the call
+    also matches, so a call named R-10 that also writes `AGENTS.md` still says it changes what guards the agent. An R-10 call whose gated segments are all
+    `git update-ref` gets `UPDATE_REF_RISK`: it changes nothing outside this Mac."""
+    keys = getattr(a, "seg_keys", None) or []
+    first = UPDATE_REF_RISK if a.rule_id == "R-10" and keys and all(_UPDATE_REF_KEY.match(k) for k in keys) else risk_line(a.rule_id, a.ho_ids)
+    lines = [first]
+    for r in policy.also_kept(a):
+        s = RISK_TEXT.get(r)
+        if s and s not in lines:
+            lines.append(s)
+    return lines
+
+
 # What a gated command does, as one sentence. The first pattern that matches the canonical key of a gated segment wins. `{1}` style groups are filled with `m.expand`.
 _Render = tuple[re.Pattern, str]
 SEGMENT_TEXT: list[_Render] = [(re.compile(p), t) for p, t in (
@@ -539,7 +558,7 @@ def other_count(a) -> int:
 
 def header(a, tool: str) -> list[str]:
     """The lines every question starts with, in this order: what, why it is risky, what else is in the call, and a hint when risky commands are joined."""
-    lines = [what_line(a, tool), risk_line(a.rule_id, a.ho_ids)]
+    lines = [what_line(a, tool), *risk_lines(a)]
     n = other_count(a)
     if n:
         lines.append(f"Also in this call: {n} other command that JADE rates as low risk." if n == 1 else f"Also in this call: {n} other commands that JADE rates as low risk.")

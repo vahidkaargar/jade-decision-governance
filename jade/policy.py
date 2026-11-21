@@ -1832,6 +1832,18 @@ def _use_identity(seg: str) -> str:
 ALSO_KEPT = ("R-13", "R-14", "R-17", "R-18", "R-21", "R-22")
 
 
+def also_kept(a) -> list[str]:
+    """The rules of `ALSO_KEPT` in the call's `seg_rules` other than the rule that names it, in `ALSO_KEPT` order (W-153 review 2): the question and the block text
+    name them too, so a human who reads "R-10" still learns that the call also writes an agent file (R-13) or a skill (R-18), as on 0.7.0."""
+    rules = set(getattr(a, "seg_rules", None) or ())
+    return [r for r in ALSO_KEPT if r in rules and r != a.rule_id]
+
+
+def rule_rationale(rule_id: str) -> str:
+    """The `rationale` of a rule of risk.yaml (with the local overlay), or "" when there is no such rule."""
+    return next((r.get("rationale", "") for r in risk()["rules"] if r.get("id") == rule_id), "")
+
+
 def _also_hits(also: list[str], text: str, files: str | None, alt: dict[str, str] | None, dirs: tuple[str, ...], path_only: bool = False) -> None:
     """Add to `also` every rule of `ALSO_KEPT` that this view of the segment matches (see `classify_segment`). `path_only`: only the path rules (the view of absolute operands)."""
     for r in risk()["rules"]:

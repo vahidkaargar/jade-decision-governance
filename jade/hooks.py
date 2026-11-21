@@ -153,6 +153,13 @@ class HookResult:
     stdout: str = ""
 
 
+def _also_note(a) -> str:
+    """" It also matches R-13 (...)." for every never-learned or human-only rule the call matches besides the one that names it (`policy.also_kept`, W-153 review 2),
+    so the block text does not hide a write to an agent file behind R-10. "" when there is none."""
+    also = policy.also_kept(a)
+    return f" It also matches {'; '.join(f'{r} ({policy.rule_rationale(r)})' for r in also)}." if also else ""
+
+
 def _classify(tool: str, tool_input: dict, cwd: str = "") -> policy.Assessment:
     return policy.assess(tool, tool_input, cwd)
 
@@ -673,7 +680,7 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit, hold_
             return res
         if mode == "advisory":
             db.event("gate", "would_block", guard=f"{a.rule_id} {a.level}", actor="hook", detail=_detail(event, a))
-            return HookResult(0, f"[advisory, not blocked] JADE: {a.level} risk ({a.rule_id}: {a.rationale}) would need a permit.")
+            return HookResult(0, f"[advisory, not blocked] JADE: {a.level} risk ({a.rule_id}: {a.rationale}) would need a permit.{_also_note(a)}")
         ctx = permits.make_context(tool, a, event, cwd=cwd)
         pending = permits.pending_for(db, a.plan_hash, context=ctx, fingerprints=fp)
         if pending is None:
@@ -688,18 +695,18 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit, hold_
             pid = pending.permit_id
         why = (f" (Permit {found.permit_id} exists but cannot be used: {refusal}.)" if found is not None and refusal else "") + permits.refusal_note(db, a.plan_hash)   # V6-26: a human refusal is told to the agent
         if ctx.get("redacted") and permits.keep_raw(db, pid, permits.raw_parts(tool, a, event)):   # W-43: the human allowed it, so the raw call is kept for their review only
-            return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}). This {tool} call needs a human-approved permit, and the {ctx['redacted']} secret-shaped "
+            return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}).{_also_note(a)} This {tool} call needs a human-approved permit, and the {ctx['redacted']} secret-shaped "
                                  f"value(s) in it are not stored in the ledger.{why}\n"
                                  f"Permit {pid} is PENDING. Ask the human to review the whole command in their own terminal:  jade permit show {pid} --raw   and, if it is right, to approve it:  "
                                  f"jade permit approve {pid}\n"
                                  "Then retry the identical command (single use, 30 minutes). You cannot view the raw command or approve it yourself; "
                                  "do not rephrase the command to avoid the gate. Continue with other work meanwhile.")
         if ctx.get("redacted"):
-            return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}). This {tool} call needs a human-approved permit, and the {ctx['redacted']} secret-shaped "
+            return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}).{_also_note(a)} This {tool} call needs a human-approved permit, and the {ctx['redacted']} secret-shaped "
                                  f"value(s) in it are not stored, so a human cannot review the whole command and the permit cannot be approved.{why}\n"
                                  "Put each secret in an environment variable or a file the command reads, remove it from the command line, and retry. "
                                  f"(Permit {pid} stays PENDING and will expire.) Do not rephrase the command to avoid the gate.")
-        return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}). This {tool} call needs a human-approved permit.{why}\n"
+        return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}).{_also_note(a)} This {tool} call needs a human-approved permit.{why}\n"
                              f"Permit {pid} is PENDING. Ask the human to run in their own terminal:  jade permit approve {pid}\n"
                              "Then retry the identical command (single use, 30 minutes). You cannot approve it yourself; "
                              "do not rephrase the command to avoid the gate. Continue with other work meanwhile.")
