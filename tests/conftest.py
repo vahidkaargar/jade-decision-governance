@@ -15,13 +15,23 @@ def real_anchor_installed() -> bool:
     return os.path.lexists(signing.DEFAULT_ANCHOR)
 
 
+def _refuse_to_skip() -> None:
+    if os.environ.get("JADE_REQUIRE_APPROVE_MODULES") == "1" and real_anchor_installed():   # W-201: CI sets this; a skipped module there would be a silent hole, so the run stops
+        raise pytest.UsageError("W-201: JADE_REQUIRE_APPROVE_MODULES=1 and the real approver trust anchor is installed, so the W-93 modules would be skipped; run on a host without the anchor")
+
+
+def pytest_sessionstart(session):
+    """W-201: stop at the start of the session, in the main process. Under pytest-xdist (CI runs `-n auto`) a UsageError raised while a worker collects
+    comes out as an INTERNALERROR with exit code 3 and the message is lost; raised here it ends the run before any worker starts, with exit code 4 and the message."""
+    _refuse_to_skip()
+
+
 def pytest_collection_modifyitems(config, items):
     """W-93: on a machine where the approver is installed (W-90) the default anchor always wins over the test override, so the subprocess-based approval tests
     are skipped there; CI and any machine without the anchor run them. In-process tests are covered by the `isolated` fixture below."""
     if not real_anchor_installed():
         return
-    if os.environ.get("JADE_REQUIRE_APPROVE_MODULES") == "1":   # W-201: CI sets this; a skipped module there would be a silent hole, so the run stops
-        raise pytest.UsageError("W-201: JADE_REQUIRE_APPROVE_MODULES=1 and the real approver trust anchor is installed, so the W-93 modules would be skipped; run on a host without the anchor")
+    _refuse_to_skip()   # also here: a conftest that is loaded late does not get pytest_sessionstart
     skip = pytest.mark.skip(reason="W-93: the real approver trust anchor is installed; this module approves permits in a subprocess that would use it (run it in CI or after --uninstall)")
     for item in items:
         if item.module.__name__.rsplit(".", 1)[-1] in SUBPROCESS_APPROVE_MODULES:
