@@ -180,14 +180,15 @@ PLAIN_HIGH = {
     "adversarial:A228": ("exact", "R-23, a file tool: exact only"), "adversarial:A229": ("exact", "R-23, a file tool: exact only"),
     "adversarial:A19": ("exact", "R-15 `git -c`: exact only"),
     "regression:R25": ("class", "R-11 `git reset --hard`: an ordinary high call, as at CONTROL in test_autonomy_floor"),
-    # class-eligible and not ordinary: each has a backlog row, and the entry goes when memory closes it
-    "adversarial:A57": ("class", "BACKLOG W-137: R-12 launchctl bootout of JADE's own agent"), "adversarial:A62": ("class", "BACKLOG W-137: R-12 launchctl remove of JADE's own agent"),
-    "adversarial:A224": ("class", "BACKLOG W-137: R-15 git config alias that runs a program"), "adversarial:A225": ("class", "BACKLOG W-137: R-15 git config alias"),
-    "adversarial:A226": ("class", "BACKLOG W-137: R-15 git config core.sshCommand"), "adversarial:A227": ("class", "BACKLOG W-137: R-15 git config set alias"),
-    "adversarial:A38": ("class", "BACKLOG W-137: R-15 GIT_SSH_COMMAND"),
-    "adversarial:A18": ("class", "BACKLOG W-190: `git push --all origin` can push the default branch"),
-    "adversarial:A59": ("class", "BACKLOG W-190: R-16 sed -i on a JADE source file from the shell"),
-    "regression:R16": ("class", "BACKLOG W-190: composio execute GMAIL_SEND_EMAIL"),
+    # R-12 calls that take JADE's own agent out of launchd (W-137 owner decision: exact only)
+    "adversarial:A57": ("exact", "R-12 launchctl bootout of JADE's own agent: exact only (W-137, owner decision)"),
+    "adversarial:A62": ("exact", "R-12 launchctl remove of JADE's own agent: exact only (W-137, owner decision)"),
+    "adversarial:A224": ("exact", "R-15 git config alias that runs a program: exact only (W-137)"), "adversarial:A225": ("exact", "R-15 git config alias: exact only (W-137)"),
+    "adversarial:A226": ("exact", "R-15 git config core.sshCommand: exact only (W-137)"), "adversarial:A227": ("exact", "R-15 git config set alias: exact only (W-137)"),
+    "adversarial:A38": ("exact", "R-15 GIT_SSH_COMMAND: exact only (W-137)"),
+    "adversarial:A18": ("exact", "`git push --all origin` can push the default branch: exact only (W-190)"),
+    "adversarial:A59": ("exact", "R-16 sed -i on a JADE source file from the shell: exact only (W-190)"),
+    "regression:R16": ("never", "composio execute GMAIL_SEND_EMAIL: an action in a connected app, never remembered (W-190)"),
     "adversarial:A244": ("class", "BACKLOG W-190: git send-pack to the default branch is blocked by SI-08 in a repository; with no repository it is the push rule's kind"),
     # V6-08 N20 (gh api merges): a merge through the API is a merge: exact at most, never sent to Jev (`policy.gh_api_merge_in`, as `gh pr merge`)
     "adversarial:A246": ("exact", "a merge through gh api: exact only"), "adversarial:A247": ("exact", "a merge through gh api: exact only"),

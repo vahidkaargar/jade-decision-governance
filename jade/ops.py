@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hmac
 import json
 import math
 import os
@@ -20,7 +21,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import NamedTuple
 
-from . import ledger, memory, paths, policy, signing
+from . import audit, ledger, memory, paths, policy, signing
 from .util import is_human_tty, now, parse_ts, show_safely, ts, user
 
 
@@ -238,18 +239,36 @@ OPEN_PERMIT = ("PENDING", "ISSUED")
 # Events whose detail is the record itself, not project text, so retention keeps it (V6-28 review): `jev` is the value the human set (cleared, `jade jev on` read `off`);
 # `jev_accepted` and `jev_allowed` hold only hashes, rule ids and session ids (the command text of a `jev_allowed` label is removed above), and they are what links a
 # Jev yes to the owner's later deny (cleared, a false allow vanished after 90 days and the deny gate opened by itself).
-KEPT_DETAIL = ("jev", "jev_accepted", "jev_allowed")
+# `level` is the value the human set with `jade level` (W-194): `_recorded_level` reads it, and a config level that no event records is refused and shown as
+# written some other way, so a cleared `level` event locked the human out of `jade level` after 90 days.
+KEPT_DETAIL = ("jev", "jev_accepted", "jev_allowed", "level")
 
 
 PURGED_ASK = json.dumps({"purged": True})   # `asks.question_json` is NOT NULL and a reader parses it: a marker, not NULL
-PURGE_TABLES = ("jev_calls", "decisions", "permits", "events", "asks", "human_answers")
+PURGE_TABLES = ("jev_calls", "decisions", "permits", "events", "asks", "human_answers", "audit_queue")
 
 
 class _DryRun(Exception):
     """Raised inside the purge transaction of a dry run so that it rolls back."""
 
 
-def _purge_rows(con, cutoff: str, *, ask_text: bool) -> dict[str, int]:
+def _purge_audit_queue(con, cutoff: str, key: bytes | None) -> int:
+    """W-210: clear the command text and the folder of a checked row of `audit_queue` (status `right` or `wrong`, checked before the cutoff), and seal the row again in the
+    same transaction: the seal covers both fields. A row whose old seal fails is cleared but its seal is left as it was, so an edited row never becomes a good one. A row
+    still `pending` is never touched (the walk shows its text). With no seal key nothing is cleared: the new seal cannot be made, and clearing would break a good seal for good."""
+    if key is None:
+        return 0
+    n = 0
+    for r in con.execute("SELECT * FROM audit_queue WHERE drawn_ts<? AND status<>'pending' AND COALESCE(resolved_ts, drawn_ts)<? "
+                         "AND (COALESCE(subject,'') NOT IN ('', ?) OR COALESCE(cwd,'') NOT IN ('', ?))", (cutoff, cutoff, PURGED, PURGED)).fetchall():
+        good = hmac.compare_digest(r["seal"], audit._seal(key, r))
+        new = {**dict(r), "subject": PURGED if r["subject"] else r["subject"], "cwd": PURGED if r["cwd"] else r["cwd"]}
+        con.execute("UPDATE audit_queue SET subject=?, cwd=?, seal=? WHERE audit_id=?", (new["subject"], new["cwd"], audit._seal(key, new) if good else r["seal"], r["audit_id"]))
+        n += 1
+    return n
+
+
+def _purge_rows(con, cutoff: str, *, ask_text: bool, audit_key: bytes | None = None) -> dict[str, int]:
     """Clear the text, inside the caller's transaction, and count the rows cleared per table. One place, so a dry run and a purge cannot disagree."""
     n = dict.fromkeys(PURGE_TABLES, 0)
     n["jev_calls"] = con.execute("UPDATE jev_calls SET state_text=NULL, question_text=NULL WHERE ts<? AND (state_text IS NOT NULL OR question_text IS NOT NULL)",
@@ -271,9 +290,11 @@ def _purge_rows(con, cutoff: str, *, ask_text: bool) -> dict[str, int]:
             keep = {k: v for k, v in ctx.items() if k in ("tool", "length", "rule", "bound", "session_id", "agent_id", "permission_mode", "hash_cwd")}
             con.execute("UPDATE permits SET scope=? WHERE permit_id=?", (json.dumps({**keep, "subject": PURGED, "purged": True}), r["permit_id"]))
             n["permits"] += 1
+    n["audit_queue"] = _purge_audit_queue(con, cutoff, audit_key)
     n["events"] = con.execute("UPDATE events SET detail_json=json_remove(detail_json,'$.label') WHERE kind='jev_allowed' AND ts<? AND json_extract(detail_json,'$.label') IS NOT NULL",
                               (cutoff,)).rowcount   # the label is command text; the keys beside it are hashes and stay (below)
-    n["events"] += con.execute("UPDATE events SET detail_json=NULL WHERE ts<? AND detail_json IS NOT NULL AND kind NOT IN ('purge', ?, ?, ?)", (cutoff, *KEPT_DETAIL)).rowcount
+    n["events"] += con.execute(f"UPDATE events SET detail_json=NULL WHERE ts<? AND detail_json IS NOT NULL AND kind NOT IN ('purge', {', '.join('?' * len(KEPT_DETAIL))})",
+                               (cutoff, *KEPT_DETAIL)).rowcount
     if ask_text:
         # The chat question (it holds a "Command:" block), the one-line label and the scope labels of an ask that is over: never an ask still open.
         n["asks"] = con.execute(
@@ -299,9 +320,10 @@ def purge_report(db: ledger.Ledger, older_than_days: int = 90, *, ask_text: bool
     `jade maintain` never turns it on."""
     cutoff = ts(now() - timedelta(days=older_than_days))
     out: dict[str, int] = {}
+    key = audit._read_key(db)   # never made here: no key, no row of the audit queue is cleared
     try:
         with db.tx() as con:
-            out = _purge_rows(con, cutoff, ask_text=ask_text)
+            out = _purge_rows(con, cutoff, ask_text=ask_text, audit_key=key)
             if dry_run:
                 raise _DryRun
             if (total := sum(out.values())):
