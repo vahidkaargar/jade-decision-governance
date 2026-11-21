@@ -18,6 +18,9 @@ ROOT = Path(__file__).resolve().parents[1]
 _NET = {"UV_OFFLINE": "0"} if os.environ.get("CI") else {}
 
 SCRIPT = ROOT / "scripts" / "verify_install.sh"
+# The script builds a wheel and an sdist and installs the wheel. On a busy machine that took more than the old 600 s (the comment above: 190 s per build with
+# 8 workers on one checkout), and a kill by the timeout read as a failed install. The bound only has to catch a hang (W-156).
+CHILD_TIMEOUT_S = 1800
 SH = shutil.which("sh")
 
 
@@ -43,7 +46,7 @@ def dist(tmp_path_factory):
         pytest.skip("uv is not installed; the release workflow runs scripts/verify_install.sh")
     keep = tmp_path_factory.mktemp("dist")
     env = {**_NET, **os.environ, "VERIFY_INSTALL_KEEP_DIST": str(keep)}
-    r = subprocess.run([SH, str(SCRIPT)], capture_output=True, text=True, timeout=600, env=env, cwd=ROOT, check=False)
+    r = subprocess.run([SH, str(SCRIPT)], capture_output=True, text=True, timeout=CHILD_TIMEOUT_S, env=env, cwd=ROOT, check=False)
     return r, keep
 
 
@@ -93,7 +96,7 @@ def test_no_private_overlay_or_baseline_dataset_is_ever_packaged(dist):
 
 
 def run_script(**env):
-    return subprocess.run([SH, str(SCRIPT)], capture_output=True, text=True, timeout=600, env={**_NET, **os.environ, **env}, cwd=ROOT, check=False)
+    return subprocess.run([SH, str(SCRIPT)], capture_output=True, text=True, timeout=CHILD_TIMEOUT_S, env={**_NET, **os.environ, **env}, cwd=ROOT, check=False)
 
 
 def test_a_prebuilt_dist_directory_is_verified_instead_of_building(dist):

@@ -598,9 +598,9 @@ def _ops(a) -> int:
                 print("\n".join(f"{'installed' if v else 'MISSING  '}  {k}" for k, v in st.items()))
                 return 0 if all(st.values()) else 1
             if a.action == "install":
-                backup = ops.hooks_install()
+                backup, summary = ops.hooks_install_with_summary()
                 print(f"hooks installed in {ops.settings_path()} ({f'backup {backup}' if backup else 'no earlier file, no backup'}). New sessions pick them up.")
-                print("\n".join(ops.install_summary()))
+                print("\n".join(ops.install_summary_lines(summary)))
             else:
                 print(f"removed {ops.hooks_uninstall()} hook entr(ies)")
         elif a.cmd == "gate":

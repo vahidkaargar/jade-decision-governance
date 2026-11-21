@@ -9,7 +9,9 @@ import subprocess
 import pytest
 
 import jade
-from jade import cli, hooks, ops, paths, policy, signing, util
+from jade import cli, hooks, ops, paths, policy, proxy, signing, util
+from tests.acceptance import test_memory_w101 as m
+from tests.acceptance.test_jev_proxy_w102 import KIND, Prov, owner_answers, prefs
 
 MODES = paths.GATE_MODES
 LEVELS = (None, "off", "low", "medium", "high")
@@ -27,10 +29,10 @@ def invariant_ids() -> list[str]:
     return sorted(i["id"] for i in policy.safety()["invariants"])
 
 
-def setup_pair(mode: str, level: str | None) -> None:
-    if level is not None:
-        ops.set_level(level, stdin_isatty=True)   # a recorded level: a raw config write would be the "not recorded" FAIL row
-    ops.set_gate_mode(mode, stdin_isatty=True)
+def setup_pair(mode: str, level: str | None, again: bool = False) -> None:
+    """`again`: the pair is set after a gated call already ran in this test (the W-142 probes), and enforce then asks for the signed backend or the journaled override."""
+    ops.set_level("unset" if level is None else level, stdin_isatty=True)   # a recorded level (an unset one too, W-142: the same test sets several pairs): a raw config write would be the "not recorded" FAIL row
+    ops.set_gate_mode(mode, stdin_isatty=True, allow_unsigned=again)
 
 
 def rows() -> dict[str, tuple]:
@@ -43,16 +45,34 @@ def blocks(mode: str, sid: str) -> bool:
 
 
 def risk_gated(mode: str, level: str | None) -> bool:
-    """pretool hands a high-risk call to `_gate` in advisory mode at level off, else in the gate mode."""
-    return mode != "off" and ("advisory" if level == "off" else mode) == "enforce"
+    """Is a plain high-risk call held for a human at this pair? Asked of the real `hooks.pretool` (W-142), never worked out again here: the call is
+    `m.CMD` with no session id, so neither `memory.step` nor `proxy.step` can let it run, and an exit 2 with a pending permit is the hold."""
+    setup_pair(mode, level, again=True)
+    a = policy.assess("Bash", {"command": m.CMD}, "/tmp")
+    assert a.level == "high" and not a.blocked and not a.ho_ids, (a.level, a.blocked, a.ho_ids)   # the probe call is a plain high call: no invariant decides it
+    res = hooks.pretool({"tool_name": "Bash", "tool_input": {"command": m.CMD}, "cwd": "/tmp", "permission_mode": "auto"})
+    return res.exit_code == 2 and "needs a human-approved permit" in res.stderr
 
 
-def no_human_paths(mode: str, level: str | None) -> list[str]:
-    """Who may let a gated high or critical call run in `_gate` without a human, before askchat: memory.step (a confirmed answer) at enforce and level
-    low or medium; proxy.step (Jev) at enforce and level low, medium or high, but at level high it is shadow only (it records and decides nothing)."""
-    if mode != "enforce":
-        return []
-    return ["memory", "Jev"] if level in ("low", "medium") else []
+def no_human_paths(mode: str, level: str | None, monkeypatch) -> list[str]:
+    """Who really lets a gated high call run with no human at this pair (W-142): the real `hooks.pretool` is called, never a copy of `_gate`. First (at
+    enforce, level medium) a confirmed answer is stored for `m.CMD` and the deny gate and a fixture Jev that says yes are set up for `KIND`; then the pair
+    is set and each call is made in a session of its own. `memory` and `Jev` are named when the hook answered with the words of that branch (exit 0)."""
+    setup_pair("enforce", "medium", again=True)
+    m.ask_and_allow(m.CMD)   # first: while Jev is not set up, the owner is asked
+    m.confirm_all()
+    monkeypatch.setattr(proxy, "make_provider", Prov(p=0.95))
+    prefs()
+    owner_answers()
+    setup_pair(mode, level, again=True)
+    out = []
+    by_memory = hooks.pretool(m.call(m.CMD, "sess-w142-memory"))
+    if by_memory.exit_code == 0 and "allowed from your confirmed answer" in by_memory.stderr:
+        out.append("memory")
+    by_jev = hooks.pretool(m.call(KIND, "sess-w142-jev"))
+    if by_jev.exit_code == 0 and "Jev judged this" in by_jev.stderr:
+        out.append("Jev")
+    return out
 
 
 @pytest.fixture
@@ -62,12 +82,34 @@ def wired(monkeypatch):
     monkeypatch.setattr(ops, "wiring_problems", lambda probe=True: [])
 
 
+# ------------------------------------------------------------------ W-142: the probes ask the real hook, so each has a positive twin
+
+@pytest.mark.parametrize("level", ["low", "medium"])
+def test_the_probe_sees_both_ways_to_run_with_no_human_at_enforce_and_low_or_medium(level, wired, monkeypatch):
+    """The positive twin: a probe that always answered "none" would make the table below pass for the wrong reason."""
+    assert no_human_paths("enforce", level, monkeypatch) == ["memory", "Jev"]
+
+
+@pytest.mark.parametrize("mode,level", [("enforce", "high"), ("enforce", None), ("enforce", "off"), ("advisory", "medium"), ("off", "medium")])
+def test_the_probe_sees_no_way_to_run_with_no_human_where_the_hook_has_none(mode, level, wired, monkeypatch):
+    assert no_human_paths(mode, level, monkeypatch) == []
+
+
+def test_the_hold_probe_sees_a_hold_at_enforce_and_none_in_advisory_or_at_level_off(wired):
+    assert risk_gated("enforce", None) is True
+    assert risk_gated("enforce", "high") is True
+    assert risk_gated("enforce", "off") is False
+    assert risk_gated("advisory", "high") is False
+    assert risk_gated("off", "high") is False
+
+
 # ------------------------------------------------------------------ the table over every gate mode and level pair
 
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("level", LEVELS)
-def test_what_blocks_row_matches_the_hook_for_every_pair(mode, level, wired):
-    setup_pair(mode, level)
+def test_what_blocks_row_matches_the_hook_for_every_pair(mode, level, wired, monkeypatch):
+    gated = risk_gated(mode, level)   # the real hook, asked first: it sets the pair itself and leaves it set
+    bypass = no_human_paths(mode, level, monkeypatch)
     ok, detail = rows()["what blocks"]
     ids = invariant_ids()
     if level is None and mode != "off":   # policy.py runs the SI-12 checks only once a level is set: the row must say so, not list it as active
@@ -75,13 +117,12 @@ def test_what_blocks_row_matches_the_hook_for_every_pair(mode, level, wired):
         ids = [s for s in ids if s != "SI-12"]
     firm = [s for s in ids if blocks(mode, s)]
     soft = [s for s in ids if not blocks(mode, s)]
-    gated = risk_gated(mode, level)
-    bypass = no_human_paths(mode, level)
     if not soft and gated and bypass:   # the invariants block, but a high call may run with no human: never "ok" (V6-10 F1)
         assert ok is None, detail
         assert ", ".join(ids) + ") blocks" in detail
         assert "held for a human approval" not in detail
-        assert "confirmed answer" in detail and "Jev" in detail and "without a human" in detail, detail
+        assert "without a human" in detail, detail
+        assert ("confirmed answer" in detail) == ("memory" in bypass) and ("Jev" in detail) == ("Jev" in bypass), (bypass, detail)   # the row names each path the real hook has, and only those
     elif not soft and gated:
         assert ok is True, detail
         assert ", ".join(ids) + ") blocks" in detail and "held for a human approval" in detail
@@ -173,6 +214,169 @@ def test_what_blocks_says_nothing_blocks_when_the_pretool_hook_is_missing():
     assert ok is None, detail
     assert detail.startswith("nothing blocks: the PreToolUse hook is not installed"), detail
     assert "blocks;" not in detail and "jade hooks install" in detail
+
+
+def _pretool_out_of_date(monkeypatch, gaps):
+    """The PreToolUse entry is installed but `hooks_status` calls it out of date, with `gaps` as `pretool_matcher_gaps` reports them (W-141)."""
+    monkeypatch.setattr(ops, "hooks_status", lambda: {**dict.fromkeys(ops.HOOKS, True), "PreToolUse": False})
+    monkeypatch.setattr(ops, "pretool_matcher_gaps", lambda: gaps)
+    monkeypatch.setattr(ops, "wiring_problems", lambda probe=True: [])
+
+
+def test_what_blocks_names_the_tools_a_matcher_gap_leaves_unchecked(monkeypatch):
+    """W-141: a matcher that misses some tools still runs for the others, so the row must not say "nothing blocks". It names the uncovered tools and still says
+    what blocks for the covered ones."""
+    _pretool_out_of_date(monkeypatch, ["Read", "Grep", "Glob", "AskUserQuestion"])
+    setup_pair("enforce", "high")
+    ok, detail = rows()["what blocks"]
+    assert ok is None, detail
+    assert not detail.startswith("nothing blocks"), detail
+    assert "does not cover Read, Grep, Glob, AskUserQuestion" in detail, detail
+    assert "no check at all" in detail and "jade hooks install" in detail, detail
+    assert "every other gated tool (Bash, " in detail and ", every MCP tool) is checked as follows: every safety invariant (" in detail, detail
+    assert "held for a human approval" in detail, detail
+
+
+def test_what_blocks_says_every_mcp_tool_when_the_matcher_misses_mcp(monkeypatch):
+    _pretool_out_of_date(monkeypatch, ["mcp__server__tool"])
+    setup_pair("enforce", "high")
+    ok, detail = rows()["what blocks"]
+    assert "does not cover every MCP tool" in detail and "mcp__server__tool" not in detail, detail
+
+
+def test_what_blocks_says_the_hook_still_runs_when_only_its_timeout_or_failure_setting_is_old(monkeypatch):
+    """W-141: no matcher gap, but the entry is out of date (a short timeout, or no onFailure): the hook still runs, so "nothing blocks" would be false too."""
+    _pretool_out_of_date(monkeypatch, [])
+    setup_pair("enforce", "high")
+    ok, detail = rows()["what blocks"]
+    assert ok is None, detail
+    assert not detail.startswith("nothing blocks"), detail
+    assert "out of date" in detail and "still runs" in detail and "crashed or hung gate may let a call run" in detail, detail
+    assert "jade hooks install" in detail and "every safety invariant (" in detail, detail
+
+
+def test_what_blocks_in_the_gap_case_keeps_the_gate_mode_words(monkeypatch):
+    _pretool_out_of_date(monkeypatch, ["Read"])
+    setup_pair("advisory", "high")
+    ok, detail = rows()["what blocks"]
+    assert ok is None and "does not cover Read" in detail and "advisory gate mode" in detail, detail
+
+
+def test_what_blocks_in_the_gap_case_is_unknown_when_the_wiring_has_problems(monkeypatch):
+    _pretool_out_of_date(monkeypatch, ["Read"])
+    monkeypatch.setattr(ops, "wiring_problems", lambda probe=True: ["disableAllHooks is true in x: the host runs no hook at all"])
+    setup_pair("enforce", "high")
+    ok, detail = rows()["what blocks"]
+    assert ok is None and detail.startswith("unknown: the hook wiring has problems"), detail
+    assert "does not cover Read" in detail, detail
+
+
+def _install_with_pretool_matchers(matchers):
+    """A real settings file (nothing mocked): `jade hooks install`, then the JADE PreToolUse group once per matcher (review of W-141)."""
+    ops.hooks_install(stdin_isatty=True)
+    p = ops.settings_path()
+    data = json.loads(p.read_text())
+    group = data["hooks"]["PreToolUse"][0]
+    data["hooks"]["PreToolUse"] = [{**group, "matcher": mt} for mt in matchers]
+    p.write_text(json.dumps(data))
+
+
+def test_an_invalid_pretool_matcher_covers_nothing_and_the_row_names_every_tool_it_misses():
+    """Review of W-141: with matchers `Bash` and `(` (not a valid regex) only Bash is checked. `pretool_matcher_gaps` stopped at the first tool on
+    `re.error`, so the row named one tool and said "every other gated tool is checked", which was false for Write, Edit, every MCP tool and the rest."""
+    setup_pair("enforce", "high")
+    _install_with_pretool_matchers(["Bash", "("])
+    gaps = ops.pretool_matcher_gaps()
+    assert "Bash" not in gaps and {"Write", "Edit", "Monitor", "AskUserQuestion", "mcp__server__tool"} <= set(gaps), gaps
+    assert gaps == [t for t in (*policy.GATED_BUILTIN, "AskUserQuestion", "mcp__server__tool") if t != "Bash"], gaps
+    ok, detail = rows()["what blocks"]
+    assert ok is None, detail
+    covered_list = detail.split("does not cover ", 1)[1].split(":", 1)[0]
+    assert "Bash" not in covered_list and "Write" in covered_list and "Edit" in covered_list and "every MCP tool" in covered_list, detail
+    assert "every other gated tool (Bash) is checked as follows: every safety invariant (" in detail, detail
+
+
+def test_a_pretool_matcher_that_covers_no_gated_tool_means_nothing_blocks():
+    """Every matcher invalid (or none that matches a gated tool): no gated call is checked, so the row says "nothing blocks", never "every other tool"."""
+    setup_pair("enforce", "high")
+    _install_with_pretool_matchers(["("])
+    assert ops.pretool_matcher_gaps() == [*policy.GATED_BUILTIN, "AskUserQuestion", "mcp__server__tool"]
+    ok, detail = rows()["what blocks"]
+    assert ok is None, detail
+    assert detail.startswith("nothing blocks: the PreToolUse matcher covers no gated tool"), detail
+    assert "every other gated tool" not in detail and "blocks;" not in detail and "jade hooks install" in detail, detail
+
+
+def _install_dead_hooks(tmp_path, mode: str) -> None:
+    """A real settings file (nothing mocked) whose every JADE hook runs a `jade` script that exits 1 (a broken install: the hook crashes on every call).
+    `mode` "gap": the PreToolUse matcher is `Bash` only; "stale": the PreToolUse timeout is 5 s; "gap+disabled": the gap, and `disableAllHooks` true.
+    The script exits at once, so the live probe `jade check` runs is fast and a busy machine cannot change the result (review of W-141)."""
+    fake = tmp_path / "bin" / "jade"
+    fake.parent.mkdir(parents=True, exist_ok=True)
+    fake.write_text("#!/bin/sh\n# from jade import cli  (the launcher marker: this is JADE's program, a broken one)\nexit 1\n")
+    fake.chmod(0o755)
+    ops.hooks_install(stdin_isatty=True)
+    p = ops.settings_path()
+    data = json.loads(p.read_text())
+    for event, groups in data["hooks"].items():
+        for g in groups:
+            for h in g["hooks"]:
+                sub = ops.parse_hook_command(h["command"]).sub
+                h["command"] = f"{fake} hook {sub}"
+                if event == "PreToolUse" and mode == "stale":
+                    h["timeout"] = 5
+            if event == "PreToolUse" and mode.startswith("gap"):
+                g["matcher"] = "Bash"
+    if mode == "gap+disabled":
+        data["disableAllHooks"] = True
+    p.write_text(json.dumps(data))
+
+
+def _rows_named_but_missing(rows_: list[tuple]) -> list[str]:
+    """Rows a detail points to ("see the `x` row") that `jade check` did not print."""
+    import re
+
+    names = {n for n, _ok, _d in rows_}
+    return [ref for _n, _ok, d in rows_ for ref in re.findall(r"the `([^`]+)` row", d) if ref not in names]
+
+
+@pytest.mark.parametrize("mode", ["gap", "stale"])
+def test_check_runs_the_live_probe_when_the_pretool_hook_is_out_of_date_and_a_dead_hook_is_never_said_to_work(tmp_path, mode):
+    """Review of W-141: with the PreToolUse entry installed but out of date (a matcher gap, or an old timeout), `check` skipped the `hook wiring` row and
+    `_what_blocks_row` ran the static checks only, so a hook that crashes on every call was reported as blocking ("every other gated tool (Bash) is checked
+    as follows: ..."). `check` now runs the live probe whenever a JADE PreToolUse entry is registered, prints the `hook wiring` row, and the `what blocks`
+    row says unknown."""
+    setup_pair("enforce", "high")
+    _install_dead_hooks(tmp_path, mode)
+    assert ops.hooks_status()["PreToolUse"] is False   # out of date: the case this test is about
+    all_rows = ops.check(live=False)
+    got = {n: (ok, d) for n, ok, d in all_rows}
+    assert "hook wiring" in got, list(got)
+    ok_w, wiring = got["hook wiring"]
+    assert ok_w is False and "pretool: exit 1 for a command SI-09 must block" in wiring, wiring
+    ok, detail = got["what blocks"]
+    assert ok is None and detail.startswith("unknown: the hook wiring has problems"), detail
+    assert _rows_named_but_missing(all_rows) == [], _rows_named_but_missing(all_rows)
+
+
+def test_check_names_disable_all_hooks_in_a_printed_row_in_the_gap_case(tmp_path):
+    """Review of W-141: a matcher gap and `disableAllHooks` true. The `what blocks` row said "see the `hook wiring` row", which `check` did not print,
+    and no row named disableAllHooks. The `hook wiring` row is now printed and names it."""
+    setup_pair("enforce", "high")
+    _install_dead_hooks(tmp_path, "gap+disabled")
+    all_rows = ops.check(live=False)
+    got = {n: (ok, d) for n, ok, d in all_rows}
+    assert "hook wiring" in got and "disableAllHooks" in got["hook wiring"][1], got.get("hook wiring")
+    assert got["what blocks"][1].startswith("unknown: the hook wiring has problems"), got["what blocks"]
+    assert _rows_named_but_missing(all_rows) == [], _rows_named_but_missing(all_rows)
+
+
+def test_check_has_no_hook_wiring_row_when_no_pretool_hook_is_registered():
+    """The positive edge: no JADE hook at all. There is nothing to probe; `what blocks` says nothing blocks and points to no row."""
+    setup_pair("enforce", "high")
+    all_rows = ops.check(live=False)
+    assert "hook wiring" not in [n for n, _ok, _d in all_rows]
+    assert _rows_named_but_missing(all_rows) == []
 
 
 def test_what_blocks_is_unknown_when_the_hook_wiring_has_problems(monkeypatch):
@@ -395,21 +599,131 @@ def test_setup_hooks_text_counts_from_hooks(monkeypatch):
     assert "four" not in setup._hooks_change() and f"add {len(ops.HOOKS)} JADE hook entries" in setup._hooks_change()
 
 
-def test_install_summary_names_gate_mode_what_blocks_and_backend_and_writes_nothing():
+@pytest.fixture
+def probe_ok(monkeypatch):
+    """The live run of each hook binary behaves. The static wiring checks stay real; only the subprocess is skipped, so a busy machine (the probe has a 15 s
+    limit) cannot turn these rows into "unknown"."""
+    monkeypatch.setattr(ops, "probe_hook", lambda parsed, timeout_s=15.0: None)
+
+
+def test_install_summary_rows_name_gate_mode_what_blocks_and_backend_and_write_nothing(probe_ok):
     setup_pair("enforce", "off")
+    ops.hooks_install(stdin_isatty=True)   # the `what blocks` row reads the real hooks (and the wiring), as in `jade check`
     before = sorted(p.name for p in paths.home().iterdir()) if paths.home().exists() else []
-    lines = ops.install_summary()
-    assert lines[0] == "gate mode: enforce"
-    assert lines[1].startswith("what blocks: advisory: ")
-    assert lines[2].startswith("approval backend: tty")
+    settings_before = ops.settings_path().read_text()
+    rows_ = ops.install_summary_rows()
+    assert [r[0] for r in rows_] == ["gate mode", "what blocks", "approval backend"]   # the row names `jade check` uses
+    (_, ok0, text0), (_, ok1, text1), (_, ok2, text2) = rows_
+    assert text0 == "enforce" and ok0 is True
+    assert text1.startswith("advisory: ") and ok1 is None   # level off: a WARN, as in `jade check`
+    assert text2.startswith("tty") and ok2 is None
     after = sorted(p.name for p in paths.home().iterdir()) if paths.home().exists() else []
-    assert before == after
+    assert before == after and ops.settings_path().read_text() == settings_before
 
 
-def test_jade_hooks_install_prints_the_summary(capsys):
+def test_install_summary_row_state_follows_the_gate_and_the_backend(monkeypatch):
+    setup_pair("advisory", None)
+    by = {n: (ok, d) for n, ok, d in ops.install_summary_rows()}
+    assert by["gate mode"][0] is None and by["gate mode"][1].startswith("advisory")
+    monkeypatch.setattr(signing, "anchor_state", lambda: ("untrusted", "bad anchor"))
+    by = {n: (ok, d) for n, ok, d in ops.install_summary_rows()}
+    assert by["approval backend"][0] is False and "bad anchor" in by["approval backend"][1]
+
+
+def test_install_summary_rows_render_like_check_rows():
+    rows_ = [("gate mode", True, "enforce"), ("what blocks", None, "x"), ("approval backend", False, "y")]
+    assert ops.install_summary_lines(rows_) == ["ok    gate mode: enforce", "WARN  what blocks: x", "FAIL  approval backend: y"]
+
+
+def test_jade_hooks_install_never_says_ok_for_what_blocks_when_the_hooks_are_disabled(capsys):
+    """Review of W-140: the install row came from `blocking_summary` alone, so with `disableAllHooks` true (the host runs no hook) install printed
+    `ok    what blocks: ...` while `jade check` said WARN "unknown". The install row is now the `what blocks` row of `jade check`."""
+    setup_pair("enforce", None)
+    ops.settings_path().write_text(json.dumps({"disableAllHooks": True}))
+    assert cli.main(["hooks", "install"]) in (0, None)
+    out = capsys.readouterr().out
+    assert "ok    what blocks" not in out, out
+    assert "WARN  what blocks: unknown: the hook wiring has problems" in out, out
+    check_row = [r for r in ops.check(live=False) if r[0] == "what blocks"][0]
+    install_row = [r for r in ops.install_summary_rows() if r[0] == "what blocks"][0]
+    assert check_row[1] is None and install_row[1] is None
+    assert "`jade check`" in install_row[2] and "see the `hook wiring` row" not in install_row[2], install_row   # install prints no `hook wiring` row (residual b of W-140)
+
+
+def test_jade_hooks_install_says_ok_for_what_blocks_only_when_the_hook_is_wired(capsys, probe_ok):
+    """The positive twin: gate enforce, no level, the hooks installed and wired: the install row is ok, says what `jade check` says, and says the hooks
+    were not run here."""
+    setup_pair("enforce", None)
+    assert cli.main(["hooks", "install"]) in (0, None)
+    out = capsys.readouterr().out
+    assert "ok    what blocks: every active safety invariant (" in out, out
+    _n, ok_i, text_i = [r for r in ops.install_summary_rows() if r[0] == "what blocks"][0]
+    _n, ok_c, text_c = [r for r in ops.check(live=False) if r[0] == "what blocks"][0]
+    assert ok_i == ok_c is True and text_i.startswith(text_c) and "not run here" in text_i and "`jade check`" in text_i, (text_i, text_c)
+
+
+@pytest.mark.parametrize("mode", ["wired", "gap"])
+def test_the_install_summary_runs_no_hook(monkeypatch, mode):
+    """Review of W-140: the install summary ran the live probe (one subprocess per hook), so `jade hooks install` went from about 1 ms to about 1.6 s of
+    CPU and 36 s of wall time on a loaded machine. The summary reads the static wiring facts only; `jade check` runs the hooks."""
+    setup_pair("enforce", None)
+    ops.hooks_install(stdin_isatty=True)
+    if mode == "gap":
+        _install_with_pretool_matchers(["Bash"])
+    ran = []
+    monkeypatch.setattr(ops, "probe_hook", lambda parsed, timeout_s=15.0: ran.append(parsed.sub))
+    ops.install_summary_lines(ops.install_summary_rows())
+    assert ran == [], ran
+
+
+def test_jade_hooks_install_reads_the_host_version_once(monkeypatch, capsys):
+    """Review of W-140: the install summary read `claude --version` a second time (about 90% of its CPU). `jade hooks install` reads it once and hands it to
+    the write and to the summary; the rows are the same as when the summary reads it itself."""
+    setup_pair("enforce", None)
+    calls = []
+
+    def fake():
+        calls.append(1)
+        return (2, 1, 314)
+
+    monkeypatch.setattr(ops, "host_version", fake)
+    monkeypatch.setattr(ops, "probe_hook", lambda parsed, timeout_s=15.0: None)
+    assert cli.main(["hooks", "install"]) in (0, None)
+    out = capsys.readouterr().out
+    assert len(calls) == 1, calls
+    assert "ok    what blocks: every active safety invariant (" in out, out
+    del calls[:]
+    rows_read = ops.install_summary_rows()
+    assert len(calls) == 1   # called on its own, the summary still reads the version itself
+    assert ops.install_summary_rows(host=(2, 1, 314)) == rows_read and len(calls) == 1
+    # an old host does not honour onFailure: handed in, it is used as given
+    # a hook entry without `onFailure` is current for a host that ignores it and out of date for one that honours it: the version handed in is the one used
+    data = json.loads(ops.settings_path().read_text())
+    for g in data["hooks"]["PreToolUse"]:
+        for h in g["hooks"]:
+            h.pop("onFailure", None)
+    ops.settings_path().write_text(json.dumps(data))
+    del calls[:]
+    assert ops.hooks_status(host=(2, 1, 314)).get("PreToolUse") is False
+    assert ops.hooks_status(host=(2, 1, 200)).get("PreToolUse") is True and ops.hooks_status(host=None).get("PreToolUse") is True
+    assert calls == []
+
+
+def test_a_refused_jade_hooks_install_reads_no_host_version(monkeypatch):
+    """The human check comes before anything runs: a call from a non-terminal spawns no `claude --version`."""
+    setup_pair("enforce", None)
+    calls = []
+    monkeypatch.setattr(util, "human_tty_refusal", lambda *a, **k: "no terminal")   # the suite's autouse fixture says "a human"; here there is none
+    monkeypatch.setattr(ops, "host_version", lambda: calls.append(1))
+    with pytest.raises(ops.HumanOnly):
+        ops.hooks_install_with_summary(stdin_isatty=False)
+    assert calls == []
+
+
+def test_jade_hooks_install_prints_the_summary(capsys, probe_ok):
     setup_pair("advisory", None)
     assert cli.main(["hooks", "install"]) in (0, None)
     out = capsys.readouterr().out
     assert "hooks installed in" in out
-    assert "gate mode: advisory" in out and "what blocks: advisory gate mode, no level set: nothing blocks" in out and "approval backend: " in out
+    assert "WARN  gate mode: advisory" in out and "what blocks: advisory gate mode, no level set: nothing blocks" in out and "approval backend: " in out
     assert json.loads(ops.settings_path().read_text())["hooks"].keys() >= set(ops.HOOKS)
