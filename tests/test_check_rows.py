@@ -307,6 +307,78 @@ def test_a_pretool_matcher_that_covers_no_gated_tool_means_nothing_blocks():
     assert "every other gated tool" not in detail and "blocks;" not in detail and "jade hooks install" in detail, detail
 
 
+def _install_dead_hooks(tmp_path, mode: str) -> None:
+    """A real settings file (nothing mocked) whose every JADE hook runs a `jade` script that exits 1 (a broken install: the hook crashes on every call).
+    `mode` "gap": the PreToolUse matcher is `Bash` only; "stale": the PreToolUse timeout is 5 s; "gap+disabled": the gap, and `disableAllHooks` true.
+    The script exits at once, so the live probe `jade check` runs is fast and a busy machine cannot change the result (review of W-141)."""
+    fake = tmp_path / "bin" / "jade"
+    fake.parent.mkdir(parents=True, exist_ok=True)
+    fake.write_text("#!/bin/sh\n# from jade import cli  (the launcher marker: this is JADE's program, a broken one)\nexit 1\n")
+    fake.chmod(0o755)
+    ops.hooks_install(stdin_isatty=True)
+    p = ops.settings_path()
+    data = json.loads(p.read_text())
+    for event, groups in data["hooks"].items():
+        for g in groups:
+            for h in g["hooks"]:
+                sub = ops.parse_hook_command(h["command"]).sub
+                h["command"] = f"{fake} hook {sub}"
+                if event == "PreToolUse" and mode == "stale":
+                    h["timeout"] = 5
+            if event == "PreToolUse" and mode.startswith("gap"):
+                g["matcher"] = "Bash"
+    if mode == "gap+disabled":
+        data["disableAllHooks"] = True
+    p.write_text(json.dumps(data))
+
+
+def _rows_named_but_missing(rows_: list[tuple]) -> list[str]:
+    """Rows a detail points to ("see the `x` row") that `jade check` did not print."""
+    import re
+
+    names = {n for n, _ok, _d in rows_}
+    return [ref for _n, _ok, d in rows_ for ref in re.findall(r"the `([^`]+)` row", d) if ref not in names]
+
+
+@pytest.mark.parametrize("mode", ["gap", "stale"])
+def test_check_runs_the_live_probe_when_the_pretool_hook_is_out_of_date_and_a_dead_hook_is_never_said_to_work(tmp_path, mode):
+    """Review of W-141: with the PreToolUse entry installed but out of date (a matcher gap, or an old timeout), `check` skipped the `hook wiring` row and
+    `_what_blocks_row` ran the static checks only, so a hook that crashes on every call was reported as blocking ("every other gated tool (Bash) is checked
+    as follows: ..."). `check` now runs the live probe whenever a JADE PreToolUse entry is registered, prints the `hook wiring` row, and the `what blocks`
+    row says unknown."""
+    setup_pair("enforce", "high")
+    _install_dead_hooks(tmp_path, mode)
+    assert ops.hooks_status()["PreToolUse"] is False   # out of date: the case this test is about
+    all_rows = ops.check(live=False)
+    got = {n: (ok, d) for n, ok, d in all_rows}
+    assert "hook wiring" in got, list(got)
+    ok_w, wiring = got["hook wiring"]
+    assert ok_w is False and "pretool: exit 1 for a command SI-09 must block" in wiring, wiring
+    ok, detail = got["what blocks"]
+    assert ok is None and detail.startswith("unknown: the hook wiring has problems"), detail
+    assert _rows_named_but_missing(all_rows) == [], _rows_named_but_missing(all_rows)
+
+
+def test_check_names_disable_all_hooks_in_a_printed_row_in_the_gap_case(tmp_path):
+    """Review of W-141: a matcher gap and `disableAllHooks` true. The `what blocks` row said "see the `hook wiring` row", which `check` did not print,
+    and no row named disableAllHooks. The `hook wiring` row is now printed and names it."""
+    setup_pair("enforce", "high")
+    _install_dead_hooks(tmp_path, "gap+disabled")
+    all_rows = ops.check(live=False)
+    got = {n: (ok, d) for n, ok, d in all_rows}
+    assert "hook wiring" in got and "disableAllHooks" in got["hook wiring"][1], got.get("hook wiring")
+    assert got["what blocks"][1].startswith("unknown: the hook wiring has problems"), got["what blocks"]
+    assert _rows_named_but_missing(all_rows) == [], _rows_named_but_missing(all_rows)
+
+
+def test_check_has_no_hook_wiring_row_when_no_pretool_hook_is_registered():
+    """The positive edge: no JADE hook at all. There is nothing to probe; `what blocks` says nothing blocks and points to no row."""
+    setup_pair("enforce", "high")
+    all_rows = ops.check(live=False)
+    assert "hook wiring" not in [n for n, _ok, _d in all_rows]
+    assert _rows_named_but_missing(all_rows) == []
+
+
 def test_what_blocks_is_unknown_when_the_hook_wiring_has_problems(monkeypatch):
     monkeypatch.setattr(ops, "hooks_status", lambda: dict.fromkeys(ops.HOOKS, True))
     monkeypatch.setattr(ops, "wiring_problems", lambda probe=True: ["disableAllHooks is true in x: the host runs no hook at all"])

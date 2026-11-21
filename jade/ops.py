@@ -874,11 +874,12 @@ def _list_b_row() -> tuple[str, bool, str]:
             "(the floor of level `off` is another thing: it needs gate mode enforce)")
 
 
-def _what_blocks_row(pretool_ok: bool | None = None, wiring: list[str] | None = None) -> tuple[str, bool | None, str]:
+def _what_blocks_row(pretool_ok: bool | None = None, wiring: list[str] | None = None, probe: bool = True) -> tuple[str, bool | None, str]:
     """`blocking_summary` for the mode and level in force, unless the PreToolUse hook is missing (then nothing blocks) or the wiring has problems (then it is
     not known). A PreToolUse hook that is installed but out of date still runs (W-141): a matcher gap leaves only the named tools unchecked, and an old timeout
-    or failure setting only weakens what a crashed or hung gate does; the row then says that and still says what blocks. `check` passes what it already found,
-    so the live wiring probe is not run twice."""
+    or failure setting only weakens what a crashed or hung gate does; the row then says that and still says what blocks. `check` passes what it already found
+    (the live wiring probe, run whenever a JADE PreToolUse entry is registered and printed as the `hook wiring` row), so the probe is not run twice and
+    the row never points to a row that is not printed. With no `wiring`, `probe` says whether to run the live probe (True) or to read the static facts only."""
     if pretool_ok is None:
         pretool_ok = hooks_status().get("PreToolUse", False)
     if not pretool_ok:
@@ -886,7 +887,7 @@ def _what_blocks_row(pretool_ok: bool | None = None, wiring: list[str] | None = 
         if gaps is None:
             return ("what blocks", None, "nothing blocks: the PreToolUse hook is not installed; run `jade hooks install` in a terminal")
         if wiring is None:
-            wiring = wiring_problems(probe=False)   # static facts only: the live probe has run or will run for the `hook wiring` row
+            wiring = wiring_problems(probe=probe)   # `check` passes the live result it printed as the `hook wiring` row
         covered = [t for t in PRETOOL_PROBE_TOOLS if t not in gaps]
         if not covered:
             return ("what blocks", None, "nothing blocks: the PreToolUse matcher covers no gated tool (or is not a valid regex), so no call gets a check; "
@@ -904,7 +905,7 @@ def _what_blocks_row(pretool_ok: bool | None = None, wiring: list[str] | None = 
             lead = "unknown: the hook wiring has problems (see the `hook wiring` row), so the hook may not run; " + lead
         return ("what blocks", None, lead + text)
     if wiring is None:
-        wiring = wiring_problems()
+        wiring = wiring_problems(probe=probe)
     ok, text = blocking_summary()
     if wiring:
         return ("what blocks", None, "unknown: the hook wiring has problems (see the `hook wiring` row), so the hook may not run; when it runs: " + text)
@@ -2271,8 +2272,9 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
     st = hooks_status()
     missing = [k for k, v in st.items() if not v]
     rows.append(("hooks installed", not missing, f"all {len(HOOKS)}: {', '.join(HOOKS)}" if not missing else f"missing or out of date: {', '.join(missing)}: run `jade hooks install` in a terminal"))
+    gaps = pretool_matcher_gaps()
     problems = None
-    if not missing:
+    if not missing or gaps is not None:   # review of W-141: a registered PreToolUse entry is probed live even when out of date, so `what blocks` never says a dead hook checks
         problems = wiring_problems()
         rows.append(("hook wiring", not problems, "binary runs, hooks enabled, a synthetic event is decided" if not problems else "; ".join(problems)))
     shadow = shadow_problems()
@@ -2283,7 +2285,6 @@ def check(live: bool = True, provider=None) -> list[tuple[str, bool, str]]:
     rows.append(("settings shadowing", not shadow, f"no managed or plugin settings file, and no project settings file under {scanned} up to its repo root, disables or shadows the hooks "
                  "(run `jade check` from the project you work in to scan that one)" if not shadow else "; ".join(shadow)))
     rows.append(_repo_config_row())
-    gaps = pretool_matcher_gaps()
     if gaps is not None:
         rows.append(("pretool matcher", not gaps, "covers every gated tool" if not gaps else f"does not cover {', '.join(gaps)}: re-run `jade hooks install` in a terminal"))
     rows.append(_gate_mode_row())
