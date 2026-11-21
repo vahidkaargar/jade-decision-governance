@@ -12,7 +12,7 @@ Two keys per answer:
 
 Never remembered (always asked): a human-only class (docs/12 section 4), the fetch-and-exec and egress rules (R-21, R-22) and the rules that guard the agent's files
 (R-13, R-18), as the top rule or as the rule of any segment, a call the gate blocks, and a call with a secret-shaped value in it. Exact-only: R-14, M-05, M-07, an inline program (`-c`, `-e`, heredoc, here-string, process substitution), a call the gate could not
-read (blind labels), a git push or merge (the fingerprint carries the head commit), a merge into the default branch, and every write or MCP call (content is part of the key).
+read (blind labels), a git push or merge (the fingerprint carries the head commit), a merge into the default branch, `launchctl bootout`, `unload` and `remove` (W-137), a segment key that still has a variable word, a call that reads a variable it sets itself, a `$'..'` word, and every write or MCP call (content is part of the key).
 
 Lifetime: a row is valid while its last human confirm or its last use is within 30 days, and never more than 180 days after the confirm.
 Evidence (V6-29, `jade/audit.py`): a row that has run silently many times (60) with no mark, or for 90 days after its last evidence, stops deciding until the human marks
@@ -46,6 +46,10 @@ _LEADING_CD = re.compile(r"""^[ \t]*cd[ \t]+(?:"([^"$`\\]*)"|'([^']*)'|([^\s"'$`
 _GIT_C = re.compile(r"(?<![\w.-])git(?:\s+-[a-zA-Z](?:\s+\S+)?)*?\s+-C\s+(\S+)")
 _SUDO_WORD = re.compile(r"(?<![\w.-])sudo(?![\w.-])")
 _PR_NUMBER = re.compile(r"^((?:gh pr|glab mr) [\w-]+) \d+(?= |$)")
+LAUNCHD_EXACT = re.compile(r"(?<![\w.-])launchctl (?:bootout|unload|remove)(?= |$)")   # W-137 (owner): stopping or removing a service is never remembered as a kind
+KEY_VARIABLE = re.compile(r"\$[A-Za-z_{]")   # a variable word that is still in a segment key: the key stands for every value of it
+VARIABLE_USE = re.compile(r"\$\{?([A-Za-z_]\w*)")   # a variable the text reads
+DOLLAR_QUOTE = re.compile(r"\$'")   # a `$'..'` word: the key shows the decoded text, only the exact key keeps the spelling
 MERGE = re.compile(r"^(?:gh pr merge|glab mr merge|git merge)(?= |$)")
 INLINE = re.compile(r"(?:^|\s)-[A-Za-z]*[ce](?=\s|\Z)|<<|<\(")
 
@@ -61,6 +65,11 @@ def exact_key(hold_key: str, fingerprints: dict | str | None) -> str:
     return sha256(canonical({"hold": hold_key, "fp": fp}))
 
 
+def _reads_assigned_variable(s: str) -> bool:
+    """True when the text reads a variable that it sets itself (`x=--hard; git reset $x`): the segment key shows the value, so it would equal the key of the plain command."""
+    return "$" in s and bool({w.partition("=")[0] for w in _ENV_WORD.findall(s)} & set(VARIABLE_USE.findall(s)))
+
+
 def eligibility(a, tool: str, tool_input: dict | None, fp: dict | None) -> str:
     """`never`, `exact` or `class`: how far an answer to this call may be generalised."""
     from . import policy
@@ -71,8 +80,10 @@ def eligibility(a, tool: str, tool_input: dict | None, fp: dict | None) -> str:
         return "exact"
     if a.rule_id in EXACT_ONLY_RULES or set(getattr(a, "seg_rules", []) or []) & EXACT_ONLY_RULES or a.blind or a.rule_id in ("R-31", "R-32"):
         return "exact"
-    if fp or INLINE.search(a.subject or ""):
+    if fp or INLINE.search(a.subject or "") or DOLLAR_QUOTE.search(a.subject or ""):
         return "exact"
+    if _reads_assigned_variable(a.subject or "") or any(LAUNCHD_EXACT.search(k) or KEY_VARIABLE.search(k) for k in getattr(a, "seg_keys", []) or []):
+        return "exact"   # W-137: launchctl bootout, unload and remove; a key with an unresolved variable (`git push origin $b`) is not one kind
     if any(MERGE.match(k) for k in getattr(a, "seg_keys", []) or []) or not getattr(a, "seg_keys", None) or policy.gh_api_merge_in(a.subject or ""):
         return "exact"   # a merge, also one made through `gh api` (V6-08 N20), is never remembered as a kind
     return "class"

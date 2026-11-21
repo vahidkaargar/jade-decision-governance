@@ -361,8 +361,9 @@ def _on_default_branch_asked(cwd: str, command: str) -> bool:
     segs = policy.segments_cwd(command + "".join("\n" + e for e in extra), cwd, literal_end=len(command))
     # the two readings of the command (`shellnorm.skeleton_both`) and the readings of a brace repeat a push: each distinct segment in each directory is asked of git once
     pushes = [(call, dirs) for seg, dirs in dict.fromkeys(segs) if not policy.is_read_only(seg) for call in policy.git_calls(seg) if call.sub == "push"]
+    unset = _unset_pushes(command, cwd, segs)
     if not pushes:
-        return False
+        return _unset_hits_default(unset)
     steered = bool(_GIT_ENV_ASSIGN.search(command)) or any(_CD_VARIABLE.search(seg) for seg, _ in segs)
     creates = any(c.sub in _REPO_CREATORS for seg, _ in segs if not policy.is_read_only(seg) for c in policy.git_calls(seg))
     unresolved: GitUnresolved | None = None
@@ -381,8 +382,55 @@ def _on_default_branch_asked(cwd: str, command: str) -> bool:
                 continue
             if hit:
                 return True   # a push that is found on main answers, whatever a push before it left open (the command is read in several readings, `shellnorm.skeleton_both`)
+    if _unset_hits_default(unset):
+        return True
     if unresolved:
         raise unresolved
+    return False
+
+
+def _unset_pushes(command: str, cwd: str, segs) -> list[tuple[policy.shellnorm.GitCall, tuple[str, ...], bool]]:
+    """The pushes of the command read with its unquoted variables empty or unset (W-133, owner decision 2026-11-20, narrow): `git $x push origin :main`,
+    `${X-git} push origin main`. Only for a push to the default branch: `_unset_hits_default` counts a hit and nothing else."""
+    unquoted = policy.shellnorm.unquoted_variables(command)
+    found = [(seg, dirs, False, unquoted) for seg, dirs in dict.fromkeys(segs) if "$" in seg] if unquoted else []
+    if (text := policy.shellnorm.unset_default_reading(command)) is not None:
+        named = policy.shellnorm.unquoted_variables(text)
+        found += [(seg, dirs, True, named) for seg, dirs in dict.fromkeys(policy.segments_cwd(text, cwd, literal_end=len(text)))]
+    steered = bool(_GIT_ENV_ASSIGN.search(command)) or any(_CD_VARIABLE.search(seg) for seg, _ in segs)
+    out = []
+    for seg, dirs, defaulted, names in found:
+        if policy.is_read_only(seg):
+            continue
+        for call in policy.git_calls(seg):
+            if defaulted and call.sub == "push":
+                out.append((call, dirs, steered))
+            out.extend((c, dirs, steered) for c in policy.shellnorm.unset_variable_pushes(call, names))
+    return out
+
+
+def _names_default(call: policy.shellnorm.GitCall) -> bool:
+    """The push names main/master itself (`--all`, `--mirror`, `:main`, `HEAD:refs/heads/master`): no repository is asked."""
+    _, refs, every = parse_push(call.args)
+    return every or any(_short_ref(dst if colon and dst else src).lower() in DEFAULT_BRANCHES
+                        for src, colon, dst in (r.lstrip("+").partition(":") for r in refs))
+
+
+def _unset_hits_default(pushes) -> bool:
+    """A push of a reading with the variables empty that goes to the default branch. A reading git cannot resolve proves nothing (it is not the command as
+    written): the command as written is resolved, and fails closed, on its own. In a directory or repository named by a variable only a push that names
+    main/master counts (git would be asked about a directory that is not the one the shell is in)."""
+    for call, dirs, steered in pushes:
+        if steered or _unfindable(call):
+            if _names_default(call):
+                return True
+            continue
+        for d in dirs:
+            try:
+                if _push_hits_default(call, d):
+                    return True
+            except GitUnresolved:
+                continue
     return False
 
 
