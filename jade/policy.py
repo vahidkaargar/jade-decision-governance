@@ -9,7 +9,6 @@ and treats read-only commands as low (see the `read_only` list in risk.yaml).
 from __future__ import annotations
 
 import fnmatch
-import glob
 import os
 import re
 import shlex
@@ -1501,11 +1500,73 @@ _GLOBS: dict[str, list[str]] | None = None   # set for the length of one `assess
 _DESTS: dict[tuple[str, tuple[str, ...]], list[tuple[str, bool]]] | None = None   # set for the length of one `assess` only: `_dest_bases` answers
 DIR_GLOB_SPEND = 20000       # glob-destination matches handed out in one command; past that a glob destination is read as written
 _GLOB_SPENT: list[int] | None = None   # set for the length of one `assess` only: the matches handed out so far
+# The WORK of the walks is bounded too, not only what they return: a pattern whose literal tail matches nothing (`/System/Library/*/*/*/n0/`) lists every directory
+# of the tree and returns no match at all. A directory entry read, and a name looked up, each cost one; a listing is read once per command.
+DIR_GLOB_ENTRIES = 512       # directory entries and look-ups the glob destinations of one command may spend; past that a walk keeps what it found
+_GLOB_WORK: list[int] | None = None   # set for the length of one `assess` only: what is left of DIR_GLOB_ENTRIES
+_LISTINGS: dict[str, list[os.DirEntry]] | None = None   # set for the length of one `assess` only: the directories listed so far
+
+
+class _WalkSpent(Exception):
+    """The walk spent DIR_GLOB_ENTRIES."""
+
+
+def _spend(budget: list[int]) -> None:
+    budget[0] -= 1
+    if budget[0] < 0:
+        raise _WalkSpent
+
+
+def _entries(d: str, budget: list[int]) -> list[os.DirEntry]:
+    listings = _LISTINGS
+    if listings is not None and d in listings:
+        return listings[d]
+    out: list[os.DirEntry] = []
+    try:
+        with os.scandir(d or os.curdir) as it:
+            for e in it:
+                _spend(budget)   # spent in the middle of a listing: it is not kept, a later walk would read it short
+                out.append(e)
+    except OSError:
+        out = []
+    if listings is not None:
+        listings[d] = out
+    return out
+
+
+def _walk(pattern: str, dironly: bool, budget: list[int]):
+    """`glob.iglob(pattern)` (no `**`, no hidden names for a pattern that does not start with a dot), written out so that each entry it reads is counted: the same
+    recursion as CPython's `glob._iglob`, `_glob1` and `_glob0`."""
+    dirname, basename = os.path.split(pattern)
+    if not _GLOB_CHARS.search(pattern):
+        _spend(budget)
+        if (os.path.lexists(pattern) if basename else os.path.isdir(dirname)):
+            yield pattern
+        return
+    dirs = _walk(dirname, True, budget) if dirname and dirname != pattern and _GLOB_CHARS.search(dirname) else [dirname]
+    magic = bool(_GLOB_CHARS.search(basename))
+    for d in dirs:
+        if not magic:
+            _spend(budget)
+            if (os.path.lexists(os.path.join(d, basename)) if basename else os.path.isdir(d)):
+                yield os.path.join(d, basename)
+            continue
+        names = []
+        for e in _entries(d, budget):
+            try:
+                if not dironly or e.is_dir():
+                    names.append(e.name)
+            except OSError:
+                pass
+        if basename[:1] != ".":
+            names = [n for n in names if n[:1] != "."]
+        for n in fnmatch.filter(names, basename):
+            yield os.path.join(d, n)
 
 
 def _glob_matches(pattern: str) -> list[str]:
-    """The paths a glob destination stands for now, as the shell expands it (`*` and `?` do not match a leading dot). Bounded: `DIR_GLOB_CAP` matches, and no pattern with
-    `**` or many wildcard components, whose walk could cost more than the command."""
+    """The paths a glob destination stands for now, as the shell expands it (`*` and `?` do not match a leading dot). Bounded: `DIR_GLOB_CAP` matches, no pattern with
+    `**` or many wildcard components, and `DIR_GLOB_ENTRIES` entries read for all the walks of one command (a walk that spends it keeps the matches it found)."""
     if "**" in pattern or sum(1 for c in pattern.split("/") if _GLOB_CHARS.search(c)) > DIR_GLOB_COMPONENTS:
         return []
     memo = _GLOBS
@@ -1514,13 +1575,14 @@ def _glob_matches(pattern: str) -> list[str]:
             return memo[pattern]
         if len(memo) >= DIR_GLOB_WALKS:
             return []
+    budget = _GLOB_WORK if _GLOB_WORK is not None else [DIR_GLOB_ENTRIES]
     out: list[str] = []
     try:
-        for m in glob.iglob(pattern):
+        for m in _walk(pattern, False, budget):
             out.append(m)
             if len(out) >= DIR_GLOB_CAP:
                 break
-    except (OSError, ValueError, re.error):
+    except (_WalkSpent, OSError, ValueError, re.error):
         pass
     if memo is not None:
         memo[pattern] = out
@@ -2340,15 +2402,17 @@ def _realpath(path: str) -> str:
 
 def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
     """Classify one tool call. Raises on malformed policy; callers decide how to fail."""
-    global _REALPATHS, _GLOBS, _DESTS, _GLOB_SPENT
+    global _REALPATHS, _GLOBS, _DESTS, _GLOB_SPENT, _GLOB_WORK, _LISTINGS
     outer, _REALPATHS = _REALPATHS, {} if _REALPATHS is None else _REALPATHS
     outer_globs, _GLOBS = _GLOBS, {} if _GLOBS is None else _GLOBS
     outer_dests, _DESTS = _DESTS, {} if _DESTS is None else _DESTS
     outer_spent, _GLOB_SPENT = _GLOB_SPENT, [0] if _GLOB_SPENT is None else _GLOB_SPENT
+    outer_work, _GLOB_WORK = _GLOB_WORK, [DIR_GLOB_ENTRIES] if _GLOB_WORK is None else _GLOB_WORK
+    outer_listings, _LISTINGS = _LISTINGS, {} if _LISTINGS is None else _LISTINGS
     try:
         return _assess(tool, tool_input, cwd)
     finally:
-        _REALPATHS, _GLOBS, _DESTS, _GLOB_SPENT = outer, outer_globs, outer_dests, outer_spent
+        _REALPATHS, _GLOBS, _DESTS, _GLOB_SPENT, _GLOB_WORK, _LISTINGS = outer, outer_globs, outer_dests, outer_spent, outer_work, outer_listings
 
 
 def _assess(tool: str, tool_input: dict, cwd: str) -> Assessment:

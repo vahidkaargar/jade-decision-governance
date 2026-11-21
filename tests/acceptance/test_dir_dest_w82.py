@@ -15,6 +15,8 @@ R-13 read only the literal protected path a command wrote. `cp /tmp/e/settings.j
 
 All paths are synthetic and live under a throwaway HOME.
 """
+import glob
+import os
 import time
 
 import pytest
@@ -468,3 +470,74 @@ def test_a_glob_with_a_hit_past_many_matches_is_still_read(home):
     (home / ".claude" / "zz.txt").write_text("x")
     assert is_r13(sh("cp /tmp/e/x ~/.claude/*"))
     assert not gated(sh("cp /tmp/e/x ~/docs/*"))
+
+
+# ---- the walk of a glob destination is bounded by the work it does, not only by the matches it returns (W-82 review, wave 4) ------
+def _counting_scandir(monkeypatch):
+    """Count every directory entry any glob walk reads through `os.scandir` (glob.iglob uses it too)."""
+    seen = [0]
+    real = os.scandir
+
+    class Counted:
+        def __init__(self, it):
+            self.it = it
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.it.close()
+
+        def __iter__(self):
+            for e in self.it:
+                seen[0] += 1
+                yield e
+
+        def close(self):
+            self.it.close()
+
+    monkeypatch.setattr(os, "scandir", lambda p=".": Counted(real(p)))
+    return seen
+
+
+def _wide_tree(root, n=10):
+    for a in range(n):
+        for b in range(n):
+            for c in range(n):
+                (root / f"a{a}" / f"b{b}" / f"c{c}").mkdir(parents=True)
+
+
+def test_a_glob_destination_that_matches_nothing_does_not_walk_the_whole_tree(home, monkeypatch):
+    """Three wildcard components and a literal tail that matches nothing: the walk visits every directory of the tree (main assesses it in 0.01 s, the walk
+    took 3 s of CPU and 50 s of wall time under load, past the hook's budget). The entries it reads are bounded per command."""
+    _wide_tree(home / "big")
+    cmd = "; ".join(f"cp s* ~/big/*/*/*/n{i}/" for i in range(16))
+    seen = _counting_scandir(monkeypatch)
+    a = sh(cmd)
+    assert not gated(a), (a.rule_id, a.level)
+    assert seen[0] <= policy.DIR_GLOB_ENTRIES, seen[0]
+
+
+def test_a_spent_walk_keeps_what_it_found_and_reads_the_rest_as_written(home, monkeypatch):
+    _wide_tree(home / "big")
+    monkeypatch.setattr(policy, "DIR_GLOB_ENTRIES", 50)
+    assert is_r13(sh("cp /tmp/e/settings.json ~/.cl*/"))   # a small walk is whole
+    assert not gated(sh("cp s* ~/big/*/*/*/n0/; cp /tmp/e/x ~/.cl*/settings.json"))   # the documented limit: past the budget, read as written
+
+
+@pytest.mark.parametrize("pattern", [
+    "{r}/*", "{r}/*/", "{r}/.*", "{r}/d*/f*", "{r}/d?/", "{r}/[d]1/f1", "{r}/*/f1", "{r}/*/*/", "{r}/d1/*", "{r}/link*/f*", "{r}/nope*/x", "{r}/d1/f1/",
+    "{r}/*/.h*", "{r}/[!d]*", "{r}/d1", "{r}/*/nofile",
+])
+def test_the_bounded_walk_matches_what_the_shell_glob_matches(tmp_path, pattern):
+    """The walk is written by hand to count its work; it must stand for the same paths as `glob.glob` (a leading dot only for a pattern that starts with one,
+    a trailing `/` for directories only, symlinks to directories followed)."""
+    r = tmp_path / "t"
+    for d in ("d1", "d2", ".hid"):
+        (r / d).mkdir(parents=True)
+        (r / d / "f1").write_text("x")
+        (r / d / ".h1").write_text("x")
+    (r / "e1").write_text("x")
+    (r / "link1").symlink_to(r / "d1")
+    p = pattern.format(r=r)
+    assert sorted(policy._glob_matches(p)) == sorted(glob.glob(p)), p
