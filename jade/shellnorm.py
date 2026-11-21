@@ -37,23 +37,54 @@ _VAR_STAGE = re.compile(r'[ \t]*"?\$(?:\{(\w+)\}|(\w+))"?(?=[\s;&|)]|$)')   # a 
 _DQ_WORD = re.compile(r'"((?:[^"\\\s]|\\.)*)"')   # a double-quoted text with no blank in it: one word (`"$b"`, `"HEAD:$b"`)
 
 
+def _nested_text_end(raw: str, i: int, dq: bool) -> int:
+    """raw[i] opens a nested command text that a nested scan reads: `$(` (not the arithmetic `$((`), a backtick, or (outside double quotes) `<(` / `>(`.
+    The index after its end, or 0 when raw[i] opens none."""
+    c = raw[i]
+    if c == "$" and raw.startswith("$(", i) and not raw.startswith("$((", i):
+        return _skip_span(raw, i + 1)
+    if c in "<>" and not dq and raw.startswith("(", i + 1):
+        return _skip_span(raw, i + 1)
+    if c == "`":
+        k, n = i + 1, len(raw)
+        while k < n and raw[k] != "`":
+            k += 2 if raw[k] == "\\" else 1
+        return k + 1
+    return 0
+
+
 def _word_var_refs(raw: str) -> list[re.Match]:
     """The `$v` / `${v}` of a stage that are words or parts of words of this stage: outside quotes, or in a double-quoted text with no blank (`"$b"`, `"HEAD:$b"`).
     A variable in a single-quoted text is not expanded here, and one in a double-quoted text with blanks (`sh -c "$g push"`, `eval "git $v ..."`) is in a text
-    that a nested reading reads with the same values: reading it here too only repeats readings (W-191, CPU time)."""
+    that a nested reading reads with the same values: reading it here too only repeats readings (W-191, CPU time). For the same reason a variable inside a nested
+    command text (`$(...)`, a backtick span, `<(...)`, `>(...)`) is not a word of this stage: the nested scan reads that text with the values the whole command gave,
+    and writing it here too gave this stage one more reading per level, read again at every depth (W-191 review: `g=git;$g $(` nested 16 levels cost 3.3 times
+    origin/main). An arithmetic `$((...))` is not a command text: its variables stay words."""
     out: list[re.Match] = []
     i, n = 0, len(raw)
     while i < n:
         c = raw[i]
         if c == "\\":
             i += 2
+        elif (k := _nested_text_end(raw, i, False)) > 0:
+            i = k
         elif c == "'":
             j = raw.find("'", i + 1)
             i = n if j < 0 else j + 1
         elif c == '"':
             m = _DQ_WORD.match(raw, i)
             if m:
-                out.extend(_VAR_REF.finditer(raw, m.start(1), m.end(1)))
+                j, end = m.start(1), m.end(1)
+                while j < end:
+                    if raw[j] == "\\":
+                        j += 2
+                    elif (k := _nested_text_end(raw, j, True)) > 0:
+                        j = k
+                    elif raw[j] == "$" and (r := _VAR_REF.match(raw, j, end)):
+                        out.append(r)
+                        j = r.end()
+                    else:
+                        j += 1
                 i = m.end()
             else:
                 j = i + 1

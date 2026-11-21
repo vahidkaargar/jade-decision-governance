@@ -188,3 +188,51 @@ def test_a_variable_command_word_keeps_a_git_write_into_a_work_tree_exported_lat
     monkeypatch.setattr(policy, "_shell_roots", _REAL_SHELL_ROOTS)
     monkeypatch.setattr(policy, "_ETC", str(tmp_path / "etc"))
     assert "HO-shell-startup" in policy.assess("Bash", {"command": command}, cwd=str(tmp_path / "work")).ho_ids, command
+
+
+# ---------------------------------------------------------------- nested texts are read once, with the shared values (W-191 review, CPU time)
+
+def test_a_variable_inside_a_nested_text_is_not_a_word_of_the_outer_stage():
+    """A `$(...)`, a backtick span or a `<(...)` / `>(...)` is read by its own nested scan, with the values the whole command gave its variables. Its `$g` is not
+    a word of the outer stage: writing it there too gave the outer stage one more reading per level, read again at every depth (P02: `g=git;$g $(` nested 16
+    levels cost about 3.3 times origin/main)."""
+    def names(raw):
+        return [m.group(1) or m.group(2) for m in shellnorm._word_var_refs(raw)]
+    assert names("$g $(g=git;$g x)") == ["g"]
+    assert names("git $v `echo $w`") == ["v"]
+    assert names("cat <($g push) >($h x) $k") == ["k"]
+    assert names('git "HEAD:$b$(f$c)"') == ["b"]
+    assert names("echo $(( $n + 1 )) $m") == ["n", "m"]   # arithmetic is not a nested command text: its variables stay words
+
+
+def _nest(depth):
+    c = "echo x"
+    for _ in range(depth):
+        c = "g=git;$g $(" + c + ")"
+    return c
+
+
+@pytest.mark.parametrize("depth", [12, 16])
+def test_nested_variable_commands_do_not_multiply_the_rows(depth):
+    """The rows the policy classifies, a count and not a time (the machine running the suite may be loaded). origin/main gives 459 rows at depth 12 and 479 at
+    depth 16; the first W-191 version gave 1 173 and 1 309."""
+    assert len(shellnorm.segments_cwd(_nest(depth), "/tmp")) <= 520
+
+
+@pytest.mark.parametrize("command", [
+    "g=git; x $($g push origin main)",
+    "g=git; x `$g push origin main`",
+    'g=git; echo "$($g push origin main)"',
+    "v=push; echo $(git $v origin main)",
+    "v=push; echo `git $v origin main`",
+    "b=main; echo $(git push origin HEAD:$b)",
+    'b=main; echo "$(git push origin HEAD:$b)"',
+    "b=main; git push origin HEAD:$(echo $b)",
+    "g=git; cat <($g push origin main)",
+    "g=git; tee >($g push origin main)",
+    "v=push; git $v origin main $(true)",
+    "v=push; git $v origin $(echo main)",
+    _nest(4).replace("echo x", "$g push origin main"),
+])
+def test_a_variable_in_a_nested_text_still_reads_the_push(command):
+    assert asked(command), command
