@@ -366,6 +366,26 @@ def test_docs_02_terminal_states_are_the_ones_the_state_machine_calls_terminal()
         assert state not in state_machine.TERMINAL
 
 
+def test_docs_02_names_every_exit_of_failed_and_outcome_unknown():
+    """Review of W-166: the new sentence left out `cancel` for FAILED, but `state_machine.next_state` sends every state that is not terminal to CANCELLED on
+    `cancel`. Each exit the code has (`T`, `cancel`, and `deadline` where `EXPIRES` holds the state) is named in the clause of that state, and a `deadline`
+    that does not apply is said not to."""
+    from jade import state_machine
+
+    line = _read("docs/02-contracts-and-state-machine.md").split("Resumable side states", 1)[1].split("\n", 1)[0]
+    sentence = line.split("are not terminal:", 1)[1]
+    clauses = {"FAILED": sentence.split("`OUTCOME_UNKNOWN`", 1)[0], "OUTCOME_UNKNOWN": sentence.split("`OUTCOME_UNKNOWN`", 1)[1]}
+    for state, clause in clauses.items():
+        exits = {ev for (src, ev) in state_machine.T if src == state} | {"cancel"}
+        assert state_machine.next_state(state, "cancel") == "CANCELLED"
+        if state in state_machine.EXPIRES:
+            exits.add("deadline")
+        else:
+            assert "never by `deadline`" in clause, (state, clause)
+        for ev in exits:
+            assert f"`{ev}`" in clause, f"docs/02 does not name the exit `{ev}` of {state}: {clause!r}"
+
+
 # ---- W-171 (d11 checklist 4): the README names no fact that is true of one machine on one day ---------------------------------
 ISO_DATE = re.compile(r"\b20\d\d-\d\d-\d\d\b")
 LIVE_STATE = (r"\bsince 20\d\d-\d\d-\d\d", r"\bearliest 20\d\d-\d\d-\d\d", r"\b(?:has|have|had|is|are) (?:been |now )?loaded\b", r"\bnot yet (?:been )?run\b",
