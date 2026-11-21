@@ -184,10 +184,10 @@ def test_a_write_with_two_paths_gets_no_scope(checkout):
 
 # ------------------------------------------------------------------ R-16 by a shell command keeps the scopes it had
 
-def test_an_r16_shell_write_keeps_the_existing_class_scopes_and_adds_no_second_project_scope(checkout):
+def test_an_r16_shell_write_offers_no_class_scope_and_no_second_project_scope(checkout):
     a, got = shell_scopes("cp /tmp/x jade/hooks.py", checkout)
     assert a.rule_id == "R-16"
-    assert kinds(got) == ["kind_project", "kind_any"], got   # as before V6-16
+    assert kinds(got) == [], got   # W-190: a shell write to JADE source is exact only (it had kind_project and kind_any before): no kind scope, and no rule_project either (V6-16)
 
 
 # ------------------------------------------------------------------ R-14: one plain remote command

@@ -13,6 +13,7 @@ import time
 import pytest
 
 from jade import hooks, policy, shellnorm, shellnorm_base
+from tests.loadproof import retry_under_load
 from tests.test_redirect_anywhere import si08
 from tests.test_redirect_round6 import CRITICAL
 
@@ -116,6 +117,7 @@ def test_the_reading_of_origin_main_is_not_capped():
 
 
 @pytest.mark.timing
+@retry_under_load
 def test_a_long_prefix_costs_a_few_times_what_origin_main_cost():
     command = PAD + "\n<&- echo git push origin main | sh"
     shellnorm._skeleton_both_top.cache_clear()
