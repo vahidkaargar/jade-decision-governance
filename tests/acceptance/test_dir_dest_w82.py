@@ -439,6 +439,27 @@ def test_the_variable_reading_keeps_the_scripts_the_command_wrote(home, cmd):
     assert (a.level, a.rule_id) == ("low", "R-31"), (cmd, a.level, a.rule_id)
 
 
+def test_a_variable_reading_is_read_for_r13_only(home, monkeypatch):
+    """Only R-13 is taken from the reading of a variable, so the reading is not classified by every rule again: with four values per variable that made a long
+    command cost 3.5 times main's CPU time (W-82 review, wave 4). Each segment is classified once, and the reading still finds R-13."""
+    calls = [0]
+    real = policy.classify_segment
+
+    def counted(*args, **kwargs):
+        calls[0] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(policy, "classify_segment", counted)
+    pad = "D=/tmp/a; D=/tmp/b; D=/tmp/c; D=/tmp/d"
+    sh(f"{pad}; cp /tmp/e/x /tmp/z/y1; cp /tmp/e/x /tmp/z/y2")
+    once, calls[0] = calls[0], 0   # every segment classified once, with no variable to read
+    a = sh(f"{pad}; cp /tmp/e/x $D/y1; cp /tmp/e/x $D/y2")
+    assert not gated(a) and calls[0] == once, (calls[0], once)
+    calls[0] = 0
+    assert is_r13(sh(f"{pad}; D=~/.claude; cp /tmp/e/settings.json $D/; cp /tmp/e/x $D/y"))
+    assert calls[0] == once + 1, (calls[0], once)   # one more assignment segment
+
+
 def test_a_variable_with_a_known_value_is_still_an_unseen_name(home):
     """Accepted false positive: the raw words `$F` are not typed, and the gate takes the higher of its readings, so a value the command set does not lower it."""
     assert is_r13(sh("F=notes.md; cp /tmp/e/$F ~/.claude/"))

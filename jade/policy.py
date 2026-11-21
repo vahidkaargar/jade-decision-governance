@@ -1432,7 +1432,22 @@ def _hardlink_sources(bare: str) -> list[str]:
     return []
 
 
+_INTOS: dict[str, list[tuple[str, bool, bool, bool]]] | None = None   # set for the length of one `assess` only: `_into_targets` answers
+
+
 def _into_targets(bare: str) -> list[tuple[str, bool, bool, bool]]:
+    """`_into_targets_now`, kept for the length of one `assess`: the human-only classes, the directory reading and the unseen-name reading of W-82 all ask it for
+    the same segment (and the reading of a variable asks it again). The list is shared: callers only read it."""
+    memo = _INTOS
+    if memo is None:
+        return _into_targets_now(bare)
+    got = memo.get(bare)
+    if got is None:
+        got = memo[bare] = _into_targets_now(bare)
+    return got
+
+
+def _into_targets_now(bare: str) -> list[tuple[str, bool, bool, bool]]:
     """Where a copy or unpack verb writes, as (path, parent_too, exact, unless_dir):
 
     * a tree copied under its own name (`cp -r /tmp/proj ~`, `rsync -a /tmp/proj ~/`) writes `dest/proj` only: that path, with parent_too (a source named
@@ -1943,6 +1958,35 @@ def _use_identity(seg: str) -> str:
     return IDENTITY_FILE.sub("-i $KEY", seg) if bare.split(" ", 1)[0].rsplit("/", 1)[-1] in REMOTE_SHELL_VERBS else seg
 
 
+def _segment_pairs(seg: str, proxied: bool, marks: tuple[str, ...]) -> tuple[str, str, list[shellnorm.GitCall], str | None, list[tuple[str, str]]]:
+    """The views of one segment the rules read: (segment, bare command, git calls, `files_view`, [(text, files)])."""
+    seg = _use_identity(seg)
+    bare, calls = _analyse(seg)
+    hooks_off = any("core.hookspath" in d for c in calls for d in c.danger)   # `git -c core.hooksPath=...` turns the pre-push guard off for this command (R-17)
+    texts = [*([HOOKS_BYPASS + bare] if hooks_off else []), seg, bare, _pathfold(bare), *([UNSAFE_GIT + bare] if any(c.danger for c in calls) else []),
+             *([EGRESS_MARK + bare] if egress.sends_out(bare, proxied or bool(egress.PROXY_ENV.search(seg))) else []), *(m + bare for m in marks)]
+    view = files_view(bare)  # what a `files_only` rule may look at: None = the whole segment
+    pairs = [(t, view if view is not None else _program_basename(t)) for t in dict.fromkeys(texts)]
+    if view:
+        pairs.append((bare, _pathfold(view)))
+    return seg, bare, calls, view, pairs
+
+
+def _r13_reads(seg: str, dirs: tuple[str, ...], proxied: bool = False, marks: tuple[str, ...] = ()) -> bool:
+    """Does R-13 match this segment, read the way `classify_segment` reads it (its text views, its absolute operands, the paths a copy into a directory writes, an
+    unseen name into a dedicated directory)? For the reading of a variable (W-82), where only R-13 is taken: the other rules are not looked at, and R-13 counts
+    even where a rule before it in the list would have matched first (that only adds a reading)."""
+    r13 = _r13()
+    seg, bare, _calls, view, pairs = _segment_pairs(seg, proxied, marks)
+    dirs_t = tuple(dirs) or ("",)
+    if any((t := _seen_by(r13, text, files)) and _hit(r13, t, dirs_t) for text, files in pairs):
+        return True
+    abs_files = _absolute_operands(seg, dirs) if view is None else _absolute_operands("x " + view, dirs) if view else ""
+    if abs_files and _hit(r13, abs_files, dirs_t):
+        return True
+    return dir_dest_hit(r13, bare, dirs_t) or unseen_into_dedicated(bare, dirs_t) or ("xargs" in seg and unseen_into_dedicated(seg, dirs_t))
+
+
 def classify_segment(seg: str, dirs: tuple[str, ...], proxied: bool = False, marks: tuple[str, ...] = ()) -> tuple[dict, str]:
     """The rule one simple command (a segment of `shellnorm.segments_cwd`) matches, and the command with launcher prefixes and git options gone.
 
@@ -1950,18 +1994,10 @@ def classify_segment(seg: str, dirs: tuple[str, ...], proxied: bool = False, mar
     reads only what the command writes (`files_view`). `marks` are marker prefixes (`blind:script-file `, `fetch:exec `) that the caller found for this segment and that rules
     read together with its text."""
     real_bare = _bare(seg)
-    seg = _use_identity(seg)
-    bare, calls = _analyse(seg)
-    hooks_off = any("core.hookspath" in d for c in calls for d in c.danger)   # `git -c core.hooksPath=...` turns the pre-push guard off for this command (R-17)
-    texts = [*([HOOKS_BYPASS + bare] if hooks_off else []), seg, bare, _pathfold(bare), *([UNSAFE_GIT + bare] if any(c.danger for c in calls) else []),
-             *([EGRESS_MARK + bare] if egress.sends_out(bare, proxied or bool(egress.PROXY_ENV.search(seg))) else []), *(m + bare for m in marks)]
-    view = files_view(bare)  # what a `files_only` rule may look at: None = the whole segment
+    seg, bare, calls, view, pairs = _segment_pairs(seg, proxied, marks)
     cview = creation_view(bare, view, calls, tuple(dirs) or ("",))  # what a `creates_only` rule may look at
     seg_best = None
     dirs_t = tuple(dirs) or ("",)
-    pairs = [(t, view if view is not None else _program_basename(t)) for t in dict.fromkeys(texts)]
-    if view:
-        pairs.append((bare, _pathfold(view)))
     for text, files in pairs:
         alt = {"R-18": cview if cview is not None else files} if cview != view else None
         rule = _first_match(text, files, alt, dirs_t)
@@ -2206,7 +2242,7 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     wroots, mroots, sroots = _wiring_roots(), _mod_roots(), _shell_roots()
     git_wt: str | None = None   # GIT_WORK_TREE an earlier segment exported or assigned (PRE2-6)
     rows: list[tuple[str, tuple[str, ...]]] = []   # every segment, read-only ones too: what an `xargs` is fed is read from them (W-77)
-    subst_seen: dict[tuple, dict] = {}
+    subst_seen: dict[tuple, bool] = {}
     env: dict[str, list[str]] = {}   # `D=~/.claude` earlier in this command: a later `$D` is read as its value too (W-82)
     for seg, dirs in shellnorm.segments_cwd(scan, cwd, literal_end=len(text_in)):   # a script the command writes keeps `'$X'` live (PRE2-1)
         rows.append((seg, dirs))
@@ -2240,11 +2276,11 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         seg_best, bare = classify_segment(seg, dirs, proxied, tuple(marks))
         if env and "$" in seg and LEVELS[seg_best["level"]] < LEVELS[_r13()["level"]]:   # W-82: the command as the shell will run it; only R-13 is taken from this reading
             for reading in _subst_readings(seg, env):   # not `known`: that holds the scripts the command wrote, read by every later segment
-                key = (reading, dirs, tuple(marks))   # the same command with the same value comes back many times in a long text: classified once
+                key = (reading, dirs, tuple(marks))   # the same command with the same value comes back many times in a long text: read once
                 if key not in subst_seen:
-                    subst_seen[key] = classify_segment(reading, dirs, proxied, tuple(marks))[0]
-                if subst_seen[key]["id"] == "R-13":
-                    seg_best = subst_seen[key]
+                    subst_seen[key] = _r13_reads(reading, dirs, proxied, tuple(marks))   # R-13 only: the other rules are not taken from this reading
+                if subst_seen[key]:
+                    seg_best = _r13()
                     break
         if best is None or LEVELS[seg_best["level"]] > LEVELS[best["level"]]:
             best = seg_best
@@ -2402,7 +2438,8 @@ def _realpath(path: str) -> str:
 
 def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
     """Classify one tool call. Raises on malformed policy; callers decide how to fail."""
-    global _REALPATHS, _GLOBS, _DESTS, _GLOB_SPENT, _GLOB_WORK, _LISTINGS
+    global _REALPATHS, _GLOBS, _DESTS, _GLOB_SPENT, _GLOB_WORK, _LISTINGS, _INTOS
+    outer_intos, _INTOS = _INTOS, {} if _INTOS is None else _INTOS
     outer, _REALPATHS = _REALPATHS, {} if _REALPATHS is None else _REALPATHS
     outer_globs, _GLOBS = _GLOBS, {} if _GLOBS is None else _GLOBS
     outer_dests, _DESTS = _DESTS, {} if _DESTS is None else _DESTS
@@ -2413,6 +2450,7 @@ def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
         return _assess(tool, tool_input, cwd)
     finally:
         _REALPATHS, _GLOBS, _DESTS, _GLOB_SPENT, _GLOB_WORK, _LISTINGS = outer, outer_globs, outer_dests, outer_spent, outer_work, outer_listings
+        _INTOS = outer_intos
 
 
 def _assess(tool: str, tool_input: dict, cwd: str) -> Assessment:
