@@ -67,7 +67,7 @@ def eligibility(a, tool: str, tool_input: dict | None, fp: dict | None) -> str:
 
     if a.ho_ids or a.blocked or a.level == "critical" or ({a.rule_id, *(getattr(a, "seg_rules", None) or [])} & NEVER_RULES):   # every segment rule, as `proxy.skip_reason` reads them (V6-06b)
         return "never"
-    if not policy.runs_shell(tool, tool_input or {}):
+    if not policy.shares_shell_answers(tool, tool_input or {}):   # a call that carries no shell text, or an MCP command given as a list (W-209)
         return "exact"
     if a.rule_id in EXACT_ONLY_RULES or set(getattr(a, "seg_rules", []) or []) & EXACT_ONLY_RULES or a.blind or a.rule_id in ("R-31", "R-32"):
         return "exact"
@@ -254,21 +254,41 @@ def is_deny(d) -> bool:
     return d["answer"] == "deny" and d["strength"] in ("hint", "strong") and (_col(d, "source") or "") != "test"
 
 
-def deny_index(denies) -> dict[tuple[str, str], str]:
-    """For each typed key, the time of the newest deny that stores it. Built once, so that `taken_out` is one dict lookup per key."""
-    idx: dict[tuple[str, str], str] = {}
+ANSWER_COLS = "rowid AS rid, *"   # an answer row is read with its row number (`rid`): the times have a resolution of one second, and the row number tells which of two answers of one second came last
+
+
+def _rid(r) -> int | None:
+    return _col(r, "rid")
+
+
+def deny_index(denies) -> dict[tuple[str, str], tuple[str, int | None]]:
+    """For each typed key, the time and row number (None when the row was read without it) of the newest deny that stores it. Built once, so that `taken_out` is one
+    dict lookup per key."""
+    idx: dict[tuple[str, str], tuple[str, int | None]] = {}
     for d in denies:
         if is_deny(d):
+            cur = (d["ts"], _rid(d))
             for k in stored_keys(d):
-                if d["ts"] > idx.get(k, ""):
-                    idx[k] = d["ts"]
+                old = idx.get(k)
+                if old is None or _newer(cur, old):
+                    idx[k] = cur
     return idx
 
 
+def _newer(a: tuple[str, int | None], b: tuple[str, int | None]) -> bool:
+    """Is answer `a` (time, row number) later than `b`? A later second is later; in the same second the later row is, when both row numbers are known (answers are
+    only ever added, so a higher number was written after). With a number missing, a tie is not later."""
+    if a[0] != b[0]:
+        return a[0] > b[0]
+    return a[1] is not None and b[1] is not None and a[1] > b[1]
+
+
 def taken_out(r, denies, keys: set[tuple[str, str]]) -> bool:
-    """A deny (`is_deny`) newer than the allow `r` that shares one of `keys`: the owner's newest answer wins. `denies` is a `deny_index` or the deny rows."""
+    """A deny (`is_deny`) newer than the allow `r` that shares one of `keys`: the owner's newest answer wins (`_newer`: the same second is told apart by the row
+    number). `denies` is a `deny_index` or the deny rows."""
     idx = denies if isinstance(denies, dict) else deny_index(denies)
-    return any(idx.get(k, "") > r["ts"] for k in keys)
+    mine = (r["ts"], _rid(r))
+    return any((hit := idx.get(k)) is not None and _newer(hit, mine) for k in keys)
 
 
 def honoured(r, denies, keys: set[tuple[str, str]], since: tuple[str, str] | None = None) -> bool:
@@ -281,7 +301,7 @@ def honoured_allows(db, where: str, args, since: tuple[str, str] | None = None, 
     """The strong allow rows that match `where` (newest confirm first) and that `honoured` with their `covered_keys` still counts: the denies read are only those
     that share a key with one of the allows (exact, class or family, scope), so the work grows with the rows of the keys in question, not with the ledger."""
     since = since or valid_since()
-    allows = db.con.execute(f"SELECT * FROM human_answers WHERE {ALLOW_SQL} AND confirmed_ts>=? AND ({where}) ORDER BY confirmed_ts DESC, rowid DESC",  # noqa: S608
+    allows = db.con.execute(f"SELECT {ANSWER_COLS} FROM human_answers WHERE {ALLOW_SQL} AND confirmed_ts>=? AND ({where}) ORDER BY confirmed_ts DESC, rowid DESC",  # noqa: S608
                             [since[0], *args]).fetchall()
     allows = [r for r in allows if standing(r, since)]
     if not allows:
@@ -308,7 +328,7 @@ def _rows_by_keys(db, where: str, exact, cls, scope) -> list:
     for col, ks in (("exact_key", exact), ("class_key", cls), ("scope_key", scope)):
         for i in range(0, len(ks), _CHUNK):
             part = ks[i:i + _CHUNK]
-            for d in db.con.execute(f"SELECT * FROM human_answers WHERE {where} AND {col} IN ({','.join('?' * len(part))})", part):  # noqa: S608 - code-defined columns
+            for d in db.con.execute(f"SELECT {ANSWER_COLS} FROM human_answers WHERE {where} AND {col} IN ({','.join('?' * len(part))})", part):  # noqa: S608 - code-defined columns
                 if d["answer_id"] not in seen:
                     seen.add(d["answer_id"])
                     out.append(d)
@@ -328,11 +348,11 @@ def lookup(db, a, tool: str, tool_input: dict | None, fp: dict | None, cwd: str 
     same = "exact_key=?" + (" OR class_key=?" if cls else "") + (f" OR scope_key IN ({','.join('?' * len(scope_keys))})" if scope_keys else "")
     args = [exact] + ([cls] if cls else []) + scope_keys
     since, ck = valid_since(), call_keys(exact, cls, scope_keys)
-    allows = db.con.execute(f"SELECT * FROM human_answers WHERE {ALLOW_SQL} AND confirmed_ts>=? AND ({same}) ORDER BY confirmed_ts DESC, rowid DESC",  # noqa: S608
+    allows = db.con.execute(f"SELECT {ANSWER_COLS} FROM human_answers WHERE {ALLOW_SQL} AND confirmed_ts>=? AND ({same}) ORDER BY confirmed_ts DESC, rowid DESC",  # noqa: S608
                             [since[0], *args]).fetchall()
     if not allows:
         return None
-    idx = deny_index(db.con.execute(f"SELECT * FROM human_answers WHERE {DENY_SQL} AND ({same})", args).fetchall())  # noqa: S608
+    idx = deny_index(db.con.execute(f"SELECT {ANSWER_COLS} FROM human_answers WHERE {DENY_SQL} AND ({same})", args).fetchall())  # noqa: S608
     return next((r for r in allows if honoured(r, idx, ck, since)), None)
 
 

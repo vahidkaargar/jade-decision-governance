@@ -31,6 +31,7 @@ RECORD_KINDS = ("wrong_mark", "audit_false_allow", "counterfactual_false_reject"
 MIN_ANSWERED = 20          # fewer answers than this say nothing about a rule
 CUT_AT = 500               # a decision keeps the first 500 characters of a command (decide.open_decision): a command this long may be cut
 INVARIANT = re.compile(r"\bSI-\d+\b")
+FLOOR_CLASS = re.compile(r"HO-[a-z0-9-]+")   # a human-only class id (jade/policy.py HO_*), as the level-off floor writes it in a `safety_block` detail (W-74)
 # A home or user path in any spelling: after a space, a quote, `=`, `:`, `<`, `;`, `(` and so on, never in the middle of a longer word (`/tmp/home/x` is not one).
 PRIVATE_PATH = re.compile(r"(?<![\w.-])(?:/(?:Users|home|Volumes|root)(?![\w.-])|/(?:private/)?var/root(?![\w.-])|~[A-Za-z_][\w.-]*)", re.I)
 # A real host: `user@host` (ssh, scp, git, psql), or a dotted name that ends in a common public or private top-level word. File endings such as .sh, .py, .md, .in or .app
@@ -63,36 +64,45 @@ def _detail(detail_json: str | None) -> dict:
 
 def classes_of(kind: str, guard: str | None, detail_json: str | None) -> tuple[list[str], str]:
     """The classes a blocker row falls in, and where they came from. A `safety_block` is classed by the invariant ids: those the hook wrote in the event detail (V6-32),
-    else those in the guard text (rows from before). A `would_block` or `gated` event is classed by its rule id."""
+    else those in the guard text (rows from before). A block by the level-off floor (V6-16) is no invariant: it is classed by the human-only class ids the hook
+    wrote (`floor`, W-74). A `would_block` or `gated` event is classed by its rule id."""
     if kind != "safety_block":
         rule, _ = _guard(guard)
         return ([rule] if rule else []), "rule"
-    ids = _detail(detail_json).get("invariants")
+    d = _detail(detail_json)
+    ids = d.get("invariants")
     if isinstance(ids, list) and ids and all(isinstance(i, str) and INVARIANT.fullmatch(i) for i in ids):
         return list(ids), "detail"
     found = INVARIANT.findall(guard or "")
-    return (found, "guard") if found else ([], "none")
+    if found:
+        return found, "guard"
+    floor = d.get("floor")
+    if isinstance(floor, list) and floor and all(isinstance(i, str) and FLOOR_CLASS.fullmatch(i) for i in floor):
+        return list(floor), "floor"
+    return [], "none"
 
 
 def blocker_classes(db, since: str) -> dict:
     """What stopped calls since `since` (an ISO time, "" for all time). Counts only."""
     live = ledger.live()
     invariants: dict[str, int] = {}
-    src = {"from_detail": 0, "from_guard_only": 0, "unclassified": 0}
+    floor: dict[str, int] = {}
+    src = {"from_detail": 0, "from_guard_only": 0, "from_floor": 0, "unclassified": 0}
     by_kind: dict[str, dict[str, int]] = {"would_block": {}, "gated": {}}
     blocks = 0
     for r in db.all(f"SELECT kind, guard, detail_json FROM events WHERE kind IN ('safety_block','would_block','gated') AND ts>=? AND {live} ORDER BY id", (since,)):  # noqa: S608
         classes, came = classes_of(r.kind, r.guard, r.detail_json)
         if r.kind == "safety_block":
             blocks += 1
-            src[{"detail": "from_detail", "guard": "from_guard_only", "none": "unclassified"}[came]] += 1
+            src[{"detail": "from_detail", "guard": "from_guard_only", "floor": "from_floor", "none": "unclassified"}[came]] += 1
+            into = floor if came == "floor" else invariants
             for c in classes:
-                invariants[c] = invariants.get(c, 0) + 1
+                into[c] = into.get(c, 0) + 1
         else:
             for c in classes:
                 by_kind[r.kind][c] = by_kind[r.kind].get(c, 0) + 1
     asks = readouts.ask_load(db, since)
-    return {"window_since": since or "all time", "safety_block_rows": blocks, "invariants": dict(sorted(invariants.items())), "invariant_rows": src,
+    return {"window_since": since or "all time", "safety_block_rows": blocks, "invariants": dict(sorted(invariants.items())), "floor_classes": dict(sorted(floor.items())), "invariant_rows": src,
             "would_block_by_rule": dict(sorted(by_kind["would_block"].items(), key=lambda kv: (-kv[1], kv[0]))),
             "gated_by_rule": dict(sorted(by_kind["gated"].items(), key=lambda kv: (-kv[1], kv[0]))),
             "asks_by_rule": {k: {x: v[x] for x in ("asked", "allowed", "denied", "expired", "open", "approve_rate")} for k, v in asks["by_rule"].items()}}
@@ -368,7 +378,11 @@ def render_blockers(r: dict, sample: list[dict] | None = None) -> str:
     lines = [f"What stopped calls ({r['window_since']}). Counts and ids only, no command text.",
              f"Safety invariants that fired ({r['safety_block_rows']} blocked call(s)):"]
     lines += [f"  {k}  {v}" for k, v in r["invariants"].items()] or ["  none"]
-    lines.append(f"Where the invariant id came from: event detail {s['from_detail']}, guard text of an older row {s['from_guard_only']}, not recorded at all {s['unclassified']}.")
+    if r["floor_classes"]:
+        lines.append("Blocked by the level-off floor (a write to JADE's own wiring), by human-only class:")
+        lines += [f"  {k}  {v}" for k, v in r["floor_classes"].items()]
+    lines.append(f"Where the invariant id came from: event detail {s['from_detail']}, guard text of an older row {s['from_guard_only']}, "
+                 f"level-off floor {s['from_floor']}, not recorded at all {s['unclassified']}.")
     lines.append("Calls the gate would have stopped in advisory mode, by rule:")
     lines += [f"  {k}  {v}" for k, v in r["would_block_by_rule"].items()] or ["  none"]
     lines.append("Calls that needed a permit or a question, by rule:")
