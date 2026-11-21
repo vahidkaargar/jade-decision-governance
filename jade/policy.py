@@ -69,11 +69,10 @@ _GH_REST_MERGE = re.compile(r"(?<![\w-])(?:pulls|merge_requests)/[^\s/]+/merge(?
 
 # W-153: a write to a git ref through the REST refs API (`repos/O/R/git/refs[/heads/main]`, PATCH, POST or DELETE) is a push by another door (SI-08, KG55, KG65). It is read from the
 # span of one `gh api` call (up to its own end: an unquoted `;`, `&`, `|` or newline), so a GET in another call does not hide it. A call is a write when it names a method other than GET and HEAD, or names none and gives a
-# field or a body (gh then sends a POST). The ref is the route tail (`heads/main`) or, on the bare `git/refs` route, the `ref=` field. A ref that is the default branch (main or master,
+# field or a body (gh then sends a POST). The method is read from the call's shell words (`_gh_methods`), so a `-X GET` inside a quoted value does not count. The ref is the route tail (`heads/main`) or, on the bare `git/refs` route, the `ref=` field. A ref that is the default branch (main or master,
 # in any letter case: the Mac disk does not tell them apart), a tag, a variable or a file the gate cannot read, a body (`--input`) or a missing ref is asked about; a plain other branch is not.
 _GH_ONLY_API = re.compile(r"(?<![\w.-])gh\s+api(?![\w.-])")
 _GH_REFS_ROUTE = re.compile(r"""(?<![\w-])(?:repos/[^\s/]+/[^\s/]+|repositories/[^\s/]+)/git/refs(?![\w.-])(?:/([^\s'"]*))?""")
-_GH_METHOD = re.compile(r"""(?<![\w-])(?:-X|--method)(?:\s+|=)?["']?([A-Za-z$`]\w*)""")
 _GH_BODY_FLAG = re.compile(r"(?<![\w-])(?:-[fF]|--field|--raw-field|--input)(?![\w-])|(?<![\w-])-[fF][^\s=-]")
 _GH_INPUT_FLAG = re.compile(r"(?<![\w-])--input(?![\w-])")
 _GH_REF_FIELD = re.compile(r"""(?<![\w-])ref=["']?([^\s"']*)""")
@@ -89,16 +88,58 @@ def _call_end(text: str, begin: int, limit: int) -> int:
     return _CALL_BODY.match(text, begin, limit).end()
 
 
+def _gh_methods(words: str) -> list[str]:
+    """The methods one `gh api` call names, read from its shell words (`words`: blanks inside quotes or after a backslash are NUL, see `_shell_words`), so a `-X GET`
+    inside a quoted field or header value (`-f note='-X GET'`, `-H 'X: --method GET'`) is data, not the method (W-153 review 2). `-X M`, `-XM`, `-X=M`, `--method M`
+    and `--method=M`; a quoted flag word (`"-X" DELETE`) is still the flag. A value that is not a plain word (a variable, a NUL from a quoted blank) is kept as it is,
+    so it is not GET: the call is read as a write. A `)`, `}` or backtick that closes a substitution around the call is not part of the value."""
+    if "-X" not in words and "--method" not in words:   # the quick test: most calls name no method
+        return []
+    ws = words.split()
+    out = []
+    for i, w in enumerate(ws):
+        if w in ("-X", "--method"):
+            v = ws[i + 1] if i + 1 < len(ws) else ""
+        elif w.startswith("--method="):
+            v = w[9:]
+        elif w.startswith("-X") and len(w) > 2:
+            v = w[3:] if w[2] == "=" else w[2:]
+        else:
+            continue
+        out.append(v.rstrip(")}`").upper())
+    return out
+
+
+_WORD_GLUE = str.maketrans({c: "\x00" for c in " \t\n\r\v\f;&|"})
+
+
+def _glue_token(m: re.Match) -> str:
+    """`_dequote_token`, but a blank or separator that is quoted or escaped becomes NUL, so it no longer splits a word: the text has the same length as `_shell_dequoted`."""
+    if m.group(1) is not None:
+        return m.group(1).translate(_WORD_GLUE)
+    if m.group(2) is not None:
+        return _DQ_ESC.sub(r"\1", m.group(2)).translate(_WORD_GLUE)
+    return "" if m.group(3) == "\n" else m.group(3).translate(_WORD_GLUE)
+
+
+def _shell_words(text: str) -> str:
+    """The text as the shell passes its words on, with each word still one run of non-blank characters (`_glue_token`). Same length and offsets as `_shell_dequoted(text)`."""
+    return _SHELL_TOKEN.sub(_glue_token, text)
+
+
 @lru_cache(maxsize=8)   # the whole command is read once per `gh api` segment: without the cache a command of many segments costs the square
-def _gh_ref_write(text: str) -> bool:
-    """Does a `gh api` call in the text write a git ref that is the default branch, a tag, or one the gate cannot read? (W-153.) Errs towards yes."""
+def _gh_ref_write(text: str, words: str | None = None) -> bool:
+    """Does a `gh api` call in the text write a git ref that is the default branch, a tag, or one the gate cannot read? (W-153.) Errs towards yes.
+    The method is read from the shell words of each call: `words` when given (`_shell_words` of the command, at the same offsets as `text`, which is then
+    `_shell_dequoted` of it), else the words of the call's own text."""
     calls = list(_GH_ONLY_API.finditer(text))
     for i, call in enumerate(calls):
-        span = text[call.end():_call_end(text, call.end(), calls[i + 1].start() if i + 1 < len(calls) else len(text))]
+        end = _call_end(text, call.end(), calls[i + 1].start() if i + 1 < len(calls) else len(text))
+        span = text[call.end():end]
         route = _GH_REFS_ROUTE.search(span)
         if not route:
             continue
-        verbs = [v.upper() for v in _GH_METHOD.findall(span)]
+        verbs = _gh_methods(words[call.end():end] if words is not None else _shell_words(span))
         if verbs:
             if all(v in ("GET", "HEAD") for v in verbs):
                 continue
@@ -151,7 +192,7 @@ def _dequoted_view(text: str) -> str | None:
 
 def _gh_ref_write_any(text: str) -> bool:
     """`_gh_ref_write` on the text as written or as the shell passes it on (`_shell_dequoted`): `refs/heads/ma\\in` and `gh a''pi` are a write to main too."""
-    return _gh_ref_write(text) or ((d := _dequoted_view(text)) is not None and _gh_ref_write(d))
+    return _gh_ref_write(text) or ((d := _dequoted_view(text)) is not None and _gh_ref_write(d, _shell_words(text)))
 
 
 def gh_api_merge_in(text: str) -> bool:

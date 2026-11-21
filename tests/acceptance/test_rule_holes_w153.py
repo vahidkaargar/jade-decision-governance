@@ -229,3 +229,40 @@ def test_a_shell_spelling_of_a_ref_write_is_rated_like_the_plain_one(cmd):
 ])
 def test_the_twins_of_the_shell_spellings_stay_as_they_were(cmd):
     assert not gated(assess(cmd))
+
+
+# ---------------------------------------------------------------- the method is read from the words gh gets, not from inside a quoted value (W-153 review 2)
+# `gh api --help`: "The default HTTP request method is GET normally and POST if any parameters were added." A `-X GET` inside a quoted field or header value
+# is data that gh sends; it is not the method, so the call is still a POST.
+
+@pytest.mark.parametrize("cmd", [
+    "gh api repos/o/r/git/refs -f ref=refs/tags/v9 -f sha=abc -f note='-X GET'",
+    "gh api repos/o/r/git/refs -f ref=refs/heads/main -f sha=abc -H 'X-Note: -X GET'",
+    "gh api repos/o/r/git/refs --input body.json -f n='--method GET'",
+    "gh api repos/o/r/git/refs/tags/v9 -f sha=abc -f force=true -f n='-X GET'",
+    "gh api repos/o/r/git/refs/heads/main -f sha=abc -f n=\"-XGET\"",
+    "gh api repos/o/r/git/refs/heads/main -f sha=abc -f n=\"--method=GET\"",
+    "gh api repos/o/r/git/refs/heads/main -f sha=abc -H X-Note:\\ -X\\ GET",
+    "gh a\\pi repos/o/r/git/refs -f ref=refs/heads/main -f sha=x -f n='-X GET'",          # the decoy with a spelling only the shell's reading shows
+    "gh api repos/o/r/git/refs -f ref=refs/heads/mai''n -f sha=x -H 'X: --method GET'",
+    "gh api repos/o/r/git/refs/heads/ma\\in -f sha=x -f n=\"-X HEAD\"",
+    "gh api repos/o/r/git/refs/heads/main \"-X\" DELETE",                               # a quoted flag word is still the flag
+    "gh api repos/o/r/git/refs/heads/main -X 'PATCH' -f sha=x",
+    "gh api repos/o/r/git/refs/heads/main \"--method=DELETE\"",
+    "gh api repos/o/r/git/refs/heads/main --method=$m",
+    "gh api repos/o/r/git/refs/heads/main -X \"$m\"",
+    "gh api repos/o/r/git/refs/heads/main -X=PATCH -f sha=x",
+])
+def test_a_decoy_method_inside_a_quoted_value_does_not_hide_a_write(cmd):
+    a = assess(cmd)
+    assert a.rule_id == "R-10" and gated(a)
+
+
+@pytest.mark.parametrize("cmd", [
+    "gh api repos/o/r/git/refs/heads/main -X GET -f n='-X PATCH'",      # the real method is GET; the quoted value is data
+    "gh api repos/o/r/git/refs/heads/main \"-X\" GET -f per_page=1",
+    "gh api repos/o/r/git/refs/heads/main -X 'GET' -f per_page=1",
+    "$(gh api repos/o/r/git/refs/heads/main -X GET -f per_page=1)",
+])
+def test_a_real_get_is_still_a_read(cmd):
+    assert not gated(assess(cmd))
