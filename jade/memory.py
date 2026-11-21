@@ -48,7 +48,7 @@ _LEADING_CD = re.compile(r"""^[ \t]*cd[ \t]+(?:"([^"$`\\]*)"|'([^']*)'|([^\s"'$`
 _GIT_C = re.compile(r"(?<![\w.-])git(?:\s+-[a-zA-Z](?:\s+\S+)?)*?\s+-C\s+(\S+)")
 _SUDO_WORD = re.compile(r"(?<![\w.-])sudo(?![\w.-])")
 _PR_NUMBER = re.compile(r"^((?:gh pr|glab mr) [\w-]+) \d+(?= |$)")
-MERGE = re.compile(r"^(?:gh pr merge|glab mr merge|git merge)(?= |$)")
+MERGE = re.compile(r"^(?:gh pr merge|glab mr merge|git merge|git update-ref)(?= |$)")   # W-153: `git update-ref` moves a branch with no push, so it is treated like a merge: exact at most, never sent to Jev
 INLINE = re.compile(r"(?:^|\s)-[A-Za-z]*[ce](?=\s|\Z)|<<|<\(")
 
 

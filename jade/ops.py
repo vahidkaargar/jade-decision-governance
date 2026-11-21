@@ -1687,14 +1687,14 @@ def settings_env_overrides() -> list[paths.Override]:
     for f in (sp, sp.with_name("settings.local.json")):
         env = _read_quiet(f).get("env")
         if isinstance(env, dict):
-            out += paths.gate_overrides({k: str(v) for k, v in env.items() if str(k).startswith("JADE_")}, source=str(f))
+            out += paths.gate_overrides({k: str(v) for k, v in env.items() if paths.is_gate_env_var(str(k))}, source=str(f))
     return out
 
 
 # ---- settings files other than the user's (W-47) --------------------------------------------------------------------
 _MANAGED_SETTINGS = "/Library/Application Support/ClaudeCode/managed-settings.json"
 _JADE_HOOK_WORDS = re.compile(r"\bhook\s+(?:pretool|posttool|stop|session-start)\b")
-_GATE_ASSIGN = re.compile(r"\bJADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME)\s*=")
+_GATE_ASSIGN = re.compile(r"\b(?:" + paths.gate_env_alternation() + r")\s*=")   # W-200: every gate variable of paths.GATE_ENV_VARS, not four of them
 
 
 def managed_settings_path() -> Path:
@@ -1812,7 +1812,7 @@ def _shadow_scan(f: Path, *, managed: bool = False) -> list[str]:
                 out.append(f"{label}: hooks.{event}[{i}].hooks[{j}].command {why}")
     env = data.get("env")
     if isinstance(env, dict):
-        out += [f"{label}: env.{o.var}={_safe_value(o.value)}: {o.why}" for o in paths.gate_overrides({k: str(v) for k, v in env.items() if str(k).startswith("JADE_")}, source=str(f)) if o.weakens]
+        out += [f"{label}: env.{o.var}={_safe_value(o.value)}: {o.why}" for o in paths.gate_overrides({k: str(v) for k, v in env.items() if paths.is_gate_env_var(str(k))}, source=str(f)) if o.weakens]
         out += [f"{label}: env.{k}: changes which program the hooks run or which files they read" for k in env if isinstance(k, str) and _ENV_MOVERS.fullmatch(k)]
     return out
 
@@ -2115,7 +2115,7 @@ def _overrides_row() -> tuple[str, bool, str]:
     if weak:
         return ("gate overrides", False, "weakening: " + ", ".join(f"{o.var} [{o.why}]" for o in weak) + ". Unset them; `JADE_ACK_OVERRIDES=VAR,...` only silences "
                 "this row for a deliberate override in this shell, never one in the Claude settings `env` block")
-    return ("gate overrides", True, shown or "none (JADE_GATE_MODE, JADE_POLICY_DIR, JADE_CONFIG, JADE_HOME, JADE_APPROVER_ANCHOR, JADE_SESSION_ID all default or unset)")
+    return ("gate overrides", True, shown or "none (" + ", ".join(paths.GATE_ENV_VARS) + " all default or unset; CLAUDE_CODE_SESSION_ID is set by the host in every session, so it is listed only in a settings env block and by the SessionStart hook when it differs from the session's id)")
 
 
 def overlay_problems() -> list[str]:
