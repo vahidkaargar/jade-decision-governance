@@ -2463,8 +2463,10 @@ def _realpath(path: str) -> str:
     return got
 
 
-def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
-    """Classify one tool call. Raises on malformed policy; callers decide how to fail."""
+@contextmanager
+def one_call():
+    """The memos and budgets of one call (real paths, glob walks and their budgets, copy targets): `assess` runs in one, and so does a reader of the same call
+    that asks the same questions again (askplain's question text). Nested, the outer one is kept."""
     global _REALPATHS, _GLOBS, _DESTS, _GLOB_SPENT, _GLOB_WORK, _LISTINGS, _INTOS
     outer_intos, _INTOS = _INTOS, {} if _INTOS is None else _INTOS
     outer, _REALPATHS = _REALPATHS, {} if _REALPATHS is None else _REALPATHS
@@ -2474,10 +2476,16 @@ def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
     outer_work, _GLOB_WORK = _GLOB_WORK, [DIR_GLOB_ENTRIES] if _GLOB_WORK is None else _GLOB_WORK
     outer_listings, _LISTINGS = _LISTINGS, {} if _LISTINGS is None else _LISTINGS
     try:
-        return _assess(tool, tool_input, cwd)
+        yield
     finally:
         _REALPATHS, _GLOBS, _DESTS, _GLOB_SPENT, _GLOB_WORK, _LISTINGS = outer, outer_globs, outer_dests, outer_spent, outer_work, outer_listings
         _INTOS = outer_intos
+
+
+def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
+    """Classify one tool call. Raises on malformed policy; callers decide how to fail."""
+    with one_call():
+        return _assess(tool, tool_input, cwd)
 
 
 def _assess(tool: str, tool_input: dict, cwd: str) -> Assessment:
