@@ -374,11 +374,38 @@ def runs_shell(tool: str, tool_input: dict) -> bool:
     return tool in SHELL_TOOLS or (is_mcp(tool) and mcp_command(tool_input) is not None)
 
 
-def mcp_command(tool_input: dict) -> str | None:
-    for key in risk().get("mcp_command_keys", ["command", "cmd", "script"]):
+def _mcp_command_read(tool_input: dict) -> tuple[str | None, bool]:
+    """(text, from_a_list) of the command an MCP call carries, or (None, False). The first command key that holds a string wins, with its text unchanged
+    (the rule before W-209, so the plan hash and the subject of such a call do not move). Only when no key holds a string is a list of words read."""
+    keys = risk().get("mcp_command_keys", ["command", "cmd", "script"])
+    for key in keys:
         if isinstance(tool_input.get(key), str) and tool_input[key].strip():
-            return tool_input[key]
-    return None
+            return tool_input[key], False
+    for key in keys:
+        val = tool_input.get(key)
+        if isinstance(val, (list, tuple)) and val and all(isinstance(w, (str, int, float)) and not isinstance(w, bool) for w in val):
+            if (text := shlex.join(str(w) for w in val)).strip("' "):
+                return text, True
+    return None, False
+
+
+def mcp_command(tool_input: dict) -> str | None:
+    """The command an MCP call carries: a string under one of the `mcp_command_keys`, or a list of words (`["git", "push"]`, W-209) joined the way a shell
+    reads it. A value that cannot be read as a command (an empty list, a nested one, an object) is no command, and the tool is rated by its name."""
+    return _mcp_command_read(tool_input)[0]
+
+
+def mcp_command_is_list(tool_input: dict) -> bool:
+    """True when `mcp_command` read its text from a list. Such a tool is rated by its name as well as by the command: the name rule was all that rated it
+    before the list was read, and a generic name rule (M-07) is let go only for a command the tool spells as one string."""
+    return _mcp_command_read(tool_input)[1]
+
+
+def shares_shell_answers(tool: str, tool_input: dict) -> bool:
+    """True when an answer to this call may be generalised like one to a shell command (a class key, a scope): `runs_shell`, except an MCP command given as a
+    list. Such a call was rated by its tool name before W-209 and stays exact only, with a hold key of its own, so that an answer given for the same command in
+    Bash or as a string never runs it (W-209 review). Everything that adds care to a shell call (SI-08, fingerprints, run fields) still reads it through `runs_shell`."""
+    return runs_shell(tool, tool_input) and not (is_mcp(tool) and mcp_command_is_list(tool_input))
 
 
 @dataclass
@@ -1807,20 +1834,23 @@ def _assess_tool(tool: str, tool_input: dict, cwd: str) -> Assessment:
     """MCP tools and the built-in tools that carry no command line: classified by name, by the command they carry, by the paths they
     write and by the text they type into a shell; the most severe reading decides."""
     cmd = mcp_command(tool_input) if is_mcp(tool) else None
-    rule = _tool_rule(tool, command_decides=cmd is not None)
+    by_name = cmd is None or mcp_command_is_list(tool_input)   # W-209: a command spelled as a list is read, and the name still rates the call, as it did before the list was read
+    rule = _tool_rule(tool, command_decides=not by_name)
     if rule["id"] == "M-99" and isinstance(tool_input.get("action"), str) and re.fullmatch(r"[\w-]{1,40}", tool_input["action"]):
         # one tool, many verbs (`herd processes {action: start}`): the action is the name's verb
-        by_action = _tool_rule(f"{tool}__{tool_input['action']}", command_decides=cmd is not None)
+        by_action = _tool_rule(f"{tool}__{tool_input['action']}", command_decides=not by_name)
         rule = rule if by_action["id"] == "M-99" else by_action
     if cmd is not None:
         a = _assess_shell(tool, cmd, cwd)
-        if not rule.get("generic"):
+        if by_name or not rule.get("generic"):
             _raise_to(a, _rule_assessment(rule))
+        if by_name:   # a list command keeps the hold key it had before W-209 (tool and input): no answer or hold of another form of the command is shared with it
+            a.hold_key = plan_hash(tool, canonical(tool_input), "")
     else:
         a = _rule_assessment(rule)
         subject = canonical(tool_input)
         _seal(a, tool, subject, "", f"{tool} {subject}")
-    if cmd is None:   # a tool that carries no command is classed by what its name does; one that carries a command was read as that command above
+    if by_name:   # a tool that carries no command (or one spelled as a list) is classed by what its name does; one that carries a command string was read as that command above
         for ident in sorted(humanonly.tool_classes(tool) | (humanonly.tool_classes(f"{tool}__{tool_input['action']}") if isinstance(tool_input.get("action"), str)
                                                               and re.fullmatch(r"[\w-]{1,40}", tool_input["action"]) else set())):
             _ho_add(a, ident)

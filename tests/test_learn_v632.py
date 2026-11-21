@@ -96,7 +96,7 @@ def test_blockers_are_counted_by_invariant_id_and_by_rule_id():
     r = learn.blocker_classes(db, ALL_TIME)
     assert r["invariants"] == {"SI-08": 2, "SI-09": 1, "SI-10": 1}
     assert r["safety_block_rows"] == 4
-    assert r["invariant_rows"] == {"from_detail": 2, "from_guard_only": 1, "unclassified": 1}   # the fallback is counted, never hidden
+    assert r["invariant_rows"] == {"from_detail": 2, "from_guard_only": 1, "from_floor": 0, "unclassified": 1}   # the fallback is counted, never hidden
     assert r["would_block_by_rule"] == {"R-14": 2, "R-11": 1}
     assert r["gated_by_rule"] == {"R-14": 1}
 

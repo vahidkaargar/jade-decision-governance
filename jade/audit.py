@@ -18,6 +18,7 @@ key or argument that sets the chance, the key or the outcome of a draw. If the k
 Each drawn row is sealed (HMAC over its fields): the draw fields, the rule, the session, the call that ran (its text and its directory), its status and the time it was
 checked. A mark writes the new status and seals the row again. The readout counts only rows whose seal holds, so a row edited with SQL is never counted as a clean check.
 The seal cannot show that a row was deleted: a deleted row is simply missing (it is not a chain).
+A call that Jev lets run (`proxy.step`, W-207) is admitted and drawn the same way, with the Jev call standing in for the answer row; a refusal means the owner is asked.
 A call that is asked about because of a limit or a pause is also kept from Jev (`memory.step` tells `proxy.step`): the audit is never a way round the question.
 
 Aging by evidence (`aged_out`, read by `memory.standing`, so lookup, `jade knows` and the proxy agree): a standing answer stops deciding after `age_runs` silent runs
@@ -355,6 +356,17 @@ def pending(db, limit: int):
             if len(out) >= limit:
                 break
     return out
+
+
+def sealed_calls(db, decision_ids) -> dict:
+    """W-207: the drawn rows of these decisions whose seal holds, as `{decision_id: row}`. `jade review` shows the call that ran from such a row (what ran and where) and
+    not the label of the standing answer, which can cover other calls. A row that is missing or fails its seal is left out: the reader then falls back to the label."""
+    ids = sorted({d for d in decision_ids if d})
+    key = _read_key(db) if ids else None
+    if key is None:
+        return {}
+    rows = db.con.execute(f"SELECT * FROM audit_queue WHERE decision_id IN ({','.join('?' * len(ids))})", ids).fetchall()  # noqa: S608 - placeholders only
+    return {r["decision_id"]: r for r in rows if hmac.compare_digest(r["seal"], _seal(key, r))}
 
 
 def describe(r, show) -> str:

@@ -314,3 +314,41 @@ def test_retention_purge_does_not_lock_the_human_out_of_jade_jev_on():
     purge()
     ops.set_jev("on", stdin_isatty=True)   # before the fix: HumanOnly, because the last record read as unreadable
     assert ops.jev_effective() == "on"
+
+
+# ------------------------------------------------------------------ the retention job never erases the level either (W-194)
+
+@pytest.mark.parametrize("level", ["off", "low", "medium", "high"])
+def test_retention_purge_does_not_change_what_the_level_record_reads(level):
+    set_cfg(level=MISSING)
+    ops.set_level(level, stdin_isatty=True)
+    assert ops._recorded_level() == level
+    age_events("level")
+    purge()
+    assert ops._recorded_level() == level   # before the fix: the detail was cleared and the record read None
+    assert paths.level() == level
+
+
+def test_retention_purge_does_not_lock_the_human_out_of_jade_level():
+    set_cfg(level=MISSING)
+    ops.set_level("high", stdin_isatty=True)
+    age_events("level")
+    purge()
+    ops.set_level("low", stdin_isatty=True)   # before the fix: HumanOnly, because the config level matched no recorded event
+    assert paths.level() == "low"
+
+
+def test_retention_purge_still_clears_the_detail_of_other_old_events():
+    db = ledger.open(timeout=5)
+    try:
+        db.event("probe", "w194_probe", guard="test", actor="human:test", detail={"text": "private"})
+    finally:
+        db.close()
+    age_events("w194_probe")
+    purge()
+    db = ledger.open(timeout=5)
+    try:
+        row = db.con.execute("SELECT detail_json FROM events WHERE kind='w194_probe'").fetchone()
+    finally:
+        db.close()
+    assert row[0] is None

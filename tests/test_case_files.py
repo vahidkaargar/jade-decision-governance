@@ -22,6 +22,25 @@ def test_regression_and_adversarial_cases_all_pass(capsys):
     assert f"{total}/{total} cases pass" in capsys.readouterr().out
 
 
+def test_lifecycle_cases_never_use_an_installed_approver(tmp_path, monkeypatch, capsys):
+    """W-155: on a machine that has the approver trust anchor (W-90) a plain `python evals/run_cases.py` made the lifecycle cases approve through the signed
+    backend, which runs `sudo` and needs a terminal: the runner crashed. The runner has its own anchor path, as the test suite has (W-93), so the answer
+    does not depend on what is installed. The helper is replaced here by one that fails loudly, so the test never reaches a real `sudo`."""
+    from jade import signing
+
+    real_anchor = tmp_path / "allowed_signers"
+    real_anchor.write_text("an installed anchor\n")
+    monkeypatch.setattr(signing, "DEFAULT_ANCHOR", real_anchor)   # the machine has the approver installed
+    monkeypatch.setattr(signing, "sign_with_helper", lambda msg: (_ for _ in ()).throw(RuntimeError("the approver helper was called")))
+    rows = [json.loads(line) for d in ("regression", "adversarial") for line in (ROOT / "evals" / d / "cases.jsonl").read_text().splitlines() if line.strip()]
+    f = tmp_path / "life.jsonl"
+    f.write_text("".join(json.dumps(c) + "\n" for c in rows if c.get("kind") in ("permit_variant", "permit_forged", "decide_walk")))
+    assert f.read_text().count('"permit_variant"') >= 1   # the kind that approves: the one the installed anchor broke
+    assert _runner().main([str(f)]) == 0
+    assert signing.DEFAULT_ANCHOR == real_anchor   # the runner puts the module back as it found it
+    assert "FAIL" not in capsys.readouterr().out
+
+
 def test_runner_detects_a_wrong_expectation(tmp_path, capsys):
     bad = tmp_path / "bad.jsonl"
     bad.write_text('{"id":"N1","class":"wrong","kind":"gate","command":"git push origin v1-feat-x","expect":"allow"}\n')
