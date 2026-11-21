@@ -252,6 +252,17 @@ def test_the_twins_of_the_shell_spellings_stay_as_they_were(cmd):
     "gh api repos/o/r/git/refs/heads/main --method=$m",
     "gh api repos/o/r/git/refs/heads/main -X \"$m\"",
     "gh api repos/o/r/git/refs/heads/main -X=PATCH -f sha=x",
+    # a GET that is not the method gh reads: the value of another option, a redirect target, inside a substitution, after a comment
+    "gh api repos/o/r/git/refs -f ref=refs/heads/main -f sha=abc --jq -XGET",
+    "gh api repos/o/r/git/refs -f ref=refs/heads/main -f sha=abc --preview --method=GET",
+    "gh api repos/o/r/git/refs -f ref=refs/heads/main -f sha=abc -H -XGET",
+    "gh api repos/o/r/git/refs -f ref=refs/heads/main -f sha=abc -f -XGET",
+    "gh api repos/o/r/git/refs -f ref=refs/heads/main -f sha=abc -H -X GET",
+    "gh api repos/o/r/git/refs -f ref=refs/heads/main -f sha=abc > -XGET",
+    "gh api repos/o/r/git/refs -f ref=refs/heads/main -f sha=abc 2> -X GET",
+    "gh api repos/o/r/git/refs -f ref=refs/heads/main -f sha=abc -f n=$(: -X GET)",
+    "gh api repos/o/r/git/refs -f ref=refs/heads/main -f sha=abc -f n=`: -X GET`",
+    "gh api repos/o/r/git/refs -f ref=refs/heads/main -f sha=abc # -X GET",
 ])
 def test_a_decoy_method_inside_a_quoted_value_does_not_hide_a_write(cmd):
     a = assess(cmd)
@@ -263,6 +274,19 @@ def test_a_decoy_method_inside_a_quoted_value_does_not_hide_a_write(cmd):
     "gh api repos/o/r/git/refs/heads/main \"-X\" GET -f per_page=1",
     "gh api repos/o/r/git/refs/heads/main -X 'GET' -f per_page=1",
     "$(gh api repos/o/r/git/refs/heads/main -X GET -f per_page=1)",
+    "`gh api repos/o/r/git/refs/heads/main -X GET -f per_page=1`",
+    "gh api repos/o/r/git/refs/heads/main -H 'Accept: x' -X GET -f per_page=1",
+    "gh api repos/o/r/git/refs/heads/main --jq .a -X GET -f per_page=1",
+    "gh api repos/o/r/git/refs/heads/main -f per_page=1 -X GET > out.json",
+    "gh api repos/o/r/git/refs/heads/main -X GET -f per_page=1  # list it",
 ])
 def test_a_real_get_is_still_a_read(cmd):
     assert not gated(assess(cmd))
+
+
+@pytest.mark.parametrize("cmd", [
+    "gh api x -f n='a b;c' -H \"d\\\"e f\" g\\ h 'open", "gh a\\pi x\\\ny -f 'a|b' \"c&d\"", "a''b \"\" '' \\", "gh api -f n=\"$(x 'y z')\" w",
+])
+def test_the_shell_words_have_the_offsets_of_the_dequoted_text(cmd):
+    """`_gh_ref_write` reads the dequoted text and its words at the same offsets: the two views must have the same length."""
+    assert len(policy._shell_words(cmd)) == len(policy._shell_dequoted(cmd))

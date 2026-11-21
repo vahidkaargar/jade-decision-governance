@@ -97,17 +97,39 @@ def _gh_methods(words: str) -> list[str]:
         return []
     ws = words.split()
     out = []
+    value_next = after_comment = in_tick = False
+    depth = 0
     for i, w in enumerate(ws):
+        # A GET or HEAD in a place gh does not read as the method (the value of another option or a redirect, inside `$(...)` or backticks, after a `#`) is
+        # dropped; any other method found there is kept. Dropping a GET can only make the call read as a write, so this never lowers a rating.
+        doubtful, value_next = value_next or after_comment or in_tick or depth > 0, False
         if w in ("-X", "--method"):
-            v = ws[i + 1] if i + 1 < len(ws) else ""
+            v, value_next = (ws[i + 1] if i + 1 < len(ws) else ""), True
         elif w.startswith("--method="):
             v = w[9:]
         elif w.startswith("-X") and len(w) > 2:
             v = w[3:] if w[2] == "=" else w[2:]
         else:
+            v = None
+            if not doubtful:
+                if w.startswith("#"):
+                    after_comment = True
+                elif w in _GH_VALUE_OPTS or _REDIRECT_WORD.match(w):
+                    value_next = True
+        depth = max(0, depth + w.count("(") - w.count(")"))
+        in_tick ^= w.count("`") % 2 == 1
+        if v is None:
             continue
-        out.append(v.rstrip(")}`").upper())
+        v = v.rstrip(")}`").upper()
+        if not (doubtful and v in ("GET", "HEAD")):
+            out.append(v)
     return out
+
+
+# The options of `gh api` that take a value as the next word (`gh api --help`); -X and --method are read on their own. A redirect operator takes the next word too.
+_GH_VALUE_OPTS = frozenset(("-H", "--header", "-f", "--raw-field", "-F", "--field", "-q", "--jq", "-t", "--template", "--input", "-p", "--preview", "--cache",
+                            "--hostname"))
+_REDIRECT_WORD = re.compile(r"\d*(?:&>>?|>>?\|?|<<?<?|>&|<&|<>)$")
 
 
 _WORD_GLUE = str.maketrans({c: "\x00" for c in " \t\n\r\v\f;&|"})
@@ -125,6 +147,12 @@ def _glue_token(m: re.Match) -> str:
 def _shell_words(text: str) -> str:
     """The text as the shell passes its words on, with each word still one run of non-blank characters (`_glue_token`). Same length and offsets as `_shell_dequoted(text)`."""
     return _SHELL_TOKEN.sub(_glue_token, text)
+
+
+@lru_cache(maxsize=8)
+def _command_words(text: str) -> str:
+    """`_shell_words` of a whole command, cached: it is read once per `gh api` segment, like `_shell_dequoted` (the words of one call's own text are not cached)."""
+    return _shell_words(text)
 
 
 @lru_cache(maxsize=8)   # the whole command is read once per `gh api` segment: without the cache a command of many segments costs the square
@@ -192,7 +220,7 @@ def _dequoted_view(text: str) -> str | None:
 
 def _gh_ref_write_any(text: str) -> bool:
     """`_gh_ref_write` on the text as written or as the shell passes it on (`_shell_dequoted`): `refs/heads/ma\\in` and `gh a''pi` are a write to main too."""
-    return _gh_ref_write(text) or ((d := _dequoted_view(text)) is not None and _gh_ref_write(d, _shell_words(text)))
+    return _gh_ref_write(text) or ((d := _dequoted_view(text)) is not None and _gh_ref_write(d, _command_words(text)))
 
 
 def gh_api_merge_in(text: str) -> bool:
