@@ -874,12 +874,19 @@ def _list_b_row() -> tuple[str, bool, str]:
             "(the floor of level `off` is another thing: it needs gate mode enforce)")
 
 
+NOT_RUN_HERE = " (the hooks were not run here: `jade check` runs each one once to prove it decides)"
+
+
 def _what_blocks_row(pretool_ok: bool | None = None, wiring: list[str] | None = None, probe: bool = True) -> tuple[str, bool | None, str]:
     """`blocking_summary` for the mode and level in force, unless the PreToolUse hook is missing (then nothing blocks) or the wiring has problems (then it is
     not known). A PreToolUse hook that is installed but out of date still runs (W-141): a matcher gap leaves only the named tools unchecked, and an old timeout
     or failure setting only weakens what a crashed or hung gate does; the row then says that and still says what blocks. `check` passes what it already found
     (the live wiring probe, run whenever a JADE PreToolUse entry is registered and printed as the `hook wiring` row), so the probe is not run twice and
-    the row never points to a row that is not printed. With no `wiring`, `probe` says whether to run the live probe (True) or to read the static facts only."""
+    the row never points to a row that is not printed. With no `wiring`, `probe` says whether to run the live probe (True) or to read the static facts only
+    (False, the install summary, W-140): the row then says the hooks were not run here and points to `jade check`, because a hook that crashes when run
+    is seen only by the live probe."""
+    probed = wiring is not None or probe   # `check` passes the live probe's result; the install summary passes nothing and probe=False
+    where = "see the `hook wiring` row" if probed else "`jade check` names them in its `hook wiring` row"
     if pretool_ok is None:
         pretool_ok = hooks_status().get("PreToolUse", False)
     if not pretool_ok:
@@ -902,14 +909,14 @@ def _what_blocks_row(pretool_ok: bool | None = None, wiring: list[str] | None = 
             lead = ("the PreToolUse hook is out of date (its timeout or failure setting) but still runs, so a crashed or hung gate may let a call run; "
                     "run `jade hooks install` in a terminal; when the gate runs it blocks as follows: ")
         if wiring:
-            lead = "unknown: the hook wiring has problems (see the `hook wiring` row), so the hook may not run; " + lead
-        return ("what blocks", None, lead + text)
+            lead = f"unknown: the hook wiring has problems ({where}), so the hook may not run; " + lead
+        return ("what blocks", None, lead + text + ("" if wiring or probed else NOT_RUN_HERE))
     if wiring is None:
         wiring = wiring_problems(probe=probe)
     ok, text = blocking_summary()
     if wiring:
-        return ("what blocks", None, "unknown: the hook wiring has problems (see the `hook wiring` row), so the hook may not run; when it runs: " + text)
-    return ("what blocks", ok, text)
+        return ("what blocks", None, f"unknown: the hook wiring has problems ({where}), so the hook may not run; when it runs: " + text)
+    return ("what blocks", ok, text + ("" if probed else NOT_RUN_HERE))
 
 
 def parse_since(value: str) -> float:
@@ -2512,14 +2519,15 @@ def _approval_row() -> tuple[str, bool | None, str]:
 
 def install_summary_rows() -> list[tuple[str, bool | None, str]]:
     """V6-10 (DX-H4), W-140: what `jade hooks install` leaves in force, as rows (name, ok, detail) with the names and the states `jade check` uses: the effective
-    gate mode, what the hook blocks, and the approval backend. `what blocks` is the row `jade check` prints (`_what_blocks_row`): it reads the hooks, and when
-    the PreToolUse hook is installed it runs the live wiring probe once (in a throwaway JADE home), so a disabled or dead hook is never "ok" here. It reads the
-    config, the policy, the Claude settings and the trust anchor: nothing is written and no default changes."""
+    gate mode, what the hook blocks, and the approval backend. `what blocks` is the row `jade check` prints (`_what_blocks_row`) with the static wiring facts
+    only: disabled hooks or a missing binary make it "unknown", but no hook is run (review of W-140: the live probe made install cost about 1.6 s of CPU and
+    tens of seconds of wall time on a busy machine), so the row says the hooks were not run here and points to `jade check`. It reads the config, the policy,
+    the Claude settings and the trust anchor: nothing is written and no default changes."""
     _, gate_ok, gate_text = _gate_mode_row()
     if os.environ.get("JADE_GATE_MODE") and "JADE_GATE_MODE" not in gate_text:
         gate_text += " (JADE_GATE_MODE in this environment)"
     backend_ok, backend_text = _approval_state()
-    return [("gate mode", gate_ok, gate_text), _what_blocks_row(), ("approval backend", backend_ok, backend_text)]
+    return [("gate mode", gate_ok, gate_text), _what_blocks_row(probe=False), ("approval backend", backend_ok, backend_text)]
 
 
 CHECK_PREFIX = {True: "ok  ", False: "FAIL", None: "WARN"}   # V6-10: WARN is not safe or not known, and never changes the exit code

@@ -645,17 +645,35 @@ def test_jade_hooks_install_never_says_ok_for_what_blocks_when_the_hooks_are_dis
     assert "ok    what blocks" not in out, out
     assert "WARN  what blocks: unknown: the hook wiring has problems" in out, out
     check_row = [r for r in ops.check(live=False) if r[0] == "what blocks"][0]
-    assert [r for r in ops.install_summary_rows() if r[0] == "what blocks"][0] == check_row
-    assert check_row[1] is None
+    install_row = [r for r in ops.install_summary_rows() if r[0] == "what blocks"][0]
+    assert check_row[1] is None and install_row[1] is None
+    assert "`jade check`" in install_row[2] and "see the `hook wiring` row" not in install_row[2], install_row   # install prints no `hook wiring` row (residual b of W-140)
 
 
 def test_jade_hooks_install_says_ok_for_what_blocks_only_when_the_hook_is_wired(capsys, probe_ok):
-    """The positive twin: gate enforce, no level, the hooks installed and wired: the install row is ok, and it is the `jade check` row."""
+    """The positive twin: gate enforce, no level, the hooks installed and wired: the install row is ok, says what `jade check` says, and says the hooks
+    were not run here."""
     setup_pair("enforce", None)
     assert cli.main(["hooks", "install"]) in (0, None)
     out = capsys.readouterr().out
     assert "ok    what blocks: every active safety invariant (" in out, out
-    assert [r for r in ops.install_summary_rows() if r[0] == "what blocks"][0] == [r for r in ops.check(live=False) if r[0] == "what blocks"][0]
+    _n, ok_i, text_i = [r for r in ops.install_summary_rows() if r[0] == "what blocks"][0]
+    _n, ok_c, text_c = [r for r in ops.check(live=False) if r[0] == "what blocks"][0]
+    assert ok_i == ok_c is True and text_i.startswith(text_c) and "not run here" in text_i and "`jade check`" in text_i, (text_i, text_c)
+
+
+@pytest.mark.parametrize("mode", ["wired", "gap"])
+def test_the_install_summary_runs_no_hook(monkeypatch, mode):
+    """Review of W-140: the install summary ran the live probe (one subprocess per hook), so `jade hooks install` went from about 1 ms to about 1.6 s of
+    CPU and 36 s of wall time on a loaded machine. The summary reads the static wiring facts only; `jade check` runs the hooks."""
+    setup_pair("enforce", None)
+    ops.hooks_install(stdin_isatty=True)
+    if mode == "gap":
+        _install_with_pretool_matchers(["Bash"])
+    ran = []
+    monkeypatch.setattr(ops, "probe_hook", lambda parsed, timeout_s=15.0: ran.append(parsed.sub))
+    ops.install_summary_lines(ops.install_summary_rows())
+    assert ran == [], ran
 
 
 def test_jade_hooks_install_prints_the_summary(capsys, probe_ok):
