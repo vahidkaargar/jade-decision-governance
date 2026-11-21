@@ -65,7 +65,8 @@ REQUIRE = "JADE_REQUIRE_APPROVE_MODULES"
 
 def approve_modules_turned_off(doc: dict) -> list[str]:
     """W-201: every place in a parsed workflow where JADE_REQUIRE_APPROVE_MODULES is not "1": a missing workflow-level value, or any workflow, job or step
-    env that sets it to something else. GitHub merges env workflow, then job, then step, so a step-level value wins for that step."""
+    env that sets it to something else, or any run line that names it (only env maps set it; a run line that touches it is a way round).
+    GitHub merges env workflow, then job, then step, so a step-level value wins for that step."""
     bad = []
     if str((doc.get("env") or {}).get(REQUIRE)) != "1":
         bad.append("workflow")
@@ -75,6 +76,8 @@ def approve_modules_turned_off(doc: dict) -> list[str]:
         for i, step in enumerate(job.get("steps") or [], 1):
             if REQUIRE in (step.get("env") or {}) and str(step["env"][REQUIRE]) != "1":
                 bad.append(f"{name} step {i}")
+            if REQUIRE in str(step.get("run", "")):   # an inline value, `env -u`, `unset` or a $GITHUB_ENV write changes it where no env map shows it
+                bad.append(f"{name} step {i} run")
     return bad
 
 
@@ -91,6 +94,12 @@ def test_the_checker_sees_every_place_that_turns_the_switch_off():
     assert approve_modules_turned_off(doc(top="1", step=0)) == ["test step 2"]       # unquoted YAML 0
     assert approve_modules_turned_off(doc(top="1", step=False)) == ["test step 2"]   # unquoted YAML false
     assert approve_modules_turned_off(doc(top="1", step="")) == ["test step 2"]
+    # a run line can turn it off too, without any env map: an inline value, `env -u`, `unset`, or a write to $GITHUB_ENV (any mention in a run line is refused)
+    for line in (f"{REQUIRE}=0 uv run pytest -q", f"env -u {REQUIRE} uv run pytest -q", f"unset {REQUIRE}; uv run pytest -q",
+                 f'echo "{REQUIRE}=0" >> "$GITHUB_ENV"', f"{REQUIRE}= uv run pytest -q", f"{REQUIRE}=1 uv run pytest -q"):
+        d = doc(top="1")
+        d["jobs"]["test"]["steps"][1]["run"] = line
+        assert approve_modules_turned_off(d) == ["test step 2 run"], line
 
 
 def test_ci_fails_instead_of_skipping_the_w93_modules(ci):
