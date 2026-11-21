@@ -233,6 +233,8 @@ def test_nested_variable_commands_do_not_multiply_the_rows(depth):
     "v=push; git $v origin main $(true)",
     "v=push; git $v origin $(echo main)",
     _nest(4).replace("echo x", "$g push origin main"),
+    "g=git; " + "x $(" * 10 + "$g push origin main" + ")" * 10,       # deeper than MAX_DEPTH (8)
+    "v=push; " + "x <(" * 10 + "git $v origin main" + ")" * 10,
 ])
 def test_a_variable_in_a_nested_text_still_reads_the_push(command):
     assert asked(command), command
