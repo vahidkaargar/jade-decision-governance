@@ -167,7 +167,9 @@ class Ledger:
         delete `-wal` and `-shm` under them ("database disk image is malformed", W-95).
 
         O_EXCL refuses any symlink, even a dangling one, and SQLite would then create the target itself with the umask mode. So a symlink at the
-        path is followed one link at a time and the same O_EXCL open is tried on its target: a file that exists is still never opened."""
+        path is followed one link at a time and the same O_EXCL open is tried on its target: a file that exists is still never opened.
+        A chain longer than the kernel follows in one lookup (macOS 32, Linux 40) fails the stat with ELOOP, but SQLite resolves links itself and
+        opens it anyway, so the chain is then resolved by `os.path.realpath` (one link per step, no kernel limit) and the O_EXCL open is tried there."""
         p = str(self.path)
         for _ in range(40):   # more links than the kernel follows (Linux 40, macOS 32): a loop ends here
             try:
@@ -181,16 +183,19 @@ class Ledger:
                     if not os.path.islink(p):
                         return
                     p = os.path.join(os.path.dirname(p), os.readlink(p))
-                except OSError:   # ELOOP: a chain longer than the kernel follows is left to SQLite and _lock_down (known limit, docs/05 T15)
-                    return
+                except OSError:   # ELOOP: a long chain (or a loop, which realpath leaves as a link, so the loop bound ends it)
+                    p = os.path.realpath(p)
             except OSError:
                 return
 
     def _lock_down(self) -> None:
-        """Mode 600 on the database and on the sidecars that exist now (an older file, or one made by another tool, is tightened too)."""
+        """Mode 600 on the database and on the sidecars that exist now (an older file, or one made by another tool, is tightened too).
+        SQLite resolves a symlinked path and keeps `-wal` and `-shm` next to the real file, so the real path is the one chmodded, by name only:
+        opening a descriptor of the database here would drop this process's locks on it (W-95)."""
+        real = os.path.realpath(self.path)
         for suffix in ("", "-wal", "-shm"):
             try:
-                os.chmod(f"{self.path}{suffix}", 0o600)
+                os.chmod(f"{real}{suffix}", 0o600)
             except OSError:
                 pass
 

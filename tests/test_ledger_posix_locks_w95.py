@@ -109,3 +109,69 @@ def test_a_second_connection_through_a_symlink_keeps_the_first_ones_lock(tmp_pat
         b.close()
         assert held_by_someone(target)
         a.close()
+
+
+LONG = 45   # more links than either kernel follows in one path lookup (macOS 32, Linux 40); SQLite resolves the links itself and still opens the file
+
+
+def link_chain(d, n, end="ledger.sqlite"):
+    """`n` relative symlinks c{n-1}.sqlite -> ... -> c0.sqlite -> `end` in `d`; returns the first link."""
+    prev = end
+    for i in range(n):
+        (d / f"c{i}.sqlite").symlink_to(prev)
+        prev = f"c{i}.sqlite"
+    return d / prev
+
+
+def modes(d, name="ledger.sqlite"):
+    return {s: (d / f"{name}{s}").stat().st_mode & 0o777 for s in ("", "-wal", "-shm") if (d / f"{name}{s}").exists()}
+
+
+def test_a_dangling_link_chain_longer_than_the_kernel_follows_still_gets_a_0600_target_before_sqlite_opens_it(tmp_path, monkeypatch):
+    # One stat of the whole chain fails with ELOOP; SQLite still opens it, and used to create the target with the umask mode (0644 here) for good.
+    path = link_chain(tmp_path, LONG)
+    target = tmp_path / "ledger.sqlite"
+    assert mode_when_sqlite_opens(monkeypatch, path, target) == 0o600
+    assert target.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("n", [1, LONG])
+def test_an_existing_0644_ledger_behind_links_is_tightened_with_its_wal_and_shm(tmp_path, n):
+    # SQLite puts -wal and -shm next to the file it really opened, not next to the link; JADE used to chmod `<link>-wal` and miss them.
+    target = tmp_path / "ledger.sqlite"
+    ledger.open(target).close()
+    os.chmod(target, 0o644)
+    path = link_chain(tmp_path, n)
+    old = os.umask(0o022)
+    try:
+        db = ledger.open(path)
+    finally:
+        os.umask(old)
+    try:
+        got = modes(tmp_path)
+        assert "-wal" in got and "-shm" in got
+        assert got == {"": 0o600, "-wal": 0o600, "-shm": 0o600}
+    finally:
+        db.close()
+
+
+def test_a_second_connection_through_a_long_link_chain_keeps_the_first_ones_lock(tmp_path):
+    path = link_chain(tmp_path, LONG)
+    target = tmp_path / "ledger.sqlite"
+    a = ledger.open(path)
+    assert held_by_someone(target)
+    b = ledger.open(path)
+    try:
+        assert held_by_someone(target)
+    finally:
+        b.close()
+        assert held_by_someone(target)
+        a.close()
+
+
+def test_a_symlink_loop_at_the_ledger_path_ends_and_creates_nothing(tmp_path):
+    (tmp_path / "a.sqlite").symlink_to("b.sqlite")
+    (tmp_path / "b.sqlite").symlink_to("a.sqlite")
+    with pytest.raises(ledger.sqlite3.OperationalError):
+        ledger.open(tmp_path / "a.sqlite")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.sqlite", "b.sqlite"]
