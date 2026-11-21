@@ -49,6 +49,8 @@ EGRESS_MARK = egress.MARK  # marker prefix R-21 matches: curl, wget or nc sendin
 RECORDED_RULES = ("R-30", "R-31", "R-32")  # rules below the permit floor whose hits the hook journals (events `secret_read`, `blind_spot`): not gated, but counted so a soak report can size them
 BLIND_MARK = blind.BLIND_MARK   # marker prefix R-31 matches: `blind:<label> <command>`, a command the classifier cannot read (W-31)
 FETCH_MARK = blind.FETCH_MARK   # marker prefix R-22 matches: fetched or decoded text that runs as code (W-31)
+RM_NPR_MARK = "rm:no-preserve-root "        # marker prefix R-26 matches: `rm` with --no-preserve-root (W-202), from jade/humanonly.py `no_preserve_root`
+RM_ROOT_MARK = "rm:no-preserve-root:root "  # marker prefix R-25 matches: the same on the root of the file system
 GH_MERGE_MARK = "gh:merge-api "   # marker prefix R-10 matches: a `gh api` call that merges a pull request, or whose query or route the gate cannot read (V6-08, N20); the segment text has the quoted query blanked
 _GH_MERGE_MUTATION = re.compile(r"\b(?:mergePullRequest|enablePullRequestAutoMerge|mergeBranch)\b")
 # A GraphQL call whose query is not text on the command line: a file (`-F query=@q.graphql`; gh reads it), stdin (`--input`), a variable or a substitution (`query="$Q"`), or no query
@@ -65,18 +67,178 @@ _GH_API_WORDS = re.compile(r"(?<![\w.-])(?:gh|glab)\s+api(?![\w.-])")
 _GH_REST_MERGE = re.compile(r"(?<![\w-])(?:pulls|merge_requests)/[^\s/]+/merge(?![\w-])|(?<![\w-])repos/[^\s/]+/[^\s/]+/merges(?![\w-])")   # the routes risk.yaml R-10 rates by name
 
 
+# W-153: a write to a git ref through the REST refs API (`repos/O/R/git/refs[/heads/main]`, PATCH, POST or DELETE) is a push by another door (SI-08, KG55, KG65). It is read from the
+# span of one `gh api` call (up to its own end: an unquoted `;`, `&`, `|` or newline), so a GET in another call does not hide it. A call is a write when it names a method other than GET and HEAD, or names none and gives a
+# field or a body (gh then sends a POST). The method is read from the call's shell words (`_gh_methods`), so a `-X GET` inside a quoted value does not count. The ref is the route tail (`heads/main`) or, on the bare `git/refs` route, the `ref=` field. A ref that is the default branch (main or master,
+# in any letter case: the Mac disk does not tell them apart), a tag, a variable or a file the gate cannot read, a body (`--input`) or a missing ref is asked about; a plain other branch is not.
+_GH_ONLY_API = re.compile(r"(?<![\w.-])gh\s+api(?![\w.-])")
+_GH_REFS_ROUTE = re.compile(r"""(?<![\w-])(?:repos/[^\s/]+/[^\s/]+|repositories/[^\s/]+)/git/refs(?![\w.-])(?:/([^\s'"]*))?""")
+_GH_BODY_FLAG = re.compile(r"(?<![\w-])(?:-[fF]|--field|--raw-field|--input)(?![\w-])|(?<![\w-])-[fF][^\s=-]")
+_GH_INPUT_FLAG = re.compile(r"(?<![\w-])--input(?![\w-])")
+_GH_REF_FIELD = re.compile(r"""(?<![\w-])ref=["']?([^\s"']*)""")
+_GH_REF_WATCHED = re.compile(r"(?i:^(?:refs/)?(?:heads/(?:main|master)(?![\w.-])|tags/)|[$`{])")   # `{branch}` is a gh placeholder: gh fills it with the current branch
+_GH_REF_MUTATION = re.compile(r"\b(?:updateRefs?|createRef|deleteRef|createCommitOnBranch)\s*\(")   # GraphQL: the same write, by mutation
+
+
+_CALL_BODY = re.compile(r"""(?:[^'";&|\n]+|'[^']*'?|"[^"]*"?)*""")   # text up to an unquoted `;`, `&`, `|` or newline; a quote left open runs to the end
+
+
+def _call_end(text: str, begin: int, limit: int) -> int:
+    """Where the `gh api` call that starts at `begin` ends: at an unquoted `;`, `&`, `|` or newline, or at `limit` (the next call). A quoted `|` (a jq filter) does not end it."""
+    return _CALL_BODY.match(text, begin, limit).end()
+
+
+def _gh_methods(words: str) -> list[str]:
+    """The methods one `gh api` call names, read from its shell words (`words`: blanks inside quotes or after a backslash are NUL, see `_shell_words`), so a `-X GET`
+    inside a quoted field or header value (`-f note='-X GET'`, `-H 'X: --method GET'`) is data, not the method (W-153 review 2). `-X M`, `-XM`, `-X=M`, `--method M`
+    and `--method=M`; a quoted flag word (`"-X" DELETE`) is still the flag. A value that is not a plain word (a variable, a NUL from a quoted blank) is kept as it is,
+    so it is not GET: the call is read as a write. A `)`, `}` or backtick that closes a substitution around the call is not part of the value."""
+    if "-X" not in words and "--method" not in words:   # the quick test: most calls name no method
+        return []
+    ws = words.split()
+    out = []
+    value_next = after_comment = in_tick = False
+    depth = 0
+    for i, w in enumerate(ws):
+        # A GET or HEAD in a place gh does not read as the method (the value of another option or a redirect, inside `$(...)` or backticks, after a `#`) is
+        # dropped; any other method found there is kept. Dropping a GET can only make the call read as a write, so this never lowers a rating.
+        doubtful, value_next = value_next or after_comment or in_tick or depth > 0, False
+        if w in ("-X", "--method"):
+            v, value_next = (ws[i + 1] if i + 1 < len(ws) else ""), True
+        elif w.startswith("--method="):
+            v = w[9:]
+        elif w.startswith("-X") and len(w) > 2:
+            v = w[3:] if w[2] == "=" else w[2:]
+        else:
+            v = None
+            if not doubtful:
+                if w.startswith("#"):
+                    after_comment = True
+                elif w in _GH_VALUE_OPTS or _REDIRECT_WORD.match(w):
+                    value_next = True
+        depth = max(0, depth + w.count("(") - w.count(")"))
+        in_tick ^= w.count("`") % 2 == 1
+        if v is None:
+            continue
+        v = v.rstrip(")}`").upper()
+        if not (doubtful and v in ("GET", "HEAD")):
+            out.append(v)
+    return out
+
+
+# The options of `gh api` that take a value as the next word (`gh api --help`); -X and --method are read on their own. A redirect operator takes the next word too.
+_GH_VALUE_OPTS = frozenset(("-H", "--header", "-f", "--raw-field", "-F", "--field", "-q", "--jq", "-t", "--template", "--input", "-p", "--preview", "--cache",
+                            "--hostname"))
+_REDIRECT_WORD = re.compile(r"\d*(?:&>>?|>>?\|?|<<?<?|>&|<&|<>)$")
+
+
+_WORD_GLUE = str.maketrans({c: "\x00" for c in " \t\n\r\v\f;&|"})
+
+
+def _glue_token(m: re.Match) -> str:
+    """`_dequote_token`, but a blank or separator that is quoted or escaped becomes NUL, so it no longer splits a word: the text has the same length as `_shell_dequoted`."""
+    if m.group(1) is not None:
+        return m.group(1).translate(_WORD_GLUE)
+    if m.group(2) is not None:
+        return _DQ_ESC.sub(r"\1", m.group(2)).translate(_WORD_GLUE)
+    return "" if m.group(3) == "\n" else m.group(3).translate(_WORD_GLUE)
+
+
+def _shell_words(text: str) -> str:
+    """The text as the shell passes its words on, with each word still one run of non-blank characters (`_glue_token`). Same length and offsets as `_shell_dequoted(text)`."""
+    return _SHELL_TOKEN.sub(_glue_token, text)
+
+
+@lru_cache(maxsize=8)
+def _command_words(text: str) -> str:
+    """`_shell_words` of a whole command, cached: it is read once per `gh api` segment, like `_shell_dequoted` (the words of one call's own text are not cached)."""
+    return _shell_words(text)
+
+
+@lru_cache(maxsize=8)   # the whole command is read once per `gh api` segment: without the cache a command of many segments costs the square
+def _gh_ref_write(text: str, words: str | None = None) -> bool:
+    """Does a `gh api` call in the text write a git ref that is the default branch, a tag, or one the gate cannot read? (W-153.) Errs towards yes.
+    The method is read from the shell words of each call: `words` when given (`_shell_words` of the command, at the same offsets as `text`, which is then
+    `_shell_dequoted` of it), else the words of the call's own text."""
+    calls = list(_GH_ONLY_API.finditer(text))
+    for i, call in enumerate(calls):
+        end = _call_end(text, call.end(), calls[i + 1].start() if i + 1 < len(calls) else len(text))
+        span = text[call.end():end]
+        route = _GH_REFS_ROUTE.search(span)
+        if not route:
+            continue
+        verbs = _gh_methods(words[call.end():end] if words is not None else _shell_words(span))
+        if verbs:
+            if all(v in ("GET", "HEAD") for v in verbs):
+                continue
+        elif not _GH_BODY_FLAG.search(span):
+            continue
+        tail = route.group(1) or ""
+        if tail.strip("/"):
+            if _GH_REF_WATCHED.search(tail):
+                return True
+            continue
+        values = _GH_REF_FIELD.findall(span)
+        if _GH_INPUT_FLAG.search(span) or not values or any(v.startswith("@") or _GH_REF_WATCHED.search(v) for v in values):
+            return True
+    return False
+
+
+_SEP_SPACE = str.maketrans(";&|\n", "    ")
+_DQ_ESC = re.compile(r'\\([\\"$`])')
+_SHELL_TOKEN = re.compile(r"""'([^']*)'?|"((?:[^"\\]|\\[\s\S])*\\?)"?|\\([\s\S])""")   # a single-quoted string, a double-quoted one, an escaped character (open quotes run to the end)
+
+
+def _dequote_token(m: re.Match) -> str:
+    if m.group(1) is not None:
+        return m.group(1).translate(_SEP_SPACE)
+    if m.group(2) is not None:
+        return _DQ_ESC.sub(r"\1", m.group(2)).translate(_SEP_SPACE)
+    return "" if m.group(3) == "\n" else m.group(3).translate(_SEP_SPACE)   # a backslash before a newline joins the lines
+
+
+@lru_cache(maxsize=8)
+def _shell_dequoted(text: str) -> str:
+    """The text as the shell passes its words on (W-153 review): a backslash outside quotes and every quote character are taken off, so `ma\\in`, `mai''n` and `'ma'in`
+    read `main`, as bash and zsh read them. A `;`, `&`, `|` or newline that is quoted or escaped is data, not the end of a command: it becomes a space, so `_call_end`
+    still finds the end of each call. Inside double quotes a backslash is kept unless it escapes `"`, `\\`, `$` or a backtick, as in the shell."""
+    return _SHELL_TOKEN.sub(_dequote_token, text)
+
+
+_QUOTE_DROP = str.maketrans({"'": None, '"': None, "\\": None, ";": " ", "&": " ", "|": " ", "\n": " "})
+
+
+def _dequoted_view(text: str) -> str | None:
+    """`_shell_dequoted(text)` when it can hold a `gh api` or `glab api` call the text as written does not show, else None (nothing to read twice). The test is a quick
+    superset: with every quote and backslash deleted (a backslash before a newline with its newline), the words must already be there."""
+    if "'" not in text and '"' not in text and "\\" not in text:
+        return None
+    if not _GH_API_WORDS.search(text.replace("\\\n", "").translate(_QUOTE_DROP)):
+        return None
+    return _shell_dequoted(text)
+
+
+def _gh_ref_write_any(text: str) -> bool:
+    """`_gh_ref_write` on the text as written or as the shell passes it on (`_shell_dequoted`): `refs/heads/ma\\in` and `gh a''pi` are a write to main too."""
+    return _gh_ref_write(text) or ((d := _dequoted_view(text)) is not None and _gh_ref_write(d, _command_words(text)))
+
+
 def gh_api_merge_in(text: str) -> bool:
     """Does the text of a call hold a `gh api` call that merges a pull request, or whose query or route the gate cannot read (`_gh_api_merges`)? Read from the plain text of
-    the call, so it errs towards yes. Memory keeps such a call as an exact answer at most and Jev never judges it, as for `gh pr merge` (integration of V6-08 and V6-06b)."""
-    return bool(_GH_API_WORDS.search(text)) and (bool(_GH_REST_MERGE.search(text)) or _gh_api_merges(text.split(), text))
+    the call, so it errs towards yes. Memory keeps such a call as an exact answer at most and Jev never judges it, as for `gh pr merge` (integration of V6-08 and V6-06b).
+    The text is read as written and as the shell passes it on (`_shell_dequoted`, W-153 review: `gh a\\pi` is `gh api`)."""
+    if _GH_API_WORDS.search(text) and (_GH_REST_MERGE.search(text) or _gh_api_merges(text.split(), text)):
+        return True
+    t = _dequoted_view(text)
+    return t is not None and bool(_GH_API_WORDS.search(t)) and (bool(_GH_REST_MERGE.search(t)) or _gh_api_merges(t.split(), t))
 
 
 def _gh_api_merges(words: list[str], text: str) -> bool:
     """`words` is a `gh api` call: it merges a pull request, or its query or route is one the gate cannot read (so it is asked about)."""
-    if _GH_MERGE_MUTATION.search(text) or _GH_ROUTE_UNREAD.search(text):
+    if _GH_MERGE_MUTATION.search(text) or _GH_ROUTE_UNREAD.search(text) or _gh_ref_write_any(text):
         return True
-    if any(w.rstrip("/").rsplit("/", 1)[-1] == "graphql" for w in words[2:]):
-        return bool(_GH_QUERY_UNREAD.search(text)) or not _GH_QUERY_FIELD.search(text)
+    if "graphql" in " ".join(words[2:]) and any(w.rstrip("/").rsplit("/", 1)[-1] == "graphql" for w in words[2:]):   # the join is a quick test: a huge call pays the word loop only when a word can be `graphql`
+        return bool(_GH_QUERY_UNREAD.search(text)) or not _GH_QUERY_FIELD.search(text) or bool(_GH_REF_MUTATION.search(text))
     return False
 PATH_RULES = ("R-01", "R-04", "R-12", "R-13", "R-16", "R-18", "R-24")  # the rules about where a write lands: they also see relative operands made absolute
 WRITE_KEYS = ("file_path", "notebook_path", "path", "filePath", "file", "filepath", "target_file", "file_name", "filename", "target")
@@ -1010,7 +1172,7 @@ _STATE_LITERAL = re.compile(r"\.config/jade(?![\w.-])|\.local/share/jade(?![\w.-
 _INSTALL_CMD = re.compile(r"\b(?:uv\s+tool\s+(?:install|upgrade|reinstall)|uv\s+pip\s+install|pip3?\s+install|pipx\s+(?:install|upgrade|reinstall)|python3?\s+-m\s+pip\s+install)\b")
 _UV_TOOL_JADE = re.compile(r"\buv\s+tool\s+(?:uninstall|upgrade|reinstall|install)\b[^;&|]*\bjade|\buv\s+tool\s+(?:uninstall|upgrade|reinstall)\b[^;&|]*--all\b")   # R-13: changes or removes the installed JADE tool itself, whatever it installs from
 _SETTINGS_FILE = re.compile(r"(?:^|/)\.claude/settings(?:\.local)?\.json$")
-_SETTINGS_DISABLE = re.compile(r"disableAllHooks|allowManagedHooksOnly|JADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME|REGISTRY_DIR|SESSION_ID)|CLAUDE_CODE_SESSION_ID|\"hooks\"\s*:\s*(?:\{\s*\}|null)", re.I)
+_SETTINGS_DISABLE = re.compile(r"disableAllHooks|allowManagedHooksOnly|" + paths.gate_env_alternation() + r"|\"hooks\"\s*:\s*(?:\{\s*\}|null)", re.I)   # W-200: the gate variables come from paths.GATE_ENV_VARS
 TERMINAL_TOOLS = frozenset({"mcp__terminal__run_in_terminal"})
 
 
@@ -1692,12 +1854,38 @@ def _use_identity(seg: str) -> str:
     return IDENTITY_FILE.sub("-i $KEY", seg) if bare.split(" ", 1)[0].rsplit("/", 1)[-1] in REMOTE_SHELL_VERBS else seg
 
 
-def classify_segment(seg: str, dirs: tuple[str, ...], proxied: bool = False, marks: tuple[str, ...] = ()) -> tuple[dict, str]:
+# W-153 review: the rules whose answer memory never keeps and Jev never judges (memory.NEVER_RULES, proxy.NEVER_RULES) or that keep a call exact or human-only
+# (memory.EXACT_ONLY_RULES, R-17 with HO_R17). A rule that comes earlier in risk.yaml (R-10 before R-13 and R-18) names the segment; these are still read
+# for it, so `seg_rules` holds them and a call is not looser because of the order of the rules. All of them are high: the segment is gated when one matches.
+ALSO_KEPT = ("R-13", "R-14", "R-17", "R-18", "R-21", "R-22")
+
+
+def also_kept(a) -> list[str]:
+    """The rules of `ALSO_KEPT` in the call's `seg_rules` other than the rule that names it, in `ALSO_KEPT` order (W-153 review 2): the question and the block text
+    name them too, so a human who reads "R-10" still learns that the call also writes an agent file (R-13) or a skill (R-18), as on 0.7.0."""
+    rules = set(getattr(a, "seg_rules", None) or ())
+    return [r for r in ALSO_KEPT if r in rules and r != a.rule_id]
+
+
+def rule_rationale(rule_id: str) -> str:
+    """The `rationale` of a rule of risk.yaml (with the local overlay), or "" when there is no such rule."""
+    return next((r.get("rationale", "") for r in risk()["rules"] if r.get("id") == rule_id), "")
+
+
+def _also_hits(also: list[str], text: str, files: str | None, alt: dict[str, str] | None, dirs: tuple[str, ...], path_only: bool = False) -> None:
+    """Add to `also` every rule of `ALSO_KEPT` that this view of the segment matches (see `classify_segment`). `path_only`: only the path rules (the view of absolute operands)."""
+    for r in risk()["rules"]:
+        if r["id"] in ALSO_KEPT and r["id"] not in also and (not path_only or r["id"] in PATH_RULES) \
+                and (t := alt[r["id"]] if alt and r["id"] in alt else _seen_by(r, text, files)) and _hit(r, t, dirs):
+            also.append(r["id"])
+
+
+def classify_segment(seg: str, dirs: tuple[str, ...], proxied: bool = False, marks: tuple[str, ...] = (), also: list[str] | None = None) -> tuple[dict, str]:
     """The rule one simple command (a segment of `shellnorm.segments_cwd`) matches, and the command with launcher prefixes and git options gone.
 
     The command is looked at as written and with its operands made absolute for every directory it may run in; a `files_only` rule (R-13, R-16)
     reads only what the command writes (`files_view`). `marks` are marker prefixes (`blind:script-file `, `fetch:exec `) that the caller found for this segment and that rules
-    read together with its text."""
+    read together with its text. When `also` is a list, the rules of `ALSO_KEPT` that the segment matches are added to it, whichever rule is returned."""
     real_bare = _bare(seg)
     seg = _use_identity(seg)
     bare, calls = _analyse(seg)
@@ -1716,12 +1904,17 @@ def classify_segment(seg: str, dirs: tuple[str, ...], proxied: bool = False, mar
         rule = _first_match(text, files, alt, dirs_t)
         if seg_best is None or LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
             seg_best = rule
+        if also is not None and LEVELS[rule["level"]] >= LEVELS["high"]:   # an ALSO_KEPT rule is high: it can only hit a view whose first match is high or critical
+            _also_hits(also, text, files, alt, dirs_t)
     abs_ops = _absolute_operands(seg, dirs)
     abs_files = abs_ops if view is None else _absolute_operands("x " + view, dirs) if view else ""
     abs_pkg = _absolute_operands(seg if view is None else "x " + view, dirs, package=True) if view != "" else ""
     abs_create = abs_files if cview == view else abs_ops if cview is None else _absolute_operands("x " + cview, dirs) if cview else ""
-    if (rule := _path_rule(abs_ops, abs_files, {"R-16": abs_pkg, "R-18": abs_create}, dirs_t)) and LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
+    path_alt = {"R-16": abs_pkg, "R-18": abs_create}
+    if (rule := _path_rule(abs_ops, abs_files, path_alt, dirs_t)) and LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
         seg_best = rule
+    if also is not None and rule and LEVELS[rule["level"]] >= LEVELS["high"]:
+        _also_hits(also, abs_ops, abs_files, path_alt, dirs_t, path_only=True)
     return seg_best, real_bare
 
 
@@ -1835,10 +2028,13 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
             fetched.update(blind.copies_of(words, fetched))   # `mv a b; bash b`: the copy is the fetched file under another name
         if len(words) > 1 and words[0].rsplit("/", 1)[-1] == "gh" and words[1] == "api" and _gh_api_merges(words, text_in):
             marks.append(GH_MERGE_MARK)   # the query is quoted text, so the whole command is read, as for a SQL client below
+        if npr := humanonly.no_preserve_root(seg, _bare(seg)):   # W-202: the segmenter folds `rm` flags to `rm -rf`, so the flag is read from the segment as written
+            marks.append(RM_ROOT_MARK if npr == "root" else RM_NPR_MARK)
         seg_labels = [lab for lab in (blind.script_label(words, known), "computed-cwd" if computed and _computed_write(_bare(seg)) else None) if lab]
         labels.extend(seg_labels)
         marks.extend(f"{BLIND_MARK}{lab} " for lab in seg_labels)
-        seg_best, bare = classify_segment(seg, dirs, proxied, tuple(marks))
+        also: list[str] = []
+        seg_best, bare = classify_segment(seg, dirs, proxied, tuple(marks), also)
         if best is None or LEVELS[seg_best["level"]] > LEVELS[best["level"]]:
             best = seg_best
         if si12_roots and not si12 and _si12_segment(seg, dirs, cwd, si12_roots):
@@ -1857,6 +2053,7 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         if LEVELS[seg_best["level"]] >= LEVELS[permit_floor()]:
             gated_keys.append(key)
             gated_rules.append(seg_best["id"])
+            gated_rules.extend(also)   # W-153 review: a never-learned rule the segment also matches (`git update-ref refs/heads/main HEAD > AGENTS.md` is R-10 and R-13)
     best = best or risk()["rules"][-1]
     if labels and best["level"] == "low":   # R-31 is low, so it never wins a level comparison: nothing above low matched, and what the gate could not read is the finding
         best = next(r for r in risk()["rules"] if r["id"] == "R-31")
