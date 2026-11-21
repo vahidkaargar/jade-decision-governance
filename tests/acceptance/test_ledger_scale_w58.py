@@ -283,8 +283,9 @@ def test_the_pause_between_tries_is_taken_only_between_tries(monkeypatch):
     assert slept == [0.1, 0.1]
 
 
+@pytest.mark.timing   # it reads a clock (a fake one, so it cannot fail under load); tests/test_timing_marks.py wants every such test marked
 def test_p95_reads_the_95th_percentile_of_the_call_times(monkeypatch):
-    """The helper itself, on a fake clock: 25 calls of 1..25 ms give the 23rd value (index int(0.95 * 24) = 22)."""
+    """The helper itself, on a fake clock:25 calls of 1..25 ms give the 23rd value (index int(0.95 * 24) = 22)."""
     import sys
     from types import SimpleNamespace
 
