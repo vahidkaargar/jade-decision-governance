@@ -11,8 +11,8 @@ Two keys per answer:
   safe to generalise has one; the rest is exact-only. `eligibility` is the whole decision.
 
 Never remembered (always asked): a human-only class (docs/12 section 4), the fetch-and-exec and egress rules (R-21, R-22) and the rules that guard the agent's files
-(R-13, R-18), as the top rule or as the rule of any segment, a call the gate blocks, and a call with a secret-shaped value in it. Exact-only: R-14, M-05, M-07, an inline program (`-c`, `-e`, heredoc, here-string, process substitution), a call the gate could not
-read (blind labels), a git push or merge (the fingerprint carries the head commit), a merge into the default branch, `launchctl bootout`, `unload` and `remove` (W-137), a segment key that still has a variable word, a call that reads a variable it sets itself, a `$'..'` word, and every write or MCP call (content is part of the key).
+(R-13, R-18), as the top rule or as the rule of any segment, `composio execute` (an action in a connected app: W-190), a call the gate blocks, and a call with a secret-shaped value in it. Exact-only: R-14, R-15, R-23 (a program that git runs, W-137), R-16 (a shell write to JADE's own source, W-190), a push of many branches (`--all`, W-190), `launchctl bootout|unload|remove` (R-12, W-137), M-05, M-07, an inline program (`-c`, `-e`, heredoc, here-string, process substitution), a call the gate could not
+read (blind labels), a git push or merge (the fingerprint carries the head commit), a merge into the default branch, a segment key that still has a variable word, a call that reads a variable it sets itself, a `$'..'` word, and every write or MCP call (content is part of the key).
 
 Lifetime: a row is valid while its last human confirm or its last use is within 30 days, and never more than 180 days after the confirm.
 Evidence (V6-29, `jade/audit.py`): a row that has run silently many times (60) with no mark, or for 90 days after its last evidence, stops deciding until the human marks
@@ -33,7 +33,9 @@ USE_DAYS = 30
 CAP_DAYS = 180
 NEAR_CAP_DAYS = 14
 NEVER_RULES = frozenset({"R-21", "R-22", "R-13", "R-18"})   # R-13, R-18: what guards the agent and the files it reads its instructions from (as in proxy.NEVER_RULES)
-EXACT_ONLY_RULES = frozenset({"R-14", "M-05", "M-07"})
+EXACT_ONLY_RULES = frozenset({"R-14", "R-15", "R-23", "R-16", "M-05", "M-07"})   # R-15, R-23 (W-137): a program that git runs, or a git config file, is read from the exact text; R-16 (W-190): a shell write to JADE's own source
+_NEVER_SEGMENT = re.compile(r"^composio\s+execute(?=\s|$)")   # W-190: an action in a connected app (it sends mail, posts a message): the same words are another action with other arguments, so nothing is kept for it
+_EXACT_SEGMENT = re.compile(r"(?<![\w.-])launchctl\s+(?:bootout|unload|remove)(?![\w-])")   # W-137 (owner decision, R-12): a call that takes a service out of launchd is read from the exact text; the rest of R-12 stays a kind
 _PLAIN_WORD = re.compile(r"[\w./:@=+,%-]*")   # a quoted word of these characters only is in the segment key as it is
 _QUOTE_MARK = re.compile(r"""[\\'"`#<]""")   # where `_quoted_form` stops: a backslash, a quote mark, a backtick, a comment, a possible here-doc
 _DQ_BODY = re.compile(r'[^"\\]*(?:\\.[^"\\]*)*', re.S)   # the text of a double-quoted word, up to its closing mark (a backslash takes the next character)
@@ -46,11 +48,10 @@ _LEADING_CD = re.compile(r"""^[ \t]*cd[ \t]+(?:"([^"$`\\]*)"|'([^']*)'|([^\s"'$`
 _GIT_C = re.compile(r"(?<![\w.-])git(?:\s+-[a-zA-Z](?:\s+\S+)?)*?\s+-C\s+(\S+)")
 _SUDO_WORD = re.compile(r"(?<![\w.-])sudo(?![\w.-])")
 _PR_NUMBER = re.compile(r"^((?:gh pr|glab mr) [\w-]+) \d+(?= |$)")
-LAUNCHD_EXACT = re.compile(r"(?<![\w.-])launchctl (?:bootout|unload|remove)(?= |$)")   # W-137 (owner): stopping or removing a service is never remembered as a kind
 KEY_VARIABLE = re.compile(r"\$[A-Za-z_{]")   # a variable word that is still in a segment key: the key stands for every value of it
 VARIABLE_USE = re.compile(r"\$\{?([A-Za-z_]\w*)")   # a variable the text reads
 DOLLAR_QUOTE = re.compile(r"\$'")   # a `$'..'` word: the key shows the decoded text, only the exact key keeps the spelling
-MERGE = re.compile(r"^(?:gh pr merge|glab mr merge|git merge)(?= |$)")
+MERGE = re.compile(r"^(?:gh pr merge|glab mr merge|git merge|git update-ref)(?= |$)")   # W-153: `git update-ref` moves a branch with no push, so it is treated like a merge: exact at most, never sent to Jev
 INLINE = re.compile(r"(?:^|\s)-[A-Za-z]*[ce](?=\s|\Z)|<<|<\(")
 
 
@@ -70,20 +71,38 @@ def _reads_assigned_variable(s: str) -> bool:
     return "$" in s and bool({w.partition("=")[0] for w in _ENV_WORD.findall(s)} & set(VARIABLE_USE.findall(s)))
 
 
+def _pushes_many(key: str) -> bool:
+    """W-190: a segment key of a `git push` or `git send-pack` that may push every branch, the default branch among them: `--all`, its synonym `--branches`, an abbreviation git
+    accepts (`--al`, `--b`: at least four characters of `--all`, three of `--branches`) or a refspec with a glob (`refs/heads/*:refs/heads/*`). It only adds questions: a word that
+    merely looks like one of these is read from the exact text."""
+    words = key.split()
+    if not words or words[0] != "git":
+        return False
+    for verb in ("push", "send-pack"):
+        if verb in words:
+            return any(
+                "*" in w or (w.startswith("--") and (("--all".startswith(name := w.split("=", 1)[0]) and len(name) >= 4) or ("--branches".startswith(name) and len(name) >= 3)))
+                for w in words[words.index(verb) + 1:]
+            )
+    return False
+
+
 def eligibility(a, tool: str, tool_input: dict | None, fp: dict | None) -> str:
     """`never`, `exact` or `class`: how far an answer to this call may be generalised."""
     from . import policy
 
     if a.ho_ids or a.blocked or a.level == "critical" or ({a.rule_id, *(getattr(a, "seg_rules", None) or [])} & NEVER_RULES):   # every segment rule, as `proxy.skip_reason` reads them (V6-06b)
         return "never"
-    if not policy.runs_shell(tool, tool_input or {}):
+    if not policy.shares_shell_answers(tool, tool_input or {}):   # a call that carries no shell text, or an MCP command given as a list (W-209)
         return "exact"
+    if any(_NEVER_SEGMENT.match(k) for k in getattr(a, "seg_keys", []) or []):
+        return "never"   # W-190
     if a.rule_id in EXACT_ONLY_RULES or set(getattr(a, "seg_rules", []) or []) & EXACT_ONLY_RULES or a.blind or a.rule_id in ("R-31", "R-32"):
         return "exact"
-    if fp or INLINE.search(a.subject or "") or DOLLAR_QUOTE.search(a.subject or ""):
+    if fp or INLINE.search(a.subject or "") or DOLLAR_QUOTE.search(a.subject or "") or any(_pushes_many(k) or _EXACT_SEGMENT.search(k) for k in getattr(a, "seg_keys", []) or []):
         return "exact"
-    if _reads_assigned_variable(a.subject or "") or any(LAUNCHD_EXACT.search(k) or KEY_VARIABLE.search(k) for k in getattr(a, "seg_keys", []) or []):
-        return "exact"   # W-137: launchctl bootout, unload and remove; a key with an unresolved variable (`git push origin $b`) is not one kind
+    if _reads_assigned_variable(a.subject or "") or any(KEY_VARIABLE.search(k) for k in getattr(a, "seg_keys", []) or []):
+        return "exact"   # W-137: a key with an unresolved variable (`git push origin $b`) is not one kind (launchctl bootout, unload and remove: `_EXACT_SEGMENT`, above)
     if any(MERGE.match(k) for k in getattr(a, "seg_keys", []) or []) or not getattr(a, "seg_keys", None) or policy.gh_api_merge_in(a.subject or ""):
         return "exact"   # a merge, also one made through `gh api` (V6-08 N20), is never remembered as a kind
     return "class"
@@ -265,21 +284,41 @@ def is_deny(d) -> bool:
     return d["answer"] == "deny" and d["strength"] in ("hint", "strong") and (_col(d, "source") or "") != "test"
 
 
-def deny_index(denies) -> dict[tuple[str, str], str]:
-    """For each typed key, the time of the newest deny that stores it. Built once, so that `taken_out` is one dict lookup per key."""
-    idx: dict[tuple[str, str], str] = {}
+ANSWER_COLS = "rowid AS rid, *"   # an answer row is read with its row number (`rid`): the times have a resolution of one second, and the row number tells which of two answers of one second came last
+
+
+def _rid(r) -> int | None:
+    return _col(r, "rid")
+
+
+def deny_index(denies) -> dict[tuple[str, str], tuple[str, int | None]]:
+    """For each typed key, the time and row number (None when the row was read without it) of the newest deny that stores it. Built once, so that `taken_out` is one
+    dict lookup per key."""
+    idx: dict[tuple[str, str], tuple[str, int | None]] = {}
     for d in denies:
         if is_deny(d):
+            cur = (d["ts"], _rid(d))
             for k in stored_keys(d):
-                if d["ts"] > idx.get(k, ""):
-                    idx[k] = d["ts"]
+                old = idx.get(k)
+                if old is None or _newer(cur, old):
+                    idx[k] = cur
     return idx
 
 
+def _newer(a: tuple[str, int | None], b: tuple[str, int | None]) -> bool:
+    """Is answer `a` (time, row number) later than `b`? A later second is later; in the same second the later row is, when both row numbers are known (answers are
+    only ever added, so a higher number was written after). With a number missing, a tie is not later."""
+    if a[0] != b[0]:
+        return a[0] > b[0]
+    return a[1] is not None and b[1] is not None and a[1] > b[1]
+
+
 def taken_out(r, denies, keys: set[tuple[str, str]]) -> bool:
-    """A deny (`is_deny`) newer than the allow `r` that shares one of `keys`: the owner's newest answer wins. `denies` is a `deny_index` or the deny rows."""
+    """A deny (`is_deny`) newer than the allow `r` that shares one of `keys`: the owner's newest answer wins (`_newer`: the same second is told apart by the row
+    number). `denies` is a `deny_index` or the deny rows."""
     idx = denies if isinstance(denies, dict) else deny_index(denies)
-    return any(idx.get(k, "") > r["ts"] for k in keys)
+    mine = (r["ts"], _rid(r))
+    return any((hit := idx.get(k)) is not None and _newer(hit, mine) for k in keys)
 
 
 def honoured(r, denies, keys: set[tuple[str, str]], since: tuple[str, str] | None = None) -> bool:
@@ -292,7 +331,7 @@ def honoured_allows(db, where: str, args, since: tuple[str, str] | None = None, 
     """The strong allow rows that match `where` (newest confirm first) and that `honoured` with their `covered_keys` still counts: the denies read are only those
     that share a key with one of the allows (exact, class or family, scope), so the work grows with the rows of the keys in question, not with the ledger."""
     since = since or valid_since()
-    allows = db.con.execute(f"SELECT * FROM human_answers WHERE {ALLOW_SQL} AND confirmed_ts>=? AND ({where}) ORDER BY confirmed_ts DESC, rowid DESC",  # noqa: S608
+    allows = db.con.execute(f"SELECT {ANSWER_COLS} FROM human_answers WHERE {ALLOW_SQL} AND confirmed_ts>=? AND ({where}) ORDER BY confirmed_ts DESC, rowid DESC",  # noqa: S608
                             [since[0], *args]).fetchall()
     allows = [r for r in allows if standing(r, since)]
     if not allows:
@@ -319,7 +358,7 @@ def _rows_by_keys(db, where: str, exact, cls, scope) -> list:
     for col, ks in (("exact_key", exact), ("class_key", cls), ("scope_key", scope)):
         for i in range(0, len(ks), _CHUNK):
             part = ks[i:i + _CHUNK]
-            for d in db.con.execute(f"SELECT * FROM human_answers WHERE {where} AND {col} IN ({','.join('?' * len(part))})", part):  # noqa: S608 - code-defined columns
+            for d in db.con.execute(f"SELECT {ANSWER_COLS} FROM human_answers WHERE {where} AND {col} IN ({','.join('?' * len(part))})", part):  # noqa: S608 - code-defined columns
                 if d["answer_id"] not in seen:
                     seen.add(d["answer_id"])
                     out.append(d)
@@ -339,11 +378,11 @@ def lookup(db, a, tool: str, tool_input: dict | None, fp: dict | None, cwd: str 
     same = "exact_key=?" + (" OR class_key=?" if cls else "") + (f" OR scope_key IN ({','.join('?' * len(scope_keys))})" if scope_keys else "")
     args = [exact] + ([cls] if cls else []) + scope_keys
     since, ck = valid_since(), call_keys(exact, cls, scope_keys)
-    allows = db.con.execute(f"SELECT * FROM human_answers WHERE {ALLOW_SQL} AND confirmed_ts>=? AND ({same}) ORDER BY confirmed_ts DESC, rowid DESC",  # noqa: S608
+    allows = db.con.execute(f"SELECT {ANSWER_COLS} FROM human_answers WHERE {ALLOW_SQL} AND confirmed_ts>=? AND ({same}) ORDER BY confirmed_ts DESC, rowid DESC",  # noqa: S608
                             [since[0], *args]).fetchall()
     if not allows:
         return None
-    idx = deny_index(db.con.execute(f"SELECT * FROM human_answers WHERE {DENY_SQL} AND ({same})", args).fetchall())  # noqa: S608
+    idx = deny_index(db.con.execute(f"SELECT {ANSWER_COLS} FROM human_answers WHERE {DENY_SQL} AND ({same})", args).fetchall())  # noqa: S608
     return next((r for r in allows if honoured(r, idx, ck, since)), None)
 
 

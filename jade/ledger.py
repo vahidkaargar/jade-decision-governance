@@ -137,6 +137,7 @@ def __getattr__(name: str):
 STALE_EVALUATING_S = 600   # a provider call ends within 20 s; a row older than this belongs to a process that died
 STATE_CAP = 32 * 1024
 DEFAULT_TIMEOUT_S = 10.0
+SCRUB_VACUUM_KEY = "scrub.vacuum_at"   # meta row: the one full VACUUM of this file has run (W-76); later scrubs only checkpoint
 
 
 def _ns(row: sqlite3.Row | None):
@@ -160,17 +161,54 @@ class Ledger:
 
     def _create_private(self) -> None:
         """Create the database file mode 600 before SQLite opens it. SQLite gives `-wal` and `-shm` the mode of the main file, so no sidecar
-        is ever group- or world-readable, whatever the umask (docs/05 T15)."""
-        try:
-            os.close(os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600))
-        except OSError:
-            pass
+        is ever group- or world-readable, whatever the umask (docs/05 T15).
+
+        Only a file that does not exist yet is opened here (O_EXCL), and never one a connection may already hold. POSIX locks belong to the process: closing
+        any descriptor of the database file drops every lock this process's other connections hold on it, and a second process may then run WAL recovery or
+        delete `-wal` and `-shm` under them ("database disk image is malformed", W-95).
+
+        O_EXCL refuses any symlink, even a dangling one, and SQLite would then create the target itself with the umask mode. So a symlink at the
+        path is followed one link at a time and the same O_EXCL open is tried on its target: a file that exists is still never opened.
+        A chain longer than the kernel follows in one lookup (macOS 32, Linux 40) fails the stat with ELOOP, but SQLite resolves links itself and
+        opens it anyway, so the chain is then resolved by `os.path.realpath` (one link per step, no kernel limit) and the O_EXCL open is tried there."""
+        p = str(self.path)
+        walking = False   # True once one stat has shown that the chain dangles: the walk then costs one readlink per link, not a stat of the rest of the chain
+        for _ in range(42):   # 40 links (Linux) one at a time, then the create attempt at the end of the chain; macOS follows 32. A loop ends here
+            try:
+                os.close(os.open(p, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600))
+                return
+            except FileExistsError:   # nothing was created and no descriptor was opened
+                pass
+            except OSError:
+                return
+            if not walking:
+                try:
+                    os.stat(p)   # one stat follows the whole chain: an existing target ends here, only a dangling link is walked
+                    return
+                except FileNotFoundError:
+                    walking = True
+                except OSError:   # ELOOP: a chain longer than one lookup follows, or a loop. Walk it with readlink only (a syscall per link, SQLite follows at most 200)
+                    for _ in range(200):
+                        try:
+                            p = os.path.join(os.path.dirname(p), os.readlink(p))
+                        except OSError:   # the end of the chain: not a link (it exists, or does not yet)
+                            break
+                    else:   # 200 links and still a link: a loop, or more than SQLite follows; it cannot open it either
+                        return
+                    continue
+            try:
+                p = os.path.join(os.path.dirname(p), os.readlink(p))
+            except OSError:   # not a link (the target appeared meanwhile): it exists, so it is not opened
+                return
 
     def _lock_down(self) -> None:
-        """Mode 600 on the database and on the sidecars that exist now (an older file, or one made by another tool, is tightened too)."""
+        """Mode 600 on the database and on the sidecars that exist now (an older file, or one made by another tool, is tightened too).
+        SQLite resolves a symlinked path and keeps `-wal` and `-shm` next to the real file, so the real path is the one chmodded, by name only:
+        opening a descriptor of the database here would drop this process's locks on it (W-95)."""
+        real = os.path.realpath(self.path)
         for suffix in ("", "-wal", "-shm"):
             try:
-                os.chmod(f"{self.path}{suffix}", 0o600)
+                os.chmod(f"{real}{suffix}", 0o600)
             except OSError:
                 pass
 
@@ -195,17 +233,22 @@ class Ledger:
                 time.sleep(0.02 + random.random() * 0.05)  # noqa: S311 - backoff jitter
 
     def scrub(self) -> bool:
-        """Rewrite the database file and empty the write-ahead log, so that text a purge cleared is not left in free pages or in old log frames.
-        `secure_delete` zeroes what a later write removes; `VACUUM` also rebuilds the pages freed before it was on (an older ledger), and a
-        `TRUNCATE` checkpoint folds the log into the file and cuts it to zero. Best effort: False when another process holds the database."""
+        """Keep text a purge cleared out of the file's free pages and out of old log frames.
+        `secure_delete` (on for every connection JADE opens) zeroes what a later write removes. A full `VACUUM` rebuilds the pages freed before it was on (an older
+        ledger); it rewrites the whole file and holds the lock for a time that grows with it, so it runs once per ledger file and is then marked in `meta`
+        (`SCRUB_VACUUM_KEY`, W-76). Every scrub runs a `TRUNCATE` checkpoint, which folds the log into the file and cuts it to zero. Best effort: False when
+        another process holds the database or the checkpoint could not finish. The purge does not show that result; the scrub runs again with the next purge that
+        clears at least one row."""
         if self._depth:
             return False
         try:
-            self.con.execute("VACUUM")
-            self.con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            if not self.meta_get(SCRUB_VACUUM_KEY):
+                self.con.execute("VACUUM")
+                self.meta_set(SCRUB_VACUUM_KEY, ts())   # only after a VACUUM that ran: a failed one is tried again next time
+            busy = self.con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
         except sqlite3.OperationalError:
             return False
-        return True
+        return not busy
 
     def _migrate(self) -> None:
         for table, cols in MIGRATIONS.items():

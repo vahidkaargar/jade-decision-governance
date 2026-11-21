@@ -49,6 +49,8 @@ EGRESS_MARK = egress.MARK  # marker prefix R-21 matches: curl, wget or nc sendin
 RECORDED_RULES = ("R-30", "R-31", "R-32")  # rules below the permit floor whose hits the hook journals (events `secret_read`, `blind_spot`): not gated, but counted so a soak report can size them
 BLIND_MARK = blind.BLIND_MARK   # marker prefix R-31 matches: `blind:<label> <command>`, a command the classifier cannot read (W-31)
 FETCH_MARK = blind.FETCH_MARK   # marker prefix R-22 matches: fetched or decoded text that runs as code (W-31)
+RM_NPR_MARK = "rm:no-preserve-root "        # marker prefix R-26 matches: `rm` with --no-preserve-root (W-202), from jade/humanonly.py `no_preserve_root`
+RM_ROOT_MARK = "rm:no-preserve-root:root "  # marker prefix R-25 matches: the same on the root of the file system
 GH_MERGE_MARK = "gh:merge-api "   # marker prefix R-10 matches: a `gh api` call that merges a pull request, or whose query or route the gate cannot read (V6-08, N20); the segment text has the quoted query blanked
 # The GraphQL mutations that merge, or that write a branch (the default branch too) without a push: a commit made on a branch, a ref moved (W-191, KG63, KG64).
 _GH_MERGE_MUTATION = re.compile(r"\b(?:mergePullRequest|enablePullRequestAutoMerge|mergeBranch|createCommitOnBranch|updateRef|updateRefs)\b")
@@ -70,12 +72,165 @@ _HTTP_CLIENTS = ("curl", "wget", "http", "https", "xh")   # the merge route sent
 _HTTP_CLIENT_WORDS = re.compile(r"(?<![\w.-])(?:curl|wget|https?|xh)(?![\w.-])")
 
 
-def gh_api_merge_in(text: str) -> bool:
-    """Does the text of a call hold a `gh api` call that merges a pull request, writes the default branch, or whose query or route the gate cannot read (`_gh_api_merges`),
-    or the merge route sent with curl, wget or httpie? Read from the plain text of the call, so it errs towards yes. Memory keeps such a call as an exact answer at most and Jev
-    never judges it, as for `gh pr merge` (integration of V6-08 and V6-06b)."""
-    if _HTTP_CLIENT_WORDS.search(text) and _GH_REST_MERGE.search(text):
-        return True
+# W-153: a write to a git ref through the REST refs API (`repos/O/R/git/refs[/heads/main]`, PATCH, POST or DELETE) is a push by another door (SI-08, KG55, KG65). It is read from the
+# span of one `gh api` call (up to its own end: an unquoted `;`, `&`, `|` or newline), so a GET in another call does not hide it. A call is a write when it names a method other than GET and HEAD, or names none and gives a
+# field or a body (gh then sends a POST). The method is read from the call's shell words (`_gh_methods`), so a `-X GET` inside a quoted value does not count. The ref is the route tail (`heads/main`) or, on the bare `git/refs` route, the `ref=` field. A ref that is the default branch (main or master,
+# in any letter case: the Mac disk does not tell them apart), a tag, a variable or a file the gate cannot read, a body (`--input`) or a missing ref is asked about; a plain other branch is not.
+_GH_ONLY_API = re.compile(r"(?<![\w.-])gh\s+api(?![\w.-])")
+_GH_REFS_ROUTE = re.compile(r"""(?<![\w-])(?:repos/[^\s/]+/[^\s/]+|repositories/[^\s/]+)/git/refs(?![\w.-])(?:/([^\s'"]*))?""")
+_GH_BODY_FLAG = re.compile(r"(?<![\w-])(?:-[fF]|--field|--raw-field|--input)(?![\w-])|(?<![\w-])-[fF][^\s=-]")
+_GH_INPUT_FLAG = re.compile(r"(?<![\w-])--input(?![\w-])")
+_GH_REF_FIELD = re.compile(r"""(?<![\w-])ref=["']?([^\s"']*)""")
+_GH_REF_WATCHED = re.compile(r"(?i:^(?:refs/)?(?:heads/(?:main|master)(?![\w.-])|tags/)|[$`{])")   # `{branch}` is a gh placeholder: gh fills it with the current branch
+_GH_REF_MUTATION = re.compile(r"\b(?:updateRefs?|createRef|deleteRef|createCommitOnBranch)\s*\(")   # GraphQL: the same write, by mutation
+
+
+_CALL_BODY = re.compile(r"""(?:[^'";&|\n]+|'[^']*'?|"[^"]*"?)*""")   # text up to an unquoted `;`, `&`, `|` or newline; a quote left open runs to the end
+
+
+def _call_end(text: str, begin: int, limit: int) -> int:
+    """Where the `gh api` call that starts at `begin` ends: at an unquoted `;`, `&`, `|` or newline, or at `limit` (the next call). A quoted `|` (a jq filter) does not end it."""
+    return _CALL_BODY.match(text, begin, limit).end()
+
+
+def _gh_methods(words: str) -> list[str]:
+    """The methods one `gh api` call names, read from its shell words (`words`: blanks inside quotes or after a backslash are NUL, see `_shell_words`), so a `-X GET`
+    inside a quoted field or header value (`-f note='-X GET'`, `-H 'X: --method GET'`) is data, not the method (W-153 review 2). `-X M`, `-XM`, `-X=M`, `--method M`
+    and `--method=M`; a quoted flag word (`"-X" DELETE`) is still the flag. A value that is not a plain word (a variable, a NUL from a quoted blank) is kept as it is,
+    so it is not GET: the call is read as a write. A `)`, `}` or backtick that closes a substitution around the call is not part of the value."""
+    if "-X" not in words and "--method" not in words:   # the quick test: most calls name no method
+        return []
+    ws = words.split()
+    out = []
+    value_next = after_comment = in_tick = False
+    depth = 0
+    for i, w in enumerate(ws):
+        # A GET or HEAD in a place gh does not read as the method (the value of another option or a redirect, inside `$(...)` or backticks, after a `#`) is
+        # dropped; any other method found there is kept. Dropping a GET can only make the call read as a write, so this never lowers a rating.
+        doubtful, value_next = value_next or after_comment or in_tick or depth > 0, False
+        if w in ("-X", "--method"):
+            v, value_next = (ws[i + 1] if i + 1 < len(ws) else ""), True
+        elif w.startswith("--method="):
+            v = w[9:]
+        elif w.startswith("-X") and len(w) > 2:
+            v = w[3:] if w[2] == "=" else w[2:]
+        else:
+            v = None
+            if not doubtful:
+                if w.startswith("#"):
+                    after_comment = True
+                elif w in _GH_VALUE_OPTS or _REDIRECT_WORD.match(w):
+                    value_next = True
+        depth = max(0, depth + w.count("(") - w.count(")"))
+        in_tick ^= w.count("`") % 2 == 1
+        if v is None:
+            continue
+        v = v.rstrip(")}`").upper()
+        if not (doubtful and v in ("GET", "HEAD")):
+            out.append(v)
+    return out
+
+
+# The options of `gh api` that take a value as the next word (`gh api --help`); -X and --method are read on their own. A redirect operator takes the next word too.
+_GH_VALUE_OPTS = frozenset(("-H", "--header", "-f", "--raw-field", "-F", "--field", "-q", "--jq", "-t", "--template", "--input", "-p", "--preview", "--cache",
+                            "--hostname"))
+_REDIRECT_WORD = re.compile(r"\d*(?:&>>?|>>?\|?|<<?<?|>&|<&|<>)$")
+
+
+_WORD_GLUE = str.maketrans({c: "\x00" for c in " \t\n\r\v\f;&|"})
+
+
+def _glue_token(m: re.Match) -> str:
+    """`_dequote_token`, but a blank or separator that is quoted or escaped becomes NUL, so it no longer splits a word: the text has the same length as `_shell_dequoted`."""
+    if m.group(1) is not None:
+        return m.group(1).translate(_WORD_GLUE)
+    if m.group(2) is not None:
+        return _DQ_ESC.sub(r"\1", m.group(2)).translate(_WORD_GLUE)
+    return "" if m.group(3) == "\n" else m.group(3).translate(_WORD_GLUE)
+
+
+def _shell_words(text: str) -> str:
+    """The text as the shell passes its words on, with each word still one run of non-blank characters (`_glue_token`). Same length and offsets as `_shell_dequoted(text)`."""
+    return _SHELL_TOKEN.sub(_glue_token, text)
+
+
+@lru_cache(maxsize=8)
+def _command_words(text: str) -> str:
+    """`_shell_words` of a whole command, cached: it is read once per `gh api` segment, like `_shell_dequoted` (the words of one call's own text are not cached)."""
+    return _shell_words(text)
+
+
+@lru_cache(maxsize=8)   # the whole command is read once per `gh api` segment: without the cache a command of many segments costs the square
+def _gh_ref_write(text: str, words: str | None = None) -> bool:
+    """Does a `gh api` call in the text write a git ref that is the default branch, a tag, or one the gate cannot read? (W-153.) Errs towards yes.
+    The method is read from the shell words of each call: `words` when given (`_shell_words` of the command, at the same offsets as `text`, which is then
+    `_shell_dequoted` of it), else the words of the call's own text."""
+    calls = list(_GH_ONLY_API.finditer(text))
+    for i, call in enumerate(calls):
+        end = _call_end(text, call.end(), calls[i + 1].start() if i + 1 < len(calls) else len(text))
+        span = text[call.end():end]
+        route = _GH_REFS_ROUTE.search(span)
+        if not route:
+            continue
+        verbs = _gh_methods(words[call.end():end] if words is not None else _shell_words(span))
+        if verbs:
+            if all(v in ("GET", "HEAD") for v in verbs):
+                continue
+        elif not _GH_BODY_FLAG.search(span):
+            continue
+        tail = route.group(1) or ""
+        if tail.strip("/"):
+            if _GH_REF_WATCHED.search(tail):
+                return True
+            continue
+        values = _GH_REF_FIELD.findall(span)
+        if _GH_INPUT_FLAG.search(span) or not values or any(v.startswith("@") or _GH_REF_WATCHED.search(v) for v in values):
+            return True
+    return False
+
+
+_SEP_SPACE = str.maketrans(";&|\n", "    ")
+_DQ_ESC = re.compile(r'\\([\\"$`])')
+_SHELL_TOKEN = re.compile(r"""'([^']*)'?|"((?:[^"\\]|\\[\s\S])*\\?)"?|\\([\s\S])""")   # a single-quoted string, a double-quoted one, an escaped character (open quotes run to the end)
+
+
+def _dequote_token(m: re.Match) -> str:
+    if m.group(1) is not None:
+        return m.group(1).translate(_SEP_SPACE)
+    if m.group(2) is not None:
+        return _DQ_ESC.sub(r"\1", m.group(2)).translate(_SEP_SPACE)
+    return "" if m.group(3) == "\n" else m.group(3).translate(_SEP_SPACE)   # a backslash before a newline joins the lines
+
+
+@lru_cache(maxsize=8)
+def _shell_dequoted(text: str) -> str:
+    """The text as the shell passes its words on (W-153 review): a backslash outside quotes and every quote character are taken off, so `ma\\in`, `mai''n` and `'ma'in`
+    read `main`, as bash and zsh read them. A `;`, `&`, `|` or newline that is quoted or escaped is data, not the end of a command: it becomes a space, so `_call_end`
+    still finds the end of each call. Inside double quotes a backslash is kept unless it escapes `"`, `\\`, `$` or a backtick, as in the shell."""
+    return _SHELL_TOKEN.sub(_dequote_token, text)
+
+
+_QUOTE_DROP = str.maketrans({"'": None, '"': None, "\\": None, ";": " ", "&": " ", "|": " ", "\n": " "})
+
+
+def _dequoted_view(text: str) -> str | None:
+    """`_shell_dequoted(text)` when it can hold a `gh api` or `glab api` call the text as written does not show, else None (nothing to read twice). The test is a quick
+    superset: with every quote and backslash deleted (a backslash before a newline with its newline), the words must already be there."""
+    if "'" not in text and '"' not in text and "\\" not in text:
+        return None
+    if not _GH_API_WORDS.search(text.replace("\\\n", "").translate(_QUOTE_DROP)):
+        return None
+    return _shell_dequoted(text)
+
+
+def _gh_ref_write_any(text: str) -> bool:
+    """`_gh_ref_write` on the text as written or as the shell passes it on (`_shell_dequoted`): `refs/heads/ma\\in` and `gh a''pi` are a write to main too."""
+    return _gh_ref_write(text) or ((d := _dequoted_view(text)) is not None and _gh_ref_write(d, _command_words(text)))
+
+
+def _gh_api_merge_text(text: str) -> bool:
+    """One reading of the text of a call (W-153 and W-191): does it hold a `gh api` call that merges a pull request, writes the default branch or a git ref, or whose query or
+    route the gate cannot read (`_gh_api_merges`)?"""
     if not _GH_API_WORDS.search(text):
         return False
     words = text.split()
@@ -86,13 +241,27 @@ def gh_api_merge_in(text: str) -> bool:
     return any(w == "api" and i and words[i - 1].rsplit("/", 1)[-1] in ("gh", "glab") and _gh_api_writes_default(words[i + 1:]) for i, w in enumerate(words))
 
 
-def _gh_api_merges(words: list[str], text: str) -> bool:
-    """`words` is a `gh api` call: it merges a pull request or writes the default branch, or its query or route is one the gate cannot read (so it is asked about)."""
-    if _GH_MERGE_MUTATION.search(text) or _GH_ROUTE_UNREAD.search(text):
+def gh_api_merge_in(text: str) -> bool:
+    """Does the text of a call hold a `gh api` call that merges a pull request, writes the default branch or a git ref, or whose query or route the gate cannot read
+    (`_gh_api_merges`), or the merge route sent with curl, wget or httpie? Read from the plain text of the call, so it errs towards yes. Memory keeps such a call as an exact
+    answer at most and Jev never judges it, as for `gh pr merge` (integration of V6-08 and V6-06b). The text is read as written and as the shell passes it on
+    (`_shell_dequoted`, W-153 review: `gh a\\pi` is `gh api`)."""
+    if _HTTP_CLIENT_WORDS.search(text) and _GH_REST_MERGE.search(text):
         return True
-    if any(w.rstrip("/").rsplit("/", 1)[-1] == "graphql" for w in words[2:]):
-        return bool(_GH_QUERY_UNREAD.search(text)) or not _GH_QUERY_FIELD.search(text)
+    if _gh_api_merge_text(text):
+        return True
+    t = _dequoted_view(text)
+    return t is not None and _gh_api_merge_text(t)
+
+
+def _gh_api_merges(words: list[str], text: str) -> bool:
+    """`words` is a `gh api` call: it merges a pull request or writes the default branch or a git ref, or its query or route is one the gate cannot read (so it is asked about)."""
+    if _GH_MERGE_MUTATION.search(text) or _GH_ROUTE_UNREAD.search(text) or _gh_ref_write_any(text):
+        return True
+    if "graphql" in " ".join(words[2:]) and any(w.rstrip("/").rsplit("/", 1)[-1] == "graphql" for w in words[2:]):   # the join is a quick test: a huge call pays the word loop only when a word can be `graphql`
+        return bool(_GH_QUERY_UNREAD.search(text)) or not _GH_QUERY_FIELD.search(text) or bool(_GH_REF_MUTATION.search(text))
     return _gh_api_writes_default(words[2:])
+
 
 
 # W-191: the REST routes that write the default branch without a push, each by name (no class rule on every `gh api` call that changes something: the row asks for a
@@ -317,11 +486,38 @@ def runs_shell(tool: str, tool_input: dict) -> bool:
     return tool in SHELL_TOOLS or (is_mcp(tool) and mcp_command(tool_input) is not None)
 
 
-def mcp_command(tool_input: dict) -> str | None:
-    for key in risk().get("mcp_command_keys", ["command", "cmd", "script"]):
+def _mcp_command_read(tool_input: dict) -> tuple[str | None, bool]:
+    """(text, from_a_list) of the command an MCP call carries, or (None, False). The first command key that holds a string wins, with its text unchanged
+    (the rule before W-209, so the plan hash and the subject of such a call do not move). Only when no key holds a string is a list of words read."""
+    keys = risk().get("mcp_command_keys", ["command", "cmd", "script"])
+    for key in keys:
         if isinstance(tool_input.get(key), str) and tool_input[key].strip():
-            return tool_input[key]
-    return None
+            return tool_input[key], False
+    for key in keys:
+        val = tool_input.get(key)
+        if isinstance(val, (list, tuple)) and val and all(isinstance(w, (str, int, float)) and not isinstance(w, bool) for w in val):
+            if (text := shlex.join(str(w) for w in val)).strip("' "):
+                return text, True
+    return None, False
+
+
+def mcp_command(tool_input: dict) -> str | None:
+    """The command an MCP call carries: a string under one of the `mcp_command_keys`, or a list of words (`["git", "push"]`, W-209) joined the way a shell
+    reads it. A value that cannot be read as a command (an empty list, a nested one, an object) is no command, and the tool is rated by its name."""
+    return _mcp_command_read(tool_input)[0]
+
+
+def mcp_command_is_list(tool_input: dict) -> bool:
+    """True when `mcp_command` read its text from a list. Such a tool is rated by its name as well as by the command: the name rule was all that rated it
+    before the list was read, and a generic name rule (M-07) is let go only for a command the tool spells as one string."""
+    return _mcp_command_read(tool_input)[1]
+
+
+def shares_shell_answers(tool: str, tool_input: dict) -> bool:
+    """True when an answer to this call may be generalised like one to a shell command (a class key, a scope): `runs_shell`, except an MCP command given as a
+    list. Such a call was rated by its tool name before W-209 and stays exact only, with a hold key of its own, so that an answer given for the same command in
+    Bash or as a string never runs it (W-209 review). Everything that adds care to a shell call (SI-08, fingerprints, run fields) still reads it through `runs_shell`."""
+    return runs_shell(tool, tool_input) and not (is_mcp(tool) and mcp_command_is_list(tool_input))
 
 
 @dataclass
@@ -727,6 +923,10 @@ def _skills_rule_re() -> re.Pattern:
     return next(r for r in risk()["rules"] if r["id"] == "R-18")["_re"]
 
 
+def _r13() -> dict:
+    return next(r for r in risk()["rules"] if r["id"] == "R-13")
+
+
 def _relocates(src: str, dirs: tuple[str, ...]) -> bool:
     """`mv` of something that already is a skill, command or agent: an existing path the rule names. It moves what is there and writes no new text."""
     if GLOB_OR_EXPANSION.search(src):
@@ -1115,7 +1315,7 @@ _STATE_LITERAL = re.compile(r"\.config/jade(?![\w.-])|\.local/share/jade(?![\w.-
 _INSTALL_CMD = re.compile(r"\b(?:uv\s+tool\s+(?:install|upgrade|reinstall)|uv\s+pip\s+install|pip3?\s+install|pipx\s+(?:install|upgrade|reinstall)|python3?\s+-m\s+pip\s+install)\b")
 _UV_TOOL_JADE = re.compile(r"\buv\s+tool\s+(?:uninstall|upgrade|reinstall|install)\b[^;&|]*\bjade|\buv\s+tool\s+(?:uninstall|upgrade|reinstall)\b[^;&|]*--all\b")   # R-13: changes or removes the installed JADE tool itself, whatever it installs from
 _SETTINGS_FILE = re.compile(r"(?:^|/)\.claude/settings(?:\.local)?\.json$")
-_SETTINGS_DISABLE = re.compile(r"disableAllHooks|allowManagedHooksOnly|JADE_(?:GATE_MODE|POLICY_DIR|CONFIG|HOME|REGISTRY_DIR|SESSION_ID)|CLAUDE_CODE_SESSION_ID|\"hooks\"\s*:\s*(?:\{\s*\}|null)", re.I)
+_SETTINGS_DISABLE = re.compile(r"disableAllHooks|allowManagedHooksOnly|" + paths.gate_env_alternation() + r"|\"hooks\"\s*:\s*(?:\{\s*\}|null)", re.I)   # W-200: the gate variables come from paths.GATE_ENV_VARS
 TERMINAL_TOOLS = frozenset({"mcp__terminal__run_in_terminal"})
 
 
@@ -1533,7 +1733,22 @@ def _hardlink_sources(bare: str) -> list[str]:
     return []
 
 
+_INTOS: dict[str, list[tuple[str, bool, bool, bool]]] | None = None   # set for the length of one `assess` only: `_into_targets` answers
+
+
 def _into_targets(bare: str) -> list[tuple[str, bool, bool, bool]]:
+    """`_into_targets_now`, kept for the length of one `assess`: the human-only classes, the directory reading and the unseen-name reading of W-82 all ask it for
+    the same segment (and the reading of a variable asks it again). The list is shared: callers only read it."""
+    memo = _INTOS
+    if memo is None:
+        return _into_targets_now(bare)
+    got = memo.get(bare)
+    if got is None:
+        got = memo[bare] = _into_targets_now(bare)
+    return got
+
+
+def _into_targets_now(bare: str) -> list[tuple[str, bool, bool, bool]]:
     """Where a copy or unpack verb writes, as (path, parent_too, exact, unless_dir):
 
     * a tree copied under its own name (`cp -r /tmp/proj ~`, `rsync -a /tmp/proj ~/`) writes `dest/proj` only: that path, with parent_too (a source named
@@ -1585,6 +1800,275 @@ def _into_targets(bare: str) -> list[tuple[str, bool, bool, bool]]:
     if (verb == "cpio" and any(re.fullmatch(r"-[A-Za-z]*i[A-Za-z]*", w) for w in args)) or (verb == "pax" and any(re.fullmatch(r"-[A-Za-z]*r[A-Za-z]*", w) for w in args)):
         return [(".", True, False, False)]
     return []
+
+
+# W-82: where a copy lands when the words name a DIRECTORY or a glob, so that R-13 (which reads path text) still sees the protected file it writes.
+# `cp /tmp/e/settings.json ~/.claude/` writes `~/.claude/settings.json`, but the words only say `~/.claude/`. The path is the directory and the name of the source, which
+# is typed: the same reading the human-only classes make of an exact file copied under its own name (`_into_targets`). Only a name that is typed counts here. A source whose
+# name is not known (a glob, a variable the command did not set to a literal, a tree's content, an archive) is NOT guessed at: it is read by `unseen_into_dedicated` below,
+# which is high only when the directory it lands in is one made for protected files (the owner's decision, W-82, docs/05 T19).
+_DIR_DEST_VERBS = frozenset({"cp", "gcp", "mv", "install", "ln", "rsync", "ditto"})
+_GLOB_CHARS = re.compile(r"[*?\[]")
+DIR_GLOB_CAP = 4096          # matches of a glob destination that are examined
+DIR_GLOB_COMPONENTS = 3      # a glob destination with more wildcard components than this is not expanded (the walk is the cost)
+DIR_GLOB_WALKS = 16          # different glob destinations walked in one command; one past that is read as written (`cp s1* /usr/*/*/; cp s2* /usr/*/*/; ...`)
+_GLOBS: dict[str, list[str]] | None = None   # set for the length of one `assess` only: the glob destinations walked so far
+_DESTS: dict[tuple[str, tuple[str, ...]], list[tuple[str, bool]]] | None = None   # set for the length of one `assess` only: `_dest_bases` answers
+DIR_GLOB_SPEND = 20000       # glob-destination matches handed out in one command; past that a glob destination is read as written
+_GLOB_SPENT: list[int] | None = None   # set for the length of one `assess` only: the matches handed out so far
+# The WORK of the walks is bounded too, not only what they return: a pattern whose literal tail matches nothing (`/System/Library/*/*/*/n0/`) lists every directory
+# of the tree and returns no match at all. A directory entry read, and a name looked up, each cost one; a listing is read once per command.
+DIR_GLOB_ENTRIES = 512       # directory entries and look-ups the glob destinations of one command may spend; past that a walk keeps what it found
+_GLOB_WORK: list[int] | None = None   # set for the length of one `assess` only: what is left of DIR_GLOB_ENTRIES
+_LISTINGS: dict[str, list[os.DirEntry]] | None = None   # set for the length of one `assess` only: the directories listed so far
+
+
+class _WalkSpent(Exception):
+    """The walk spent DIR_GLOB_ENTRIES."""
+
+
+def _spend(budget: list[int]) -> None:
+    budget[0] -= 1
+    if budget[0] < 0:
+        raise _WalkSpent
+
+
+def _entries(d: str, budget: list[int]) -> list[os.DirEntry]:
+    listings = _LISTINGS
+    if listings is not None and d in listings:
+        return listings[d]
+    out: list[os.DirEntry] = []
+    try:
+        with os.scandir(d or os.curdir) as it:
+            for e in it:
+                _spend(budget)   # spent in the middle of a listing: it is not kept, a later walk would read it short
+                out.append(e)
+    except OSError:
+        out = []
+    if listings is not None:
+        listings[d] = out
+    return out
+
+
+def _walk(pattern: str, dironly: bool, budget: list[int]):
+    """`glob.iglob(pattern)` (no `**`, no hidden names for a pattern that does not start with a dot), written out so that each entry it reads is counted: the same
+    recursion as CPython's `glob._iglob`, `_glob1` and `_glob0`."""
+    dirname, basename = os.path.split(pattern)
+    if not _GLOB_CHARS.search(pattern):
+        _spend(budget)
+        if (os.path.lexists(pattern) if basename else os.path.isdir(dirname)):
+            yield pattern
+        return
+    dirs = _walk(dirname, True, budget) if dirname and dirname != pattern and _GLOB_CHARS.search(dirname) else [dirname]
+    magic = bool(_GLOB_CHARS.search(basename))
+    for d in dirs:
+        if not magic:
+            _spend(budget)
+            if (os.path.lexists(os.path.join(d, basename)) if basename else os.path.isdir(d)):
+                yield os.path.join(d, basename)
+            continue
+        names = []
+        for e in _entries(d, budget):
+            try:
+                if not dironly or e.is_dir():
+                    names.append(e.name)
+            except OSError:
+                pass
+        if basename[:1] != ".":
+            names = [n for n in names if n[:1] != "."]
+        for n in fnmatch.filter(names, basename):
+            yield os.path.join(d, n)
+
+
+def _glob_matches(pattern: str) -> list[str]:
+    """The paths a glob destination stands for now, as the shell expands it (`*` and `?` do not match a leading dot). Bounded: `DIR_GLOB_CAP` matches, no pattern with
+    `**` or many wildcard components, and `DIR_GLOB_ENTRIES` entries read for all the walks of one command (a walk that spends it keeps the matches it found)."""
+    if "**" in pattern or sum(1 for c in pattern.split("/") if _GLOB_CHARS.search(c)) > DIR_GLOB_COMPONENTS:
+        return []
+    memo = _GLOBS
+    if memo is not None:   # inside one `assess`: a pattern is walked once, and at most DIR_GLOB_WALKS different patterns are walked at all
+        if pattern in memo:
+            return memo[pattern]
+        if len(memo) >= DIR_GLOB_WALKS:
+            return []
+    budget = _GLOB_WORK if _GLOB_WORK is not None else [DIR_GLOB_ENTRIES]
+    out: list[str] = []
+    try:
+        for m in _walk(pattern, False, budget):
+            out.append(m)
+            if len(out) >= DIR_GLOB_CAP:
+                break
+    except (_WalkSpent, OSError, ValueError, re.error):
+        pass
+    if memo is not None:
+        memo[pattern] = out
+    return out
+
+
+def _dest_bases(base: str, dirs: tuple[str, ...]) -> list[tuple[str, bool]]:
+    """The destination `base` as (path, is_a_directory) for every directory the command may run in: absolute with symlinks resolved, a glob as what it matches now. A path
+    is a directory when it ends in `/`, is `.` or `..`, or exists as one. A relative path with no directory to resolve it in is read as written. Inside one `assess` the
+    answer for a (base, dirs) is kept: a long command that names one glob destination many times resolves its matches once."""
+    memo = _DESTS
+    if memo is None:
+        return _dest_bases_now(base, dirs)
+    key = (base, dirs)
+    if key not in memo:
+        memo[key] = _dest_bases_now(base, dirs)
+    got = memo[key]
+    if _GLOB_SPENT is not None and _GLOB_CHARS.search(base):   # a glob destination: every match is read by the caller, so the matches handed out in one command are bounded too
+        if _GLOB_SPENT[0] >= DIR_GLOB_SPEND:
+            return [(_pathfold(_expand_home(base.strip("\"'"))), base.endswith("/"))]   # read as written, as a pattern that is not expanded
+        _GLOB_SPENT[0] += len(got)
+    return got
+
+
+def _dest_bases_now(base: str, dirs: tuple[str, ...]) -> list[tuple[str, bool]]:
+    base = _expand_home(base.strip("\"'"))
+    if not base or "\x00" in base:
+        return []
+    textual = base.endswith("/") or base.rstrip("/").rsplit("/", 1)[-1] in (".", "..")
+    out: list[tuple[str, bool]] = []
+    for d in dirs or ("",):
+        if not d and not os.path.isabs(base):
+            continue
+        pat = base if os.path.isabs(base) else os.path.join(d, base)
+        for p in (_glob_matches(pat) if _GLOB_CHARS.search(pat) else [pat]):
+            q = normalise_path(p)
+            out.append((q, textual or os.path.isdir(q)))
+    return list(dict.fromkeys(out)) or [(_pathfold(base), textual)]
+
+
+def _typed_dir_dest(words: list[str]) -> bool:
+    """Is the destination of this copy a directory by its words alone: a `-t DIR` (cp, install, ln), or a last operand that ends in `/`? It holds even when the
+    directory is not there yet (`mkdir -p d && cp f d/`). Mirrors how `_into_targets` picks the destination."""
+    verb, args = words[0].rsplit("/", 1)[-1], [_word(w) for w in words[1:] if w]
+    if verb not in ("rsync", "ditto") and _target_dir(args):
+        return True
+    ops = _rsync_operands(args) if verb == "rsync" else operands(args)
+    return len(ops) >= 2 and ops[-1].endswith("/")
+
+
+def dir_dest_paths(bare: str, dirs: tuple[str, ...] = ("",)):
+    """The paths a copy, move, link or sync writes when it names a directory (W-82), one at a time: R-13 reads each as if it had been typed.
+
+    Built on `_into_targets`, with `mv` as `cp -r`. A file copied into a directory is `dir/name` (and `dir/name/` for what a tree called so holds). A tree copied to a name
+    that is not a directory yet becomes that directory: `dir/`. A destination that is a glob is every path it matches now: a file it matches is written itself, a directory
+    holds the copy. A name that is not typed (a glob or variable source, a contents copy, an archive) gives nothing. It only produces paths; the caller takes a rating
+    from them only when it is higher than what the command already has."""
+    words = system_bare(bare).split(" ")
+    verb = words[0].rsplit("/", 1)[-1]
+    if verb not in _DIR_DEST_VERBS:
+        return
+    if verb == "mv":
+        words = ["cp", "-r", *words[1:]]
+    typed_dir = _typed_dir_dest(words)
+    for path, _parent_too, exact, unless_dir in _into_targets(" ".join(words)):
+        if exact:
+            base, _, name = path.rpartition("/")
+            if not name or GLOB_OR_EXPANSION.search(name) or "\x01" in name:
+                continue
+            if typed_dir and not _GLOB_CHARS.search(base):   # `dir/name` lost the `/` the destination was typed with: put it back, so a directory the command
+                base += "/"                                    # has yet to make is still one. Not for a glob: `set*/` would match directories only, not the file it reads
+        elif unless_dir:
+            base, name = path, ""
+        else:
+            continue
+        for q, is_dir in _dest_bases(base or "/", dirs):
+            head = q.rstrip("/")
+            if exact and not is_dir:   # a file that is there is written itself (a glob destination that matched one)
+                yield q
+            elif exact:
+                yield f"{head}/{name}"
+                yield f"{head}/{name}/"
+            elif not is_dir:   # a tree copied to a name that is not a directory yet becomes that directory
+                yield f"{head}/"
+
+
+def dir_dest_hit(rule: dict, bare: str, dirs: tuple[str, ...]) -> bool:
+    """Does R-13's pattern match a path `dir_dest_paths` gives for this command?"""
+    rx = rule["_re"]
+    return any(rx.search(p) for p in dir_dest_paths(bare, dirs))
+
+
+# W-82, owner decision 2026-11-20: a name the gate cannot see (a glob or variable source, the contents of a tree, an archive) copied, moved, linked, synced or unpacked
+# into a directory MADE for protected files is R-13 high. Which file lands is not in the words, and in these directories most of what can land is protected: the hook
+# settings, the hooks, the instruction files, `authorized_keys`, the policy files. A directory is dedicated by its own name (the last component, case-folded as R-13
+# reads paths), wherever it is. Not `~/.local/bin`, not `~/.config`, not an ordinary project directory, not a directory inside a dedicated one (`~/.claude/projects/`):
+# there a name that is not typed stays as it was.
+DEDICATED_DIRS = frozenset({".claude", ".vscode", ".cursor", ".codex", ".ssh", "policies", ".ai"})
+
+
+def _dedicated(path: str) -> bool:
+    return os.path.basename(path.rstrip("/")).casefold() in DEDICATED_DIRS
+
+
+_LN_NO_DEREF = re.compile(r"^-[A-Za-z]*[nh][A-Za-z]*$")
+
+
+def _ln_as_tree_copy(words: list[str], dirs: tuple[str, ...]) -> list[str]:
+    """`ln` read as `cp -r` for the unseen-name reading (W-82 review, wave 4): a link to a tree puts that tree, whose names are not typed, where the link is made.
+    `ln -s /tmp/e ~/proj/.claude` is `cp -r /tmp/e ~/proj/.claude`. One operand makes the link in the directory the command runs in (`.`). `-T`, and `-n`/`-h` over
+    a destination that is a symlink now, replace the destination itself rather than make a link inside it: read as `cp -T`."""
+    args = words[1:]
+    ops = operands(args)
+    no_target = any(w == "--no-target-directory" or _NO_TARGET_DIR.match(w) for w in args)
+    if not no_target and ops and any(w == "--no-dereference" or _LN_NO_DEREF.match(w) for w in args):
+        dest = _expand_home(_word(ops[-1])).rstrip("/")
+        no_target = any(os.path.islink(dest if os.path.isabs(dest) else os.path.join(d, dest)) for d in dirs if d or os.path.isabs(dest))
+    out = ["cp", "-r", *(["-T"] if no_target else []), *args]
+    if len(ops) == 1 and not _target_dir(args):
+        out.append(".")
+    return out
+
+
+def unseen_into_dedicated(bare: str, dirs: tuple[str, ...] = ("",)) -> bool:
+    """Does this copy, move, link, sync or unpack put a name that is not typed into a dedicated directory (W-82)? Built on `_into_targets`, with `mv` as `cp -r`:
+
+    * a source whose name is a glob, a variable or a substitution lands in the destination directory;
+    * a tree copied under its typed name holds contents that are not typed: it lands in `dest/name` when `dest` is a directory, and becomes `dest` when it is not;
+    * a contents copy (`src/`, `src/.`, `cp -T`, ditto) and an unpack (tar, unzip, 7z, cpio, pax) write unseen names into `dest`.
+    The destination is resolved as `dir_dest_paths` resolves it (home, the directories the command may run in, symlinks, a glob destination as what it matches now).
+    The command an `xargs` or a `find -exec` runs is read too: what they feed it (the replace string, or the words `xargs` appends) is a name that is not typed."""
+    words = system_bare(bare).split(" ")
+    inner: str | None = None
+    if (xi := _xargs_inner(" ".join(words))) is not None:
+        cmd, repl = xi
+        inner = _put(cmd, repl, _BRACES) if repl else f"{cmd} {_BRACES}"
+    elif words[0].rsplit("/", 1)[-1] == "find" and (at := next((i for i, w in enumerate(words) if w in shellnorm.FIND_EXEC), None)) is not None:
+        tail = words[at + 1:]
+        inner = " ".join(tail[:next((i for i, w in enumerate(tail) if w in (";", "+", "\\;", "\\", "\x06")), len(tail))])
+    if inner is not None:   # the inner command without its own launcher and system directory (`xargs sudo cp`, `-exec /bin/cp`)
+        words = system_bare(_bare(inner)).split(" ")
+    if not words or not words[0]:
+        return False
+    verb = words[0].rsplit("/", 1)[-1]
+    if verb == "mv":
+        words = ["cp", "-r", *words[1:]]
+    elif verb == "ln":
+        words = _ln_as_tree_copy(words, dirs)
+    typed_dir = _typed_dir_dest(words)   # `newdir/` or `-t newdir`: a directory by its words, even when the command has yet to make it
+    seen: dict[str, list[tuple[str, bool]]] = {}   # one destination for many sources: resolved (and a glob walked) once
+
+    def bases(p: str) -> list[tuple[str, bool]]:
+        if p not in seen:
+            seen[p] = _dest_bases(p, dirs)
+        return seen[p]
+
+    for path, parent_too, exact, unless_dir in _into_targets(" ".join(words)):
+        if exact:
+            base, _, name = path.rpartition("/")
+            if not name or GLOB_OR_EXPANSION.search(name) or "\x01" in name or "\x06" in name:   # the name is not typed: it lands in `base`
+                if _dedicated(base) or any(_dedicated(q) for q, _is_dir in bases(base or "/")):   # the name as written, or where its symlinks lead
+                    return True
+            elif parent_too and _dedicated(name) and (typed_dir or any(is_dir for _q, is_dir in bases(base or "/"))):   # a tree called `.claude` copied into a directory
+                return True
+        elif unless_dir:   # the tree becomes `dest` when no directory is there now (`dest/` typed so but not made yet may be either: both are read)
+            if any((not is_dir or not os.path.isdir(q)) and (_dedicated(path) or _dedicated(q)) for q, is_dir in bases(path)):
+                return True
+        elif _dedicated(path) or any(_dedicated(q) for q, _is_dir in bases(path)):
+            return True
+    return False
 
 
 def _git_tree_targets(seg: str, calls: list[shellnorm.GitCall], carried: str | None = None) -> list[tuple[str, bool]]:
@@ -1750,20 +2234,23 @@ def _assess_tool(tool: str, tool_input: dict, cwd: str) -> Assessment:
     """MCP tools and the built-in tools that carry no command line: classified by name, by the command they carry, by the paths they
     write and by the text they type into a shell; the most severe reading decides."""
     cmd = mcp_command(tool_input) if is_mcp(tool) else None
-    rule = _tool_rule(tool, command_decides=cmd is not None)
+    by_name = cmd is None or mcp_command_is_list(tool_input)   # W-209: a command spelled as a list is read, and the name still rates the call, as it did before the list was read
+    rule = _tool_rule(tool, command_decides=not by_name)
     if rule["id"] == "M-99" and isinstance(tool_input.get("action"), str) and re.fullmatch(r"[\w-]{1,40}", tool_input["action"]):
         # one tool, many verbs (`herd processes {action: start}`): the action is the name's verb
-        by_action = _tool_rule(f"{tool}__{tool_input['action']}", command_decides=cmd is not None)
+        by_action = _tool_rule(f"{tool}__{tool_input['action']}", command_decides=not by_name)
         rule = rule if by_action["id"] == "M-99" else by_action
     if cmd is not None:
         a = _assess_shell(tool, cmd, cwd)
-        if not rule.get("generic"):
+        if by_name or not rule.get("generic"):
             _raise_to(a, _rule_assessment(rule))
+        if by_name:   # a list command keeps the hold key it had before W-209 (tool and input): no answer or hold of another form of the command is shared with it
+            a.hold_key = plan_hash(tool, canonical(tool_input), "")
     else:
         a = _rule_assessment(rule)
         subject = canonical(tool_input)
         _seal(a, tool, subject, "", f"{tool} {subject}")
-    if cmd is None:   # a tool that carries no command is classed by what its name does; one that carries a command was read as that command above
+    if by_name:   # a tool that carries no command (or one spelled as a list) is classed by what its name does; one that carries a command string was read as that command above
         for ident in sorted(humanonly.tool_classes(tool) | (humanonly.tool_classes(f"{tool}__{tool_input['action']}") if isinstance(tool_input.get("action"), str)
                                                               and re.fullmatch(r"[\w-]{1,40}", tool_input["action"]) else set())):
             _ho_add(a, ident)
@@ -1797,48 +2284,113 @@ def _use_identity(seg: str) -> str:
     return IDENTITY_FILE.sub("-i $KEY", seg) if bare.split(" ", 1)[0].rsplit("/", 1)[-1] in REMOTE_SHELL_VERBS else seg
 
 
-def classify_segment(seg: str, dirs: tuple[str, ...], proxied: bool = False, marks: tuple[str, ...] = ()) -> tuple[dict, str]:
-    """The rule one simple command (a segment of `shellnorm.segments_cwd`) matches, and the command with launcher prefixes and git options gone.
-
-    The command is looked at as written and with its operands made absolute for every directory it may run in; a `files_only` rule (R-13, R-16)
-    reads only what the command writes (`files_view`). `marks` are marker prefixes (`blind:script-file `, `fetch:exec `) that the caller found for this segment and that rules
-    read together with its text."""
-    real_bare = _bare(seg)
+def _segment_pairs(seg: str, proxied: bool, marks: tuple[str, ...]) -> tuple[str, str, list[shellnorm.GitCall], str | None, list[tuple[str, str]]]:
+    """The views of one segment the rules read: (segment, bare command, git calls, `files_view`, [(text, files)])."""
     seg = _use_identity(seg)
     bare, calls = _analyse(seg)
     hooks_off = any("core.hookspath" in d for c in calls for d in c.danger)   # `git -c core.hooksPath=...` turns the pre-push guard off for this command (R-17)
     texts = [*([HOOKS_BYPASS + bare] if hooks_off else []), seg, bare, _pathfold(bare), *([UNSAFE_GIT + bare] if any(c.danger for c in calls) else []),
              *([EGRESS_MARK + bare] if egress.sends_out(bare, proxied or bool(egress.PROXY_ENV.search(seg))) else []), *(m + bare for m in marks)]
     view = files_view(bare)  # what a `files_only` rule may look at: None = the whole segment
-    cview = creation_view(bare, view, calls, tuple(dirs) or ("",))  # what a `creates_only` rule may look at
-    seg_best = None
-    dirs_t = tuple(dirs) or ("",)
     pairs = [(t, view if view is not None else _program_basename(t)) for t in dict.fromkeys(texts)]
     if view:
         pairs.append((bare, _pathfold(view)))
+    return seg, bare, calls, view, pairs
+
+
+def _r13_reads(seg: str, dirs: tuple[str, ...], proxied: bool = False, marks: tuple[str, ...] = ()) -> bool:
+    """Does R-13 match this segment, read the way `classify_segment` reads it (its text views, its absolute operands, the paths a copy into a directory writes, an
+    unseen name into a dedicated directory)? For the reading of a variable (W-82), where only R-13 is taken: the other rules are not looked at, and R-13 counts
+    even where a rule before it in the list would have matched first (that only adds a reading)."""
+    r13 = _r13()
+    seg, bare, _calls, view, pairs = _segment_pairs(seg, proxied, marks)
+    dirs_t = tuple(dirs) or ("",)
+    if any((t := _seen_by(r13, text, files)) and _hit(r13, t, dirs_t) for text, files in pairs):
+        return True
+    abs_files = _absolute_operands(seg, dirs) if view is None else _absolute_operands("x " + view, dirs) if view else ""
+    if abs_files and _hit(r13, abs_files, dirs_t):
+        return True
+    return dir_dest_hit(r13, bare, dirs_t) or unseen_into_dedicated(bare, dirs_t) or ("xargs" in seg and unseen_into_dedicated(seg, dirs_t))
+
+
+# W-153 review: the rules whose answer memory never keeps and Jev never judges (memory.NEVER_RULES, proxy.NEVER_RULES) or that keep a call exact or human-only
+# (memory.EXACT_ONLY_RULES, R-17 with HO_R17). A rule that comes earlier in risk.yaml (R-10 before R-13 and R-18) names the segment; these are still read
+# for it, so `seg_rules` holds them and a call is not looser because of the order of the rules. All of them are high: the segment is gated when one matches.
+ALSO_KEPT = ("R-13", "R-14", "R-17", "R-18", "R-21", "R-22")
+
+
+def also_kept(a) -> list[str]:
+    """The rules of `ALSO_KEPT` in the call's `seg_rules` other than the rule that names it, in `ALSO_KEPT` order (W-153 review 2): the question and the block text
+    name them too, so a human who reads "R-10" still learns that the call also writes an agent file (R-13) or a skill (R-18), as on 0.7.0."""
+    rules = set(getattr(a, "seg_rules", None) or ())
+    return [r for r in ALSO_KEPT if r in rules and r != a.rule_id]
+
+
+def rule_rationale(rule_id: str) -> str:
+    """The `rationale` of a rule of risk.yaml (with the local overlay), or "" when there is no such rule."""
+    return next((r.get("rationale", "") for r in risk()["rules"] if r.get("id") == rule_id), "")
+
+
+def _also_hits(also: list[str], text: str, files: str | None, alt: dict[str, str] | None, dirs: tuple[str, ...], path_only: bool = False) -> None:
+    """Add to `also` every rule of `ALSO_KEPT` that this view of the segment matches (see `classify_segment`). `path_only`: only the path rules (the view of absolute operands)."""
+    for r in risk()["rules"]:
+        if r["id"] in ALSO_KEPT and r["id"] not in also and (not path_only or r["id"] in PATH_RULES) \
+                and (t := alt[r["id"]] if alt and r["id"] in alt else _seen_by(r, text, files)) and _hit(r, t, dirs):
+            also.append(r["id"])
+
+
+def classify_segment(seg: str, dirs: tuple[str, ...], proxied: bool = False, marks: tuple[str, ...] = (), also: list[str] | None = None) -> tuple[dict, str]:
+    """The rule one simple command (a segment of `shellnorm.segments_cwd`) matches, and the command with launcher prefixes and git options gone.
+
+    The command is looked at as written and with its operands made absolute for every directory it may run in; a `files_only` rule (R-13, R-16)
+    reads only what the command writes (`files_view`). `marks` are marker prefixes (`blind:script-file `, `fetch:exec `) that the caller found for this segment and that rules
+    read together with its text. When `also` is a list, the rules of `ALSO_KEPT` that the segment matches are added to it, whichever rule is returned."""
+    real_bare = _bare(seg)
+    seg, bare, calls, view, pairs = _segment_pairs(seg, proxied, marks)
+    cview = creation_view(bare, view, calls, tuple(dirs) or ("",))  # what a `creates_only` rule may look at
+    seg_best = None
+    dirs_t = tuple(dirs) or ("",)
     for text, files in pairs:
         alt = {"R-18": cview if cview is not None else files} if cview != view else None
         rule = _first_match(text, files, alt, dirs_t)
         if seg_best is None or LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
             seg_best = rule
+        if also is not None and LEVELS[rule["level"]] >= LEVELS["high"]:   # an ALSO_KEPT rule is high: it can only hit a view whose first match is high or critical
+            _also_hits(also, text, files, alt, dirs_t)
     abs_ops = _absolute_operands(seg, dirs)
     abs_files = abs_ops if view is None else _absolute_operands("x " + view, dirs) if view else ""
     abs_pkg = _absolute_operands(seg if view is None else "x " + view, dirs, package=True) if view != "" else ""
     abs_create = abs_files if cview == view else abs_ops if cview is None else _absolute_operands("x " + cview, dirs) if cview else ""
-    if (rule := _path_rule(abs_ops, abs_files, {"R-16": abs_pkg, "R-18": abs_create}, dirs_t)) and LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
+    path_alt = {"R-16": abs_pkg, "R-18": abs_create}
+    if (rule := _path_rule(abs_ops, abs_files, path_alt, dirs_t)) and LEVELS[rule["level"]] > LEVELS[seg_best["level"]]:
         seg_best = rule
+    if also is not None and rule and LEVELS[rule["level"]] >= LEVELS["high"]:
+        _also_hits(also, abs_ops, abs_files, path_alt, dirs_t, path_only=True)
+    r13 = _r13()   # W-82: a copy into a directory, a glob or a variable-held destination: R-13 reads the paths it writes (adds a reading, never lowers one)
+    if dir_dest_hit(r13, bare, dirs_t) or unseen_into_dedicated(bare, dirs_t) or ("xargs" in seg and unseen_into_dedicated(seg, dirs_t)):   # `bare` has lost the launcher `xargs`
+        if LEVELS[seg_best["level"]] < LEVELS[r13["level"]]:
+            seg_best = r13
+        if also is not None and "R-13" not in also:   # W-153 review: R-13 is a kept rule; a segment that R-13 reads this way is not looser because of the order of the rules
+            also.append("R-13")
     return seg_best, real_bare
 
 
-def _call_dir(call: shellnorm.GitCall, dirs: tuple[str, ...], cwd: str) -> str | None:
-    """The directory a git call runs in: the directory of the segment, then each `-C` in turn. None when one is written with a variable or a substitution."""
+def _call_dir(call: shellnorm.GitCall, dirs: tuple[str, ...], cwd: str) -> tuple[str, bool]:
+    """The directory a git call runs in: the directory of the segment, then each `-C` in turn, and whether the gate knows it. A `-C` written with a variable or a
+    substitution makes it unknown until an absolute `-C` names one again; the directory returned then is the last one the gate knew, where the user's own and the
+    system aliases (the same in every directory) are still read (W-31). Only the aliases of the repository the variable names stay unseen."""
     d = (dirs[0] if dirs else "") or cwd
+    known = True
     for c in call.dirs:
         if re.search(r"[$`\x06]", c):
-            return None
+            known = False
+            continue
         c = os.path.expanduser(c)
-        d = c if os.path.isabs(c) else os.path.join(d or os.getcwd(), c)
-    return d
+        if os.path.isabs(c):
+            d, known = c, True
+        elif known:
+            d = os.path.join(d or os.getcwd(), c)
+    return d, known
 
 
 def hidden(text: str, cwd: str = "") -> tuple[list[str], frozenset[str]]:
@@ -1861,11 +2413,101 @@ def _hidden(text: str, cwd: str, _home: str, _xdg: str) -> tuple[tuple[str, ...]
             if is_read_only(seg):
                 continue
             for call in git_calls(seg):
-                if not gitalias.candidate(call.sub) or (d := _call_dir(call, dirs, cwd)) is None:
+                if not gitalias.candidate(call.sub):
                     continue
+                d, d_known = _call_dir(call, dirs, cwd)   # not `known`: that holds the scripts the command wrote, returned below
                 if (expansion := aliases.expand(call.sub, call.args, d)) is not None:
-                    extra.append(f"cd {shlex.quote(d)} && {expansion}" if d else expansion)
-    return tuple(extra), known
+                    extra.append(f"cd {shlex.quote(d)} && {expansion}" if d and d_known else expansion)
+    return tuple(dict.fromkeys(extra)), known   # one reading per distinct text: 1500 `git -C "$D" nuke` are one expansion, not 1500 to classify
+
+
+_BRACES = "\x06\x06"   # how the segmenter spells the default `{}` of `xargs -I{}`, `xargs -i` and `find -exec ... {}`
+_STDIN_PATH = re.compile(r"[\w./~$@+,:=%{}-]+")
+_XARGS_VALUE_OPTS = frozenset({"-n", "-L", "-P", "-s", "-d", "-E", "-a", "-S", "-R", "--arg-file", "--max-args", "--max-lines", "--max-procs", "--max-chars", "--delimiter",
+                               "--eof"})   # options whose value is the next word when it is not attached
+_XARGS_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+_XARGS_FETCHERS = frozenset({"curl", "wget"})
+XARGS_STDIN_CAP = 8   # xargs segments, and instruction paths named elsewhere, that are paired one by one; above that a writer `xargs` is rated R-18 whole
+
+
+def _xargs_inner(seg: str) -> tuple[str, str | None] | None:
+    """`xargs [options] command ...` as written in one segment: the command it runs (the words after its options) and its replace string
+    (`{}` is the segmenter's `\\x06\\x06`; `-I s`, `-Is`, `-J s`, `--replace=s`, `-i[s]`), None when there is none. None when the segment is not an `xargs`."""
+    words = seg.split(" ")
+    start = next((i for i, w in enumerate(words[:7]) if w.rsplit("/", 1)[-1] == "xargs"), None)
+    if start is None:
+        return None
+    i, repl = start + 1, None
+    while i < len(words) and words[i].startswith("-") and words[i] not in ("-", "--"):
+        o = words[i]
+        if o.startswith("--replace"):
+            repl = o.partition("=")[2] or _BRACES
+        elif o[:2] in ("-I", "-J"):
+            if o[2:]:
+                repl = o[2:]
+            elif i + 1 < len(words):
+                i, repl = i + 1, words[i + 1]
+        elif o[:2] == "-i":
+            repl = o[2:] or _BRACES
+        elif o in _XARGS_VALUE_OPTS:
+            i += 1
+        i += 1
+    if i < len(words) and words[i] == "--":
+        i += 1
+    inner = " ".join(w for w in words[i:] if w)
+    return (inner, repl) if inner else None
+
+
+def _put(text: str, repl: str, path: str) -> str:
+    """`text` with the replace string at the start of a word (or after `>`, `<`, `=`) made `path`. One in the middle of a word (`/tmp/backup/{}`) is a name that was listed,
+    never a whole path, and stays as it is."""
+    return re.sub(r"(?<![^\s<>=])" + re.escape(repl), lambda _: path, text)
+
+
+def _verb(command: str) -> str:
+    return system_bare(_bare(command)).split(" ")[0].rsplit("/", 1)[-1]
+
+
+def _xargs_stdin_readings(rows: list[tuple[str, tuple[str, ...]]]) -> tuple[list[tuple[str, tuple[str, ...], str]], str | None]:
+    """The commands an `xargs` runs when the instruction-file paths the rest of the command names (an `echo`, a `printf`, an `ls -d`, a `find`) are what reaches
+    it on standard input (W-77, R-18): `echo ~/.claude/skills/n.md | xargs touch` is `touch ~/.claude/skills/n.md`. Returns (segment, directories, the real `xargs` segment)
+    for each reading, and the first writer `xargs` segment when the pairing was cut at the cap (`XARGS_STDIN_CAP`), else None. Only a reading is added, the segment itself is
+    classified as before.
+
+    A path word is one the instruction-file pattern of R-18 matches (a directory without its slash too), taken from every segment that is not an `xargs`
+    and holds no replace string. A writer verb (`WRITER_VERBS`) gets the path in the place of the replace string, or after its last word when it has none. A shell
+    (`xargs -I{} sh -c 'echo x > {}'`) is read through the segment of its quoted body that holds the `{}`, the segmenter makes it one. Whole-command scope: the segmenter does not
+    say which segment feeds which, so a path named in another pipeline counts too (the safe direction)."""
+    xs = [(seg, dirs, got) for seg, dirs in rows if (got := _xargs_inner(seg))]
+    if not xs:
+        return [], None
+    rx = _skills_rule_re()
+    holders: dict[str, list[str]] = {}   # per replace string of a shell `xargs`: the segments that hold it, where the segmenter put the quoted body (W-77 review)
+    for _seg, _dirs, (inner, repl) in xs:
+        if repl and repl not in holders and _verb(inner) in _XARGS_SHELLS:
+            at = re.compile(r"(?<![^\s<>=])" + re.escape(repl))   # where `_put` puts the path: at the start of a word, or after `>`, `<`, `=`
+            holders[repl] = [seg for seg, _ in rows if repl in seg and at.search(seg) and not _xargs_inner(seg)][:XARGS_STDIN_CAP + 1]
+    paths_: list[str] = []
+    for seg, _ in rows:
+        if _xargs_inner(seg) or _BRACES in seg:
+            continue
+        for w in _bare(seg).split(" "):
+            w = w.strip("\"'")
+            if w and w not in paths_ and _STDIN_PATH.fullmatch(w) and rx.search(w if w.endswith("/") else w + "/"):
+                paths_.append(w)
+    if not paths_:
+        return [], None
+    writer = next((seg for seg, _, (inner, _) in xs if _verb(inner) in WRITER_VERBS or _verb(inner) in _XARGS_SHELLS), None)
+    out: list[tuple[str, tuple[str, ...], str]] = []
+    for seg, dirs, (inner, repl) in xs[:XARGS_STDIN_CAP]:
+        verb = _verb(inner)
+        for p in paths_[:XARGS_STDIN_CAP]:
+            if verb in WRITER_VERBS and (repl and repl in inner or verb not in _XARGS_FETCHERS):   # the words a fetcher is fed are addresses, never the file it writes
+                out.append((_put(inner, repl, p) if repl and repl in inner else f"{inner} {p}", dirs, seg))
+            if repl and verb in _XARGS_SHELLS:
+                out.extend((_put(h, repl, p), dirs, seg) for h in holders[repl][:XARGS_STDIN_CAP])
+    over = len(xs) > XARGS_STDIN_CAP or len(paths_) > XARGS_STDIN_CAP or any(len(h) > XARGS_STDIN_CAP for h in holders.values())
+    return out, writer if over else None
 
 
 def _carried_work_tree(seg: str, cur: str | None) -> str | None:
@@ -1879,6 +2521,53 @@ def _carried_work_tree(seg: str, cur: str | None) -> str | None:
         if m := _GIT_WORK_TREE_ENV.search(seg):
             return m.group(1)
     return cur
+
+
+_VAR_USE = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
+_VAR_VALUE = re.compile(r"[\w./+:=@%,~${}-]*")   # a plain literal, or one built from variables an earlier part set: no substitution, no space, no glob
+ENV_VALUES = 4   # values kept for one variable: the last that were set (`D=~/.claude; false && D=/tmp/o; cp x $D/` is read with each)
+ENV_NAMES = 32   # variables kept per command
+ENV_LENGTH = 400   # a value longer than this is not kept: `B=$A$A$A; C=$B$B$B` grows by a factor at every step
+
+
+def _subst_vars(text: str, env: dict[str, list[str]], k: int = 0) -> str:
+    """`text` with each `$NAME` or `${NAME}` that an earlier part of the command set to a literal written as that value (W-82): the k-th of its values from the last one, or
+    the first it has. One that is not known stays."""
+    def value(m: re.Match) -> str:
+        vals = env.get(m.group(1) or m.group(2))
+        return m.group(0) if not vals else vals[-1 - k] if k < len(vals) else vals[0]
+    return _VAR_USE.sub(value, text)
+
+
+def _subst_readings(text: str, env: dict[str, list[str]]) -> list[str]:
+    """The command written with the last value of each variable, then with the one before it, and so on: every reading that differs from the text itself."""
+    names = {g for m in _VAR_USE.finditer(text) for g in m.groups() if g in env}
+    rounds = max((len(env[n]) for n in names), default=0)
+    return list(dict.fromkeys(r for k in range(rounds) if (r := _subst_vars(text, env, k)) != text))
+
+
+def _note_assignments(seg: str, env: dict[str, list[str]]) -> None:
+    """A segment that is only `NAME=value` words (or `export NAME=value`) gives a variable a value. A value that is a substitution, has a space or a glob, is too long, or
+    is not a plain literal is not kept. Every plain value is kept (the last `ENV_VALUES`), and neither an unknown value nor `unset` forgets one: a branch may or may not
+    have run, and the reading is only ever added."""
+    words = [w for w in seg.split(" ") if w]
+    while words and words[0] in ("then", "do", "else", "if", "while", "until", "!", "time"):   # `if x; then D=~/.claude; fi`
+        words = words[1:]
+    if words and words[0] in shellnorm.EXPORTISH:
+        words = [w for w in words[1:] if not w.startswith("-")]
+    if not words or not all(shellnorm.ENV_ASSIGN.match(w) for w in words):
+        return
+    for w in words:
+        name, val = shellnorm.ENV_ASSIGN.match(w).groups()
+        if not _VAR_VALUE.fullmatch(val) or len(val) > ENV_LENGTH or (name not in env and len(env) >= ENV_NAMES):
+            continue
+        val = _subst_vars(val, env)
+        if len(val) <= ENV_LENGTH:
+            vals = env.setdefault(name, [])
+            if val in vals:
+                vals.remove(val)
+            vals.append(val)
+            del vals[:-ENV_VALUES]
 
 
 def _computed_write(bare: str) -> bool:
@@ -1916,7 +2605,12 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     sql_client = False   # a segment runs a database client: its statement is quoted text, so the raw command is read for it below
     wroots, mroots, sroots = _wiring_roots(), _mod_roots(), _shell_roots()
     git_wt: str | None = None   # GIT_WORK_TREE an earlier segment exported or assigned (PRE2-6)
+    rows: list[tuple[str, tuple[str, ...]]] = []   # every segment, read-only ones too: what an `xargs` is fed is read from them (W-77)
+    subst_seen: dict[tuple, bool] = {}
+    env: dict[str, list[str]] = {}   # `D=~/.claude` earlier in this command: a later `$D` is read as its value too (W-82)
     for seg, dirs in shellnorm.segments_cwd(scan, cwd, literal_end=len(text_in)):   # a script the command writes keeps `'$X'` live (PRE2-1)
+        rows.append((seg, dirs))
+        _note_assignments(seg, env)
         git_wt = _carried_work_tree(seg, git_wt)
         if seg.startswith(BLIND_MARK):
             labels.append(seg[len(BLIND_MARK):].split(" ", 1)[0])
@@ -1942,10 +2636,21 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
             marks.append(GH_MERGE_MARK)   # the query is quoted text, so the whole command is read, as for a SQL client below
         elif words[0].rsplit("/", 1)[-1] in _HTTP_CLIENTS and _http_merge(words[0].rsplit("/", 1)[-1], words[1:]):
             marks.append(GH_MERGE_MARK)   # the merge route sent with curl, wget or httpie (W-191, KG60)
+        if npr := humanonly.no_preserve_root(seg, _bare(seg)):   # W-202: the segmenter folds `rm` flags to `rm -rf`, so the flag is read from the segment as written
+            marks.append(RM_ROOT_MARK if npr == "root" else RM_NPR_MARK)
         seg_labels = [lab for lab in (blind.script_label(words, known), "computed-cwd" if computed and _computed_write(_bare(seg)) else None) if lab]
         labels.extend(seg_labels)
         marks.extend(f"{BLIND_MARK}{lab} " for lab in seg_labels)
-        seg_best, bare = classify_segment(seg, dirs, proxied, tuple(marks))
+        also: list[str] = []
+        seg_best, bare = classify_segment(seg, dirs, proxied, tuple(marks), also)
+        if env and "$" in seg and LEVELS[seg_best["level"]] < LEVELS[_r13()["level"]]:   # W-82: the command as the shell will run it; only R-13 is taken from this reading
+            for reading in _subst_readings(seg, env):   # not `known`: that holds the scripts the command wrote, read by every later segment
+                key = (reading, dirs, tuple(marks))   # the same command with the same value comes back many times in a long text: read once
+                if key not in subst_seen:
+                    subst_seen[key] = _r13_reads(reading, dirs, proxied, tuple(marks))   # R-13 only: the other rules are not taken from this reading
+                if subst_seen[key]:
+                    seg_best = _r13()
+                    break
         if best is None or LEVELS[seg_best["level"]] > LEVELS[best["level"]]:
             best = seg_best
         if si12_roots and not si12 and _si12_segment(seg, dirs, cwd, si12_roots):
@@ -1964,6 +2669,22 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
         if LEVELS[seg_best["level"]] >= LEVELS[permit_floor()]:
             gated_keys.append(key)
             gated_rules.append(seg_best["id"])
+            gated_rules.extend(also)   # W-153 review: a never-learned rule the segment also matches (`git update-ref refs/heads/main HEAD > AGENTS.md` is R-10 and R-13)
+    if "xargs" in scan:   # W-77: the instruction-file paths another segment names are what a writer `xargs` is fed (R-18); only ever adds a reading
+        readings, cut = _xargs_stdin_readings(rows)
+        found = []
+        for xseg, xdirs, real in readings:
+            xalso: list[str] = []
+            found.append((classify_segment(xseg, xdirs, proxied, (), xalso)[0], real, xalso))
+        if cut:   # more pairs than the cap: a writer `xargs` next to instruction paths is rated whole
+            found.append((next(r for r in risk()["rules"] if r["id"] == "R-18"), cut, []))
+        for r, real, xalso in found:
+            if best is None or LEVELS[r["level"]] > LEVELS[best["level"]]:
+                best = r
+            if LEVELS[r["level"]] >= LEVELS[permit_floor()]:
+                gated_keys.append(_segment_key(_bare(real)))
+                gated_rules.append(r["id"])
+                gated_rules.extend(xalso)
     best = best or risk()["rules"][-1]
     if labels and best["level"] == "low":   # R-31 is low, so it never wins a level comparison: nothing above low matched, and what the gate could not read is the finding
         best = next(r for r in risk()["rules"] if r["id"] == "R-31")
@@ -2089,14 +2810,29 @@ def _realpath(path: str) -> str:
     return got
 
 
+@contextmanager
+def one_call():
+    """The memos and budgets of one call (real paths, glob walks and their budgets, copy targets): `assess` runs in one, and so does a reader of the same call
+    that asks the same questions again (askplain's question text). Nested, the outer one is kept."""
+    global _REALPATHS, _GLOBS, _DESTS, _GLOB_SPENT, _GLOB_WORK, _LISTINGS, _INTOS
+    outer_intos, _INTOS = _INTOS, {} if _INTOS is None else _INTOS
+    outer, _REALPATHS = _REALPATHS, {} if _REALPATHS is None else _REALPATHS
+    outer_globs, _GLOBS = _GLOBS, {} if _GLOBS is None else _GLOBS
+    outer_dests, _DESTS = _DESTS, {} if _DESTS is None else _DESTS
+    outer_spent, _GLOB_SPENT = _GLOB_SPENT, [0] if _GLOB_SPENT is None else _GLOB_SPENT
+    outer_work, _GLOB_WORK = _GLOB_WORK, [DIR_GLOB_ENTRIES] if _GLOB_WORK is None else _GLOB_WORK
+    outer_listings, _LISTINGS = _LISTINGS, {} if _LISTINGS is None else _LISTINGS
+    try:
+        yield
+    finally:
+        _REALPATHS, _GLOBS, _DESTS, _GLOB_SPENT, _GLOB_WORK, _LISTINGS = outer, outer_globs, outer_dests, outer_spent, outer_work, outer_listings
+        _INTOS = outer_intos
+
+
 def assess(tool: str, tool_input: dict, cwd: str = "") -> Assessment:
     """Classify one tool call. Raises on malformed policy; callers decide how to fail."""
-    global _REALPATHS
-    outer, _REALPATHS = _REALPATHS, {} if _REALPATHS is None else _REALPATHS
-    try:
+    with one_call():
         return _assess(tool, tool_input, cwd)
-    finally:
-        _REALPATHS = outer
 
 
 def _assess(tool: str, tool_input: dict, cwd: str) -> Assessment:
