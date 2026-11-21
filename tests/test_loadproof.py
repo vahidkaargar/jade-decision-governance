@@ -76,6 +76,74 @@ def test_pytest_still_sees_the_fixtures_and_parameters_of_the_wrapped_test(n, tm
     assert seen == [(n, tmp_path)]
 
 
+CMD = "echo " + "'a' " * 200 + "; git push origin main"
+
+
+def test_a_retry_is_as_cold_as_the_first_try_so_a_slow_scan_cannot_pass_from_the_cache(monkeypatch):
+    """Review of W-156: the shell scan is memoised (`_skeleton_top`, `_skeleton_both_top`, `policy._hidden`), so a retry read the first try's result and
+    a slowdown that failed the cold first try passed the warm second one. Every try must run the scan itself: here the underlying `_skeleton` is counted,
+    the first try fails (as a slow one would), and the second try must still call it."""
+    from jade import policy, shellnorm
+
+    real = shellnorm._skeleton
+    calls = []
+
+    def counted(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    monkeypatch.setattr(shellnorm, "_skeleton", counted)
+    per_try = []
+
+    @retry_under_load
+    def body():
+        before = len(calls)
+        a = policy.assess("Bash", {"command": CMD}, "")
+        per_try.append(len(calls) - before)
+        assert "SI-08" in a.blocked
+        assert len(per_try) >= 2, "slow, as a real slowdown is on the cold first try"
+
+    body()
+    assert len(per_try) == 2 and per_try[0] > 0, per_try
+    assert per_try[1] > 0, f"the second try read the scan from the cache: {per_try}"
+
+
+def test_the_memo_caches_are_empty_at_the_start_of_every_try():
+    from jade import policy, shellnorm
+
+    sizes = []
+
+    @retry_under_load(tries=3)
+    def body():
+        sizes.append((shellnorm._skeleton_top.cache_info().currsize, shellnorm._skeleton_both_top.cache_info().currsize, policy._hidden.cache_info().currsize))
+        policy.assess("Bash", {"command": CMD}, "")
+        raise AssertionError("always slow")
+
+    with pytest.raises(AssertionError):
+        body()
+    assert sizes == [(0, 0, 0)] * 3, sizes
+
+
+def test_every_lru_cache_of_jade_is_cleared_before_a_try_or_left_warm_by_a_written_decision():
+    """A new memo cache in `jade` would make a retry warm again without anyone noticing: it must be put in MEMO_CACHES (cleared before every try)
+    or in NOT_CLEARED (left warm, with the reason in tests/loadproof.py)."""
+    import importlib
+    import pkgutil
+
+    import jade
+    from tests import loadproof
+
+    found = set()
+    for info in pkgutil.walk_packages(jade.__path__, "jade."):
+        mod = importlib.import_module(info.name)
+        for name, obj in vars(mod).items():
+            if callable(getattr(obj, "cache_clear", None)) and callable(getattr(obj, "cache_info", None)) and getattr(obj, "__module__", None) == info.name:
+                found.add((info.name, name))
+    listed = set(loadproof.MEMO_CACHES) | set(loadproof.NOT_CLEARED)
+    assert found - listed == set(), f"lru_cache functions not in MEMO_CACHES or NOT_CLEARED: {sorted(found - listed)}"
+    assert listed - found == set(), f"listed but not an lru_cache any more: {sorted(listed - found)}"
+
+
 def test_the_decorated_signature_is_kept_for_pytest_collection():
     import inspect
 
