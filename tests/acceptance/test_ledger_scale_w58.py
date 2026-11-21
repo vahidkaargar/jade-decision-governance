@@ -230,34 +230,67 @@ def test_the_gated_pretool_handler_stays_inside_its_budget_at_20k_rows(at_big):
                                   f"every try: {', '.join(f'{t:.1f}' for t in tries)} ms")
 
 
-def _stalled_once(first_ms: float, then_ms: float):
-    """A fake call: the first 5 calls take `first_ms` (a stall), the later ones `then_ms`. It sleeps, so the clock is the real one."""
-    state = {"n": 0}
+def _scripted(monkeypatch, values):
+    """Replace this module's `p95` by one that returns `values` in turn and records the `runs` it was asked for. No clock and no sleep is involved, so the
+    tests below cannot be failed by a loaded machine (the first version slept for real and failed under load: a 0.5 ms try measured over 20 ms)."""
+    import sys
 
-    def fn():
-        state["n"] += 1
-        time.sleep((first_ms if state["n"] <= 5 else then_ms) / 1000)
+    asked = []
+    it = iter(values)
 
-    return fn
+    def fake(fn, runs=25):
+        asked.append(runs)
+        return next(it)
 
-
-def test_a_short_stall_on_the_runner_does_not_fail_the_budget_test():
-    """W-126: the first try meets a stall (40 ms against a 20 ms budget), the second does not: the best try passes. The old single measurement failed here.
-    The margins are wide (a 0.5 ms call against 20 ms) so that this test is not itself a timing test."""
-    got, tries = best_p95(_stalled_once(40, 0.5), 20.0, tries=5, runs=5, pause_s=0)
-    assert got < 20.0 and len(tries) == 2 and tries[0] >= 40
+    monkeypatch.setattr(sys.modules[__name__], "p95", fake)
+    return asked
 
 
-def test_a_real_slowdown_still_fails_the_budget_test_in_every_try():
-    """The budget keeps its meaning: code that is slow in all tries (here 12 ms against 4 ms) is over the budget in the best try, after all the tries."""
-    got, tries = best_p95(lambda: time.sleep(0.012), 4.0, tries=3, runs=5, pause_s=0)
-    assert got >= 12 and len(tries) == 3 and min(tries) == got
+def test_a_short_stall_on_the_runner_does_not_fail_the_budget_test(monkeypatch):
+    """W-126: the first try meets a stall (40 ms against a 20 ms budget), the second does not: the best try passes. The old single measurement failed here."""
+    asked = _scripted(monkeypatch, [40.0, 0.5])
+    got, tries = best_p95(lambda: None, 20.0, tries=5, runs=5, pause_s=0)
+    assert got == 0.5 and tries == [40.0, 0.5] and asked == [5, 5]
 
 
-def test_a_quiet_machine_pays_for_one_try():
-    calls = []
-    got, tries = best_p95(lambda: calls.append(1), 50.0, tries=5, runs=7, pause_s=0)
-    assert len(calls) == 7 and len(tries) == 1 and got < 50.0
+def test_a_stall_in_the_middle_tries_is_also_survived(monkeypatch):
+    _scripted(monkeypatch, [40.0, 30.0, 3.0])
+    got, tries = best_p95(lambda: None, 20.0, tries=5, runs=5, pause_s=0)
+    assert got == 3.0 and len(tries) == 3
+
+
+def test_a_real_slowdown_still_fails_the_budget_test_in_every_try(monkeypatch):
+    """The budget keeps its meaning: code that is slow in all tries (12 ms against 4 ms) is over the budget in the best try, after all the tries."""
+    _scripted(monkeypatch, [12.0, 13.0, 12.5])
+    got, tries = best_p95(lambda: None, 4.0, tries=3, runs=5, pause_s=0)
+    assert got == 12.0 and len(tries) == 3 and min(tries) == got and not got < 4.0
+
+
+def test_a_quiet_machine_pays_for_one_try(monkeypatch):
+    asked = _scripted(monkeypatch, [0.1])
+    got, tries = best_p95(lambda: None, 50.0, tries=5, runs=7, pause_s=0)
+    assert asked == [7] and tries == [0.1] and got == 0.1
+
+
+def test_the_pause_between_tries_is_taken_only_between_tries(monkeypatch):
+    _scripted(monkeypatch, [40.0, 30.0, 1.0])
+    import sys
+    from types import SimpleNamespace
+
+    slept = []
+    monkeypatch.setattr(sys.modules[__name__], "time", SimpleNamespace(sleep=slept.append))   # this module's `time` only, not the real one
+    best_p95(lambda: None, 20.0, tries=5, runs=5, pause_s=0.1)
+    assert slept == [0.1, 0.1]
+
+
+def test_p95_reads_the_95th_percentile_of_the_call_times(monkeypatch):
+    """The helper itself, on a fake clock: 25 calls of 1..25 ms give the 23rd value (index int(0.95 * 24) = 22)."""
+    import sys
+    from types import SimpleNamespace
+
+    clock = iter([x for ms in range(1, 26) for x in (0.0, ms / 1000)])
+    monkeypatch.setattr(sys.modules[__name__], "time", SimpleNamespace(perf_counter=lambda: next(clock)))   # this module's `time` only
+    assert p95(lambda: None, 25) == pytest.approx(23.0)
 
 
 def test_the_gate_budget_test_uses_the_retrying_measurement():
