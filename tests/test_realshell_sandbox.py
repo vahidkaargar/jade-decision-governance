@@ -27,6 +27,7 @@ needs_sandbox = pytest.mark.skipif(not HAVE_SANDBOX, reason="NOT VERIFIED HERE: 
 # Files that start a shell for a reason other than running a payload corpus. Adding a file here needs a reason a reviewer can check.
 ALLOWED_SHELL_RUNNERS = {
     "jade/improve.py": "runs the task-observer new-observation.sh helper with fixed arguments; no corpus",
+    "tests/acceptance/test_gate_residuals_w209.py": "starts no shell: ['bash', '-c', ...] is only data passed to policy.assess / policy.mcp_command as the text of an MCP tool call; nothing is run",
     "tests/acceptance/test_signed_approval_w89.py": "runs scripts/jade-approve-sign with a fixed message; no corpus",
     "tests/test_release_guard.py": "runs scripts/check_release_tag.sh in a temporary git repository with a fixed list of tag names as one argument each; the script refuses a bad tag before it runs anything; no corpus",
     "tests/test_secret_scan.py": "runs scripts/scan_new_changes.sh in a temporary git repository with fixed arguments and a fake token that is only scanned; no corpus",

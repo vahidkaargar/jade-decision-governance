@@ -137,6 +137,7 @@ def __getattr__(name: str):
 STALE_EVALUATING_S = 600   # a provider call ends within 20 s; a row older than this belongs to a process that died
 STATE_CAP = 32 * 1024
 DEFAULT_TIMEOUT_S = 10.0
+SCRUB_VACUUM_KEY = "scrub.vacuum_at"   # meta row: the one full VACUUM of this file has run (W-76); later scrubs only checkpoint
 
 
 def _ns(row: sqlite3.Row | None):
@@ -195,17 +196,22 @@ class Ledger:
                 time.sleep(0.02 + random.random() * 0.05)  # noqa: S311 - backoff jitter
 
     def scrub(self) -> bool:
-        """Rewrite the database file and empty the write-ahead log, so that text a purge cleared is not left in free pages or in old log frames.
-        `secure_delete` zeroes what a later write removes; `VACUUM` also rebuilds the pages freed before it was on (an older ledger), and a
-        `TRUNCATE` checkpoint folds the log into the file and cuts it to zero. Best effort: False when another process holds the database."""
+        """Keep text a purge cleared out of the file's free pages and out of old log frames.
+        `secure_delete` (on for every connection JADE opens) zeroes what a later write removes. A full `VACUUM` rebuilds the pages freed before it was on (an older
+        ledger); it rewrites the whole file and holds the lock for a time that grows with it, so it runs once per ledger file and is then marked in `meta`
+        (`SCRUB_VACUUM_KEY`, W-76). Every scrub runs a `TRUNCATE` checkpoint, which folds the log into the file and cuts it to zero. Best effort: False when
+        another process holds the database or the checkpoint could not finish. The purge does not show that result; the scrub runs again with the next purge that
+        clears at least one row."""
         if self._depth:
             return False
         try:
-            self.con.execute("VACUUM")
-            self.con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            if not self.meta_get(SCRUB_VACUUM_KEY):
+                self.con.execute("VACUUM")
+                self.meta_set(SCRUB_VACUUM_KEY, ts())   # only after a VACUUM that ran: a failed one is tried again next time
+            busy = self.con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
         except sqlite3.OperationalError:
             return False
-        return True
+        return not busy
 
     def _migrate(self) -> None:
         for table, cols in MIGRATIONS.items():

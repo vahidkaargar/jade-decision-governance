@@ -144,6 +144,13 @@ _ENTROPY_BITS = 3.5                    # Shannon bits per character: a random ba
 _WORD_SHARE = 0.6                      # the share of the run made of word chunks (`Config`, `retry`): a camel-case identifier is over 0.8, a random token 0.2
 _WORD_CHUNK = re.compile(r"[A-Z]?[a-z]{3,}")
 _WORDLIKE = re.compile(r"[A-Z]?[a-z]+")
+# W-80: a name split at case and digit changes (`NFCISO15693ReaderSession` gives NFCISO, 15693, Reader, Session) is a few long pieces; a random base-62
+# token is many short ones. A mean piece of 3 or more is a name: an acronym-and-digit identifier, a path behind a
+# variable, a timestamped name. Not applied when every letter is a hex letter: a hex-heavy token (a Twilio-shaped `AC` plus 32 hex) has long digit runs.
+# A run that is mostly consecutive characters (`0123456789ABCDEF`, an alphabet literal) is not random either. Rates in docs/05 section 3.
+_PIECE = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+")
+_PIECE_MEAN = 3.0
+_HEX_LETTERS = frozenset("abcdefABCDEF")
 _NOT_A_TOKEN_PREFIX = ("iVBORw0KGgo", "R0lGOD", "UEsDB", "AAAAB3NzaC1", "AAAAC3NzaC1", "MII", "sha1-", "sha256-", "sha384-", "sha512-")   # image, zip, ssh public key, certificate, SRI hash
 
 
@@ -161,6 +168,11 @@ def _random_looking(t: str) -> bool:
     if "/" in t and any(len(seg) >= 4 and _WORDLIKE.fullmatch(seg) for seg in t.split("/")):   # a relative path (`src/Components/x`), not base64 with a slash
         return False
     if sum(len(w.group(0)) for w in _WORD_CHUNK.finditer(t)) > n * _WORD_SHARE:   # camel-case identifiers
+        return False
+    pieces = _PIECE.findall(t)
+    if sum(map(len, pieces)) >= _PIECE_MEAN * len(pieces) and not all(c in _HEX_LETTERS for c in t if c.isalpha()):   # a name (W-80)
+        return False
+    if sum(ord(b) - ord(a) == 1 for a, b in zip(t, t[1:], strict=False)) * 2 > n:   # an alphabet or a counting run, not a random token (W-80)
         return False
     counts: dict[str, int] = {}
     for c in t:

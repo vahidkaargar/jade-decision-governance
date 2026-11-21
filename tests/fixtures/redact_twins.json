@@ -830,5 +830,149 @@
    "def testRedactionIsLinearOnAdversarialText2(self): pass"
   ],
   "template": "@@"
+ },
+ {
+  "kind": "acronym_ident",
+  "parts": [
+   "NFCISO15693",
+   "ReaderSession"
+  ],
+  "template": "let s = @@()"
+ },
+ {
+  "kind": "acronym_ident",
+  "parts": [
+   "NSISO8601",
+   "DateFormatter"
+  ],
+  "template": "[[@@ alloc] init]"
+ },
+ {
+  "kind": "acronym_ident",
+  "parts": [
+   "ITCFIFO",
+   "AvailableAll2"
+  ],
+  "template": "@@ /z=1"
+ },
+ {
+  "kind": "acronym_ident",
+  "parts": [
+   "PKCS12Key",
+   "AndCertificates"
+  ],
+  "template": "from cryptography.hazmat.primitives.serialization.pkcs12 import @@"
+ },
+ {
+  "kind": "acronym_ident",
+  "parts": [
+   "MLKEM768X",
+   "25519PrivateKey"
+  ],
+  "template": "key = @@.generate()"
+ },
+ {
+  "kind": "acronym_ident",
+  "parts": [
+   "ChaCha20",
+   "Poly1305Cipher"
+  ],
+  "template": "class @@:"
+ },
+ {
+  "kind": "acronym_ident",
+  "parts": [
+   "PyUnicode_",
+   "AsUTF8String"
+  ],
+  "template": "PyObject *b = @@(o);"
+ },
+ {
+  "kind": "acronym_ident",
+  "parts": [
+   "COLOR_Bayer",
+   "RGGB2RGBA"
+  ],
+  "template": "from cv2 import @@ as code"
+ },
+ {
+  "kind": "acronym_ident",
+  "parts": [
+   "TestEccPoint",
+   "_NIST_P256"
+  ],
+  "template": "class @@(unittest.TestCase):"
+ },
+ {
+  "kind": "acronym_ident",
+  "parts": [
+   "AutoModelFor",
+   "Seq2SeqLM"
+  ],
+  "template": "model = @@.from_pretrained(name)"
+ },
+ {
+  "kind": "acronym_ident",
+  "parts": [
+   "GetGpuLaunch",
+   "Config3D"
+  ],
+  "template": "auto config = @@(ctx, n);"
+ },
+ {
+  "kind": "acronym_ident",
+  "parts": [
+   "DescriptorMatcher",
+   "_BRUTEFORCE_SL2"
+  ],
+  "template": "matcher_type = @@"
+ },
+ {
+  "kind": "acronym_ident",
+  "parts": [
+   "IDEMPOTENCY",
+   "_UNKNOWN"
+  ],
+  "template": "b'\\x13@@'"
+ },
+ {
+  "kind": "acronym_ident",
+  "parts": [
+   "PBKDF2WithHMAC-SHA512",
+   "AndAES256-CBC"
+  ],
+  "template": "key.export_key(protection='@@')"
+ },
+ {
+  "kind": "var_path",
+  "parts": [
+   "$CONF/approver",
+   "_ed25519"
+  ],
+  "template": "sudo rm -f \"@@\""
+ },
+ {
+  "kind": "timestamp_name",
+  "parts": [
+   "nightly_backup_",
+   "20261105T031502Z"
+  ],
+  "template": "tar -czf @@.tar.gz backups"
+ },
+ {
+  "kind": "alphabet",
+  "parts": [
+   "0123456789",
+   "ABCDEFabcdef"
+  ],
+  "template": "if ch in '@@':"
+ },
+ {
+  "kind": "alphabet",
+  "parts": [
+   "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+   "abcdefghijklmnopqrstuvwxyz0123456789-_"
+  ],
+  "template": "ALPHABET = \"@@\""
  }
 ]
