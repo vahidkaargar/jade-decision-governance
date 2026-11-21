@@ -171,7 +171,7 @@ class Ledger:
         A chain longer than the kernel follows in one lookup (macOS 32, Linux 40) fails the stat with ELOOP, but SQLite resolves links itself and
         opens it anyway, so the chain is then resolved by `os.path.realpath` (one link per step, no kernel limit) and the O_EXCL open is tried there."""
         p = str(self.path)
-        for _ in range(40):   # more links than the kernel follows (Linux 40, macOS 32): a loop ends here
+        for _ in range(42):   # 40 links (Linux) one at a time, then the create attempt at the end of the chain; macOS follows 32. A loop ends here
             try:
                 os.close(os.open(p, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600))
                 return

@@ -135,6 +135,37 @@ def test_a_dangling_link_chain_longer_than_the_kernel_follows_still_gets_a_0600_
     assert target.stat().st_mode & 0o777 == 0o600
 
 
+class LinuxStat:
+    """`ledger.os` with a `stat` that follows at most 40 links in one lookup and never fails earlier, as Linux does. macOS stops at 32, so on a Mac a chain of
+    exactly 40 takes the ELOOP branch; this stand-in puts the walk of one link per step to the test on any platform."""
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    @staticmethod
+    def stat(p, *a, **kw):
+        import errno
+
+        cur, hops = str(p), 0
+        while os.path.islink(cur):
+            hops += 1
+            if hops > 40:
+                raise OSError(errno.ELOOP, "Too many levels of symbolic links", cur)
+            cur = os.path.join(os.path.dirname(cur), os.readlink(cur))
+        return os.stat(cur)
+
+
+@pytest.mark.parametrize("n", [1, 31, 39, 40, 41])
+def test_a_dangling_chain_the_kernel_still_follows_gets_a_0600_target_before_sqlite_opens_it(tmp_path, monkeypatch, n):
+    # Linux follows 40 links: a chain of exactly 40 dangling links is walked link by link, and the create attempt after the 40th link is still made
+    # (the loop used to end one step early, and SQLite created the target with the umask mode, 0644 here, for a moment).
+    monkeypatch.setattr(ledger, "os", LinuxStat())
+    path = link_chain(tmp_path, n)
+    target = tmp_path / "ledger.sqlite"
+    assert mode_when_sqlite_opens(monkeypatch, path, target) == 0o600
+    assert target.stat().st_mode & 0o777 == 0o600
+
+
 @pytest.mark.parametrize("n", [1, LONG])
 def test_an_existing_0644_ledger_behind_links_is_tightened_with_its_wal_and_shm(tmp_path, n):
     # SQLite puts -wal and -shm next to the file it really opened, not next to the link; JADE used to chmod `<link>-wal` and miss them.
