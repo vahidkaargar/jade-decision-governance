@@ -331,6 +331,36 @@ def test_an_unseen_name_into_a_dedicated_directory_is_r13(home, cmd):
     assert is_r13(sh(cmd)), (cmd, sh(cmd).rule_id, sh(cmd).level)
 
 
+@pytest.mark.parametrize("cmd", [
+    "cp -r /tmp/e/.claude newdir/",
+    "mkdir -p newdir && cp -r /tmp/e/.claude newdir/",
+    "cp -r /tmp/e/.claude -t newdir",
+    "cp -r /tmp/e/.claude --target-directory=newdir",
+    "mv /tmp/e/.claude newdir/",
+    "cp -r ~/.claude ~/backup_zz/",                         # the accepted backup false positive, now the same whether the directory is there or not
+    "cp -r /tmp/e ~/proj/.claude/",                          # not there yet: the tree becomes ~/proj/.claude
+    "mkdir -p ~/proj/.cursor && cp -r /tmp/e ~/proj/.cursor/",
+])
+def test_a_tree_into_a_directory_typed_as_one_but_not_there_yet_is_read(home, cmd):
+    """A destination that ends in `/` or is given with `-t` is a directory by its words, also for the tree reading: a tree called `.claude` copied into it is
+    `newdir/.claude` (W-82 review, wave 4: `sub/` that exists was high, `newdir/` low). A tree copied to a typed directory that is not there yet may also become it."""
+    assert not (home / "proj" / "newdir").exists() and not (home / "backup_zz").exists()
+    a = sh(cmd, str(home / "proj"))
+    assert is_r13(a), (cmd, a.rule_id, a.level)
+
+
+@pytest.mark.parametrize("cmd", [
+    "cp -r /tmp/e/.claude newdir",                           # no `/`, not there: the copy is newdir itself, an ordinary name
+    "cp -r /tmp/e/cfg newdir/",
+    "cp -r /tmp/e/cfg -t newdir",
+    "cp -r /tmp/e ~/proj/newdir/",
+    "mkdir -p ~/.claude/x && cp -r /tmp/e ~/.claude/x/",     # a directory inside a dedicated one
+])
+def test_the_twin_of_a_tree_into_a_new_directory_stays_low(home, cmd):
+    a = sh(cmd, str(home / "proj"))
+    assert not gated(a), (cmd, a.rule_id, a.level)
+
+
 def test_the_hook_cwd_inside_a_dedicated_directory_counts(home):
     assert is_r13(sh("cp /tmp/e/* .", str(home / ".claude")))
     assert is_r13(sh("tar xf /tmp/a.tar", str(home / ".claude")))

@@ -1725,6 +1725,7 @@ def unseen_into_dedicated(bare: str, dirs: tuple[str, ...] = ("",)) -> bool:
     verb = words[0].rsplit("/", 1)[-1]
     if verb == "mv":
         words = ["cp", "-r", *words[1:]]
+    typed_dir = _typed_dir_dest(words)   # `newdir/` or `-t newdir`: a directory by its words, even when the command has yet to make it
     seen: dict[str, list[tuple[str, bool]]] = {}   # one destination for many sources: resolved (and a glob walked) once
 
     def bases(p: str) -> list[tuple[str, bool]]:
@@ -1738,10 +1739,10 @@ def unseen_into_dedicated(bare: str, dirs: tuple[str, ...] = ("",)) -> bool:
             if not name or GLOB_OR_EXPANSION.search(name) or "\x01" in name or "\x06" in name:   # the name is not typed: it lands in `base`
                 if _dedicated(base) or any(_dedicated(q) for q, _is_dir in bases(base or "/")):   # the name as written, or where its symlinks lead
                     return True
-            elif parent_too and _dedicated(name) and any(is_dir for _q, is_dir in bases(base or "/")):   # a tree called `.claude` copied into a directory
+            elif parent_too and _dedicated(name) and (typed_dir or any(is_dir for _q, is_dir in bases(base or "/"))):   # a tree called `.claude` copied into a directory
                 return True
-        elif unless_dir:
-            if any(not is_dir and (_dedicated(path) or _dedicated(q)) for q, is_dir in bases(path)):   # the tree becomes `dest`
+        elif unless_dir:   # the tree becomes `dest` when no directory is there now (`dest/` typed so but not made yet may be either: both are read)
+            if any((not is_dir or not os.path.isdir(q)) and (_dedicated(path) or _dedicated(q)) for q, is_dir in bases(path)):
                 return True
         elif _dedicated(path) or any(_dedicated(q) for q, _is_dir in bases(path)):
             return True
