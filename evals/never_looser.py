@@ -92,6 +92,7 @@ SEED_PARTS = [   # one payload or more for each rule and invariant the case file
 ]
 PER_COMMAND_S = 20.0   # a classifier that needs more CPU seconds than this on one command is a finding in itself (the hook budget is 6 s)
 WALL_BACKSTOP_S = 600.0   # wall clock bound per command, for a hang only: waiting is not counted by PER_COMMAND_S, so a busy machine cannot trip it (W-156)
+GIT_TIMEOUT_EVAL_S = 120.0   # the gate gives one git call 2 s of wall time and fails closed when it is cut; while comparing, a loaded machine must not cut one tree of an identical pair (W-156)
 CHILD_S = 3600
 CWDS = ("empty", "repo-main", "repo-feature")
 
@@ -309,10 +310,25 @@ def _alarm(_sig, _frame):
 def classify_all(commands: list[str], cwd: str) -> dict[str, dict]:
     # The per-command bound is CPU time of this process (ITIMER_PROF, SIGPROF): the wall clock grows with the load of other processes, so on a busy machine a command that needs
     # 3 s alone passed the old 20 s wall bound, ref-a "timed out" and the check exited 2 (W-156). A wall clock bound stays as a backstop for a hang (ITIMER_REAL, SIGALRM).
+    # The gate's own 2 s wall-clock bound on one git call (`hooks.GIT_TIMEOUT_S`, `gitalias.TIMEOUT_S`) is raised for the comparison, in this child only: under load it cut one tree of an
+    # identical pair (the other was not cut), which showed as "looser" or as exit 1 instead of 2 (W-156). A git call that hangs for longer than this is still fail-closed.
+    import importlib
+
+    bounds = []   # (module, name, old value): a ref that lacks the module or the name is left as it is
+    for mod, name in (("jade.hooks", "GIT_TIMEOUT_S"), ("jade.gitalias", "TIMEOUT_S")):
+        try:
+            m = importlib.import_module(mod)
+        except ImportError:
+            continue
+        if hasattr(m, name):
+            bounds.append((m, name, getattr(m, name)))
+            setattr(m, name, GIT_TIMEOUT_EVAL_S)
     old = (signal.signal(signal.SIGALRM, _alarm), signal.signal(signal.SIGPROF, _alarm))
     try:
         return _classify_each(commands, cwd)
     finally:
+        for m, name, value in bounds:
+            setattr(m, name, value)
         signal.signal(signal.SIGALRM, old[0])
         signal.signal(signal.SIGPROF, old[1])
 

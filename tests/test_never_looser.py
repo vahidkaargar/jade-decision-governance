@@ -371,6 +371,20 @@ def test_a_hang_is_still_stopped_by_the_wall_clock_backstop(monkeypatch):
     assert _classify_with(monkeypatch, nl, lambda: time.sleep(5)) == {"error": "TimeoutError"}
 
 
+def test_the_git_lookups_of_the_gate_are_not_cut_by_the_2_second_wall_clock_while_comparing(monkeypatch):
+    """Review of W-156: the gate gives one git call 2 s of wall time (`hooks.GIT_TIMEOUT_S`) and fails closed when it is cut. Under load one tree of an identical
+    pair was cut and the other was not, so the check reported a looser tree (or exited 1 instead of 2). While the trees are compared the bound is raised in
+    this child only, and it is put back; the gate (`jade/`) is not changed."""
+    from jade import gitalias, hooks
+
+    nl = _nl()
+    seen = []
+    before = (hooks.GIT_TIMEOUT_S, gitalias.TIMEOUT_S)
+    _classify_with(monkeypatch, nl, lambda: seen.append((hooks.GIT_TIMEOUT_S, gitalias.TIMEOUT_S)))
+    assert seen == [(nl.GIT_TIMEOUT_EVAL_S, nl.GIT_TIMEOUT_EVAL_S)] and nl.GIT_TIMEOUT_EVAL_S >= 30, seen
+    assert (hooks.GIT_TIMEOUT_S, gitalias.TIMEOUT_S) == before
+
+
 def test_classify_all_leaves_no_timer_and_no_handler_behind(monkeypatch):
     import signal
 
