@@ -19,7 +19,7 @@ def wheel(tmp_path_factory):
     if uv is None:
         pytest.skip("uv is not installed; CI builds the wheel (docs/08)")
     out = tmp_path_factory.mktemp("wheel")
-    r = subprocess.run([uv, "build", "--wheel", "--offline", "--out-dir", str(out), str(ROOT)], capture_output=True, text=True, timeout=300)
+    r = subprocess.run([uv, "build", "--wheel", "--offline", "--out-dir", str(out), str(ROOT)], capture_output=True, text=True, timeout=1800)   # only a hang must trip it: a busy machine builds slowly (W-156)
     assert r.returncode == 0, r.stderr[-2000:]
     built = list(out.glob("*.whl"))
     assert len(built) == 1, built

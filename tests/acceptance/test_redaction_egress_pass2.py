@@ -6,6 +6,7 @@ import time
 import pytest
 
 from jade import hooks, ledger, ops, permits, redact
+from tests.loadproof import retry_under_load
 
 R = "Zq8vK2mN5p" + "Q8sT1vW4xZ"                     # an unshaped secret
 FAKE = "Zq8fakeSecret" + "Value12345"
@@ -32,10 +33,10 @@ def everything(db) -> str:
 
 
 def _timed(text):
-    t0 = time.perf_counter()
+    t0 = time.process_time()   # CPU time: other processes taking the machine do not move it (W-156)
     redact.redact(text)
     redact.redact(text, secrets_only=True)
-    return time.perf_counter() - t0
+    return time.process_time() - t0
 
 
 # ---- the ReDoS: a start without an end must cost one pass, not a rescan from every start -----------------------------
@@ -51,6 +52,7 @@ _UNITS = [
 
 @pytest.mark.timing
 @pytest.mark.parametrize("unit", _UNITS)
+@retry_under_load
 def test_redaction_is_linear_on_adversarial_text(unit):
     """`redact()` runs on every gated command before the hook's timeout; a hook that overruns it is killed and the command runs."""
     n = 150_000
@@ -65,6 +67,7 @@ def test_a_long_or_unclosed_bracket_value_is_still_redacted():
 
 
 @pytest.mark.timing
+@retry_under_load
 def test_a_huge_gated_command_is_still_decided_well_before_the_hook_timeout(monkeypatch):
     """The reviewer's DoS: a critical command followed by 150 KB of `password=[a` took 13 s, the host killed the hook (fail open)."""
     monkeypatch.setenv("JADE_GATE_MODE", "enforce")

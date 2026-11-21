@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
+import signal
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -156,21 +159,81 @@ def preflight(*, claim: str = "", evidence: str = "", options: list[str] | None 
     return RouteDecision(_routing()["default_route"], f"default route: one batched request (risk {risk})", checks + ["PF-08"])
 
 
+FAST_PATTERN_MAX = 1000          # characters in a `jade fast regex` pattern (W-78)
+FAST_FILE_MAX = 1024 * 1024      # bytes in the file it searches; a larger file is refused, never cut (a cut file could say "no match" for text past the cut)
+FAST_REGEX_TIMEOUT_S = 2.0       # wall-clock limit of one search; a pattern that backtracks without end stops here
+
+
+class _RegexTimeout(Exception):
+    pass
+
+
+def _on_regex_alarm(_signum, _frame):
+    raise _RegexTimeout
+
+
+def _read_capped(name: str) -> str:
+    """Read one regular file of at most FAST_FILE_MAX bytes. A directory, a FIFO or a device (`/dev/zero`) is refused before it can block or fill memory."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK)   # O_NONBLOCK: opening a FIFO must not wait for a writer
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise SystemExit(f"jade fast: {name} is not a regular file")
+            if st.st_size > FAST_FILE_MAX:
+                raise SystemExit(f"jade fast: {name} is too large ({st.st_size} bytes; the limit is {FAST_FILE_MAX})")
+            data = b""
+            while len(data) <= FAST_FILE_MAX:   # a file that grew since fstat is still bounded
+                chunk = os.read(fd, FAST_FILE_MAX + 1 - len(data))
+                if not chunk:
+                    break
+                data += chunk
+        finally:
+            os.close(fd)
+    except OSError as e:
+        raise SystemExit(f"jade fast: cannot read {name} ({type(e).__name__})") from None
+    if len(data) > FAST_FILE_MAX:
+        raise SystemExit(f"jade fast: {name} is too large (the limit is {FAST_FILE_MAX} bytes)")
+    return data.decode("utf-8", errors="replace")
+
+
+def _search_with_timeout(pattern: str, text: str):
+    """re.search under an interval timer. Without SIGALRM (not the main thread, or no such signal) the pattern and file caps are the only bound."""
+    try:
+        old = signal.signal(signal.SIGALRM, _on_regex_alarm)
+    except (ValueError, AttributeError):
+        return re.search(pattern, text, re.M)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, FAST_REGEX_TIMEOUT_S)
+        try:
+            return re.search(pattern, text, re.M)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+    finally:
+        signal.signal(signal.SIGALRM, old)
+
+
 def fast_check(kind: str, args: list[str]) -> tuple[bool, str]:
     if kind == "exit-code":
         if len(args) != 2:
             raise SystemExit("usage: jade fast exit-code EXPECTED ACTUAL")
         return args[0].strip() == args[1].strip(), f"expected {args[0]}, actual {args[1]}"
     if kind == "file-exists":
-        missing = [a for a in args if not Path(a).expanduser().exists()]
+        missing = [a for a in args if not Path(a).exists()]   # no `~` expansion: the shell does that for an unquoted path, and a quoted one is a literal name
         return not missing, "all exist" if not missing else f"missing: {', '.join(missing)}"
     if len(args) != 2:
         raise SystemExit("usage: jade fast regex PATTERN FILE")
+    if len(args[0]) > FAST_PATTERN_MAX:
+        raise SystemExit(f"jade fast: pattern is longer than {FAST_PATTERN_MAX} characters")
     try:
-        text = Path(args[1]).expanduser().read_text(errors="replace")
-        m = re.search(args[0], text, re.M)
-    except (OSError, UnicodeError) as e:
-        raise SystemExit(f"jade fast: cannot read {args[1]} ({type(e).__name__})") from None
+        re.compile(args[0], re.M)
+    except re.error as e:
+        raise SystemExit(f"jade fast: invalid pattern ({e})") from None
+    text = _read_capped(args[1])
+    try:
+        m = _search_with_timeout(args[0], text)
+    except _RegexTimeout:
+        raise SystemExit(f"jade fast: the search did not finish in {FAST_REGEX_TIMEOUT_S:g} s (the pattern is too costly)") from None
     except re.error as e:
         raise SystemExit(f"jade fast: invalid pattern ({e})") from None
     return bool(m), f"matched at offset {m.start()}" if m else "no match"
