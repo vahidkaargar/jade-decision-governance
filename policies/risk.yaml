@@ -121,6 +121,10 @@ rules:
     # destination of cp/mv/ln/install/rsync, `git clone` destinations, `curl -o`, `tar -C`, or the whole segment for a verb that may write any
     # operand) and never at a read, a grep, an `ls`, a `git add`, or a path inside quoted prose or a heredoc body. A removal creates nothing.
     # A Write/Edit/MultiEdit path is always a target. `CLAUDE.md` and the settings files stay R-13; the human installs a skill from a terminal.
+    # W-77: `xargs` is read too (jade/policy.py `_xargs_stdin_readings`). A `{}` in a destination is a glob, so a creation; an instruction path that another segment names and
+    # that reaches `xargs` on stdin (`echo ~/.claude/skills/n.md | xargs touch`) is put in the place of the replace string of a writer `xargs`, and that command is rated by this
+    # rule as if typed. Not covered: a path only the shell or a list file knows (`xargs -a list`, `cat list | xargs`, `echo $P | xargs`, `find ~/.claude -name skills -exec ... {}/n.md`),
+    # `ln -sf` over an existing file and an edit of an existing file (the W-54 decision; W-39 is open).
     files_only: true
     creates_only: true
     match: "(?i:(?<![\\w.-])\\.(?:claude/(?:skills|commands|agents)|agents|cursor/(?:skills|commands|agents)|skills-archive)/)"
