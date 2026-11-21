@@ -361,6 +361,46 @@ def test_the_twin_of_a_tree_into_a_new_directory_stays_low(home, cmd):
     assert not gated(a), (cmd, a.rule_id, a.level)
 
 
+@pytest.mark.parametrize("cmd", [
+    "ln -s /tmp/e ~/proj/.claude",                           # the link IS a dedicated directory, and what is in it is not typed
+    "ln -sf /tmp/e ~/proj/.claude",
+    "ln -sfn /tmp/e ~/proj/.claude",
+    "ln -s /tmp/e/.claude ~/proj/",                          # a link called .claude, made in ~/proj
+    "ln -s /tmp/e/.claude ~/proj",
+    "ln -s /tmp/e/.claude -t ~/proj",
+    "cd ~/proj && ln -s /tmp/e/.claude",                     # one operand: the link is made in the directory the command runs in
+    "ln -s /tmp/e/.claude newdir/",
+    "ln -sT /tmp/e ~/proj/.cursor",
+    "sudo ln -s /tmp/e ~/proj/.codex",
+])
+def test_a_symlink_that_makes_a_dedicated_directory_of_a_tree_is_r13(home, cmd):
+    """`ln -s /tmp/e ~/proj/.claude` makes a dedicated directory whose contents the gate cannot see, as `cp -r /tmp/e ~/proj/.claude` does (W-82 review, wave 4)."""
+    a = sh(cmd, str(home / "proj"))
+    assert is_r13(a), (cmd, a.rule_id, a.level)
+
+
+def test_a_symlink_that_replaces_a_dedicated_link_is_r13(home, tmp_path_factory):
+    old = tmp_path_factory.mktemp("old")
+    (home / "proj" / ".claude").symlink_to(old)
+    assert is_r13(sh("ln -sfn /tmp/e ~/proj/.claude"))   # -n: the link itself is replaced, not followed
+    assert is_r13(sh("ln -sfh /tmp/e ~/proj/.claude"))
+
+
+@pytest.mark.parametrize("cmd", [
+    "ln -s /tmp/x ~/.claude/",                               # a link called x inside ~/.claude: a typed name no protected path holds
+    "ln -s /tmp/x ~/.claude",
+    "ln -s ~/.claude ~/proj/cfg",                            # a link to the dedicated directory, under an ordinary name
+    "ln -s /tmp/e ~/proj/x",
+    "ln -s /opt/tool/bin/tool ~/.local/bin/",
+    "ln -s /tmp/e ~/proj/.vscode",                           # ~/proj/.vscode is a real directory: the link is ~/proj/.vscode/e
+    "ln -sfn /tmp/e ~/proj/.vscode",                         # -n changes nothing for a real directory
+    "cd ~/proj && ln -s /tmp/e/x",
+])
+def test_the_twin_of_a_symlink_into_a_dedicated_directory_stays_low(home, cmd):
+    a = sh(cmd, str(home / "proj"))
+    assert not gated(a), (cmd, a.rule_id, a.level)
+
+
 def test_the_hook_cwd_inside_a_dedicated_directory_counts(home):
     assert is_r13(sh("cp /tmp/e/* .", str(home / ".claude")))
     assert is_r13(sh("tar xf /tmp/a.tar", str(home / ".claude")))

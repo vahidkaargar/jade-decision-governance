@@ -1702,6 +1702,25 @@ def _dedicated(path: str) -> bool:
     return os.path.basename(path.rstrip("/")).casefold() in DEDICATED_DIRS
 
 
+_LN_NO_DEREF = re.compile(r"^-[A-Za-z]*[nh][A-Za-z]*$")
+
+
+def _ln_as_tree_copy(words: list[str], dirs: tuple[str, ...]) -> list[str]:
+    """`ln` read as `cp -r` for the unseen-name reading (W-82 review, wave 4): a link to a tree puts that tree, whose names are not typed, where the link is made.
+    `ln -s /tmp/e ~/proj/.claude` is `cp -r /tmp/e ~/proj/.claude`. One operand makes the link in the directory the command runs in (`.`). `-T`, and `-n`/`-h` over
+    a destination that is a symlink now, replace the destination itself rather than make a link inside it: read as `cp -T`."""
+    args = words[1:]
+    ops = operands(args)
+    no_target = any(w == "--no-target-directory" or _NO_TARGET_DIR.match(w) for w in args)
+    if not no_target and ops and any(w == "--no-dereference" or _LN_NO_DEREF.match(w) for w in args):
+        dest = _expand_home(_word(ops[-1])).rstrip("/")
+        no_target = any(os.path.islink(dest if os.path.isabs(dest) else os.path.join(d, dest)) for d in dirs if d or os.path.isabs(dest))
+    out = ["cp", "-r", *(["-T"] if no_target else []), *args]
+    if len(ops) == 1 and not _target_dir(args):
+        out.append(".")
+    return out
+
+
 def unseen_into_dedicated(bare: str, dirs: tuple[str, ...] = ("",)) -> bool:
     """Does this copy, move, link, sync or unpack put a name that is not typed into a dedicated directory (W-82)? Built on `_into_targets`, with `mv` as `cp -r`:
 
@@ -1725,6 +1744,8 @@ def unseen_into_dedicated(bare: str, dirs: tuple[str, ...] = ("",)) -> bool:
     verb = words[0].rsplit("/", 1)[-1]
     if verb == "mv":
         words = ["cp", "-r", *words[1:]]
+    elif verb == "ln":
+        words = _ln_as_tree_copy(words, dirs)
     typed_dir = _typed_dir_dest(words)   # `newdir/` or `-t newdir`: a directory by its words, even when the command has yet to make it
     seen: dict[str, list[tuple[str, bool]]] = {}   # one destination for many sources: resolved (and a glob walked) once
 
