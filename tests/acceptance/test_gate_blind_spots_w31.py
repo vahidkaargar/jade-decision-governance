@@ -280,6 +280,88 @@ def test_an_alias_that_hides_a_builtin_is_ignored_as_git_ignores_it(home):
     assert sh("git push origin v1-feat-x").rule_id == "R-10"   # `push = status` must not hide a real push either
 
 
+@pytest.mark.parametrize("cmd,rule", [
+    ('git -C "$DIR" p', "R-10"),
+    ("git -C $DIR pp", "R-10"),
+    ('git -C "$(pwd)" push-it', "R-10"),
+    ('git -C "$DIR" nuke', "R-11"),
+    ('git -C "$A" -C sub p', "R-10"),
+    ('cd "$DIR" && git p', "R-10"),
+    ("cd $NOPE/x && git -C repo pub", "R-10"),
+])
+def test_an_alias_behind_a_computed_directory_is_still_read_from_the_global_config(home, cmd, rule):
+    """W-31: `git -C "$DIR" p` runs in a directory the gate cannot name, but the user's own and the system aliases apply in every directory, so they are read
+    from the last directory the gate does know. Before, the call was skipped and a push to the default branch rated low."""
+    alias_config(home, ALIASES)
+    a = sh(cmd)
+    assert a.rule_id == rule and a.level == "high", (cmd, a.rule_id, a.level)
+
+
+def test_an_alias_behind_a_computed_directory_rates_like_the_command_it_expands_to(home):
+    alias_config(home, ALIASES)
+    typed = sh('git -C "$DIR" push origin main')
+    a = sh('git -C "$DIR" p')
+    assert (a.rule_id, a.level) == (typed.rule_id, typed.level)
+    assert gate('git -C "$DIR" p').exit_code == 2 and "SI-08" in gate('git -C "$DIR" p').stderr
+
+
+@pytest.mark.parametrize("alias,typed", [
+    ("ph", "push origin HEAD"),
+    ("pu", "push"),
+    ("phs", "push origin HEAD"),
+])
+@pytest.mark.parametrize("pre", ['git -C "$DIR" ', 'cd "$DIR" && git '])
+def test_a_directory_dependent_alias_behind_a_computed_directory_is_no_weaker_than_the_typed_push(home, tmp_path, alias, typed, pre):
+    """The expansion of `git -C "$DIR" ph` must not be read against the known directory (a feature branch) when the typed push would fail closed on `$DIR`."""
+    alias_config(home, "[alias]\n\tph = push origin HEAD\n\tpu = push\n\tphs = !git push origin HEAD\n")
+    r = tmp_path / "repo"
+    env = {"HOME": str(home), "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
+    subprocess.run(["git", "init", "-q", "-b", "main", str(r)], check=True, env=env)
+    subprocess.run(["git", "-C", str(r), "checkout", "-q", "-b", "feat/x"], check=True, env=env)
+    a, t = sh(pre + alias, cwd=str(r)), sh(pre + typed, cwd=str(r))
+    assert LEVELS[a.level] >= LEVELS[t.level], (pre + alias, a.rule_id, a.level, t.rule_id, t.level)
+    ga, gt = gate(pre + alias, cwd=str(r)), gate(pre + typed, cwd=str(r))
+    assert ga.exit_code >= gt.exit_code or ga.exit_code == 2, (pre + alias, ga.exit_code, gt.exit_code, gt.stderr)
+
+
+@pytest.mark.parametrize("cmd", [
+    'git -C "$DIR" st',
+    'git -C "$DIR" lg',
+    'git -C "$DIR" nosuchalias',
+    'git -C "$DIR" status',
+])
+def test_twins_of_a_computed_directory_alias_stay_as_they_were(home, cmd):
+    alias_config(home, ALIASES)
+    assert not at_least_high(sh(cmd)), cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "git lg; bash x.sh",
+    "git foo; bash x.sh",
+    "git foo && ./run.sh",
+    'git -C "$D" foo; python3 tools/x.py',
+    'git -C "$D" -C /tmp foo; bash run.sh',
+])
+def test_a_script_run_after_a_git_call_that_is_not_built_in_is_still_a_blind_spot(home, cmd):
+    """The alias lookup must not lose the scripts the command wrote: `git lg; bash x.sh` is low and R-31 (a script the gate cannot read), not an error that
+    fails closed in enforcing mode."""
+    alias_config(home, ALIASES)
+    a = sh(cmd)
+    assert (a.level, a.rule_id) == ("low", "R-31"), (cmd, a.level, a.rule_id)
+
+
+def test_a_script_the_command_wrote_after_a_git_call_that_is_not_built_in_is_read(home):
+    alias_config(home, ALIASES)
+    a = sh("cat > x.sh <<'EOF'\necho hi\nEOF\ngit foo; bash x.sh")
+    assert (a.level, a.rule_id) == ("low", "R-99"), (a.level, a.rule_id)
+
+
+def test_a_computed_directory_alias_lookup_that_fails_invents_nothing(home, monkeypatch):
+    alias_config(home, ALIASES)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(subprocess.TimeoutExpired("git", 2)))
+    assert not at_least_high(sh('git -C "$DIR" st'))
+
+
 def test_an_alias_set_in_the_repository_config_is_read(home, tmp_path):
     r = tmp_path / "repo"
     subprocess.run(["git", "init", "-q", str(r)], check=True)
@@ -299,7 +381,8 @@ def test_a_command_with_no_alias_never_starts_git_to_look_for_one(home, monkeypa
     calls = []
     real = subprocess.run
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append(a) or real(*a, **k))
-    for cmd in ("git status", "git log --oneline", "git commit -m x", "git diff HEAD", "ls -la", "git -C /tmp/case checkout -b feat/x"):
+    for cmd in ("git status", "git log --oneline", "git commit -m x", "git diff HEAD", "ls -la", "git -C /tmp/case checkout -b feat/x",
+                'git -C "$DIR" status'):
         sh(cmd)
     assert calls == []
 

@@ -47,6 +47,12 @@ DELETE = [
     "sqlite3 db.sqlite 'delete from users'", "rsync -a --delete src/ dst/", "dropdb prod",
     # V6-17 review: other spellings of the same action (an OpenShift client, a forced replace is a delete and a create)
     "oc delete pod x", "oc -n x delete pod y", "kubectl replace --force -f x.yaml", "kubectl -n x replace -f x.yaml --force",
+    # W-137 (owner decision): a Keychain item or a whole keychain deleted
+    "security delete-internet-password -s example.org", "security delete-keychain x.keychain", "sudo security delete-keychain /Library/Keychains/x.keychain",
+    "/usr/bin/security delete-keychain a.keychain", "security -v delete-internet-password -s x", "security -p 'jade> ' delete-keychain a", "security -i -q delete-keychain a",
+    # W-137 review: getopt `hilp:` -- a `p` that is not the last letter takes the rest of the word as its value, so the next word is the verb
+    "security -pp delete-keychain k", "security -pjadep delete-keychain k", "security -ipp delete-internet-password -s a", "security -lpq delete-keychain k",
+    "security -pjade delete-keychain k",
 ]
 DELETE_NOT = [
     "rm -rf node_modules", "rm -rf ./node_modules ./dist ./build", "rm -rf .venv", "rm -rf /tmp/scratch-1", "rm -rf /private/tmp/x/y", "rm -rf $TMPDIR/build",
@@ -57,6 +63,9 @@ DELETE_NOT = [
     "psql -c 'select 1'", "mysql -e 'select * from t'", "redis-cli get k", "sqlite3 db.sqlite 'delete from users where id = 1'", "rsync -a src/ dst/", "rsync -an --delete src/ dst/",
     "find . -name '*.py' -print", "find . -type f | wc -l", "echo rm -rf /", "grep -r 'rm -rf' docs", "ls -la",
     "oc get pods", "oc describe pod x", "kubectl replace -f x.yaml",
+    "security find-internet-password -s x", "security list-keychains", "security find-internet-password -s delete-keychain", "echo security delete-keychain x",
+    "security -p delete-keychain list-keychains", "security create-keychain x.keychain",
+    "security -ip delete-keychain list-keychains", "security -lp delete-internet-password list-keychains", "security -pp list-keychains",
 ]
 MONEY = [
     "stripe refunds create --charge ch_1 --live", "stripe charges create --amount 100 --currency usd --live", "stripe payouts create --amount 100 --live",
@@ -252,10 +261,12 @@ def test_a_missing_script_is_not_a_class(tmp_path):
 
 # ------------------------------------------------------------------ the gate
 
-def test_a_level_raises_a_class_call_to_high_even_when_its_rule_is_low():
+@pytest.mark.parametrize("cmd,klass,sid", [("stripe refunds create --charge ch_1 --live", "HO-money", "s-w98b"),
+                                           ("security delete-keychain x.keychain", "HO-delete", "s-w98b-kc")])   # W-137: a keychain delete is R-99 low
+def test_a_level_raises_a_class_call_to_high_even_when_its_rule_is_low(cmd, klass, sid):
     from jade import hooks
 
-    ev = {"tool_name": "Bash", "tool_input": {"command": "stripe refunds create --charge ch_1 --live"}, "session_id": "s-w98b", "cwd": CWD, "permission_mode": "auto"}
+    ev = {"tool_name": "Bash", "tool_input": {"command": cmd}, "session_id": sid, "cwd": CWD, "permission_mode": "auto"}
     os.environ["JADE_GATE_MODE"] = "enforce"
     try:
         r = hooks.pretool(ev)
@@ -264,7 +275,7 @@ def test_a_level_raises_a_class_call_to_high_even_when_its_rule_is_low():
     assert r.exit_code == 2 and "[jade:ask_" in r.stderr
     d = ledger.open(timeout=5)
     try:
-        assert "HO-money" in d.con.execute("SELECT question_json FROM asks WHERE session_id=?", ("s-w98b",)).fetchone()[0]   # the question names the class
+        assert klass in d.con.execute("SELECT question_json FROM asks WHERE session_id=?", (sid,)).fetchone()[0]   # the question names the class
     finally:
         d.close()
 
