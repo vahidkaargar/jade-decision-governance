@@ -41,6 +41,19 @@ def test_a_repeated_w120_unit_costs_linear_time(unit):
     assert large <= 24 * max(small, 1e-3), (small, large)
 
 
+CONTINUATION_RUNS = {"after_gt": ("echo x >", "log"), "after_gt_then_amp": ("echo x >", "&2"), "in_named_fd": ("echo x {fd}", ">log"), "after_amp": ("echo x &", "y")}
+
+
+@pytest.mark.timing
+@pytest.mark.parametrize("shape", sorted(CONTINUATION_RUNS))
+def test_a_long_run_of_backslash_newlines_in_a_spelling_costs_linear_time(shape):
+    """The patterns that let a backslash-newline stand in a spelling (`>\\<nl>&\\<nl>(`) must not split one run of them two ways: eight times the run takes at
+    most 24 times the CPU time (a pattern that tries every split gives 64)."""
+    head, tail = CONTINUATION_RUNS[shape]
+    small, large = _cpu(head + "\\\n" * 1250 + tail), _cpu(head + "\\\n" * 10000 + tail)
+    assert large <= 24 * max(small, 2e-3), (small, large)
+
+
 @pytest.mark.parametrize("unit", sorted(UNITS))
 @pytest.mark.parametrize("push", ["git push origin feature >(cat) :main", "git {fd}>log push origin main", "git push origin feature {fd}>l :main"])
 def test_a_push_to_main_after_a_long_run_of_units_is_stopped(unit, push):

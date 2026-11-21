@@ -69,7 +69,9 @@ SHELL_NAME = re.compile(r"^(?:ba|z|da|k|a|fi|c|tc)?sh$")
 # A backslash-newline: the shell takes it out of the line before it reads a word or an operator, so `>\<newline>(cat)` is `>(cat)` and `{f\<newline>d}>log` is
 # `{fd}>log`. The scanner drops it where it meets it; the patterns of the W-120 spellings let it stand anywhere in the spelling (W-120 review).
 _CONT = r"(?:\\\r?\n)*"
-PLAIN = re.compile(r"(?:[^\\'\"$`<\n;(){}&|#>]+|>(?!" + _CONT + "&?" + _CONT + r"\())+")   # a `>` is plain unless it opens an output process substitution (`>(`, `>&(`: W-120)
+# The second run of backslash-newlines is reachable only after a literal `&`: two runs side by side would split one long run every way (its square in time).
+_OUT_SUBST = ">" + _CONT + "(?:&" + _CONT + r")?\("
+PLAIN = re.compile(r"(?:[^\\'\"$`<\n;(){}&|#>]+|(?!" + _OUT_SUBST + ")>)+")   # a `>` is plain unless it opens an output process substitution (`>(`, `>&(`: W-120)
 PLAIN_PRIOR = re.compile(r"[^\\'\"$`<\n;(){}&|#]+")   # the pattern as it was before W-120: the `prior` reading (see `_skeleton_both_top`)
 # Characters that Python calls white space and that the shell does not split a word at (bash and zsh split at a space, a tab and a newline): `a<U+2003>b` is one word. They are
 # written as the encoded blank, so a later `split()` of the text keeps the word whole (V6-08 review, N19).
@@ -78,7 +80,7 @@ _INERT = re.compile(r"[;&|<>(){}`]")   # characters a quoted word may hold that 
 
 _NAMED_FD = r"\{" + _CONT + r"[A-Za-z_](?:\w|\\\r?\n)*\}"   # `{fd}`, with a backslash-newline anywhere in it
 NAMED_FD = re.compile(_NAMED_FD + "(?=" + _CONT + "[<>])")   # `{fd}>log`: zsh and bash 4.1+ read it as a redirect that names a descriptor, not as a word (W-120)
-OUT_SUBST = re.compile(">" + _CONT + "&?" + _CONT + r"\(")   # `>(cmd)`, `&>(cmd)`, `2>(cmd)`, `>&(cmd)`: an output process substitution, one word that is the path of a pipe (W-120)
+OUT_SUBST = re.compile(_OUT_SUBST)   # `>(cmd)`, `&>(cmd)`, `2>(cmd)`, `>&(cmd)`: an output process substitution, one word that is the path of a pipe (W-120)
 _AMP_CONT = re.compile(r"(?:\\\r?\n)+>")   # `&\<newline>>log` is `&>log`: the `&` is part of the redirect, it does not end the command (W-120 review)
 HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|(\\?)([^\s;&|<>()'\"\\`$]+))")
 HEREDOC_AT = re.compile(r"(?<!<)" + HEREDOC_OP.pattern + r"(?!<)")   # a heredoc operator, not the end of `<<<`
