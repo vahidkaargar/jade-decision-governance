@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+# W-201: tests/conftest.py skips the subprocess approval modules (test_gate_failure_modes, test_hook_payloads_w40, test_phase2_enforce and 8 more) where the real
+# approver anchor is installed. A runner has none; if one ever did, the run must stop with an error and not skip them quietly.
+env:
+  JADE_REQUIRE_APPROVE_MODULES: "1"
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
