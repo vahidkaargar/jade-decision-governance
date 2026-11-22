@@ -12,6 +12,10 @@ from . import ask, ledger, paths, questions, redact
 from .util import human_tty_refusal, is_human_tty, session_id, ts
 
 LEGACY = ("verify", "noul", "choice", "score")
+LEGACY_HELP = {"verify": "is the claim supported by the evidence? The answer is a probability of yes",
+               "noul": "a yes or no question with your own meaning for yes (-t) and no (-f)",
+               "choice": "pick one of the options you give with -o",
+               "score": "place the answer on the ordered levels you give with -c"}
 
 
 # ---- ask -------------------------------------------------------------------------------------------
@@ -36,31 +40,37 @@ def _read_state(a) -> tuple[str, str]:
 
 def ask_parser(prog: str) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog=prog, description="Ask Jev a typed question. Exit 0 accept, 3 abstain, 4 reject, 5 provider unavailable, "
-                                                       "6 invalid question. Only 0 is a yes. State is redacted, then sent to openrouter.ai.")
+                                                       "6 invalid question. Only 0 is a yes. State is redacted, then sent to openrouter.ai.",
+                                epilog=f'example: {prog} verify "The suite passed" --state-file test-output.txt')
     common = argparse.ArgumentParser(add_help=False)
     for target, default in ((p, None), (common, argparse.SUPPRESS)):
-        target.add_argument("--model", default=default)
+        target.add_argument("--model", default=default, help="the model id to ask (default: JEV_MODEL, then the config file, then the built-in model)")
         target.add_argument("--raw", action="store_true", default=False if default is None else default, help="print the full provider JSON")
-        target.add_argument("--dry-run", action="store_true", default=False if default is None else default, help="print the payload, send nothing")
-        target.add_argument("--json", action="store_true", default=False if default is None else default, help="machine-readable result")
-        target.add_argument("--risk", choices=("low", "medium", "high", "critical"), default="low" if default is None else default)
-        target.add_argument("--decision", default=default, help="decision id to attach this evaluation to")
-        target.add_argument("--no-companion", action="store_true", default=False if default is None else default)
-        target.add_argument("--no-cache", action="store_true", default=False if default is None else default)
+        target.add_argument("--dry-run", action="store_true", default=False if default is None else default, help="print the redacted payload and send nothing")
+        target.add_argument("--json", action="store_true", default=False if default is None else default, help="print the result as JSON, for a script")
+        target.add_argument("--risk", choices=("low", "medium", "high", "critical"), default="low" if default is None else default,
+                            help="the risk of the action the answer is for; it picks the thresholds (default: low)")
+        target.add_argument("--decision", default=default, help="the decision id to attach this answer to (verify opens its own decision when you give none)")
+        target.add_argument("--no-companion", action="store_true", default=False if default is None else default,
+                            help="verify: do not add the second question that asks whether the evidence is raw")
+        target.add_argument("--no-cache", action="store_true", default=False if default is None else default,
+                            help="ask again instead of reusing the stored answer (a human terminal or a test run only; capped)")
     sub = p.add_subparsers(dest="cmd", required=True)
     for name in LEGACY:
-        sp = sub.add_parser(name, parents=[common])
-        sp.add_argument("text", help="claim or question")
-        sp.add_argument("-s", "--state", default="", help="evidence text, or - for stdin")
-        sp.add_argument("--state-file", help="read the evidence from a file (preferred: raw tool output)")
-    sub.choices["noul"].add_argument("-t", "--true", required=True)
-    sub.choices["noul"].add_argument("-f", "--false", required=True)
-    sub.choices["choice"].add_argument("-o", "--option", action="append", default=[], help="name=description")
-    sub.choices["score"].add_argument("-c", "--level", action="append", default=[], help="ordered level, lowest first")
-    q = sub.add_parser("question", parents=[common], help="ask a registry question by id")
-    q.add_argument("question_id")
-    q.add_argument("--field", action="append", default=[], help="state field: name=value or name=@file")
-    q.add_argument("-o", "--option", action="append", default=[])
+        text = LEGACY_HELP[name]
+        sp = sub.add_parser(name, parents=[common], help=text, description=text[:1].upper() + text[1:] + ".")
+        sp.add_argument("text", help="the claim or the question")
+        sp.add_argument("-s", "--state", default="", help="the evidence as text, or - to read it from stdin")
+        sp.add_argument("--state-file", help="read the evidence from a file (best: raw tool output)")
+    sub.choices["noul"].add_argument("-t", "--true", required=True, help="what a yes means")
+    sub.choices["noul"].add_argument("-f", "--false", required=True, help="what a no means")
+    sub.choices["choice"].add_argument("-o", "--option", action="append", default=[], help="one option as name=description (repeat for each option)")
+    sub.choices["score"].add_argument("-c", "--level", action="append", default=[], help="one level (repeat for each level, lowest first)")
+    q = sub.add_parser("question", parents=[common], help="ask a registry question by id (`jade question list` shows the ids)",
+                       description="Ask a question from the question registry by its id. The registry entry says which state fields it needs.")
+    q.add_argument("question_id", help="the registry id, such as q.verify_claim.supported_by_evidence")
+    q.add_argument("--field", action="append", default=[], help="one state field as name=value, or name=@file to read the value from a file (repeat)")
+    q.add_argument("-o", "--option", action="append", default=[], help="for a choice question: one option as name=description (repeat)")
     return p
 
 
@@ -765,94 +775,127 @@ class _VersionAction(argparse.Action):
 
 def build_parser() -> argparse.ArgumentParser:
     """The `jade` command tree (everything but `ask` and `hook`, which `main` hands off first). Also read by the docs test."""
-    p = argparse.ArgumentParser(prog="jade", description="Adaptive decision governance for Jev. `jade ask -h` for questions.")
+    p = argparse.ArgumentParser(prog="jade", description="JADE: adaptive decision governance for AI agents that use Jev. It journals every model call in the ledger, "
+                                                         "gates risky tool calls by gate mode and level, and leaves every approval to a human (a permit, or an answer). "
+                                                         "Run `jade <command> -h` for one command, and `jade ask -h` for questions to Jev.",
+                                epilog="start here: jade setup --status, then jade check --offline")
     p.add_argument("--version", action=_VersionAction, help="print the code version, commit, ledger schema version and policy_version")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("ask", help="ask Jev (see `jade ask -h`)")
-    sub.add_parser("hook", help="Claude Code hook entry: pretool | posttool | posttool-failure | stop | session-start")
+    sub.add_parser("ask", help="ask Jev a typed question (see `jade ask -h`)")
+    sub.add_parser("hook", help="the hook entry point Claude Code runs: pretool | posttool | posttool-failure | stop | session-start")
 
-    s = sub.add_parser("ledger").add_subparsers(dest="action", required=True)
-    st = s.add_parser("stats")
-    st.add_argument("--days", type=int, default=14)
+    s = sub.add_parser("ledger", help="read the ledger's figures, or clear old text from it",
+                       description="The ledger is the local SQLite journal of every Jev call, decision, permit and event.").add_subparsers(dest="action", required=True)
+    st = s.add_parser("stats", help="print what your agents did: calls, exit codes, asks, blocks and the readouts (read-only)",
+                      description="Print the ledger figures for a window of days as JSON: Jev calls, exit codes, latency, asks and answers, would_block and safety_block "
+                                  "events, and the readouts of docs/14. Read-only.", epilog="example: jade ledger stats --days 7")
+    st.add_argument("--days", type=int, default=14, help="the window in days (default 14)")
     st.add_argument("--json", action="store_true", help="the same figures on one line with sorted keys, for a script (the default is the same data, indented)")
-    pg = s.add_parser("purge")
+    pg = s.add_parser("purge", help="clear stored state text older than the retention window (a human terminal; the daily job does it too)",
+                      description="Clear the state text of ledger rows older than the retention window. The rows stay; their text goes. Outside the daily job a human "
+                                  "runs it at a terminal. --dry-run only counts.", epilog="example: jade ledger purge --older-than 90d --dry-run")
     pg.add_argument("--older-than", type=_days, default=90, metavar="DAYS", help="retention window in days: 90 or 90d (default 90)")
     pg.add_argument("--test-rows", action="store_true", help="instead of the retention purge, remove the rows a run under JADE_SOURCE=test left in the ledger")
     pg.add_argument("--id", action="append", default=[], metavar="ID", help="with --test-rows: a permit or decision id written before the tag existed (repeatable)")
     pg.add_argument("--dry-run", action="store_true", help="count the rows the purge would clear, per table, and change nothing (needs no terminal)")
     pg.add_argument("--ask-text", action="store_true", help="also clear the chat question and the labels of ended asks and of answers (the owner's yes, docs/05 T15); the daily job never does")
 
-    c = sub.add_parser("check", help="probe ledger, policies, registry, hooks, shim and the provider; non-zero on any failure")
-    c.add_argument("--offline", action="store_true")
+    c = sub.add_parser("check", help="probe the ledger, policies, registry, hooks, shim and the provider; non-zero on any failure",
+                       description="Check the wiring and print one row per check: ok, FAIL, or a warning. The exit code is non-zero when any row fails, which "
+                                   "means dead wiring. Without --offline it also sends a fixed-text canary to the provider (it needs your key). "
+                                   "docs/09 section 6 explains each row.", epilog="example: jade check --offline")
+    c.add_argument("--offline", action="store_true", help="skip the live provider canary (no key needed, nothing is sent)")
     c.add_argument("--json", action="store_true", help="the rows as JSON (ok is true, false, or null for a warning) and the load counters; the exit code is the same")
 
-    pm = sub.add_parser("permit").add_subparsers(dest="action", required=True)
-    pm.add_parser("list").add_argument("--all", action="store_true")
-    rq = pm.add_parser("request")
-    rq.add_argument("--command", required=True)
-    rq.add_argument("--cwd")
-    for name in ("show", "approve", "revoke"):
-        x = pm.add_parser(name, allow_abbrev=False) if name == "show" else pm.add_parser(name)   # `--raw` is spelled out: SI-09 lists that spelling only
-        x.add_argument("permit_id")
+    pm = sub.add_parser("permit", help="list, show, request, approve or revoke execution permits",
+                        description="A permit is a single-use approval for one exact high or critical call. Only a human at a terminal approves it; "
+                                    "the agent then retries the identical call.").add_subparsers(dest="action", required=True)
+    pm.add_parser("list", help="list the waiting and issued permits", description="List the permits that are PENDING or ISSUED.").add_argument(
+        "--all", action="store_true", help="list every permit, also the consumed, revoked and expired ones")
+    rq = pm.add_parser("request", help="ask for a permit for one Bash command; a human approves it later",
+                       description="Classify one Bash command and create a PENDING permit for it. It prints the command a human runs to approve it.")
+    rq.add_argument("--command", required=True, help="the exact Bash command the permit is for")
+    rq.add_argument("--cwd", help="the working folder of the command (default: the current folder)")
+    for name, text in (("show", "print one permit as JSON"), ("approve", "approve a PENDING permit (human terminal only)"), ("revoke", "revoke a permit so it can never be used")):
+        x = pm.add_parser(name, allow_abbrev=False, help=text, description=text[:1].upper() + text[1:] + ".") if name == "show" else pm.add_parser(name, help=text, description=text[:1].upper() + text[1:] + ".")   # `--raw` is spelled out: SI-09 lists that spelling only
+        x.add_argument("permit_id", help="the permit id, such as prm_0123456789ab")
         if name == "show":
             x.add_argument("--raw", action="store_true", help="human terminal only: the whole command with the secret-shaped values the ledger stores redacted (needs `permit_reveal` in the config)")
         if name == "approve":
             x.add_argument("-y", "--yes", action="store_true", help="not accepted: approval always needs the code typed after the command is shown")
 
-    d = sub.add_parser("decide").add_subparsers(dest="action", required=True)
-    o = d.add_parser("open")
-    o.add_argument("--objective", required=True)
-    o.add_argument("--command")
-    o.add_argument("--evidence", action="append", default=[])
-    o.add_argument("--risk", choices=("low", "medium", "high", "critical"))
-    d.add_parser("list").add_argument("--status")
-    d.add_parser("show").add_argument("decision_id")
-    ev = d.add_parser("event")
-    ev.add_argument("decision_id")
-    ev.add_argument("event")
-    ev.add_argument("--note")
-    oc = d.add_parser("outcome")
-    oc.add_argument("decision_id")
-    oc.add_argument("--type", choices=("observed", "estimated", "unknown"), required=True)
-    oc.add_argument("--success", choices=("true", "false"))
-    oc.add_argument("--method", required=True)
-    oc.add_argument("--evidence", action="append", default=[])
+    d = sub.add_parser("decide", help="open, list, show and move decisions through their state machine",
+                       description="A decision is the record of one choice an agent makes, from open to verified or failed (docs/02).").add_subparsers(dest="action", required=True)
+    o = d.add_parser("open", help="open a decision and classify its risk", description="Open a decision and print its id, status, risk and rule id as JSON.")
+    o.add_argument("--objective", required=True, help="what the decision is about, in one sentence")
+    o.add_argument("--command", help="the command the decision is about; its risk rule is applied")
+    o.add_argument("--evidence", action="append", default=[], help="a reference to evidence, such as a file path (repeat)")
+    o.add_argument("--risk", choices=("low", "medium", "high", "critical"), help="raise the risk to at least this level")
+    d.add_parser("list", help="list the 50 most recently updated decisions", description="List the 50 most recently updated decisions, newest first.").add_argument(
+        "--status", help="only decisions in this status, such as VERIFYING")
+    d.add_parser("show", help="print one decision with its events as JSON", description="Print one decision with its events as JSON.").add_argument(
+        "decision_id", help="the decision id")
+    ev = d.add_parser("event", help="send one event to a decision's state machine",
+                      description="Send one event to a decision. Some events are for a human terminal only; an agent may send fast and deep results, evidence, "
+                                  "escalation and cancel.")
+    ev.add_argument("decision_id", help="the decision id")
+    ev.add_argument("event", help="the event name (docs/02 lists them)")
+    ev.add_argument("--note", help="a short reason, stored with the event")
+    oc = d.add_parser("outcome", help="record the observed outcome of a decision",
+                      description="Record what happened after a decision. Verified, failed and unknown follow only from an outcome.")
+    oc.add_argument("decision_id", help="the decision id")
+    oc.add_argument("--type", choices=("observed", "estimated", "unknown"), required=True, help="how the outcome is known")
+    oc.add_argument("--success", choices=("true", "false"), help="whether it worked (not used with --type unknown)")
+    oc.add_argument("--method", required=True, help="how you checked it, such as the test command you ran")
+    oc.add_argument("--evidence", action="append", default=[], help="a reference to evidence, such as a log file (repeat)")
 
-    k = sub.add_parser("ack", help="record what was done about abstain/reject answers")
-    k.add_argument("call_ids", nargs="*")
-    k.add_argument("--all", action="store_true")
-    k.add_argument("--as", dest="as_", required=True, choices=("revised", "escalated", "reported", "dropped"))
-    k.add_argument("--note", default="")
+    k = sub.add_parser("ack", help="record what was done about abstain/reject answers",
+                       description="Record what was done about Jev answers that were not a yes (exit 3, 4, 5 or 6) and have no record yet. An agent reaches only "
+                                   "its own session's answers. Every ack needs a --note and is journaled.",
+                       epilog="example: jade ack --all --as revised --note \"added the missing test\"")
+    k.add_argument("call_ids", nargs="*", help="the call ids to acknowledge")
+    k.add_argument("--all", action="store_true", help="every answer that still needs a record")
+    k.add_argument("--as", dest="as_", required=True, choices=("revised", "escalated", "reported", "dropped"), help="what was done")
+    k.add_argument("--note", default="", help="what was done, in a few words (required); journaled")
 
-    sub.add_parser("question").add_argument("action", choices=("lint", "list"))
+    sub.add_parser("question", help="list or lint the question registry",
+                   description="List the questions in the registry, or lint the registry (exit 1 when an entry has problems).").add_argument(
+        "action", choices=("lint", "list"), help="list prints every question; lint checks every entry")
 
-    r = sub.add_parser("route", help="preflight: FAST, JEV, DEEP or ESCALATE")
-    r.add_argument("--claim")
-    r.add_argument("--evidence")
-    r.add_argument("--evidence-file")
-    r.add_argument("--command")
-    r.add_argument("-o", "--option", action="append")
-    r.add_argument("--risk", default="low", choices=("low", "medium", "high", "critical"))
+    r = sub.add_parser("route", help="preflight: FAST, JEV, DEEP or ESCALATE",
+                       description="Run the preflight checks (PF-01 to PF-08, docs/03) on a claim or an action before anyone asks Jev, and print the route "
+                                   "as JSON with the check that decided it and the reason. The routes come from policies/routing.yaml.",
+                       epilog="example: jade route --claim \"tests pass\" --evidence-file test-output.txt --done")
+    r.add_argument("--claim", help="the claim to check")
+    r.add_argument("--evidence", help="the evidence as text")
+    r.add_argument("--evidence-file", help="read the evidence from a file")
+    r.add_argument("--command", help="the command the claim is about; PF-02 checks it against the safety invariants")
+    r.add_argument("-o", "--option", action="append", help="one option of a choice (repeat)")
+    r.add_argument("--risk", default="low", choices=("low", "medium", "high", "critical"), help="the risk of the action (default: low)")
     r.add_argument("--done", action="store_true", help="the agent is about to claim completion")
     r.add_argument("--deterministic", action="store_true", help="a deterministic check can answer this")
     r.add_argument("--question-id", help="PF-04: the registry question about to be asked; with --field, a repeat in this session routes to REUSE")
     r.add_argument("--field", action="append", default=[], help="state field of that question: name=value or name=@file")
     r.add_argument("--observed-at", help="PF-07: when the context was observed (ISO 8601, UTC when no zone is given); needs --ttl-s")
     r.add_argument("--ttl-s", type=float, help="PF-07: how many seconds that observation stays good")
-    f = sub.add_parser("fast", help="deterministic checks: exit-code EXPECT ACTUAL | file-exists PATH | regex PATTERN FILE")
-    f.add_argument("kind", choices=("exit-code", "file-exists", "regex"))
-    f.add_argument("args", nargs="+")
+    f = sub.add_parser("fast", help="deterministic checks: exit-code EXPECT ACTUAL | file-exists PATH | regex PATTERN FILE",
+                       description="Run one deterministic check instead of asking Jev. Prints true or false. Exit 0 when true, 4 when false.",
+                       epilog="example: jade fast file-exists dist/app.whl")
+    f.add_argument("kind", choices=("exit-code", "file-exists", "regex"), help="the kind of check")
+    f.add_argument("args", nargs="+", help="its arguments: EXPECT ACTUAL, or PATH, or PATTERN FILE")
 
-    w = sub.add_parser("work")
-    w.add_argument("action", choices=("list", "render", "set", "sync", "add"))
-    w.add_argument("id", nargs="?")
-    w.add_argument("--file", default="work-items.jsonl")
-    w.add_argument("--out", default="BACKLOG.md")
-    w.add_argument("--status")
-    w.add_argument("--note")
-    w.add_argument("--next")
-    w.add_argument("--trigger")
-    w.add_argument("--all", action="store_true")
+    w = sub.add_parser("work", help="list, add, update and render the durable work items (work-items.jsonl to BACKLOG.md)",
+                       description="Manage the durable work items. list reads; add, set, sync and render write the work file, render BACKLOG.md and "
+                                   "(add, set, sync) mirror the items into the ledger.", epilog="example: jade work set W-72 --status done --note \"merged\"")
+    w.add_argument("action", choices=("list", "render", "set", "sync", "add"), help="list the open items, render BACKLOG.md, set one item, sync to the ledger, or add an item")
+    w.add_argument("id", nargs="?", help="with set: the item id, such as W-72")
+    w.add_argument("--file", default="work-items.jsonl", help="the work file (default: work-items.jsonl)")
+    w.add_argument("--out", default="BACKLOG.md", help="the rendered file (default: BACKLOG.md)")
+    w.add_argument("--status", help="set: the new status")
+    w.add_argument("--note", help="set: a note stored with the change")
+    w.add_argument("--next", help="add, set: the next action (required for add)")
+    w.add_argument("--trigger", help="add, set: what starts the next action (required for add)")
+    w.add_argument("--all", action="store_true", help="list: also the done and dropped items")
     w.add_argument("--title", help="add: the item's title (required)")
     w.add_argument("--impact", help="add: what happens if it is not done (required)")
     w.add_argument("--rationale", help="add: why it is an item (required)")
@@ -864,60 +907,95 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--parent", help="add: id of the parent item")
     w.add_argument("--phase", type=int, choices=range(0, 6), help="add: roadmap phase 0 to 5")
 
-    lb = sub.add_parser("label").add_subparsers(dest="action", required=True)
-    lb.add_parser("auto")
-    lb.add_parser("queue")
-    ls = lb.add_parser("set")
-    ls.add_argument("call_id")
-    ls.add_argument("value", choices=("yes", "no"))
-    ls.add_argument("--note")
+    lb = sub.add_parser("label", help="calibration labels: the adjudication queue, and labels a human writes",
+                        description="A calibration label is the true answer to the question Jev was asked; for a verify call: did the claim hold "
+                                    "(docs/04 section 2). An agent may read the queue; only a human at a terminal writes a label.").add_subparsers(dest="action", required=True)
+    lb.add_parser("auto", help="turn recorded outcomes into labels (human terminal only)", description="Join recorded outcomes into labels. It needs a human terminal.")
+    lb.add_parser("queue", help="list the answers that wait for a human label (read-only)", description="List the answers that wait for a human label, up to the weekly cap.")
+    ls = lb.add_parser("set", help="write one label: the true answer to the question (human terminal only)",
+                       description="Write one adjudicated label for one Jev call: the true answer to its question, not a verdict on Jev's answer. "
+                                   "It needs a human terminal.", epilog="example: jade label set <call_id> yes --note \"tests passed\"")
+    ls.add_argument("call_id", help="the Jev call id, from `jade label queue`")
+    ls.add_argument("value", choices=("yes", "no"), help="yes: the true answer is yes (the claim held); no: it is no")
+    ls.add_argument("--note", help="why, in a few words")
 
-    e = sub.add_parser("eval").add_subparsers(dest="action", required=True)
-    e.add_parser("run").add_argument("--protected", action="store_true")
-    e.add_parser("conditions")
+    e = sub.add_parser("eval", help="offline evaluation: metrics, baseline conditions, routing cases, threshold proposals",
+                       description="Offline evaluation of Jev answers against labels (docs/04). Nothing here changes a threshold; propose only records "
+                                   "candidates.").add_subparsers(dest="action", required=True)
+    e.add_parser("run", help="print the metrics per calibration group as JSON", description="Print the metrics per calibration group at the current bands, and what is still missing.").add_argument(
+        "--protected", action="store_true", help="include the protected split (human terminal only)")
+    e.add_parser("conditions", help="compare the baseline conditions of docs/04 section 8", description="Compare the baseline conditions of docs/04 section 8 on the labelled rows.")
     e.add_parser("routing", help="confusion matrix of the router on the hand-written routing cases (offline)").add_argument("--cases", help="a routing cases file (default: evals/routing/cases.jsonl of the checkout)")
-    e.add_parser("propose")
+    e.add_parser("propose", help="propose new accept thresholds from the labels as improvement candidates",
+                 description="Propose a new accept threshold for each calibration group with enough labels. Each proposal becomes an improvement candidate; nothing is applied.")
 
-    im = sub.add_parser("improve").add_subparsers(dest="action", required=True)
-    im.add_parser("mine").add_argument("--days", type=int, default=7)
-    im.add_parser("list")
-    for name in ("show", "promote", "rollback"):
-        im.add_parser(name).add_argument("candidate_id")
-    im.add_parser("protected", help="evaluate a candidate on the protected split (human terminal only)").add_argument("candidate_id")
-    im.add_parser("canary", help="serve a shadowed template version to the canary share (human terminal or the standing opt-in)").add_argument("candidate_id")
+    im = sub.add_parser("improve", help="the bounded improvement loop: mine, list, evaluate, promote and roll back candidates",
+                        description="The bounded improvement loop (docs/07). Candidates are measured offline and promoted only by the rules in "
+                                    "policies/promotion.yaml. FREEZE stops it.").add_subparsers(dest="action", required=True)
+    im.add_parser("mine", help="turn patterns in the ledger into improvement candidates", description="Turn patterns in the ledger into improvement records, once per pattern per week. Installs nothing.").add_argument(
+        "--days", type=int, default=7, help="the window in days (default 7)")
+    im.add_parser("list", help="list the improvement candidates", description="List the improvement candidates, newest first.")
+    for name, text in (("show", "print one candidate as JSON"), ("promote", "promote a candidate when policies/promotion.yaml allows it"),
+                       ("rollback", "undo a candidate and restore what it replaced")):
+        im.add_parser(name, help=text, description=text[:1].upper() + text[1:] + ".").add_argument("candidate_id", help="the candidate id")
+    im.add_parser("protected", help="evaluate a candidate on the protected split (human terminal only)").add_argument("candidate_id", help="the candidate id")
+    im.add_parser("canary", help="serve a shadowed template version to the canary share (human terminal or the standing opt-in)").add_argument("candidate_id", help="the candidate id")
     sh = im.add_parser("shadow", help="replay recent stored state through a challenger question version (async, off the hot path)")
-    sh.add_argument("candidate_id")
-    sh.add_argument("--question-id", required=True)
-    sh.add_argument("--version", type=int, required=True)
-    sh.add_argument("--limit", type=int, default=100)
-    im.add_parser("freeze")
-    im.add_parser("unfreeze")
+    sh.add_argument("candidate_id", help="the candidate id")
+    sh.add_argument("--question-id", required=True, help="the registry question to replay")
+    sh.add_argument("--version", type=int, required=True, help="the challenger version of that question")
+    sh.add_argument("--limit", type=int, default=100, help="at most this many stored states (default 100)")
+    im.add_parser("freeze", help="turn the kill switch on: no promotion runs", description="Create the FREEZE file: the improvement loop stops promoting.")
+    im.add_parser("unfreeze", help="turn the kill switch off (human terminal only)", description="Remove the FREEZE file. It needs a human terminal.")
 
-    sub.add_parser("hooks").add_argument("action", choices=("status", "install", "uninstall"))
-    pgate = sub.add_parser("gate")
-    pgate.add_argument("action", choices=("status", "enforce", "advisory", "off"))
+    sub.add_parser("hooks", help="show, install or remove JADE's hooks in ~/.claude/settings.json",
+                   description="Show, install or remove JADE's hook entries in the Claude Code settings file. status exits 1 when a hook is missing. install and "
+                               "uninstall need a human terminal; install keeps a backup. Open a new Claude Code session afterwards.").add_argument(
+        "action", choices=("status", "install", "uninstall"), help="status reads; install adds every JADE hook; uninstall removes them")
+    pgate = sub.add_parser("gate", help="show or set the gate mode: off, advisory or enforce (setting it: human terminal only)",
+                           description="The gate mode is the safety floor. advisory records what the gate would block and blocks nothing; enforce blocks; "
+                                       "off runs nothing. status prints it. Setting it needs a human terminal; enforce needs the signed approver (docs/10).",
+                           epilog="example: jade gate advisory")
+    pgate.add_argument("action", choices=("status", "enforce", "advisory", "off"), help="status prints the gate mode; the others set it")
     pgate.add_argument("--allow-unsigned", action="store_true", help="enforce without the signed approval backend (docs/10); journaled")
-    preview = sub.add_parser("review", help="what you answered to JADE's asks (counts by rule and channel); `review confirm` (human terminal) makes allow answers standing; `review mark ID right|wrong` is your verdict on a call; `review mark` alone checks, one by one, the calls that ran without asking you")
-    preview.add_argument("action", nargs="?", choices=("confirm", "mark"))
+    preview = sub.add_parser("review", help="show what you answered to JADE's asks; confirm them as standing answers, or mark calls right or wrong",
+                             description="Show what you answered to JADE's asks (counts by rule and channel). `review confirm` (a human terminal) makes allow "
+                                         "answers standing. `review mark ID right|wrong` is your verdict on a call. `review mark` alone checks, one by one, the "
+                                         "calls that ran without asking you.",
+                             epilog="example: jade review --since 7d")
+    preview.add_argument("action", nargs="?", choices=("confirm", "mark"), help="none shows the counts; confirm or mark as above")
     preview.add_argument("rest", nargs="*", help="with mark: DECISION_ID right|wrong")
     preview.add_argument("--since", help="a window such as 90m, 24h or 7d (default: all time)")
     preview.add_argument("--all", action="store_true", help="with confirm: take every group of a rule below high risk (a high one is still asked), at most 10 groups, then one typed yes")
-    pknows = sub.add_parser("knows", help="the answers JADE remembers (docs/12): list (read-only); rm and edit need a human terminal")
-    pknows.add_argument("action", choices=("list", "rm", "edit"))
-    pknows.add_argument("id", nargs="?")
-    plevel = sub.add_parser("level", help="human only: show or set the autonomy level (docs/12): unset, off, low, medium or high; no argument prints it")
-    plevel.add_argument("value", nargs="?", choices=("unset", "off", "low", "medium", "high"))
-    pjev = sub.add_parser("jev", help="human only: show or set whether a model may be asked at all (on or off, or unset for the default); no argument prints it")
-    pjev.add_argument("value", nargs="?", choices=("unset", "on", "off"))
-    sub.add_parser("claude-md").add_argument("action", choices=("show", "apply"))
-    gh =sub.add_parser("git-hook", help="the standalone pre-push guard for the default branch (SI-08): `script` prints it, `check <repo>` says whether a repository runs it").add_subparsers(dest="action", required=True)
+    pknows = sub.add_parser("knows", help="list, forget or edit the answers JADE remembers (rm and edit: human terminal only)",
+                            description="The standing answers JADE remembers (docs/12). list reads them; rm forgets one; edit opens your preferences text in your "
+                                        "editor. rm and edit need a human terminal.")
+    pknows.add_argument("action", choices=("list", "rm", "edit"), help="list, rm (forget one) or edit (your preferences text)")
+    pknows.add_argument("id", nargs="?", help="with rm: the id of the standing answer")
+    plevel = sub.add_parser("level", help="show or set the level (the autonomy setting): unset, off, low, medium or high; setting it: human terminal only",
+                            description="The level is the autonomy setting (docs/12): how much JADE may answer in your place, and whether text may leave your "
+                                        "machine. With no argument it prints the level. Setting it needs a human terminal and is journaled.",
+                            epilog="example: jade level off")
+    plevel.add_argument("value", nargs="?", choices=("unset", "off", "low", "medium", "high"), help="the new level (none: print the level)")
+    pjev = sub.add_parser("jev", help="show or set the jev setting (may a model be asked at all); setting it: human terminal only",
+                          description="The jev setting says whether a model may be asked at all: on, off, or unset for the default. With no argument it prints "
+                                      "the setting. Setting it needs a human terminal and is journaled.")
+    pjev.add_argument("value", nargs="?", choices=("unset", "on", "off"), help="on, off, or unset for the default (none: print the setting)")
+    sub.add_parser("claude-md", help="print or apply the Jev section for ~/.claude/CLAUDE.md",
+                   description="show prints the shipped Jev section for your CLAUDE.md. apply replaces the Jev section of ~/.claude/CLAUDE.md with it, "
+                               "keeps a backup, and needs a human terminal.").add_argument("action", choices=("show", "apply"), help="show prints; apply writes")
+    gh =sub.add_parser("git-hook", help="print or check the standalone pre-push guard for the default branch (SI-08)",
+                       description="The standalone pre-push guard that refuses a push to the default branch (SI-08). `script` prints it, `check <repo>` "
+                                   "says whether a repository runs it. JADE installs nothing here: you install it (docs/08 section 2.7).").add_subparsers(dest="action", required=True)
     gh.add_parser("script", help="print the self-contained POSIX sh pre-push hook (installs nothing; install it yourself, docs/08 section 2.7)")
-    gh.add_parser("check", help="report whether the pre-push hook git runs for REPO is the JADE guard; exit 1 when it is not").add_argument("repo")
-    pl = sub.add_parser("learn", help="reports for you to read, never applied (V6-32): what stopped calls, a regression case for each call you marked wrong, a table of asks and errors per rule").add_subparsers(dest="action", required=True)
+    gh.add_parser("check", help="report whether the pre-push hook git runs for REPO is the JADE guard; exit 1 when it is not").add_argument("repo", help="the path of a git repository")
+    pl = sub.add_parser("learn", help="reports for you to read, never applied: blockers, policy and cases",
+                        description="Reports for you to read, never applied (V6-32, docs/16): what stopped calls, a regression case for each call you marked "
+                                    "wrong, a table of asks and errors per rule. They change no policy, threshold, memory, label or case file.").add_subparsers(dest="action", required=True)
     for name, text in (("blockers", "what stopped calls, by safety invariant id and rule id; --sample N lists a fixed sample for your precision check"),
                        ("policy", "per rule: asks, answers and wrong marks side by side, with a word of advice; changes nothing"),
                        ("cases", "a diff that adds a regression case for each call you marked wrong (and for each record of --records FILE); applies nothing")):
-        pn = pl.add_parser(name, help=text)
+        pn = pl.add_parser(name, help=text, description=text[:1].upper() + text[1:] + ".")
         if name != "cases":   # `cases` has no window: a call marked wrong is a case however long ago
             pn.add_argument("--days", type=int, default=30, help="the window in days (default 30; 0 is all time)" + ("; wrong marks and human-only asks always count all time" if name == "policy" else ""))
             pn.add_argument("--json", action="store_true", help="one line of JSON with sorted keys")
@@ -926,20 +1004,35 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "cases":
             pn.add_argument("--records", help="a JSONL file of audit false allows or counterfactual false rejects (kind, command, optional rule_id, tool, twin_command)")
             pn.add_argument("--out", help="write the diff to this new file instead of printing it (never inside the checkout, the policies or the config)")
-    sub.add_parser("maintain").add_argument("--offline", action="store_true")
-    sub.add_parser("version", help="print the code version, commit, ledger schema version and policy_version").add_argument("--json", action="store_true")
-    up = sub.add_parser("upgrade", help="human only: install a release of jade-decision-governance with uv, then run jade check from it; --check only looks")
+    sub.add_parser("maintain", help="the daily job: expiries, retention purge, drift canary and miner; prints one JSON line",
+                   description="The daily maintenance job: run the expiries and the retention purge, run the check (with the provider canary "
+                               "unless --offline) and the miner. It prints one JSON line for the log and exits 1 when the check fails. It never clears "
+                               "the chat-question text (`jade ledger purge --ask-text` does).").add_argument(
+        "--offline", action="store_true", help="run the check without the provider canary (nothing is sent)")
+    sub.add_parser("version", help="print the code version, commit, ledger schema version and policy_version",
+                   description="Print the code version, commit, ledger schema version and policy_version (the same text as `jade --version`).").add_argument(
+        "--json", action="store_true", help="print the same data as JSON")
+    up = sub.add_parser("upgrade", help="install a release with uv, then run jade check from it; human terminal only (--check only reads)",
+                        description="Install a release with uv, then run `jade check` from the new install. It lists the files that change and installs only after "
+                                    "you type yes. It never touches the ledger, your overlays, settings.json or CLAUDE.md. It needs a human terminal; --check only reads.",
+                        epilog="example: jade upgrade --check")
     ug = up.add_mutually_exclusive_group()
     ug.add_argument("--check", action="store_true", help="read-only: installed version, latest release, CHANGELOG headings in between")
     ug.add_argument("--ref", help="a release tag (vX.Y.Z) or a full commit hash to install (default: the latest release)")
-    su = sub.add_parser("setup", help="human only: the first-run wizard (gate advisory, hooks, CLAUDE.md section, skill, maintenance job, check); --status only reads")
+    su = sub.add_parser("setup", help="the first-run wizard that wires JADE into Claude Code; human terminal only (--status only reads)",
+                        description="The first-run wizard. It asks y/N before each step: advisory gate mode, hooks, skill, maintenance job, the Jev section of an "
+                                    "existing CLAUDE.md, then a check. It backs up what it edits and never sets enforce. It needs a human terminal; --status only reads.",
+                        epilog="example: jade setup --status")
     sg = su.add_mutually_exclusive_group()
     sg.add_argument("--yes", action="store_true", help="apply every step without asking (still needs an interactive terminal)")
     sg.add_argument("--status", action="store_true", help="read-only: what is done and what is missing")
-    lp = sub.add_parser("launchd-plist")
-    lp.add_argument("--label", default="com.jade.maintain")
-    ms = sub.add_parser("maintain-schedule", help="print a cron line or systemd units that run `jade maintain` daily, for a machine without launchd; installs nothing")
-    ms.add_argument("--format", choices=("cron", "systemd"), default="cron")
+    lp = sub.add_parser("launchd-plist", help="print the macOS LaunchAgent plist that runs `jade maintain` daily; installs nothing",
+                        description="Print the LaunchAgent plist for the daily `jade maintain` job on macOS. It installs nothing.")
+    lp.add_argument("--label", default="com.jade.maintain", help="the launchd label (default: com.jade.maintain)")
+    ms = sub.add_parser("maintain-schedule", help="print a cron line or systemd units that run `jade maintain` daily, for a machine without launchd; installs nothing",
+                        description="Print a cron line, or a systemd user service and timer, that run `jade maintain` once a day. For a machine without launchd. "
+                                    "It installs nothing: you do that.", epilog="example: jade maintain-schedule --format systemd")
+    ms.add_argument("--format", choices=("cron", "systemd"), default="cron", help="cron (one crontab line, the default) or systemd (a service and its timer)")
     return p
 
 

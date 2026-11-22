@@ -40,6 +40,15 @@ Date: 2026-11-08. Environment: a single developer Mac (hostname and user redacte
 | Failure handling | S13, §3 | CLI exits non-zero with `jev: HTTP <code>` / `jev: request failed` / `jev: no key`; no retry, no logging; the calling agent is free to continue, so every failure is fail-open. 85 calls (9.4%) produced an unparsable or error result (78 unparsable, 6 usage errors, 1 timeout). |
 | Available benchmark data | S21, §3 | None existed; `evals/baseline/` was built from transcripts in this phase (heuristic labels), plus live probes for latency/cost and `evals/baseline/replay-2026-11-08.json` for what the proposed thresholds would have done |
 
+### 1c. Facts worth knowing before you build on Jev via OpenRouter
+
+Verified 2026-11-08 (the source-of-truth table above). This list was on the README front page before; it moved here.
+
+- The endpoint is `POST https://openrouter.ai/api/alpha/decisions`. The request id `typesafe/jev-1.14` resolves to a dated snapshot. `typesafe/jev-latest` does not exist there.
+- Several independent questions fit in one request and cost no extra latency.
+- A Choice with a single option is accepted and returns confidence 1.0. So the client must check that the candidates are valid.
+- Confidence describes how concentrated the answer distribution is. It is not the probability of being right, and it is not permission.
+
 ## 2. Assumptions and unknowns (recorded, not invented)
 
 | Id | Item | Why it matters | Resolution path |
@@ -75,6 +84,18 @@ Method: `evals/baseline/mine_transcripts.py` pairs each Bash `tool_use` whose co
 | Cost | ≈ $0.013 for all 907 calls | Not a constraint |
 
 **The 78 unparsed outputs (W-18).** Not examined row by row: the private dataset was not read. From the committed code and a synthetic reproduction, the cause is ours, not the provider's. (1) A successful `jev` line is `P(yes)=0.64  [cost $0.000013]`, 29 characters, and every provider-side failure is a `jev: ...` line that the miner already buckets; neither can be a silent 31-36 character `no_parse`. (2) The miner paired the result with *any* Bash command whose text contained `jev verify|noul|choice|score`: a commit message, an `echo`, a `grep`, a file written by heredoc. Such a command prints something unrelated, or nothing, and Claude Code's placeholder for no output, `(Bash completed with no output)`, is exactly 31 characters, the bottom of the observed band. (3) The miner also kept only the first `jev` in a command, so a second call in the same command was never counted. The miner now flags mentions (`mention: true`, excluded from every real-call count, reported as `calls_mention`), emits one row per real call, and buckets a real call's non-answer by shape (`empty_output`, `exit_status_only`, `background_job`, residual `no_parse`). What is still unknown: how many of the 78 are mentions and how many are real calls with redirected or empty output, and what the 36-character end of the band is. Both need a re-run of `evals/baseline/mine_transcripts.py` over the transcripts, which prints counts only; until then the 9.4% error rate above is an upper bound on provider and parse failures, and the 907 real-call count may include mentions and omit second calls. G5's "6 quoting failures" stands; the 78 are not additional quoting failures.
+
+**The short version: why JADE exists.** This table was on the README front page before; it moved here. Before anything was designed, the practice of the time was measured on one developer machine. The practice was a rule in the agent instructions ("run `jev verify` before presenting work as done; a low probability means investigate") and a 124-line CLI with no ledger.
+
+| Over 14 days, 907 real calls | |
+|---|---|
+| Verifications below the vendor's suggested 0.70 "yes" line | 57% |
+| Of those, followed by a done/verified claim in the next message (heuristic) | 30% |
+| Calls that re-asked an identical question in the same session | 20% |
+| Calls with an error or unparsable result, none of which blocked anything | 9.4% |
+| Latency, one question or eight batched (measured at baseline, 2026-11-08) | ≈ 500 ms either way. A live call is slower and changes with the provider: `jade check` prints the latency of its canary call |
+
+A prose rule with no threshold and no enforcement point does not hold. The method is above; the thresholds and budgets are in `docs/04-calibration-and-evaluation.md`.
 
 Baseline latency and cost budgets derived from these numbers are in `docs/04-calibration-and-evaluation.md` §6.
 

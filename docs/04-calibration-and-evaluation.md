@@ -83,6 +83,22 @@ Regression guard (`tests/acceptance/test_ledger_scale_w58.py`, 20k rows so it st
 
 These numbers are heuristic (regex over transcripts). Phase 1's first job is to replace them with ledger facts; the baseline is re-measured over the first 14 ledger days before any threshold or routing change (paired comparison needs a clean "before").
 
+### 4d. How fast: the hook and one provider call
+
+This table was on the README front page before; it moved here. The gate runs on every tool call. These are the numbers the repository holds, each with its date and the number of runs. A test (`tests/test_front_page.py`) compares each row with the stored file.
+
+| What | Runs | p50 | p95 | Date | Source file |
+|---|---|---|---|---|---|
+| Hook process, a call that is not gated, empty ledger | 30 | 113.5 ms | 156.2 ms | 2026-11-09 | result-ledger-100k-2026-11-09.json: empty_ledger_hook_process/pretool_ungated_read |
+| Hook process, a gated call with a permit pending, empty ledger | 30 | 152.2 ms | 165.7 ms | 2026-11-09 | result-ledger-100k-2026-11-09.json: empty_ledger_hook_process/pretool_gated_pending_permit |
+| Hook process, a call that is not gated, 100,000 ledger rows | 30 | 109.9 ms | 119.0 ms | 2026-11-09 | result-ledger-100k-2026-11-09.json: after/hook_process/pretool_ungated_read |
+| Hook process, a gated call with a permit pending, 100,000 ledger rows | 30 | 150.0 ms | 162.4 ms | 2026-11-09 | result-ledger-100k-2026-11-09.json: after/hook_process/pretool_gated_pending_permit |
+| One provider call with one question | 20 | 514 ms | 639 ms | 2026-11-09 | result-2026-11-09.json: single_noul_parallel_1 |
+
+These numbers are old. They were measured on 2026-11-09 on macOS, with a synthetic ledger, before release 0.4.0. They are not measured again on the current release; that is an open item for the owner. The files are in `evals/performance/`.
+
+When a level sends a call to the provider, the hook waits for the answer, also in shadow. It waits at most 3 seconds, inside the hook's own limit of 6 seconds, and then you are asked as before. No live figure for this wait is published here.
+
 ## 5. Evaluation sets and partitioning
 
 ```
