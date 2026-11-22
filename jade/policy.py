@@ -52,7 +52,8 @@ FETCH_MARK = blind.FETCH_MARK   # marker prefix R-22 matches: fetched or decoded
 RM_NPR_MARK = "rm:no-preserve-root "        # marker prefix R-26 matches: `rm` with --no-preserve-root (W-202), from jade/humanonly.py `no_preserve_root`
 RM_ROOT_MARK = "rm:no-preserve-root:root "  # marker prefix R-25 matches: the same on the root of the file system
 GH_MERGE_MARK = "gh:merge-api "   # marker prefix R-10 matches: a `gh api` call that merges a pull request, or whose query or route the gate cannot read (V6-08, N20); the segment text has the quoted query blanked
-_GH_MERGE_MUTATION = re.compile(r"\b(?:mergePullRequest|enablePullRequestAutoMerge|mergeBranch)\b")
+# The GraphQL mutations that merge, or that write a branch (the default branch too) without a push: a commit made on a branch, a ref moved (W-191, KG63, KG64).
+_GH_MERGE_MUTATION = re.compile(r"\b(?:mergePullRequest|enablePullRequestAutoMerge|mergeBranch|createCommitOnBranch|updateRef|updateRefs)\b")
 # A GraphQL call whose query is not text on the command line: a file (`-F query=@q.graphql`; gh reads it), stdin (`--input`), a variable or a substitution (`query="$Q"`), or no query
 # field at all. The gate cannot see a merge there, so the call is asked about like a merge (V6-08 review, N20). A query in single quotes, or in double quotes without a `$` or a
 # backtick, is text the gate reads: `gh api graphql -f query='query { viewer { login } }'` stays a read.
@@ -65,6 +66,10 @@ _GH_ROUTE_UNREAD = re.compile(r"(?<![\w-])pulls/[^\s/]+/[^\s/]*[$`]")
 
 _GH_API_WORDS = re.compile(r"(?<![\w.-])(?:gh|glab)\s+api(?![\w.-])")
 _GH_REST_MERGE = re.compile(r"(?<![\w-])(?:pulls|merge_requests)/[^\s/]+/merge(?![\w-])|(?<![\w-])repos/[^\s/]+/[^\s/]+/merges(?![\w-])")   # the routes risk.yaml R-10 rates by name
+
+
+_HTTP_CLIENTS = ("curl", "wget", "http", "https", "xh")   # the merge route sent with an HTTP client is a merge too (W-191, KG60)
+_HTTP_CLIENT_WORDS = re.compile(r"(?<![\w.-])(?:curl|wget|https?|xh)(?![\w.-])")
 
 
 # W-153: a write to a git ref through the REST refs API (`repos/O/R/git/refs[/heads/main]`, PATCH, POST or DELETE) is a push by another door (SI-08, KG55, KG65). It is read from the
@@ -223,23 +228,130 @@ def _gh_ref_write_any(text: str) -> bool:
     return _gh_ref_write(text) or ((d := _dequoted_view(text)) is not None and _gh_ref_write(d, _command_words(text)))
 
 
+def _gh_api_merge_text(text: str) -> bool:
+    """One reading of the text of a call (W-153 and W-191): does it hold a `gh api` call that merges a pull request, writes the default branch or a git ref, or whose query or
+    route the gate cannot read (`_gh_api_merges`)?"""
+    if not _GH_API_WORDS.search(text):
+        return False
+    words = text.split()
+    if _GH_REST_MERGE.search(text) or _gh_api_merges(words, text):
+        return True
+    if _WRITE_ROUTE_TEXT.search(text) and _API_WRITE_FLAG_TEXT.search(text):
+        return True   # a write route and a flag that changes something anywhere in the text: a quoted header (`-H "Accept: ..."`) splits into words that hide the route below
+    return any(w == "api" and i and words[i - 1].rsplit("/", 1)[-1] in ("gh", "glab") and _gh_api_writes_default(words[i + 1:]) for i, w in enumerate(words))
+
+
 def gh_api_merge_in(text: str) -> bool:
-    """Does the text of a call hold a `gh api` call that merges a pull request, or whose query or route the gate cannot read (`_gh_api_merges`)? Read from the plain text of
-    the call, so it errs towards yes. Memory keeps such a call as an exact answer at most and Jev never judges it, as for `gh pr merge` (integration of V6-08 and V6-06b).
-    The text is read as written and as the shell passes it on (`_shell_dequoted`, W-153 review: `gh a\\pi` is `gh api`)."""
-    if _GH_API_WORDS.search(text) and (_GH_REST_MERGE.search(text) or _gh_api_merges(text.split(), text)):
+    """Does the text of a call hold a `gh api` call that merges a pull request, writes the default branch or a git ref, or whose query or route the gate cannot read
+    (`_gh_api_merges`), or the merge route sent with curl, wget or httpie? Read from the plain text of the call, so it errs towards yes. Memory keeps such a call as an exact
+    answer at most and Jev never judges it, as for `gh pr merge` (integration of V6-08 and V6-06b). The text is read as written and as the shell passes it on
+    (`_shell_dequoted`, W-153 review: `gh a\\pi` is `gh api`)."""
+    if _HTTP_CLIENT_WORDS.search(text) and _GH_REST_MERGE.search(text):
+        return True
+    if _gh_api_merge_text(text):
         return True
     t = _dequoted_view(text)
-    return t is not None and bool(_GH_API_WORDS.search(t)) and (bool(_GH_REST_MERGE.search(t)) or _gh_api_merges(t.split(), t))
+    return t is not None and _gh_api_merge_text(t)
 
 
 def _gh_api_merges(words: list[str], text: str) -> bool:
-    """`words` is a `gh api` call: it merges a pull request, or its query or route is one the gate cannot read (so it is asked about)."""
+    """`words` is a `gh api` call: it merges a pull request or writes the default branch or a git ref, or its query or route is one the gate cannot read (so it is asked about)."""
     if _GH_MERGE_MUTATION.search(text) or _GH_ROUTE_UNREAD.search(text) or _gh_ref_write_any(text):
         return True
     if "graphql" in " ".join(words[2:]) and any(w.rstrip("/").rsplit("/", 1)[-1] == "graphql" for w in words[2:]):   # the join is a quick test: a huge call pays the word loop only when a word can be `graphql`
         return bool(_GH_QUERY_UNREAD.search(text)) or not _GH_QUERY_FIELD.search(text) or bool(_GH_REF_MUTATION.search(text))
+    return _gh_api_writes_default(words[2:])
+
+
+
+# W-191: the REST routes that write the default branch without a push, each by name (no class rule on every `gh api` call that changes something: the row asks for a
+# replay first). The contents API writes the default branch when the call names no branch; `git/refs` makes or moves a ref; `pulls/N/update-branch` merges the base into
+# the branch of a pull request. A whole route in a variable or a substitution, on a call that changes something, is a route the gate cannot read.
+_API_VALUE_OPTIONS = ("-X", "--method", "-H", "--header", "-f", "--raw-field", "-F", "--field", "--input", "-q", "--jq", "-t", "--template", "--hostname", "--cache", "-p", "--preview")
+_CONTENTS_ROUTE = re.compile(r"(?:^|/)repos/[^/\s]+/[^/\s]+/contents(?:/|$)")
+_REFS_ROUTE = re.compile(r"(?:^|/)repos/[^/\s]+/[^/\s]+/git/refs(?:/(?P<rest>\S*))?$")
+_UPDATE_BRANCH_ROUTE = re.compile(r"(?:^|/)pulls/[^/\s]+/update-branch/?$")
+_WRITE_ROUTE_TEXT = re.compile(r"(?<![\w-])repos/[^/\s]+/[^/\s]+/(?:contents|git/refs)(?![\w-])|(?<![\w-])pulls/[^/\s]+/update-branch(?![\w-])")
+_API_WRITE_FLAG_TEXT = re.compile(r"(?<![\w-])(?:-X|--method|-f|-F|--field|--raw-field|--input)(?![\w-])|(?<![\w-])-[XfF]\S")
+_DEFAULT_BRANCH_NAMES = ("main", "master")   # the names R-10 and SI-08 take for the default branch (hooks.DEFAULT_BRANCHES)
+
+
+def _unquoted(word: str) -> str:
+    return word.strip("'\"")
+
+
+def _api_parts(args: list[str]) -> tuple[str | None, set[str], list[tuple[str, str]], bool]:
+    """The words after `gh api`: (the route, the methods named, the fields as (name, value), whether the body comes from a file or stdin with `--input`)."""
+    route, methods, fields, has_input = None, set(), [], False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in _API_VALUE_OPTIONS:
+            value = _unquoted(args[i + 1]) if i + 1 < len(args) else ""
+            if a in ("-X", "--method"):
+                methods.add(value.upper())
+            elif a in ("-f", "--raw-field", "-F", "--field"):
+                fields.append(tuple(value.split("=", 1)) if "=" in value else (value, ""))
+            elif a == "--input":
+                has_input = True
+            i += 2
+            continue
+        if a.startswith("--") and "=" in a:
+            name, value = a.split("=", 1)
+            if name == "--method":
+                methods.add(_unquoted(value).upper())
+            elif name in ("--raw-field", "--field"):
+                value = _unquoted(value)
+                fields.append(tuple(value.split("=", 1)) if "=" in value else (value, ""))
+            elif name == "--input":
+                has_input = True
+        elif a.startswith("-X") and len(a) > 2:
+            methods.add(_unquoted(a[2:]).upper())
+        elif a[:2] in ("-f", "-F") and len(a) > 2:
+            value = _unquoted(a[2:])
+            fields.append(tuple(value.split("=", 1)) if "=" in value else (value, ""))
+        elif not a.startswith("-") and route is None:
+            route = _unquoted(a)
+        i += 1
+    return route, methods, fields, has_input
+
+
+def _default_or_unread(branch: str) -> bool:
+    b = _unquoted(branch)
+    return not b or b.lower() in _DEFAULT_BRANCH_NAMES or any(c in b for c in "$`@")
+
+
+def _gh_api_writes_default(args: list[str]) -> bool:
+    """`args` are the words after `gh api`: the call changes something (a method other than GET or HEAD, or fields or `--input` with no method: gh then sends a POST) and its
+    route is one that writes the default branch or merges, or a route the gate cannot read."""
+    route, methods, fields, has_input = _api_parts(args)
+    if route is None or not (any(m not in ("GET", "HEAD") for m in methods) or (not methods and (fields or has_input))):
+        return False
+    if "$" in route or "`" in route:
+        return True
+    route = route.split("?", 1)[0]
+    if _UPDATE_BRANCH_ROUTE.search(route):
+        return True
+    if _CONTENTS_ROUTE.search(route):
+        branches = [v for k, v in fields if k == "branch"]
+        return has_input or not branches or any(_default_or_unread(b) for b in branches)
+    if m := _REFS_ROUTE.search(route):
+        rest = m.group("rest") or ""
+        if rest.startswith("heads/"):
+            return _default_or_unread(rest[len("heads/"):])
+        if rest:
+            return False
+        refs = [_unquoted(v) for k, v in fields if k == "ref"]
+        return has_input or not refs or any(r.startswith("refs/heads/") and _default_or_unread(r[len("refs/heads/"):]) or any(c in r for c in "$`@") for r in refs)
     return False
+
+
+def _http_merge(prog: str, args: list[str]) -> bool:
+    """curl, wget or httpie sends the merge route with a method that changes something (`curl -X PUT .../pulls/3/merge`), or a method the gate cannot read."""
+    if not any(_GH_REST_MERGE.search(a) for a in args):
+        return False
+    methods = humanonly._methods(prog, args, [a for a in args if not a.startswith("-")])
+    return any(m not in ("GET", "HEAD") for m in methods) or (not methods and humanonly._sends_body(args))
 PATH_RULES = ("R-01", "R-04", "R-12", "R-13", "R-16", "R-18", "R-24")  # the rules about where a write lands: they also see relative operands made absolute
 WRITE_KEYS = ("file_path", "notebook_path", "path", "filePath", "file", "filepath", "target_file", "file_name", "filename", "target")
 CONTENT_KEYS = {"content", "new_string", "old_string", "new_str", "old_str", "new_source", "text", "contents", "data", "source", "patch"}
@@ -2522,6 +2634,8 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
             fetched.update(blind.copies_of(words, fetched))   # `mv a b; bash b`: the copy is the fetched file under another name
         if len(words) > 1 and words[0].rsplit("/", 1)[-1] == "gh" and words[1] == "api" and _gh_api_merges(words, text_in):
             marks.append(GH_MERGE_MARK)   # the query is quoted text, so the whole command is read, as for a SQL client below
+        elif words[0].rsplit("/", 1)[-1] in _HTTP_CLIENTS and _http_merge(words[0].rsplit("/", 1)[-1], words[1:]):
+            marks.append(GH_MERGE_MARK)   # the merge route sent with curl, wget or httpie (W-191, KG60)
         if npr := humanonly.no_preserve_root(seg, _bare(seg)):   # W-202: the segmenter folds `rm` flags to `rm -rf`, so the flag is read from the segment as written
             marks.append(RM_ROOT_MARK if npr == "root" else RM_NPR_MARK)
         seg_labels = [lab for lab in (blind.script_label(words, known), "computed-cwd" if computed and _computed_write(_bare(seg)) else None) if lab]

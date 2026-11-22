@@ -22,7 +22,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     # The parallel step took 18 to 23 minutes on PR runs and 28 on the merge of PR 53, so the serial timing step after it was cut by a 30 minute limit.
-    timeout-minutes: 45
+    # A run on main and the run of PR 60 were cancelled at 45 minutes once the suite grew with the lane merges, so the limit is 60, the most `tests/test_ci_workflow.py` allows: a hang still stops, a slow run does not.
+    timeout-minutes: 60
     strategy:
       matrix:
         python: ["3.13", "3.14"]

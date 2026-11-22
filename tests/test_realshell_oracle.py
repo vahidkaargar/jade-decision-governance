@@ -309,9 +309,9 @@ def test_an_unreadable_or_foreign_file_exits_2_and_is_never_a_pass(tmp_path, cap
 
 
 def test_check_through_the_real_hook_finds_a_known_gap_and_passes_a_blocked_push():
-    """The classifier side is the real hook in a child process (decision_replay), not a fake. KG58 is a real gap on this tree (V6-08 closed the plain variable form); a plain push is blocked by SI-08."""
-    cmds = ["git push origin main", "v=push; git $v origin main", "git push origin feature-x"]
-    snap = snapshot_of([("A56", cmds[0], True), ("KG58", cmds[1], True), ("A99", cmds[2], False)])
+    """The classifier side is the real hook in a child process (decision_replay), not a fake. KG56 is a real gap on this tree (W-191 closed the variable forms, KG58 among them); a plain push is blocked by SI-08."""
+    cmds = ["git push origin main", 'git -C "" push origin main', "git push origin feature-x"]
+    snap = snapshot_of([("A56", cmds[0], True), ("KG56", cmds[1], True), ("A99", cmds[2], False)])
     out = oracle.classify_with_hook(cmds)
     assert out[cmds[0]]["action"] == "block" and "SI-08" in out[cmds[0]]["invariants"]
     assert "SI-08" not in out[cmds[1]]["invariants"]
@@ -319,8 +319,8 @@ def test_check_through_the_real_hook_finds_a_known_gap_and_passes_a_blocked_push
     corpus = [{"ids": e["ids"], "cmd": e["cmd"]} for e in snap["entries"]]
     r = oracle.check_snapshot(snap, corpus, {}, oracle.classify_with_hook, None)
     g = gate(r, "G4 SI-08 mismatch")
-    assert r["exit"] == 1 and g["state"] == "fail" and "KG58" in g["detail"] and "A56" not in g["detail"]
-    r = oracle.check_snapshot(snap, corpus, {cmds[1]: "KG58"}, oracle.classify_with_hook, 1)
+    assert r["exit"] == 1 and g["state"] == "fail" and "KG56" in g["detail"] and "A56" not in g["detail"]
+    r = oracle.check_snapshot(snap, corpus, {cmds[1]: "KG56"}, oracle.classify_with_hook, 1)
     assert r["exit"] == 0 and gate(r, "G4 known gaps")["state"] == "pass"
 
 

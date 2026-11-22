@@ -180,6 +180,39 @@ def _first_positional(args: list[str], kind: str) -> str | None:
     return None
 
 
+_LAUNCHERS = frozenset({"env", "command", "exec", "nohup", "time", "nice", "builtin", "sudo", "doas"})
+_LAUNCHER_VALUE_OPTS = {"env": {"-u", "-C", "-S", "--unset", "--chdir"}, "nice": {"-n", "--adjustment"}, "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-R", "-T", "-U"}, "doas": {"-u", "-C"}}
+_ENV_ASSIGN = re.compile(r"^[A-Za-z_]\w*=")
+
+
+def _peel_launchers(words: list) -> list:
+    """`words` without the launchers in front of the program (`env -i X=1 sh f`, `nice -n 5 sh f`, `command sh f`, `exec bash f`), when each one is a bare word and the option words
+    are plain. A word that is not plain (a computed name, an option that is not known) stops the peel: what is left is read as before."""
+    for _ in range(6):
+        if not words or words[0].text not in _LAUNCHERS:
+            break
+        name, i = words[0].text, 1
+        valued = _LAUNCHER_VALUE_OPTS.get(name, set())
+        while i < len(words) and words[i].text is not None:
+            t = words[i].text
+            if t == "--":
+                i += 1
+                break
+            if t in valued:
+                i += 2
+            elif t.startswith("-") and t != "-" or (name == "env" and _ENV_ASSIGN.match(t)):
+                i += 1
+            else:
+                break
+        words = words[i:]
+    return words
+
+
+def _reads_stdin(args: list[str], kind: str) -> bool:
+    """A shell or interpreter that is given no program on its command line and no file reads the program on its stdin (`sh < f`, `sh -e -x < f`); `-c` and `-n` mean it does not."""
+    return not any(re.fullmatch(r"-[a-zA-Z]*[cn]|--(?:command|noexec|eval|print)", a) if kind == "shell" else _CODE.fullmatch(a) for a in args if a.startswith("-"))
+
+
 def _runner_kind(w: str) -> str | None:
     return "shell" if SHELLS.match(w) else "interp" if INTERPS.match(w) else None
 
@@ -319,12 +352,15 @@ def written_scripts(text: str) -> tuple[list[str], frozenset[str]]:
     runs: dict[str, list[tuple[int, str, str | None]]] = {}
     for k, c in enumerate(cmds):
         _, rest = inert._lead(c)
+        rest = _peel_launchers(rest)   # `env sh f`, `command sh f`, `exec bash f`, `nohup sh f` (W-133, F6)
         if not rest or rest[0].text is None:
             continue
         first, args = rest[0].text, [w.text or "" for w in rest[1:]]
         w = _base(first)
         if (kind := _runner_kind(w)) is not None:
             f = _first_positional(args, kind)
+            if not f and _reads_stdin(args, kind):   # `sh < f`: the file is the program on stdin
+                f = next((r.target.text for r in c.redirects if r.op == "<" and r.target is not None and r.target.text and not r.target.text.startswith("/dev/")), None)
             if f:
                 runs.setdefault(_norm(f), []).append((k, w if kind == "interp" or w not in (".", "source") else "bash", kind))
         elif "/" in first:

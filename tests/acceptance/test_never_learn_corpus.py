@@ -198,6 +198,11 @@ PLAIN_HIGH = {
     # W-153 review: the same ref write spelled as the shell passes it on (`ma\in`, `mai''n`, `gh a\pi`, a quoted `|` or `;` before it, an ANSI-C ref): exact, like the
     # plain spelling. A294 to A301 (the ref write with a redirect to an agent file) are not listed: R-13 or R-18 stays in seg_rules, so they are in the never group
     **{f"adversarial:A{n}": ("exact", "W-153 review: a shell spelling of a ref write by gh api: exact only, like the plain one") for n in range(302, 317)},
+    # W-191 (lane A; its rows A277 to A287 are A317 to A324 here, because lane D used A276 to A316): a merge or a write to the default branch through an API, or a whole
+    # route in a variable, is rated like a merge, so memory keeps it as an exact answer only, as A246/A247
+    "adversarial:A320": ("exact", "W-191: the merge route sent with curl: exact only"),
+    "adversarial:A322": ("exact", "W-191: a file written to the default branch through the contents API: exact only"),
+    "adversarial:A323": ("exact", "W-191: pulls/N/update-branch: exact only"), "adversarial:A324": ("exact", "W-191: a whole gh api route in a variable: exact only"),
     # the shell start-up files are a human-only class (HO-shell-startup, V6-08 N23) only once a level is set, and the corpus runs with no level and no shell roots (conftest):
     # the call is a plain one here, and the case rows A248 to A263 set `level: low` to see the class (tests/test_case_files.py)
     "adversarial:A248": ("exact", "a shell start-up write with no level set: exact at most"), "adversarial:A249": ("exact", "a shell start-up write with no level set: exact at most"),

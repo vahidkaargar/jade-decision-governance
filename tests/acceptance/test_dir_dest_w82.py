@@ -521,13 +521,20 @@ def test_a_variable_reading_is_read_for_r13_only(home, monkeypatch):
 
     monkeypatch.setattr(policy, "classify_segment", counted)
     pad = "D=/tmp/a; D=/tmp/b; D=/tmp/c; D=/tmp/d"
+
+    def segments(cmd):   # what the scanner hands the classifier: since W-191 it holds a stage once for each value of a variable in its words
+        return len(list(policy.shellnorm.segments_cwd(cmd, "/tmp/case", literal_end=len(cmd))))
+
     sh(f"{pad}; cp /tmp/e/x /tmp/z/y1; cp /tmp/e/x /tmp/z/y2")
     once, calls[0] = calls[0], 0   # every segment classified once, with no variable to read
-    a = sh(f"{pad}; cp /tmp/e/x $D/y1; cp /tmp/e/x $D/y2")
-    assert not gated(a) and calls[0] == once, (calls[0], once)
+    assert once == segments(f"{pad}; cp /tmp/e/x /tmp/z/y1; cp /tmp/e/x /tmp/z/y2")
+    cmd = f"{pad}; cp /tmp/e/x $D/y1; cp /tmp/e/x $D/y2"
+    a = sh(cmd)
+    assert not gated(a) and calls[0] == segments(cmd), (calls[0], segments(cmd))   # the R-13 reading adds no classification of its own
     calls[0] = 0
-    assert is_r13(sh(f"{pad}; D=~/.claude; cp /tmp/e/settings.json $D/; cp /tmp/e/x $D/y"))
-    assert calls[0] == once + 1, (calls[0], once)   # one more assignment segment
+    cmd = f"{pad}; D=~/.claude; cp /tmp/e/settings.json $D/; cp /tmp/e/x $D/y"
+    assert is_r13(sh(cmd))
+    assert calls[0] == segments(cmd), (calls[0], segments(cmd))
 
 
 def test_a_variable_with_a_known_value_is_still_an_unseen_name(home):
