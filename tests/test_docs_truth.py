@@ -353,6 +353,19 @@ def test_the_ask_text_purge_waits_in_the_backlog_for_the_owner():
         assert re.search(rf"^\| {w['id']} \|", backlog, re.M), f"{w['id']} missing from BACKLOG.md"
 
 
+def test_the_threat_model_names_as_open_only_known_gap_rows_that_are_open():
+    """docs/05 lists the open bypass vectors by their `known_gap` rows. A row named there (one id, or `KGa to KGb`) must still be in
+    evals/known_gaps/cases.jsonl: a row that left the file with its fix is closed, and the paragraph names it by its new case id instead (W-191 review: the
+    paragraph still called KG57 to KG67 open after they moved to the adversarial set)."""
+    text = _read("docs/05-threat-model.md")
+    named = set()
+    for m in re.finditer(r"\bKG(\d+)(?: to KG(\d+))?\b", text):
+        lo, hi = int(m.group(1)), int(m.group(2) or m.group(1))
+        named.update(f"KG{n:02d}" for n in range(lo, hi + 1))
+    rows = {json.loads(line)["id"] for line in _read("evals/known_gaps/cases.jsonl").splitlines() if line.strip()}
+    assert named and not named - rows, f"docs/05 names as open the rows {sorted(named - rows)}, which are not in evals/known_gaps/cases.jsonl"
+
+
 def test_docs_02_terminal_states_are_the_ones_the_state_machine_calls_terminal():
     """W-166 (V6-11): docs/02 listed FAILED and OUTCOME_UNKNOWN as terminal, but both have exits in `state_machine.T`."""
     from jade import state_machine

@@ -12,7 +12,7 @@ Two keys per answer:
 
 Never remembered (always asked): a human-only class (docs/12 section 4), the fetch-and-exec and egress rules (R-21, R-22) and the rules that guard the agent's files
 (R-13, R-18), as the top rule or as the rule of any segment, `composio execute` (an action in a connected app: W-190), a call the gate blocks, and a call with a secret-shaped value in it. Exact-only: R-14, R-15, R-23 (a program that git runs, W-137), R-16 (a shell write to JADE's own source, W-190), a push of many branches (`--all`, W-190), `launchctl bootout|unload|remove` (R-12, W-137), M-05, M-07, an inline program (`-c`, `-e`, heredoc, here-string, process substitution), a call the gate could not
-read (blind labels), a git push or merge (the fingerprint carries the head commit), a merge into the default branch, and every write or MCP call (content is part of the key).
+read (blind labels), a git push or merge (the fingerprint carries the head commit), a merge into the default branch, a segment key that still has a variable word, a call that reads a variable it sets itself, a `$'..'` word, and every write or MCP call (content is part of the key).
 
 Lifetime: a row is valid while its last human confirm or its last use is within 30 days, and never more than 180 days after the confirm.
 Evidence (V6-29, `jade/audit.py`): a row that has run silently many times (60) with no mark, or for 90 days after its last evidence, stops deciding until the human marks
@@ -48,6 +48,9 @@ _LEADING_CD = re.compile(r"""^[ \t]*cd[ \t]+(?:"([^"$`\\]*)"|'([^']*)'|([^\s"'$`
 _GIT_C = re.compile(r"(?<![\w.-])git(?:\s+-[a-zA-Z](?:\s+\S+)?)*?\s+-C\s+(\S+)")
 _SUDO_WORD = re.compile(r"(?<![\w.-])sudo(?![\w.-])")
 _PR_NUMBER = re.compile(r"^((?:gh pr|glab mr) [\w-]+) \d+(?= |$)")
+KEY_VARIABLE = re.compile(r"\$[A-Za-z_{]")   # a variable word that is still in a segment key: the key stands for every value of it
+VARIABLE_USE = re.compile(r"\$\{?([A-Za-z_]\w*)")   # a variable the text reads
+DOLLAR_QUOTE = re.compile(r"\$'")   # a `$'..'` word: the key shows the decoded text, only the exact key keeps the spelling
 MERGE = re.compile(r"^(?:gh pr merge|glab mr merge|git merge|git update-ref)(?= |$)")   # W-153: `git update-ref` moves a branch with no push, so it is treated like a merge: exact at most, never sent to Jev
 INLINE = re.compile(r"(?:^|\s)-[A-Za-z]*[ce](?=\s|\Z)|<<|<\(")
 
@@ -61,6 +64,11 @@ def exact_key(hold_key: str, fingerprints: dict | str | None) -> str:
     """The call in the state it was answered in: the hold key and the fingerprints the gate computed (a pushed HEAD, a content digest)."""
     fp = fingerprints if isinstance(fingerprints, str) else canonical(fingerprints or {})
     return sha256(canonical({"hold": hold_key, "fp": fp}))
+
+
+def _reads_assigned_variable(s: str) -> bool:
+    """True when the text reads a variable that it sets itself (`x=--hard; git reset $x`): the segment key shows the value, so it would equal the key of the plain command."""
+    return "$" in s and bool({w.partition("=")[0] for w in _ENV_WORD.findall(s)} & set(VARIABLE_USE.findall(s)))
 
 
 def _pushes_many(key: str) -> bool:
@@ -91,8 +99,10 @@ def eligibility(a, tool: str, tool_input: dict | None, fp: dict | None) -> str:
         return "never"   # W-190
     if a.rule_id in EXACT_ONLY_RULES or set(getattr(a, "seg_rules", []) or []) & EXACT_ONLY_RULES or a.blind or a.rule_id in ("R-31", "R-32"):
         return "exact"
-    if fp or INLINE.search(a.subject or "") or any(_pushes_many(k) or _EXACT_SEGMENT.search(k) for k in getattr(a, "seg_keys", []) or []):
+    if fp or INLINE.search(a.subject or "") or DOLLAR_QUOTE.search(a.subject or "") or any(_pushes_many(k) or _EXACT_SEGMENT.search(k) for k in getattr(a, "seg_keys", []) or []):
         return "exact"
+    if _reads_assigned_variable(a.subject or "") or any(KEY_VARIABLE.search(k) for k in getattr(a, "seg_keys", []) or []):
+        return "exact"   # W-137: a key with an unresolved variable (`git push origin $b`) is not one kind (launchctl bootout, unload and remove: `_EXACT_SEGMENT`, above)
     if any(MERGE.match(k) for k in getattr(a, "seg_keys", []) or []) or not getattr(a, "seg_keys", None) or policy.gh_api_merge_in(a.subject or ""):
         return "exact"   # a merge, also one made through `gh api` (V6-08 N20), is never remembered as a kind
     return "class"
