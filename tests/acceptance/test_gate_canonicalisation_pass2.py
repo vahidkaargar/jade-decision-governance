@@ -12,6 +12,7 @@ import pytest
 
 from jade import hooks, policy
 from jade.util import LEVELS
+from tests.loadproof import retry_under_load
 
 SESSION = "s" * 8
 
@@ -299,12 +300,13 @@ def test_f03_comments_and_braces_that_are_not_commands_stay_as_before(cmd):
 # ---------------------------------------------------------------- N1: classifier cost
 
 def _timed(cmd: str) -> float:
-    t = time.perf_counter()
+    t = time.process_time()   # CPU time: other processes taking the machine do not move it (W-156)
     assess(cmd)
-    return time.perf_counter() - t
+    return time.process_time() - t
 
 
 @pytest.mark.timing
+@retry_under_load
 def test_n1_many_quoted_words_cost_is_linear_not_quadratic():
     small = _timed("echo " + "'a' " * 5000)
     big = _timed("echo " + "'a' " * 40000)
@@ -316,18 +318,54 @@ def test_n1_many_quoted_words_cost_is_linear_not_quadratic():
 
 
 @pytest.mark.timing
+@retry_under_load
 def test_n1_nested_shell_quoting_is_bounded_and_still_found():
     assert _timed(_nest("git push origin main", 10)) < 5.0
     assert "SI-08" in assess(_nest("git push origin main", 7)).blocked
     assert _timed(_nest("git push origin main", 12)) < 30.0  # past the work budget: degraded text search, never a hang; origin/main's own reading of this takes 0.6 s here and the gate runs it too
 
 
+def _exhausted_budgets(monkeypatch, total: int) -> list[list[int]]:
+    """Give both readings (the current scanner and origin/main's frozen copy) a work budget of `total` characters and return the budget lists their scans use.
+    A list that went below zero is a scan that ran out of work (W-145)."""
+    from jade import shellnorm, shellnorm_base
+
+    seen: list[list[int]] = []
+    for mod in (shellnorm, shellnorm_base):
+        monkeypatch.setattr(mod, "BUDGET", total)
+        orig = mod._Scan.__init__
+
+        def init(self, s, depth, budget, *a, _orig=orig, **k):
+            seen.append(budget)
+            _orig(self, s, depth, budget, *a, **k)
+
+        monkeypatch.setattr(mod._Scan, "__init__", init)
+    return seen
+
+
+def test_n1_work_budget_exhaustion_degrades_to_text_search_not_open(monkeypatch):
+    # Counts work, not seconds (W-145). The budget is made small, so that a 20 kB command runs it out in the middle of the scan: no clock, so a loaded runner cannot fail it.
+    # The earlier form of this test sent 1.2 MB and never reached the real budget (4 000 000): about 1.6 M of it was still left, so it only measured speed.
+    words = 5000
+    cmd = "echo " + "'a' " * words + "; git push origin main"
+    with monkeypatch.context() as m:
+        seen = _exhausted_budgets(m, int(len(cmd) * 1.5))
+        a = assess(cmd)
+    assert seen and min(b[0] for b in seen) < 0, "the budget was not used up: the test no longer tests exhaustion"
+    assert "SI-08" in a.blocked, a
+    # with the real budget (a different text, so that no stored answer is reused) the budget holds and the answer is the same
+    assert "SI-08" in assess(cmd.replace("echo ", "echo b ", 1)).blocked
+
+
 @pytest.mark.timing
-def test_n1_work_budget_exhaustion_degrades_to_text_search_not_open():
+@retry_under_load
+def test_n1_huge_quoted_input_cost_stays_bounded():
+    # A real-size input (1.2 MB). Measured in CPU seconds of this process: other processes taking the machine's time make the wall clock grow 3 to 6 times (14.7 s wall for 2.3 s CPU
+    # under load) and not this. A slowdown in the gate itself shows in both. It is 2.3 s here and the bound stays at 10 s.
     cmd = "echo " + "'a' " * 300000 + "; git push origin main"
-    t = time.perf_counter()
+    t = time.process_time()
     a = assess(cmd)
-    assert time.perf_counter() - t < 10.0
+    assert time.process_time() - t < 10.0
     assert "SI-08" in a.blocked
 
 
@@ -470,6 +508,7 @@ def test_probe_cd_to_a_computed_directory_is_a_documented_limit():
 
 
 @pytest.mark.timing
+@retry_under_load
 def test_n1_huge_command_is_not_masked_and_cost_stays_bounded():
     from jade import inert
 

@@ -8,9 +8,10 @@ The owner reads simple English: short sentences, one idea each, at most 20 words
 from __future__ import annotations
 
 import dataclasses
+import functools
 import re
 
-from . import policy, shellnorm
+from . import blind, policy, shellnorm
 from .util import show_safely
 
 # One plain sentence per rule id of policies/risk.yaml (tests check that none is missing and that none is longer than 20 words).
@@ -34,6 +35,8 @@ RISK_TEXT: dict[str, str] = {
     "R-22": "This runs text that is downloaded or decoded while it runs, so nobody can read it first.",
     "R-23": "This edits a git config file, which can make git run a program later.",
     "R-24": "This changes the packages or the build of JADE itself.",
+    "R-25": "This deletes the root of the disk and turns off the safety check of rm, and you cannot undo it.",
+    "R-26": "This deletes files with the safety check of rm turned off, and you cannot undo it.",
     "R-30": "This reads a file that holds a password or key, and it is only recorded.",
     "R-31": "This runs a script or text that the gate cannot read, and it is only recorded.",
     "R-32": "This gives a script or a computed folder to a command that normally only reads.",
@@ -52,6 +55,96 @@ RISK_TEXT: dict[str, str] = {
     "M-99": "This tool has no rule yet, and it is only recorded.",
 }
 GENERIC_RISK = "This call needs your decision."
+# W-154: a write to authorized_keys is R-13, but the generic R-13 sentence (rules, hooks, settings, installed code) does not say that it opens a login.
+AUTHKEYS_RISK = "This writes a list of keys that are trusted to log in, so it can open a login."
+AUTHKEYS_WHAT = "Write the authorized_keys file, which lists the keys that can log in."
+AUTHKEYS_ALSO = "It also writes a list of keys that are trusted to log in, so it can open a login."   # after the rule's sentence, when the call does more
+_AUTHKEYS_SSH = re.compile(r"\.ssh/authorized_keys2?(?![\w.-])")   # the shape policies/risk.yaml R-13 matches
+_AUTHKEYS_NAME = re.compile(r"(?<![\w.-])authorized_keys2?(?![\w.-])")   # a write target named so, after `cd ~/.ssh`: the gate reads the same file
+
+
+_IN_PLACE = re.compile(r"^-[A-Za-z]*i")   # `sed -i`, `perl -pi`: the file is written in place
+_GLOBBY = re.compile(r"[*?\[]")
+
+
+def _written(key: str, typed: bool = True) -> list[tuple[str, bool]]:
+    """What one segment WRITES, as (text, is an absolute path): the targets `policy.files_view` knows (a redirect, the destination of cp/rsync/ln/install/scp, the
+    archive of tar -c), the paths a copy into a directory or a glob destination writes (`policy.dir_dest_paths`, W-82), and, for a command whose view is the whole
+    segment, the file a known writer writes: a `tee` operand, the output of `curl -o` or `wget -O`, `dd of=`, an in-place `sed -i`. Nothing else: `rm`, `chmod`,
+    `truncate`, an upload and a move away do not write the key list (W-154 review, wave 4)."""
+    words = policy.system_bare(key.removeprefix(shellnorm.UNSAFE_MARK + " ")).split(" ")
+    bare = " ".join(words)
+    view = policy.files_view(bare)
+    out = [(view, False)] if view else []
+    if typed or _GLOBBY.search(bare if view is None else view):   # a path into a directory holds a typed name; one a glob destination matches needs the glob
+        out.extend((p, True) for p in policy.dir_dest_paths(bare))
+    if view is None:
+        verb, args = words[0].rsplit("/", 1)[-1], words[1:]
+        if verb == "tee":
+            out.extend((w, False) for w in policy.operands(args))
+        elif verb in ("curl", "wget"):
+            out.extend((w, False) for w in blind.downloads(words))
+        elif verb == "dd":
+            out.extend((w[3:], False) for w in args if w.startswith("of="))
+        elif verb in ("sed", "gsed", "perl") and any(_IN_PLACE.match(w) or w.startswith("--in-place") for w in args):
+            out.extend((w, False) for w in policy.operands(args))
+    return out
+
+
+def _readings(key: str, subject: str) -> list[str]:
+    """The segment as written, and with each value an earlier part of the command gave its variables (`D=~/.ssh; cp k $D/`), as the gate reads it for R-13."""
+    if "$" not in key or not subject:
+        return [key]
+    env = _assignments(subject)
+    return [key, *policy._subst_readings(key, env)] if env else [key]
+
+
+@functools.lru_cache(maxsize=8)
+def _assignments(subject: str) -> dict[str, list[str]]:
+    """The values the command gives its variables, read once per command (the question asks for every gated segment). Callers only read the answer."""
+    env: dict[str, list[str]] = {}
+    for seg, _dirs in shellnorm.segments_cwd(subject):
+        policy._note_assignments(seg, env)
+    return env
+
+
+def _writes_authkeys(key: str, subject: str = "") -> bool:
+    """Does one gated segment write an authorized_keys file? A reader (`cat ~/.ssh/authorized_keys`), a mention (`echo authorized_keys > CLAUDE.md`), a removal,
+    a chmod, an upload or a move away do not: only what the segment writes counts (`_written`). A name the gate cannot see copied into `~/.ssh` (`cp * ~/.ssh/`)
+    is R-13 too, but that it is authorized_keys is not known, so it is not said."""
+    for reading in _readings(key, subject):
+        folded = reading.casefold()
+        typed = "authorized_keys" in folded
+        if not typed and not ("ssh" in folded and _GLOBBY.search(reading)):   # the name is typed, or a glob destination in or under an ssh directory
+            continue                                                         # matches it: nothing else names it
+        for text, absolute in _written(reading, typed):
+            if (_AUTHKEYS_SSH if absolute else _AUTHKEYS_NAME).search(text):
+                return True
+    return False
+
+
+def _authkeys_call(a, tool: str) -> bool:
+    """Is this call, rated R-13, a write to an authorized_keys file? A Write or Edit names the path; a shell call is read from its gated segments."""
+    if a.rule_id != "R-13":
+        return False
+    if tool in policy.WRITE_TOOLS:
+        return bool(_AUTHKEYS_SSH.search(getattr(a, "subject", "") or ""))
+    subject = getattr(a, "subject", "") or ""
+    return any(_writes_authkeys(k, subject) for k in getattr(a, "seg_keys", None) or [])
+
+
+def _risk(a, tool: str) -> list[str]:
+    """The risk lines (`risk_lines`: the sentence of the rule that names the call, then of each kept rule it also matches). A call whose only gated work is writing
+    authorized_keys gets the login sentence alone; a call that also does other gated work (a hook or settings write, a push) keeps the sentence of its rule and adds
+    the login sentence to it, so neither risk is hidden (W-154 review)."""
+    if not _authkeys_call(a, tool):
+        return risk_lines(a)
+    keys = getattr(a, "seg_keys", None) or []
+    subject = getattr(a, "subject", "") or ""
+    if tool in policy.WRITE_TOOLS or all(_writes_authkeys(k, subject) for k in keys):
+        return [AUTHKEYS_RISK]
+    first, *rest = risk_lines(a)
+    return [f"{first} {AUTHKEYS_ALSO}", *rest]
 
 
 GENERIC_HO = "A rule that only you can decide matches this call."
@@ -89,6 +182,25 @@ def risk_line(rule_id: str, ho_ids=()) -> str:
             return GENERIC_HO
         return f"This call {' and '.join(known)}, and only you can decide that."
     return RISK_TEXT.get(rule_id, GENERIC_RISK)
+
+
+# W-153 review 2: `git update-ref` is R-10, but it moves a ref on this Mac only; the R-10 sentence ("outside this Mac") would be false for it.
+UPDATE_REF_RISK = "This moves or deletes a git branch or tag on this Mac, and a later push can publish it."
+_UPDATE_REF_KEY = re.compile(r"^git(?:\s+-\S+(?:\s+(?!update-ref\b)\S+)?)*\s+update-ref\b")
+
+
+def risk_lines(a) -> list[str]:
+    """The risk sentences of a call: the sentence of the rule that names it, then the sentence of every never-learned or human-only rule (`policy.also_kept`) the call
+    also matches, so a call named R-10 that also writes `AGENTS.md` still says it changes what guards the agent. An R-10 call whose gated segments are all
+    `git update-ref` gets `UPDATE_REF_RISK`: it changes nothing outside this Mac."""
+    keys = getattr(a, "seg_keys", None) or []
+    first = UPDATE_REF_RISK if a.rule_id == "R-10" and keys and all(_UPDATE_REF_KEY.match(k) for k in keys) else risk_line(a.rule_id, a.ho_ids)
+    lines = [first]
+    for r in policy.also_kept(a):
+        s = RISK_TEXT.get(r)
+        if s and s not in lines:
+            lines.append(s)
+    return lines
 
 
 # What a gated command does, as one sentence. The first pattern that matches the canonical key of a gated segment wins. `{1}` style groups are filled with `m.expand`.
@@ -504,11 +616,19 @@ def what_line(a, tool: str) -> str:
     """One plain sentence for what will happen. A shell call is read from its gated segments, any other tool from its name."""
     keys = list(getattr(a, "seg_keys", None) or [])
     if keys:
-        plain = _plain_push_call(getattr(a, "subject", "") or "")
-        return " ".join(dict.fromkeys(_WORST_PUSH if not plain and (k == "git push" or k.startswith("git push ")) else _render(k) for k in keys))
+        subject = getattr(a, "subject", "") or ""
+        plain = _plain_push_call(subject)
+
+        def line(k: str) -> str:
+            if k == "git push" or k.startswith("git push "):
+                return _render(k) if plain else _WORST_PUSH
+            return AUTHKEYS_WHAT if _writes_authkeys(k, subject) else _render(k)
+        return " ".join(dict.fromkeys(line(k) for k in keys))
     if tool.startswith("mcp__"):
         parts = show_safely(tool, one_line=True).split("__")
         return f"Use {parts[1]}: {parts[-1].replace('_', ' ')}." if len(parts) > 2 else f"Use the tool {show_safely(tool, one_line=True)}."
+    if tool in policy.WRITE_TOOLS and _authkeys_call(a, tool):
+        return AUTHKEYS_WHAT
     if tool in ("Write", "MultiEdit", "NotebookEdit"):
         return "Write a file."
     if tool == "Edit":
@@ -537,7 +657,8 @@ def other_count(a) -> int:
 
 def header(a, tool: str) -> list[str]:
     """The lines every question starts with, in this order: what, why it is risky, what else is in the call, and a hint when risky commands are joined."""
-    lines = [what_line(a, tool), risk_line(a.rule_id, a.ho_ids)]
+    with policy.one_call():   # the login text reads the copy targets of every gated segment: a glob destination is walked once for the question, within one budget
+        lines = [what_line(a, tool), *_risk(a, tool)]
     n = other_count(a)
     if n:
         lines.append(f"Also in this call: {n} other command that JADE rates as low risk." if n == 1 else f"Also in this call: {n} other commands that JADE rates as low risk.")

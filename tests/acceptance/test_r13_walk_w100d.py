@@ -79,6 +79,10 @@ TABLE = {
     r"(?<![\w.-])\.mcp\.json(?![\w-])": [(W("/tmp/repo/.mcp.json"), PLAIN)],
     r"\.vscode/(?:settings|tasks)\.json": [(W("/tmp/repo/.vscode/settings.json"), PLAIN), (W("/tmp/repo/.vscode/tasks.json"), PLAIN)],
     r"\.codex/config\.toml": [(W(HOME / ".codex/config.toml"), PLAIN)],
+    # W-153: the config and instruction files of other harnesses; plain, like CLAUDE.md and .mcp.json
+    r"(?<![\w.-])GEMINI\.md(?![\w.-])": [(W("/tmp/repo/GEMINI.md"), PLAIN)],
+    r"\.gemini/settings\.json(?![\w.-])": [(W(HOME / ".gemini/settings.json"), PLAIN)],
+    r"(?<![\w.-])\.claude\.json(?![\w.-])": [(W(HOME / ".claude.json"), PLAIN)],
     r"\.ai/rules\.md": [(W("/tmp/repo/.ai/rules.md"), PLAIN)],
     r"policies/(?:[\w-]+\.(?:yaml|py)|local/)": [
         (W("/tmp/repo/policies/risk.yaml"), PLAIN), (W("/tmp/repo/policies/local/x.yaml"), PLAIN),

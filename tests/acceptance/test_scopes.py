@@ -115,7 +115,7 @@ def test_merge_scope_refused_for_a_prefix_a_launcher_or_a_program_path(repo, cmd
                                  "gh pr merge 940 --repo github.com/owner/repoA --squash; ls", "ls && gh pr merge 940 --repo github.com/owner/repoA --squash", "gh pr merge 940 --repo github.com/owner/repoA --squash &"])
 def test_merge_scope_refused_unless_the_call_is_one_simple_command(repo, cmd):
     a = assessed(cmd, repo)
-    assert a.seg_keys and a.seg_keys[-1].startswith("gh pr merge 940 --repo github.com/owner/repoA") and len(a.seg_keys) == 1, (cmd, a.seg_keys)   # one gated segment, as the reviewer showed
+    assert a.seg_keys and all(k.startswith("gh pr merge 940 --repo github.com/owner/repoA") for k in a.seg_keys), (cmd, a.seg_keys)   # only gated merge segments, as the reviewer showed; a variable with a known value (W-191) adds a second key for the same merge, still a merge and still offered nothing below
     assert offered(cmd, repo) == [], cmd
     assert offered(f"cd {repo} && {cmd}", "/") == [], cmd                                                          # also behind a leading cd
 
