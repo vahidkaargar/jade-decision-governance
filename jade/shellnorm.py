@@ -1305,6 +1305,7 @@ def git_env_danger(name: str, val: str) -> bool:
 class _Scan:
     def __init__(self, s: str, depth: int, budget: list[int], literal_end: int = 0):
         self.s, self.n, self.depth, self.budget = s, len(s), depth, budget
+        self.spaced = len(budget) > 11 and bool(budget[11])   # the path view (`skeleton(spaced=True)`): slot 11 of the budget, so every nested scan keeps it (PRE3-1)
         self.nest = 0
         # Single quotes before this index are literal to the shell that runs the text: only the top-level text the outer shell parses. A body that is
         # re-parsed (`bash -c "..."`, `eval`, `| sh`, a here-string, a heredoc, a script the command writes) may hold text the outer shell already
@@ -1821,7 +1822,10 @@ class _Scan:
             else:
                 inert = _INERT.sub("\x06", plain)   # `awk 'NR>1'`: a quoted `>` is data, not a redirect
                 literal_sq = quote == "'" and i <= self.literal_end   # `'$HOME'` at the top level is literal: it never expands
-                emit('""' if re.search(r"\s", plain) else inert.replace("$", "\x06") if literal_sq else inert)
+                word = inert.replace("$", "\x06") if literal_sq else inert
+                if re.search(r"\s", plain):   # the path view keeps a word with a quoted space as one word (`_enc`): the root checks read it (PRE3-1)
+                    word = _enc(word) if self.spaced else '""'
+                emit(word)
 
         while i < n:
             c = s[i]
@@ -2048,17 +2052,17 @@ class _Scan:
 
 
 @functools.lru_cache(maxsize=16)
-def _skeleton_top(command: str, literal_end: int, legacy: bool = False, ssh: bool = True, targets: bool = False, ansi_bash: bool = False, prior: bool = False) -> str:
+def _skeleton_top(command: str, literal_end: int, legacy: bool = False, ssh: bool = True, targets: bool = False, ansi_bash: bool = False, prior: bool = False, spaced: bool = False) -> str:
     if not ansi_bash:
-        return _skeleton(command, 0, None, literal_end, legacy, ssh, targets, prior)
+        return _skeleton(command, 0, None, literal_end, legacy, ssh, targets, prior, spaced)
     token = _ANSI_BASH.set(True)   # bash's reading of `$'\\c'` for the whole scan, at every depth and in every word list (W-133, F10)
     try:
-        return _skeleton(command, 0, None, literal_end, legacy, ssh, targets, prior)
+        return _skeleton(command, 0, None, literal_end, legacy, ssh, targets, prior, spaced)
     finally:
         _ANSI_BASH.reset(token)
 
 
-def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None, literal_end: int | None = None, ssh: bool = True) -> str:
+def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None, literal_end: int | None = None, ssh: bool = True, spaced: bool = False) -> str:
     """The command with quoting, escapes, comments, heredoc bodies and expansions resolved; separators are left for SPLIT.
 
     `literal_end`: single quotes before this index are literal (default: the whole text). A caller that appends text the command runs without writing
@@ -2068,18 +2072,21 @@ def skeleton(command: str, _depth: int = 0, _budget: list[int] | None = None, li
     so it is memoised: a 2 MB command is scanned once, not once per caller.
 
     `ssh` False: the remote command of `ssh host 'cmd'` is not read as a command of its own (V6-17 review: by default it is, like `sh -c 'cmd'`). Only the check that
-    asks whether a call is one simple command (jade/scopes.py) passes False."""
+    asks whether a call is one simple command (jade/scopes.py) passes False.
+
+    `spaced`: the path view. A quoted word with whitespace is kept as one word with its whitespace encoded (`_enc`) instead of `""`; only the root checks read it
+    (policy), the rules keep reading `""`, so quoted prose never matches a path rule (PRE3-1). A backslash-escaped space is always encoded."""
     if _depth == 0 and _budget is None:
-        return _skeleton_top(command, len(command) if literal_end is None else literal_end, False, ssh)
+        return _skeleton_top(command, len(command) if literal_end is None else literal_end, False, ssh, spaced=spaced)
     return _skeleton(command, _depth, _budget)
 
 
-def _skeleton(command: str, _depth: int, _budget: list[int] | None, literal_end: int = 0, legacy: bool = False, ssh: bool = True, targets: bool = False, prior: bool = False) -> str:
-    # `legacy`, `ssh`, `targets` and `prior` ride in the budget, which every nested scan shares: origin/main's reading of a quoted `${NAME}` (`$X`, see `_Scan`), the reading of an ssh remote command,
+def _skeleton(command: str, _depth: int, _budget: list[int] | None, literal_end: int = 0, legacy: bool = False, ssh: bool = True, targets: bool = False, prior: bool = False, spaced: bool = False) -> str:
+    # `legacy`, `ssh`, `targets`, `prior` and `spaced` ride in the budget, which every nested scan shares: origin/main's reading of a quoted `${NAME}` (`$X`, see `_Scan`), the reading of an ssh remote command,
     # the reading of a brace word after a redirect operator as several targets (`expand_braces`), and the reading as it was before W-120 (`_skeleton_both_top`), at every depth.
     # Slot 5 is the work left for reading variable commands with their values (`VARIABLE_WORK`). Slot 7 is the table of the values variables were given, for the whole
-    # command at every depth, slot 8 counts its changes, and slot 9 is the work left for reading the variables in the words of a stage (`WORD_WORK`) (W-191). Slot 10 is `prior`.
-    budget = _budget if _budget is not None else [BUDGET, HERE_ALLOWANCE, {}, legacy, ssh, VARIABLE_WORK, targets, {}, 0, WORD_WORK, prior]
+    # command at every depth, slot 8 counts its changes, and slot 9 is the work left for reading the variables in the words of a stage (`WORD_WORK`) (W-191). Slot 10 is `prior`, slot 11 is `spaced` (the path view, PRE3-1).
+    budget = _budget if _budget is not None else [BUDGET, HERE_ALLOWANCE, {}, legacy, ssh, VARIABLE_WORK, targets, {}, 0, WORD_WORK, prior, spaced]
     budget[0] -= len(command)
     command = _MARK_CHARS.sub("\x06", command)   # a byte that is one of the marks stays a word
     if _depth > MAX_DEPTH or budget[0] < 0:
@@ -2287,30 +2294,30 @@ _QUOTED_VAR = re.compile(r"'[^']*\$|\"[^\"]*\$\{")   # the two places the curren
 
 
 @functools.lru_cache(maxsize=16)
-def _skeleton_both_top(command: str, literal_end: int) -> tuple[tuple[str, bool], ...]:
+def _skeleton_both_top(command: str, literal_end: int, spaced: bool = False) -> tuple[tuple[str, bool], ...]:
     """The readings of a command, each as (text, is_current): the current reading; the current reading with a single-quoted `$X` and a double-quoted `${NAME}` read as main read
     them (`literal_end` 0, `legacy`), when the command has one and the two differ; the current reading with every result of a brace word after a redirect operator a target of its own
     (`git > {a,b} push origin main`, zsh), when the command has one and the two differ; the current reading with bash's `\\c` in `$'...'` (a NUL ends the string), when the command has one and the
     two differ; and origin/main's own reading (cut as main cut it). Every one is a command line of its own, so the rating and the push check are the stricter
     of all of them: a literal `'$B'` that is one reading's branch name stays the other readings' unknown branch (PR 46 merge review, ADV-1 and ADV-2)."""
     command = _JOIN_CHAR.sub("\x06", command)   # a byte that is the join stays a word
-    out = [(_skeleton_top(command, literal_end), True)]
+    out = [(_skeleton_top(command, literal_end, spaced=spaced), True)]
     if _QUOTED_VAR.search(command):
-        loose = _skeleton_top(command, 0, True)
+        loose = _skeleton_top(command, 0, True, spaced=spaced)
         if loose != out[0][0]:
             out.append((loose, True))
     if "{" in command and "," in command and _BRACE_TARGET.search(command):   # zsh: `git > {a,b} push origin main` writes a and b and pushes (W-131)
-        multi = _skeleton_top(command, literal_end, False, True, True)
+        multi = _skeleton_top(command, literal_end, False, True, True, spaced=spaced)
         if multi != out[0][0]:
             out.append((multi, True))
     if "$'" in command and "\\c" in command:   # bash ends a `$'...'` string at `\\c ` and reads `\\cj` as a newline, zsh reads `\\c` as a `c`: `git push origin $'main\\c@'` (W-133, F10)
-        ansi = _skeleton_top(command, literal_end, False, True, False, True)
+        ansi = _skeleton_top(command, literal_end, False, True, False, True, spaced=spaced)
         if all(ansi != text for text, _ in out):
             out.append((ansi, True))
     if _W120_FORMS.search(command):
         # The reading the gate had before W-120, kept beside the new one: a named descriptor (`{fd}>log`) is a word there and `>(cmd)` opens a group. A shell that does not know
         # `{fd}>` (bash before 4.1) reads the word, and the new reading drops it, so no command is rated lower than it was (the differential of that change found eight).
-        for text in dict.fromkeys(_skeleton_top(command, *args, prior=True) for args in ((literal_end, False), *(((0, True),) if len(out) > 1 else ()))):
+        for text in dict.fromkeys(_skeleton_top(command, *args, prior=True, spaced=spaced) for args in ((literal_end, False), *(((0, True),) if len(out) > 1 else ()))):
             if all(text != seen for seen, _ in out):
                 out.append((text, True))
     floor = _base_skeleton(command)
@@ -2363,16 +2370,16 @@ def segments(command: str) -> list[str]:
 SEG_TOKEN = re.compile(r"(\n|;|&&|\|\||(?<!>)(?<!>&)\||(?<![<>])&(?!>)|\$\(|`|\(|\)|\{|\})")
 
 
-def segments_cwd(command: str, cwd: str = "", literal_end: int | None = None) -> list[tuple[str, tuple[str, ...]]]:
+def segments_cwd(command: str, cwd: str = "", literal_end: int | None = None, spaced: bool = False) -> list[tuple[str, tuple[str, ...]]]:
     """Like `segments`, with the directories the segment may run in: `cd`/`pushd`/`popd` are followed, a subshell keeps its own.
-    `literal_end`: as in `skeleton`.
+    `literal_end`, `spaced`: as in `skeleton`.
 
     A command that carries substitutions is ordered by the canonical text, not by execution, so every directory the
     command passes through counts for every segment then.
     """
     rows: list[tuple[str, tuple[str, ...]]] = []
     big: set[tuple[str, tuple[str, ...]]] = set()
-    readings = _skeleton_both_top(command, len(command) if literal_end is None else literal_end)
+    readings = _skeleton_both_top(command, len(command) if literal_end is None else literal_end, spaced)
     for text, current in readings:
         got = _segments_cwd_of(text, cwd, SEG_TOKEN if current else _base().SEG_TOKEN)
         # origin/main's reading is classified again even when its rows are already rows of the current reading: the policy carries state from row to row (the fetched
