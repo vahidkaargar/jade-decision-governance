@@ -1258,6 +1258,8 @@ def _config_roots() -> tuple[str, ...]:
 
 def _expand_home(p: str) -> str:
     """`~`, `$HOME` and `${HOME}` at the start of a path word, which the shell expands before the command sees them."""
+    if p[:1] not in ("~", "$"):
+        return p   # only a leading `~` or `$HOME` is expanded: most paths are not looked up in the environment
     home = os.path.expanduser("~")
     for var in ("${HOME}", "$HOME"):
         if p == var or p.startswith(var + "/"):
@@ -1278,17 +1280,30 @@ def _path_key(path: str, base: str) -> str:
 
 
 _DATA_FIRMLINK_RE = re.compile(r"/system/volumes/data(?=/|$)", re.I)
+_VOLFS_RE = re.compile(r"/\.vol(?=/|$)", re.I)
+
+
+def _volfs(key: str) -> bool:
+    """A path under macOS volfs (`/.vol/<device>/<inode>[/...]`): it names any file or folder by number, so a write there counts as a write to every
+    protected root (PRE3-2). `key` is a `_path_key` (firmlink folded); the match ignores case on every system."""
+    return bool(_VOLFS_RE.match(key))
 
 
 def _fold(p: str) -> str:
     """The comparison form of a real path, used on both sides of every root check: the macOS data-volume firmlink prefix removed
     (`/System/Volumes/Data/Users/x` is `/Users/x`, the same inode, and realpath does not resolve it: PRE2-2), Unicode NFC (APFS ignores NFC/NFD:
-    PRE2-9), case-folded where the volume ignores case. Each step only adds matches on another system."""
+    PRE2-9), case-folded where the volume ignores case. Each step only adds matches on another system. Remembered per (path, case rule): every root is
+    folded again for each path checked, and a command with many paths checks each one against every root set (W8 F3)."""
+    return _fold_for(p, _case_insensitive())
+
+
+@lru_cache(maxsize=16384)
+def _fold_for(p: str, insensitive: bool) -> str:
     if _DATA_FIRMLINK_RE.match(p):
         p = p[20:] or "/"
     if not p.isascii():
         p = unicodedata.normalize("NFC", p)
-    if _case_insensitive():
+    if insensitive:
         p = p.casefold()
         if not p.isascii():
             p = unicodedata.normalize("NFC", p)
@@ -1301,6 +1316,8 @@ def _si12_hit(path: str, base: str, roots: tuple[str, ...], parent_too: bool = F
     if not path or "\x00" in path:
         return False
     real = _path_key(path, base)
+    if roots and _volfs(real):
+        return True
     for r in roots:
         r = _fold(r)
         if real == r or real.startswith(r + os.sep) or (parent_too and r.startswith(real.rstrip(os.sep) + os.sep)):
@@ -1611,37 +1628,51 @@ def _ho_tool_paths(a: Assessment, tool_input: dict, subjects: list[str], cwd: st
             _ho_add(a, HO_MOD)
         if _si12_hit(s, cwd, sroots):
             _ho_add(a, HO_SHELL)
-        if _SETTINGS_FILE.search(_path_key(s, cwd)):
+        key = _path_key(s, cwd)
+        if _volfs(key):
+            _ho_add(a, HO_SETTINGS)   # PRE3-2: the settings file by number; its text is not checked
+        elif _SETTINGS_FILE.search(key):
             text = _written_text(tool_input) if text is None else text
             if not text or _settings_disables(text) or _settings_disables(_settings_result(tool_input, s, cwd)):   # unreadable text counts: it could be anything
                 _ho_add(a, HO_SETTINGS)
 
 
+def _settings_key(key: str) -> bool:
+    """A `_path_key` that is a Claude settings file, or a volfs name that may be one (PRE3-2)."""
+    return bool(_SETTINGS_FILE.search(key)) or _volfs(key)
+
+
 def _ho_segment(a: Assessment, seg: str, dirs: tuple[str, ...], cwd: str, wroots: tuple[str, ...], mroots: tuple[str, ...], sroots: tuple[str, ...],
-                git_work_tree: str | None = None) -> None:
-    """Human-only classes of one shell segment that is not read-only. `git_work_tree`: a GIT_WORK_TREE an earlier segment of the call set."""
+                git_work_tree: str | None = None, roots_only: bool = False) -> None:
+    """Human-only classes of one shell segment that is not read-only. `git_work_tree`: a GIT_WORK_TREE an earlier segment of the call set.
+    `roots_only`: the root checks alone (the path view of a segment, PRE3-1); the pattern classes were read from the rules' view."""
     toks, parent_too = _segment_tokens(seg)
     bare, calls = _analyse(seg)
-    links = _hardlink_sources(bare)
+    if roots_only:
+        toks = _path_view_tokens(bare, toks)   # PRE4-5: prose arguments are not paths
+    links = _hardlink_sources(bare, fed=_xargs_inner(seg) is not None)
     into = _into_targets(bare)
     _ho_shell_segment(a, seg, bare, calls, toks, parent_too, dirs, cwd, sroots, links, into, git_work_tree)
     for d in (dirs or ("",)):
         base = d or cwd
         # PRE2-3: a hard link is a second name of the same file, whichever side is the protected one. PRE2-8: a file copied into a directory under its
         # own name (`cp /tmp/settings.json ~/.claude/`) is an exact file; the whole-tree check is the shell roots' only.
-        checks = [(src, True) for src in links] + [(path, False) for path, _, exact, _ in into if exact]
-        for path, parent in checks:
+        checks = links + [(path, False, False) for path, _, exact, _ in into if exact]
+        for path, parent, unless_dir in checks:
+            if unless_dir and os.path.isdir(os.path.join(base or os.getcwd(), _expand_home(path))):
+                continue   # `ln SRC DIR` makes DIR/name, counted on its own (PRE3-8)
             if _si12_hit(path, base, wroots, parent):
                 _ho_add(a, HO_WIRING)
             if _si12_hit(path, base, mroots, parent):
                 _ho_add(a, HO_MOD)
-            if path and "\x00" not in path and _SETTINGS_FILE.search(_path_key(path, base)):
+            if path and "\x00" not in path and _settings_key(_path_key(path, base)):
                 _ho_add(a, HO_SETTINGS)
     install = bool(_INSTALL_CMD.search(bare))
-    if _UV_TOOL_JADE.search(bare):
-        _ho_add(a, HO_WIRING)
-    for ident in sorted(humanonly.shell_classes(bare, dirs, cwd, raw=seg)):
-        _ho_add(a, ident)
+    if not roots_only:
+        if _UV_TOOL_JADE.search(bare):
+            _ho_add(a, HO_WIRING)
+        for ident in sorted(humanonly.shell_classes(bare, dirs, cwd, raw=seg)):
+            _ho_add(a, ident)
     for tok in toks:
         for d in (dirs or ("",)):
             base = d or cwd
@@ -1650,7 +1681,7 @@ def _ho_segment(a: Assessment, seg: str, dirs: tuple[str, ...], cwd: str, wroots
             if _si12_hit(tok, base, mroots, parent_too):
                 _ho_add(a, HO_MOD)
             real = _realpath(os.path.join(base or os.getcwd(), os.path.expanduser(tok))) if tok and "\x00" not in tok else ""
-            if real and _SETTINGS_FILE.search(_fold(real)):
+            if real and _settings_key(_fold(real)):
                 _ho_add(a, HO_SETTINGS)   # a shell write of a settings file: the text is not the gate's to read
             if install and real and os.path.isdir(real) and _is_checkout(real):
                 _ho_add(a, HO_INSTALL)
@@ -1664,6 +1695,23 @@ _GIT_WORK_TREE_ENV = re.compile(r"(?:^|\s)GIT_WORK_TREE=(\S*)")
 _HARDLINK_CP = re.compile(r"^-[A-Za-z]*l[A-Za-z]*$")
 _SYMLINK_LN = re.compile(r"^-[A-Za-z]*s[A-Za-z]*$")
 _NO_TARGET_DIR = re.compile(r"^-[A-Za-z]*T[A-Za-z]*$")
+_RSYNC_RELATIVE = re.compile(r"^-[A-Za-z]*R[A-Za-z]*$")
+_GLOB_CHARS = re.compile(r"[*?\[]")
+_COMPUTED_WORD = re.compile(r"[$`]|[@!+*?]\(")   # `$F`, `${F}`, `"$@"`, `$(...)`, a backtick, an extglob `@(..)`: the shell computes the name
+_UNKNOWN_NAME = re.compile(r"[\x00\x06]|[@!+]$")   # a NUL, the segmenter's mark (`{}`), an extglob prefix the segmenter cut at `(`: the name made is not the name read (W8)
+_RSYNC_REMOTE = re.compile(r"^(?:rsync://[^/]*/?|[^/]*?::|[^/]*?:)")
+
+
+def _rsync_source_path(x: str) -> str:
+    """The path part of an rsync source: `host:p` and `host::mod/p` and `rsync://host/mod/p` give `p`; the remote home (`host:`), a module root and
+    `.` give '' or '.', a contents copy (PRE3-3)."""
+    m = _RSYNC_REMOTE.match(x)
+    if not m:
+        return x
+    rest = x[m.end():]
+    if "::" in m.group() or m.group().startswith("rsync://"):
+        rest = rest.split("/", 1)[1] if "/" in rest else ""   # the first part is the module
+    return rest
 # rsync options whose value is the next word (rsync reads options anywhere on the line, also after the operands: PRE2-11)
 _RSYNC_VALUE = frozenset({"-e", "--rsh", "--exclude", "--include", "--exclude-from", "--include-from", "--files-from", "-f", "--filter", "--rsync-path",
                           "-T", "--temp-dir", "--compare-dest", "--copy-dest", "--link-dest", "--backup-dir", "--suffix", "--chmod", "--chown", "--usermap",
@@ -1671,13 +1719,14 @@ _RSYNC_VALUE = frozenset({"-e", "--rsh", "--exclude", "--include", "--exclude-fr
                           "--bwlimit", "--max-size", "--min-size", "--partial-dir", "--port", "--sockopts", "--skip-compress", "--modify-window", "--iconv",
                           "--max-delete", "--write-batch", "--read-batch", "--only-write-batch", "-M", "--remote-option", "--info", "--debug",
                           "--checksum-choice", "--cc", "--compress-choice", "--zc", "--compress-level", "--zl", "--stop-after", "--stop-at", "--address",
-                          "--protocol", "--outbuf", "--early-input", "--max-alloc", "--checksum-seed"})
+                          "--protocol", "--outbuf", "--early-input", "--max-alloc", "--checksum-seed", "--copy-as"})
 _RSYNC_VALUE_CLUSTER = re.compile(r"^-[A-Za-z]*[efTBM]$")
 _SOURCE_VERBS = frozenset({"source", "."})
 
 
 def _word(w: str) -> str:
-    return w.strip("'\"`,;()")
+    """A word of a segment as a path: quotes and stray punctuation removed, the whitespace the path view encodes restored (PRE3-1)."""
+    return shellnorm._dec(w.strip("'\"`,;()"))
 
 
 def _option_value(args: list[str], names: tuple[str, ...], long: str = "") -> str | None:
@@ -1721,16 +1770,40 @@ def _rsync_operands(args: list[str]) -> list[str]:
     return out
 
 
-def _hardlink_sources(bare: str) -> list[str]:
-    """The operands of a hard-link command (`ln` without `-s`, `cp -l`/`--link`/`-al`, `link`): each is a second name of the other (PRE2-3)."""
+def _hardlink_sources(bare: str, fed: bool = False) -> list[tuple[str, bool, bool]]:
+    """The names a hard-link command (`ln` without `-s`, `cp -l`/`--link`/`-al`, `link`) joins, as (path, parent_too, unless_dir): each source with
+    parent_too (PRE2-3), and the new name: the destination itself unless it is a directory, else `dest/name` per source (`ln /tmp/x ~` makes `~/x`
+    only, PRE3-8); a lone source links `./name`. The PRE3-8 narrowing applies to one plain literal source only: a glob, a contents source (`DIR/`, `DIR/.`),
+    `-T`, several sources (PRE4-1), or a source the shell computes (`$F`, `"$@"`, `$(...)`, a backtick, an extglob: PRE5-2) keep the destination check
+    as it was. So does a source whose name the words do not give (W8): the segmenter's mark for `{}` of `find -exec` and `xargs -I{}`, a NUL (it ends the name
+    the shell makes), the stub of an extglob the segmenter cut at `(`; `-t D` with no source (they come on standard input); and any command `xargs` runs
+    (`fed`: its replace string, whatever it is spelled, and the words it appends are names that are not typed)."""
     words = [_word(w) for w in bare.split(" ") if w]
     if not words:
         return []
     verb, args = words[0].rsplit("/", 1)[-1], words[1:]
-    if verb == "link" or (verb == "ln" and not any(w == "--symbolic" or _SYMLINK_LN.match(w) for w in args)) or (
-            verb in ("cp", "gcp") and any(w == "--link" or _HARDLINK_CP.match(w) for w in args)):
-        return operands(args)
-    return []
+    if not (verb == "link" or (verb == "ln" and not any(w == "--symbolic" or _SYMLINK_LN.match(w) for w in args)) or (
+            verb in ("cp", "gcp") and any(w == "--link" or _HARDLINK_CP.match(w) for w in args))):
+        return []
+    ops = operands(args)
+    tdir = _target_dir(args) if verb != "link" else None
+    if tdir:
+        dest, srcs, unless_dir = tdir, [o for o in ops if o != tdir], False
+    elif len(ops) >= 2:
+        dest, srcs, unless_dir = ops[-1], ops[:-1], True
+    else:
+        dest, srcs, unless_dir = ".", ops, False
+    out = [(src, True, False) for src in srcs]
+    computed = {_word(w) for w in bare.split(" ")[1:] if _COMPUTED_WORD.search(w)}   # PRE5-2: a name the shell computes is not a plain literal
+    broad = fed or len(srcs) != 1 or any(w == "--no-target-directory" or _NO_TARGET_DIR.match(w) for w in args) or any(
+        _GLOB_CHARS.search(s) or s in (".", "..") or s.endswith(("/", "/.")) or s in computed or _COMPUTED_WORD.search(s) or _UNKNOWN_NAME.search(s)
+        for s in srcs)
+    if broad and (srcs or tdir):   # `-t D` with no source: the names come on standard input (W8 F1)
+        out.append((dest, True, False))   # the old check: the destination with parent_too, directory or not
+    elif unless_dir:
+        out.append((dest, True, True))
+    out += [(os.path.join(_expand_home(dest), name), True, False) for src in srcs if (name := os.path.basename(src.rstrip("/"))) not in ("", ".", "..")]
+    return list(dict.fromkeys(out))
 
 
 _INTOS: dict[str, list[tuple[str, bool, bool, bool]]] | None = None   # set for the length of one `assess` only: `_into_targets` answers
@@ -1770,16 +1843,35 @@ def _into_targets_now(bare: str) -> list[tuple[str, bool, bool, bool]]:
             return []
         if verb == "rsync" and re.match(r"^[^/]*:", dest):
             return []   # a remote destination
-        if verb == "ditto" or (verb in ("cp", "gcp") and any(w == "--no-target-directory" or _NO_TARGET_DIR.match(w) for w in args)):
-            return [(dest, True, False, False)]   # ditto copies the contents of each source; `cp -T`: dest is the copy itself
+        if verb == "ditto":   # ditto copies the contents of a folder, and a file into a folder under its own name (PRE3-4)
+            return list(dict.fromkeys([(dest, True, False, False)] + [(os.path.join(_expand_home(dest), name), True, True, False) for x in srcs
+                                                                     if (name := os.path.basename(x.rstrip("/"))) not in ("", ".", "..")]))
+        if verb in ("cp", "gcp") and any(w == "--no-target-directory" or _NO_TARGET_DIR.match(w) for w in args):
+            return [(dest, True, False, False)]   # `cp -T`: dest is the copy itself
         copyish = verb in ("cp", "gcp", "rsync")
         recursive = verb == "rsync" or (verb in ("cp", "gcp") and any(_TREE_CP_FLAG.match(w) or w in ("--recursive", "--archive") for w in args))
+        # PRE3-3: `rsync -R`/`--relative`, `--files-from` and `cp --parents` write each source's path, or listed files, below dest: a contents copy
+        relative = (verb == "rsync" and any(w == "--relative" or _RSYNC_RELATIVE.match(w) for w in args)) or (verb in ("cp", "gcp") and "--parents" in args)
+        spread = relative or (verb == "rsync" and any(w.startswith("--files-from") for w in args))
         out: list[tuple[str, bool, bool, bool]] = []
         for x in srcs:
-            contents = copyish and (x in (".", "..") or x.endswith(("/", "/.")))   # BSD cp and rsync copy what is inside
+            if verb == "rsync":
+                x = _rsync_source_path(x)
+            glob = bool(_GLOB_CHARS.search(x))
             name = os.path.basename(x.rstrip("/"))
-            if contents:
+            if spread:   # added to the checks below, never in place of them (PRE4-2)
                 out.append((dest, True, False, False))
+                rel = os.path.normpath(x.split("/./", 1)[1] if verb == "rsync" and "/./" in x else x.lstrip("/")) if relative and x else "."
+                if rel not in (".", "") and not rel.startswith(".."):   # `rsync -R a/b D` and `cp --parents a/b D` write `D/a/b`
+                    out.append((os.path.join(_expand_home(dest), rel), recursive, True, False))
+            # BSD cp and rsync copy what is inside `src/`; a glob source may name anything in its folder (recursive, or a dot pattern: PRE3-3)
+            contents = copyish and (x in ("", ".", "..") or x.endswith(("/", "/.")))
+            # A glob source and `~` may also be one name (a lone match, a file): they keep the entries below as well, so a glob destination that matches a
+            # FILE still reads as that file (`cp -R /tmp/x* proj/CLAUDE.m*`, W8 F1). Only a source that is surely a folder's contents stops here.
+            spreads = copyish and not contents and (x == "~" or (glob and (recursive or name.startswith((".", "[")))))
+            if contents or spreads:
+                out.append((dest, True, False, False))
+            if contents:
                 continue
             if name not in ("", ".", ".."):
                 out.append((os.path.join(_expand_home(dest), name), recursive, True, False))
@@ -1808,7 +1900,6 @@ def _into_targets_now(bare: str) -> list[tuple[str, bool, bool, bool]]:
 # name is not known (a glob, a variable the command did not set to a literal, a tree's content, an archive) is NOT guessed at: it is read by `unseen_into_dedicated` below,
 # which is high only when the directory it lands in is one made for protected files (the owner's decision, W-82, docs/05 T19).
 _DIR_DEST_VERBS = frozenset({"cp", "gcp", "mv", "install", "ln", "rsync", "ditto"})
-_GLOB_CHARS = re.compile(r"[*?\[]")
 DIR_GLOB_CAP = 4096          # matches of a glob destination that are examined
 DIR_GLOB_COMPONENTS = 3      # a glob destination with more wildcard components than this is not expanded (the walk is the cost)
 DIR_GLOB_WALKS = 16          # different glob destinations walked in one command; one past that is read as written (`cp s1* /usr/*/*/; cp s2* /usr/*/*/; ...`)
@@ -2071,11 +2162,46 @@ def unseen_into_dedicated(bare: str, dirs: tuple[str, ...] = ("",)) -> bool:
     return False
 
 
+_GIT_CONFIG_PAIR_ENV = re.compile(r"(?:^|\s)GIT_CONFIG_(KEY|VALUE)_(\d+)=(\S*)", re.I)
+_SHELL_RUNNER = re.compile(r"^(?:[A-Za-z_]\w*=\S*\s+)*(?:(?:\S*/)?env(?:\s+-\S+|\s+[A-Za-z_]\w*=\S*)*\s+)?(?:\S*/)?(?:ba|z|da|k|a|fi)?sh\s+-[A-Za-z]*c(?:\s|$)")
+
+
+def _env_config_work_tree(seg: str) -> str | None:
+    """The value of the first `GIT_CONFIG_KEY_<n>=core.worktree` that has a `GIT_CONFIG_VALUE_<n>=D` in the segment (PRE3-5). Whether GIT_CONFIG_COUNT
+    covers n is not checked: the caller counts this as an added location, never as the only one (PRE4-4). One pass over the text (PRE4-6)."""
+    if "GIT_CONFIG_" not in seg.upper():
+        return None
+    keys: list[str] = []
+    vals: dict[str, str] = {}
+    for m in _GIT_CONFIG_PAIR_ENV.finditer(seg):
+        kind, n, v = m.group(1).upper(), m.group(2), m.group(3)
+        if kind == "KEY":
+            if v.strip("'\"").lower() == "core.worktree":
+                keys.append(n)
+        else:
+            vals.setdefault(n, v)
+    return next((vals[n] for n in keys if n in vals), None)
+
+
+def _env_work_tree(seg: str) -> str | None:
+    """The work tree a segment's environment gives git: `GIT_WORK_TREE=D`, or `GIT_CONFIG_KEY_<n>=core.worktree` with its `GIT_CONFIG_VALUE_<n>=D` (PRE3-5)."""
+    if m := _GIT_WORK_TREE_ENV.search(seg):
+        return m.group(1)
+    return _env_config_work_tree(seg)
+
+
 def _git_tree_targets(seg: str, calls: list[shellnorm.GitCall], carried: str | None = None) -> list[tuple[str, bool]]:
     """The work trees a git call writes (`-C D`, `--work-tree D`, `-c core.worktree=D`, `GIT_WORK_TREE=D` in the segment or set by an earlier one
     (`carried`), else the directory it runs in), and the directory a clone or a new worktree fills: a work tree that is home, or holds a start-up file, is
-    replaced file by file (`git --work-tree=~ checkout -- .`)."""
-    env = m.group(1) if (m := _GIT_WORK_TREE_ENV.search(seg)) else carried
+    replaced file by file (`git --work-tree=~ checkout -- .`).
+
+    Only a `GIT_WORK_TREE=D` on this segment itself replaces the default location. A `GIT_CONFIG_KEY_<n>=core.worktree` value and a work tree carried
+    from an earlier segment (an export, an assignment, a nested shell's prefix) are added to the locations checked: the directory git runs in (cwd, `-C`)
+    is still counted, unless the call names its own `--work-tree` or `-c core.worktree` (PRE4-3, PRE4-4)."""
+    own = m.group(1) if (m := _GIT_WORK_TREE_ENV.search(seg)) else None
+    cfg = _env_config_work_tree(seg)
+    env = own or cfg or carried
+    extra = [x for x in dict.fromkeys((cfg, carried)) if x]   # added locations, never in place of another
     out = []
     for call in calls:
         sub, args = call.sub, call.args
@@ -2090,6 +2216,12 @@ def _git_tree_targets(seg: str, calls: list[shellnorm.GitCall], carried: str | N
         for d in call.dirs:
             base = os.path.join(base, _expand_home(_word(d)))
         wt = call.work_tree or call.config_work_tree or env
+        if sub not in ("clone", "worktree") and env and wt != env:   # git takes GIT_WORK_TREE over core.worktree: count both, the safe direction
+            out.append((os.path.join(base, _expand_home(_word(env))), True))
+        if sub not in ("clone", "worktree"):
+            out += [(os.path.join(base, _expand_home(_word(x))), True) for x in extra if x != wt and x != env]
+            if own is None and extra and not (call.work_tree or call.config_work_tree):
+                out.append((base, True))   # the real work tree: the env value may not reach this git (PRE4-3, PRE4-4)
         if sub == "clone":
             dest = ops[-1] if len(ops) >= 2 else (os.path.basename(ops[0].rstrip("/")).removesuffix(".git") if ops else "")
             out.append((os.path.join(base, _expand_home(_word(dest))), True))
@@ -2102,14 +2234,14 @@ def _git_tree_targets(seg: str, calls: list[shellnorm.GitCall], carried: str | N
 
 
 def _ho_shell_segment(a: Assessment, seg: str, bare: str, calls: list[shellnorm.GitCall], toks: list[str], parent_too: bool, dirs: tuple[str, ...], cwd: str,
-                      sroots: tuple[str, ...], links: list[str], into: list[tuple[str, bool, bool, bool]], git_work_tree: str | None) -> None:
+                      sroots: tuple[str, ...], links: list[tuple[str, bool, bool]], into: list[tuple[str, bool, bool, bool]], git_work_tree: str | None) -> None:
     """HO-shell-startup for one shell segment: the paths it writes, the files it hard-links, the trees it copies or unpacks, the git work trees it writes.
     `source F` reads F: only its redirects count (PRE-10)."""
     if not sroots:
         return
     if bare.split(" ", 1)[0] in _SOURCE_VERBS:
         toks = [_word(t) for t in REDIRECT_TARGET.findall(bare)]
-    targets = [(t, parent_too, False) for t in toks] + [(s, True, False) for s in links] + [(p, par, ud) for p, par, _, ud in into]
+    targets = [(t, parent_too, False) for t in toks] + links + [(p, par, ud) for p, par, _, ud in into]
     targets += [(p, par, False) for p, par in _git_tree_targets(seg, calls, git_work_tree)]
     for path, parent, unless_dir in targets:
         for d in dirs or ("",):
@@ -2135,7 +2267,11 @@ _REDIRECT_PREFIX = re.compile(r"^(?:\d+|&)?(?:<>|>>?)[|&]?")
 def _segment_tokens(seg: str) -> tuple[list[str], bool]:
     """The words of a shell segment that may be paths it writes (the write view of the segment, or the whole segment when it may write any operand), cleaned
     of quotes and of an `--opt=` prefix, and whether its verb replaces a directory (rm, mv, find -delete ...): a parent of the operand then counts too."""
-    bare = _bare(seg)
+    return _bare_tokens(_bare(seg))
+
+
+def _bare_tokens(bare: str) -> tuple[list[str], bool]:
+    """`_segment_tokens` of a segment already without its launcher prefixes."""
     words = bare.split(" ")
     verb = words[0].rsplit("/", 1)[-1]
     view = files_view(bare)
@@ -2144,15 +2280,53 @@ def _segment_tokens(seg: str) -> tuple[list[str], bool]:
     toks = []
     for tok in text.split(" "):
         tok = tok.rpartition("=")[2] if "=" in tok and not tok.startswith("=") else tok
-        tok = _REDIRECT_PREFIX.sub("", tok.strip("'\"`,;()"))   # `3>>F`, `&>F`, `>|F`: the file after the operator (PRE-7)
+        tok = shellnorm._dec(_REDIRECT_PREFIX.sub("", tok.strip("'\"`,;()")))   # `3>>F`, `&>F`, `>|F`: the file after the operator (PRE-7); PRE3-1 decode
         if tok and not tok.startswith("-") and tok not in (">", ">>"):
             toks.append(tok)
     return toks, parent_too
 
 
-def _si12_segment(seg: str, dirs: tuple[str, ...], cwd: str, roots: tuple[str, ...]) -> bool:
-    """SI-12 for one shell segment that is not read-only: does it write the config directory (or replace it, or a parent of it)?"""
+# The options whose value is text, not a path, per verb: the path view (PRE3-1) drops only these values (PRE4-5, PRE5-1). A deny-list of prose positions:
+# a verb not named here keeps every word, so a new writer fails toward the class.
+_PROSE_OPTS = frozenset({"--note", "--body", "--title", "--message", "-m", "--subject", "--description"})
+_TEXT_OPTS = {"git": _PROSE_OPTS, "gh": _PROSE_OPTS, "glab": _PROSE_OPTS, "jade": _PROSE_OPTS, "curl": frozenset({"-d", "--data", "--data-raw"})}
+_GIT_TEXT_SUBS = frozenset({"commit", "tag", "notes", "merge", "stash", "format-patch", "send-email"})   # git verbs whose `-m`/`--message` is text
+
+
+def _path_view_tokens(bare: str, toks: list[str]) -> list[str]:
+    """The words of a segment the path view reads: the segment's tokens (`_segment_tokens`, as in e880dfc) without the values of the known text options of
+    `_TEXT_OPTS` (`jade ack --note "..."`, `gh pr create --body "..."`, `git commit -m "..."`, `curl -d "..."`). Every other word, and every word of
+    any other verb, is read as before."""
+    words = bare.split(" ")
+    verb = words[0].rsplit("/", 1)[-1]
+    opts = _TEXT_OPTS.get(verb)
+    if verb == "git" and (len(words) < 2 or words[1] not in _GIT_TEXT_SUBS):
+        opts = None   # `git checkout -m PATH`: `-m` is a flag there, the next word a path
+    if not opts:
+        return toks
+    kept: list[str] = []
+    skip = False
+    for w in words[1:]:
+        if skip:
+            skip = False
+            continue
+        if w in opts:
+            skip = True   # the value is the next word
+            continue
+        if w.startswith("--") and w.split("=", 1)[0] in opts and "=" in w:
+            continue
+        kept.append(w)
+    if len(kept) == len(words) - 1:
+        return toks
+    return _bare_tokens(" ".join([words[0], *kept]))[0]
+
+
+def _si12_segment(seg: str, dirs: tuple[str, ...], cwd: str, roots: tuple[str, ...], path_view: bool = False) -> bool:
+    """SI-12 for one shell segment that is not read-only: does it write the config directory (or replace it, or a parent of it)?
+    `path_view`: the segment comes from the path view, only its path positions count (PRE4-5)."""
     toks, parent_too = _segment_tokens(seg)
+    if path_view:
+        toks = _path_view_tokens(_bare(seg), toks)
     return any(_si12_hit(tok, d or cwd, roots, parent_too) for tok in toks for d in (dirs or ("",)))
 
 
@@ -2511,15 +2685,16 @@ def _xargs_stdin_readings(rows: list[tuple[str, tuple[str, ...]]]) -> tuple[list
 
 
 def _carried_work_tree(seg: str, cur: str | None) -> str | None:
-    """GIT_WORK_TREE after a segment that sets it on its own (`export GIT_WORK_TREE=~`, `GIT_WORK_TREE=~`) or unsets it; any other segment leaves it.
-    A plain assignment counts too, although only an exported one reaches git: the safe direction."""
+    """GIT_WORK_TREE (or a `GIT_CONFIG_KEY_<n>=core.worktree` pair) after a segment that sets it on its own (`export GIT_WORK_TREE=~`, `GIT_WORK_TREE=~`)
+    or unsets it, or that sets it for a nested shell (`GIT_WORK_TREE=~ bash -c '...'`, `env GIT_WORK_TREE=~ sh -c`: its body is read as the segments that
+    follow, PRE3-5); any other segment leaves it. A plain assignment counts too, although only an exported one reaches git: the safe direction."""
     words = seg.split(" ")
     first = words[0]
     if first == "unset" and "GIT_WORK_TREE" in words[1:]:
         return None
-    if first in shellnorm.EXPORTISH or all(shellnorm.ENV_ASSIGN.match(w) for w in words if w):
-        if m := _GIT_WORK_TREE_ENV.search(seg):
-            return m.group(1)
+    if first in shellnorm.EXPORTISH or all(shellnorm.ENV_ASSIGN.match(w) for w in words if w) or _SHELL_RUNNER.match(seg):
+        if wt := _env_work_tree(seg):
+            return wt
     return cur
 
 
@@ -2584,6 +2759,21 @@ def _computed_write(bare: str) -> bool:
     return shellnorm.verb_effects(verb, words[1:])[0] and blind.relative_words(" ".join(operands(words[1:])))
 
 
+def _ho_spaced(ho: Assessment, scan: str, literal_end: int, cwd: str, wroots: tuple[str, ...], mroots: tuple[str, ...], sroots: tuple[str, ...],
+               si12_roots: tuple[str, ...] | None) -> bool:
+    """PRE3-1: the root checks over the path view of the command, where a word with a quoted or escaped space is one word as the shell passes it
+    (`echo x >> "$HOME/a b/../.zshenv"`). Only adds classes to `ho`, so it can never clear what the rules' view found. Returns whether SI-12 is hit."""
+    git_wt: str | None = None
+    si12 = False
+    for seg, dirs in shellnorm.segments_cwd(scan, cwd, literal_end=literal_end, spaced=True):
+        git_wt = _carried_work_tree(seg, git_wt)
+        if is_read_only(seg):
+            continue
+        si12 = si12 or bool(si12_roots and _si12_segment(seg, dirs, cwd, si12_roots, path_view=True))
+        _ho_segment(ho, seg, dirs, cwd, wroots, mroots, sroots, git_wt, roots_only=True)
+    return si12
+
+
 def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     best: dict | None = None
     active: list[str] = []
@@ -2608,10 +2798,12 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
     rows: list[tuple[str, tuple[str, ...]]] = []   # every segment, read-only ones too: what an `xargs` is fed is read from them (W-77)
     subst_seen: dict[tuple, bool] = {}
     env: dict[str, list[str]] = {}   # `D=~/.claude` earlier in this command: a later `$D` is read as its value too (W-82)
+    spaced = "\\ " in scan or "\\\t" in scan   # a word with a quoted or escaped space: the root checks read the path view too (PRE3-1)
     for seg, dirs in shellnorm.segments_cwd(scan, cwd, literal_end=len(text_in)):   # a script the command writes keeps `'$X'` live (PRE2-1)
         rows.append((seg, dirs))
         _note_assignments(seg, env)
         git_wt = _carried_work_tree(seg, git_wt)
+        spaced = spaced or '""' in seg   # a word with a quoted space reads `""` here; a write to it may look read-only (`echo x >> ""`)
         if seg.startswith(BLIND_MARK):
             labels.append(seg[len(BLIND_MARK):].split(" ", 1)[0])
         cd = blind.cd_kind(PREFIX.sub("", seg, count=1).strip().split(" "))
@@ -2685,6 +2877,8 @@ def _assess_shell(tool: str, subject: str, cwd: str) -> Assessment:
                 gated_keys.append(_segment_key(_bare(real)))
                 gated_rules.append(r["id"])
                 gated_rules.extend(xalso)
+    if spaced:
+        si12 = _ho_spaced(ho, scan, len(text_in), cwd, wroots, mroots, sroots, si12_roots) or si12
     best = best or risk()["rules"][-1]
     if labels and best["level"] == "low":   # R-31 is low, so it never wins a level comparison: nothing above low matched, and what the gate could not read is the finding
         best = next(r for r in risk()["rules"] if r["id"] == "R-31")

@@ -36,6 +36,7 @@ MEMO_CACHES = (
     ("jade.policy", "_command_words"),   # W-153 (lane D): pure memos of one command text; cleared so a retry reads the command as cold as the first try
     ("jade.policy", "_gh_ref_write"),
     ("jade.policy", "_shell_dequoted"),
+    ("jade.policy", "_fold_for"),        # PR 68: a pure memo of the fold of one path under one case rule; cleared so a retry is as cold as the first try
     ("jade.askplain", "_assignments"),   # W-154 (lane H): a pure memo of one command's variable assignments
     ("jade.questions", "_scan"),     # questions.reset_cache
     ("jade.thresholds", "escalation"),
