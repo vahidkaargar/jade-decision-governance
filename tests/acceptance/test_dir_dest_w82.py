@@ -639,3 +639,20 @@ def test_the_bounded_walk_matches_what_the_shell_glob_matches(tmp_path, pattern)
     (r / "link1").symlink_to(r / "d1")
     p = pattern.format(r=r)
     assert sorted(policy._glob_matches(p)) == sorted(glob.glob(p)), p
+
+
+# ---- a glob source into a glob destination that matches a protected FILE (wave 8 fix) ------------------------------------------
+@pytest.mark.parametrize("cmd", [
+    "cp -R /tmp/x* ~/.claude/settings.js*", "cp -a /tmp/x* ~/.claude/settings.js*", "mv /tmp/x* ~/.claude/settings.js*", "rsync -a /tmp/x* ~/.claude/settings.js*",
+    "cp -R /tmp/x* ~/proj/CLAUDE.m*", "mv /tmp/x? ~/proj/CLAUDE.m*", "mv /tmp/x[0-9] ~/proj/CLAUDE.m*", "mv /tmp/x* ~/proj/CLAUDE.*", "cp -r /tmp/x* ~/proj/CLAUDE.m*",
+    "cp -R /tmp/x* ~/.claude/s*", "cp -R /tmp/x* ~/.claude/*", "cp ~ ~/proj/CLAUDE.m*", "cp -R /tmp/new.md ~/proj/CLAUDE.m*", "cp -R /tmp/x* ~/proj/CLAUDE.md",
+])
+def test_a_glob_source_into_a_glob_destination_that_matches_a_file_is_r13(home, cmd):
+    (home / "proj" / "CLAUDE.md").write_text("x")
+    assert is_r13(sh(cmd, str(home))), (cmd, sh(cmd, str(home)).rule_id, sh(cmd, str(home)).level)   # origin/main rates all of these high
+
+
+@pytest.mark.parametrize("cmd", ["cp -R /tmp/x* ~/proj/NOTES.m*", "mv /tmp/x* ~/docs/*", "cp -R /tmp/x* ~/docs/"])
+def test_a_glob_source_into_a_glob_destination_with_no_protected_match_stays_low(home, cmd):
+    (home / "proj" / "CLAUDE.md").write_text("x")
+    assert not gated(sh(cmd, str(home))), (cmd, sh(cmd, str(home)).rule_id)

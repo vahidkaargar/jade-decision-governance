@@ -1857,9 +1857,13 @@ def _into_targets_now(bare: str) -> list[tuple[str, bool, bool, bool]]:
                 if rel not in (".", "") and not rel.startswith(".."):   # `rsync -R a/b D` and `cp --parents a/b D` write `D/a/b`
                     out.append((os.path.join(_expand_home(dest), rel), recursive, True, False))
             # BSD cp and rsync copy what is inside `src/`; a glob source may name anything in its folder (recursive, or a dot pattern: PRE3-3)
-            contents = copyish and (x in ("", ".", "..", "~") or x.endswith(("/", "/.")) or (glob and (recursive or name.startswith((".", "[")))))
-            if contents:
+            contents = copyish and (x in ("", ".", "..") or x.endswith(("/", "/.")))
+            # A glob source and `~` may also be one name (a lone match, a file): they keep the entries below as well, so a glob destination that matches a
+            # FILE still reads as that file (`cp -R /tmp/x* proj/CLAUDE.m*`, W8 F1). Only a source that is surely a folder's contents stops here.
+            spreads = copyish and not contents and (x == "~" or (glob and (recursive or name.startswith((".", "[")))))
+            if contents or spreads:
                 out.append((dest, True, False, False))
+            if contents:
                 continue
             if name not in ("", ".", ".."):
                 out.append((os.path.join(_expand_home(dest), name), recursive, True, False))
