@@ -153,6 +153,13 @@ class HookResult:
     stdout: str = ""
 
 
+def _also_note(a) -> str:
+    """" It also matches R-13 (...)." for every never-learned or human-only rule the call matches besides the one that names it (`policy.also_kept`, W-153 review 2),
+    so the block text does not hide a write to an agent file behind R-10. "" when there is none."""
+    also = policy.also_kept(a)
+    return f" It also matches {'; '.join(f'{r} ({policy.rule_rationale(r)})' for r in also)}." if also else ""
+
+
 def _classify(tool: str, tool_input: dict, cwd: str = "") -> policy.Assessment:
     return policy.assess(tool, tool_input, cwd)
 
@@ -361,8 +368,9 @@ def _on_default_branch_asked(cwd: str, command: str) -> bool:
     segs = policy.segments_cwd(command + "".join("\n" + e for e in extra), cwd, literal_end=len(command))
     # the two readings of the command (`shellnorm.skeleton_both`) and the readings of a brace repeat a push: each distinct segment in each directory is asked of git once
     pushes = [(call, dirs) for seg, dirs in dict.fromkeys(segs) if not policy.is_read_only(seg) for call in policy.git_calls(seg) if call.sub == "push"]
+    unset = _unset_pushes(command, cwd, segs)
     if not pushes:
-        return False
+        return _unset_hits_default(unset)
     steered = bool(_GIT_ENV_ASSIGN.search(command)) or any(_CD_VARIABLE.search(seg) for seg, _ in segs)
     creates = any(c.sub in _REPO_CREATORS for seg, _ in segs if not policy.is_read_only(seg) for c in policy.git_calls(seg))
     unresolved: GitUnresolved | None = None
@@ -381,8 +389,55 @@ def _on_default_branch_asked(cwd: str, command: str) -> bool:
                 continue
             if hit:
                 return True   # a push that is found on main answers, whatever a push before it left open (the command is read in several readings, `shellnorm.skeleton_both`)
+    if _unset_hits_default(unset):
+        return True
     if unresolved:
         raise unresolved
+    return False
+
+
+def _unset_pushes(command: str, cwd: str, segs) -> list[tuple[policy.shellnorm.GitCall, tuple[str, ...], bool]]:
+    """The pushes of the command read with its unquoted variables empty or unset (W-133, owner decision 2026-11-20, narrow): `git $x push origin :main`,
+    `${X-git} push origin main`. Only for a push to the default branch: `_unset_hits_default` counts a hit and nothing else."""
+    unquoted = policy.shellnorm.unquoted_variables(command)
+    found = [(seg, dirs, False, unquoted) for seg, dirs in dict.fromkeys(segs) if "$" in seg] if unquoted else []
+    if (text := policy.shellnorm.unset_default_reading(command)) is not None:
+        named = policy.shellnorm.unquoted_variables(text)
+        found += [(seg, dirs, True, named) for seg, dirs in dict.fromkeys(policy.segments_cwd(text, cwd, literal_end=len(text)))]
+    steered = bool(_GIT_ENV_ASSIGN.search(command)) or any(_CD_VARIABLE.search(seg) for seg, _ in segs)
+    out = []
+    for seg, dirs, defaulted, names in found:
+        if policy.is_read_only(seg):
+            continue
+        for call in policy.git_calls(seg):
+            if defaulted and call.sub == "push":
+                out.append((call, dirs, steered))
+            out.extend((c, dirs, steered) for c in policy.shellnorm.unset_variable_pushes(call, names))
+    return out
+
+
+def _names_default(call: policy.shellnorm.GitCall) -> bool:
+    """The push names main/master itself (`--all`, `--mirror`, `:main`, `HEAD:refs/heads/master`): no repository is asked."""
+    _, refs, every = parse_push(call.args)
+    return every or any(_short_ref(dst if colon and dst else src).lower() in DEFAULT_BRANCHES
+                        for src, colon, dst in (r.lstrip("+").partition(":") for r in refs))
+
+
+def _unset_hits_default(pushes) -> bool:
+    """A push of a reading with the variables empty that goes to the default branch. A reading git cannot resolve proves nothing (it is not the command as
+    written): the command as written is resolved, and fails closed, on its own. In a directory or repository named by a variable only a push that names
+    main/master counts (git would be asked about a directory that is not the one the shell is in)."""
+    for call, dirs, steered in pushes:
+        if steered or _unfindable(call):
+            if _names_default(call):
+                return True
+            continue
+        for d in dirs:
+            try:
+                if _push_hits_default(call, d):
+                    return True
+            except GitUnresolved:
+                continue
     return False
 
 
@@ -418,14 +473,17 @@ def _policy_failure(mode: str, event: dict, tool: str, tool_input: dict, cwd: st
 
 
 def malformed_reason(event: dict) -> str | None:
-    """Why a PreToolUse event is not the shape the host sends, when that could hide a gated call (V6-18 d, F11, N26); None when it is well formed or is no tool
-    call at all (no `tool_name`). A `tool_name` that is not a string cannot be matched to the gated list, and the text of a list `command` is not what the
+    """Why a PreToolUse event is not the shape the host sends, when that could hide a gated call (V6-18 d, F11, N26); None when it is well formed. The host
+    always names the tool, so an event with no `tool_name` (empty or non-JSON stdin reaches here as `{}`) is not read as "no tool call" (W-209, V6-18):
+    nothing can say it is harmless. A `tool_name` that is not a string cannot be matched to the gated list, and the text of a list `command` is not what the
     shell would run, so neither is read as harmless. A `tool_input` that is not an object is handled by `failsafe_reason` (it blocks a gated tool)."""
     if "tool_name" not in event:
-        return None
+        return "the event has no tool_name (the hook input was empty, not JSON, or not a JSON object)"
     tool = event["tool_name"]
     if not isinstance(tool, str):
         return f"the event has a tool_name that is not a string ({type(tool).__name__})"
+    if not tool.strip():
+        return "the event has an empty tool_name"
     tin = event.get("tool_input")
     if tool in policy.SHELL_TOOLS and isinstance(tin, dict) and tin.get("command") is not None and not isinstance(tin["command"], str):
         return f"the {tool} command is not a string ({type(tin['command']).__name__})"
@@ -468,7 +526,8 @@ def pretool(event: dict, permit=None) -> HookResult:
         return _verdict(mode, f"JADE safety invariant {', '.join(a.blocked)} blocks this {tool} call. No permit can authorize it. "
                               f"Rule text: policies/safety.yaml. Do not rephrase the command to get around the invariant; ask the human.", a.blocked)
     if mode == "enforce" and paths.level() == "off" and OFF_FLOOR_CLASSES & set(a.ho_ids):
-        _journal("gate", "safety_block", a, event)   # V6-16: at level `off` a write to JADE's own live wiring still blocks (the floor of "observe plus floor")
+        # V6-16: at level `off` a write to JADE's own live wiring still blocks (the floor of "observe plus floor"). W-74: the event names the classes that fired, ids only
+        _journal("gate", "safety_block", a, event, floor=sorted(OFF_FLOOR_CLASSES & set(a.ho_ids)))
         return HookResult(2, f"JADE floor: level off blocks this {tool} call. It writes to JADE's own live wiring ({', '.join(sorted(OFF_FLOOR_CLASSES & set(a.ho_ids)))}: "
                              "the hook files, `~/.claude/settings.json`, the install, the JADE config or state). No permit can authorize it at this level. "
                              "Do not rephrase the call to get around the floor; ask the human to do it in their own terminal.")
@@ -528,12 +587,12 @@ def _journal_blind(a: policy.Assessment, event: dict) -> None:
         pass
 
 
-def _journal(entity: str, kind: str, a: policy.Assessment, event: dict) -> None:
+def _journal(entity: str, kind: str, a: policy.Assessment, event: dict, **more) -> None:
     try:
         from . import ledger
 
         db = ledger.open(timeout=LEDGER_TIMEOUT_S)
-        db.event(entity, kind, guard=f"{a.rule_id} {a.level} {','.join(a.blocked)}".strip(), actor="hook", detail=_detail(event, a))
+        db.event(entity, kind, guard=f"{a.rule_id} {a.level} {','.join(a.blocked)}".strip(), actor="hook", detail=_detail(event, a, **more))
         db.close()
     except Exception:  # noqa: BLE001, S110 - journaling must never change the gate verdict
         pass
@@ -673,7 +732,7 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit, hold_
             return res
         if mode == "advisory":
             db.event("gate", "would_block", guard=f"{a.rule_id} {a.level}", actor="hook", detail=_detail(event, a))
-            return HookResult(0, f"[advisory, not blocked] JADE: {a.level} risk ({a.rule_id}: {a.rationale}) would need a permit.")
+            return HookResult(0, f"[advisory, not blocked] JADE: {a.level} risk ({a.rule_id}: {a.rationale}) would need a permit.{_also_note(a)}")
         ctx = permits.make_context(tool, a, event, cwd=cwd)
         pending = permits.pending_for(db, a.plan_hash, context=ctx, fingerprints=fp)
         if pending is None:
@@ -688,18 +747,18 @@ def _gate(mode: str, tool: str, a: policy.Assessment, event: dict, permit, hold_
             pid = pending.permit_id
         why = (f" (Permit {found.permit_id} exists but cannot be used: {refusal}.)" if found is not None and refusal else "") + permits.refusal_note(db, a.plan_hash)   # V6-26: a human refusal is told to the agent
         if ctx.get("redacted") and permits.keep_raw(db, pid, permits.raw_parts(tool, a, event)):   # W-43: the human allowed it, so the raw call is kept for their review only
-            return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}). This {tool} call needs a human-approved permit, and the {ctx['redacted']} secret-shaped "
+            return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}).{_also_note(a)} This {tool} call needs a human-approved permit, and the {ctx['redacted']} secret-shaped "
                                  f"value(s) in it are not stored in the ledger.{why}\n"
                                  f"Permit {pid} is PENDING. Ask the human to review the whole command in their own terminal:  jade permit show {pid} --raw   and, if it is right, to approve it:  "
                                  f"jade permit approve {pid}\n"
                                  "Then retry the identical command (single use, 30 minutes). You cannot view the raw command or approve it yourself; "
                                  "do not rephrase the command to avoid the gate. Continue with other work meanwhile.")
         if ctx.get("redacted"):
-            return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}). This {tool} call needs a human-approved permit, and the {ctx['redacted']} secret-shaped "
+            return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}).{_also_note(a)} This {tool} call needs a human-approved permit, and the {ctx['redacted']} secret-shaped "
                                  f"value(s) in it are not stored, so a human cannot review the whole command and the permit cannot be approved.{why}\n"
                                  "Put each secret in an environment variable or a file the command reads, remove it from the command line, and retry. "
                                  f"(Permit {pid} stays PENDING and will expire.) Do not rephrase the command to avoid the gate.")
-        return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}). This {tool} call needs a human-approved permit.{why}\n"
+        return HookResult(2, f"JADE gate: {a.level} risk ({a.rule_id}: {a.rationale}).{_also_note(a)} This {tool} call needs a human-approved permit.{why}\n"
                              f"Permit {pid} is PENDING. Ask the human to run in their own terminal:  jade permit approve {pid}\n"
                              "Then retry the identical command (single use, 30 minutes). You cannot approve it yourself; "
                              "do not rephrase the command to avoid the gate. Continue with other work meanwhile.")
@@ -878,7 +937,8 @@ def stop(event: dict) -> HookResult:
 def _override_notice(db, event: dict) -> list[str]:
     """Environment overrides in force for this hook process that weaken the gate (docs/05 T19, G05): a different policy directory, configuration or
     ledger, or a gate mode below enforce. They are shown to the session and journaled once per session, so a weakened gate is never silent."""
-    weak = [o for o in paths.gate_overrides() if o.weakens]
+    sid = event.get("session_id")
+    weak = [o for o in paths.gate_overrides(host_session_id=sid if isinstance(sid, str) else None) if o.weakens]   # W-200: CLAUDE_CODE_SESSION_ID shows only when it differs from the host's id
     if not weak:
         return []
     names = ", ".join(f"{o.var}={o.value}" for o in weak)

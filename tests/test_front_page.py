@@ -388,8 +388,21 @@ def _measure(source: str):
     return doc
 
 
+def subsection(text: str, title: str) -> str:
+    """A `### title` block of a document, up to the next heading of level 2 or 3."""
+    found = re.search(rf"^### {re.escape(title)}[^\n]*\n(.*?)(?=^##+ |\Z)", text, re.S | re.M)
+    assert found, f"no section '### {title}'"
+    return found.group(1)
+
+
+DOC04 = (ROOT / "docs" / "04-calibration-and-evaluation.md").read_text()
+DOC09 = (ROOT / "docs" / "09-install-and-upgrade.md").read_text()
+
+
 def test_the_latency_table_is_what_the_stored_measurements_say():
-    text = section(README, "How fast")
+    """The table moved from the README front page to docs/04 section 4d; the README map still points at docs/04 for it."""
+    assert "how fast the hook is" in README
+    text = subsection(DOC04, "4d. How fast")
     table = rows(text)
     assert len(table) >= 4
     for what, n, p50, p95, date, source in (r[:6] for r in table):
@@ -404,7 +417,9 @@ def test_the_latency_table_is_what_the_stored_measurements_say():
 
 # ---- the trust root ----------------------------------------------------------------------------------------------------------------
 def test_the_trust_root_is_stated_and_matches_what_jade_upgrade_does():
-    text = section(README, "Which release you are running")
+    """The text moved from the README front page to docs/09 section 4; the README Upgrade step points there."""
+    assert "what you trust when you install a release: `docs/09-install-and-upgrade.md`" in README
+    text = subsection(DOC09.split("## 4. Release process")[1].split("\n## ")[0], "Which release you are running")
     assert upgrade.REPO in text or "github.com/vahidkaargar/jade-decision-governance" in text
     assert "does not check" in text and "signature" in text and "SHA256SUMS" in text
     src = inspect.getsource(upgrade).lower()

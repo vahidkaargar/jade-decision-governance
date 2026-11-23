@@ -11,6 +11,11 @@ on:
 permissions:
   contents: read
 
+# W-201: the test job runs the full suite before the tag is published. As in ci.yml, a run where the real approver anchor exists stops with an error
+# instead of quietly skipping the subprocess approval modules (tests/conftest.py).
+env:
+  JADE_REQUIRE_APPROVE_MODULES: "1"
+
 jobs:
   guard:
     runs-on: ubuntu-latest

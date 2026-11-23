@@ -19,6 +19,45 @@ uv run python evals/run_cases.py
 
 Every test gets its own JADE home, config and settings directory (`tests/conftest.py`), so tests can run in any order and in parallel. A test that asserts a time budget carries `@pytest.mark.timing`; CI runs those in their own serial step. `tests/test_timing_marks.py` fails when a test reads `time.monotonic`, `time.perf_counter` or `time.process_time` and has no mark.
 
+## Developer tools and layout
+
+This section was in the README before; it moved here.
+
+Classify a command with the shipped risk rules:
+
+```bash
+uv run python -c "from policies.loader import load_risk, classify; r = classify(load_risk(), 'git push origin feature/x'); print(r['id'], r['level'], '-', r['rationale'])"
+```
+
+Measure your own baseline, if you already use the `jev` CLI from Claude Code. It reads `~/.claude/projects`; the dataset holds your project text and stays local:
+
+```bash
+uv run python evals/baseline/mine_transcripts.py --dataset evals/baseline/dataset-local.jsonl > summary.json
+uv run python evals/replay_policy.py evals/baseline/dataset-local.jsonl
+```
+
+Live probes need an OpenRouter key in the macOS Keychain (service `OPENROUTER_API_KEY`) or the `OPENROUTER_API_KEY` environment variable. They send only a synthetic fixture and cost well under one cent:
+
+```bash
+uv run python adapters/jev/probe_openrouter.py
+uv run python evals/performance/run.py --rounds 3
+```
+
+Layout:
+
+```
+jade/             the runtime package (CLI `jade`, shim `jev`)
+registry/         question registry, one JSON file per question version
+skills/jade/      SKILL.md: how agents should use it
+docs/             design documents and the deployment runbook
+schemas/          JSON Schema 2020-12: decision, question, permit, outcome, work-item, improvement (+ examples)
+policies/         risk.yaml routing.yaml escalation.yaml safety.yaml promotion.yaml, loader.py
+policies/local/   machine-specific overlays (gitignored) + committed *.example.yaml
+evals/            baseline miner, policy replay, regression + adversarial cases, live performance harness
+adapters/jev/     OpenRouter Decisions API probe
+tests/            contract, policy and overlay tests; tests/acceptance = the Phase 1–5 acceptance checklist
+```
+
 ## Real-shell payload tests: sandbox only
 
 A test, eval, probe or review harness (scratch ones included) that runs a guard-test command in a real shell runs it through `evals/realshell.py` and nothing else: macOS `sandbox-exec`, writes only inside a fresh work root, a canary check before every run, the whole process group killed after every case. PATH stubs alone are never enough; a missing stub once let `chmod -R 777 /` run for real. Destructive payloads target only canaries the test created. Before a review round, `python3 evals/realshell.py audit <harness folder>` must print nothing. The gate enforces the common case: SI-13 blocks a command that runs a Python payload runner without the helper. Details: `docs/13-real-shell-payload-tests.md`.

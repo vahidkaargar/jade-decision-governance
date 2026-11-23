@@ -178,6 +178,46 @@ def test_the_template_stays_fast_with_thousands_of_answers_of_one_kind():
     assert "I am fine with" not in text and el < 0.5, el
 
 
+# ------------------------------------------------------------------ RR10-6 (W-124)
+
+def test_a_deny_in_the_same_second_as_the_allow_takes_it_out_on_every_path():
+    """Times have a resolution of one second, so a deny given after an allow in the same second must still win: the row order breaks the tie."""
+    a, exact, cls = keys_of(m.CMD)
+    when = now() - timedelta(minutes=5)
+    row(a.rule_id, exact, cls, "allow", m.CMD, when)
+    row(a.rule_id, exact, cls, "deny", m.CMD, when, strength="hint")   # the same second, written after the allow
+    d = m.db()
+    try:
+        assert memory.lookup(d, a, "Bash", {"command": m.CMD}, {}, "/tmp") is None
+        assert [p for p in proxy.past_answers(d, a.rule_id) if p["answer"] == "allow"] == []
+        assert "I am fine with" not in ops.knows_template(ops.knows_rows(d))
+    finally:
+        d.close()
+
+
+def test_an_allow_given_after_a_deny_in_the_same_second_still_stands():
+    a, exact, cls = keys_of(m.CMD)
+    when = now() - timedelta(minutes=5)
+    row(a.rule_id, exact, cls, "deny", m.CMD, when, strength="hint")
+    row(a.rule_id, exact, cls, "allow", m.CMD, when)   # written after the deny: the owner's newest answer
+    d = m.db()
+    try:
+        assert memory.lookup(d, a, "Bash", {"command": m.CMD}, {}, "/tmp") is not None
+        assert [p["answer"] for p in proxy.past_answers(d, a.rule_id)].count("allow") == 1
+        assert "I am fine with" in ops.knows_template(ops.knows_rows(d))
+    finally:
+        d.close()
+
+
+def test_rows_without_a_row_order_keep_the_strictly_newer_rule():
+    t = ts(now() - timedelta(minutes=5))
+    allow = {"answer": "allow", "strength": "strong", "ts": t, "exact_key": "k"}
+    deny = {"answer": "deny", "strength": "hint", "ts": t, "exact_key": "k"}
+    keys = {("exact", "k")}
+    assert memory.taken_out(allow, [deny], keys) is False                        # the same time, no row order known: as before
+    assert memory.taken_out(allow, [{**deny, "ts": ts(now())}], keys) is True    # a later second wins as before
+
+
 # ------------------------------------------------------------------ RR10-5
 
 def test_an_empty_last_use_reads_as_the_old_sql_read_it():

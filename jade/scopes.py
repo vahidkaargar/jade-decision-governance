@@ -304,9 +304,9 @@ def _merge_segment(tokens: list[str]) -> str | None:
 
 def _is_plain_shell_call(a, tool: str, tool_input: dict | None) -> bool:
     """A shell call the gate read whole, that no rule keeps from a human, and that holds no inline program."""
-    if not policy.runs_shell(tool, tool_input or {}):
+    if not policy.shares_shell_answers(tool, tool_input or {}):   # an MCP command given as a list is never covered by a scope (W-209)
         return False
-    if a.ho_ids or a.blocked or a.blind or getattr(a, "unread", None) or a.level == "critical" or a.rule_id in memory.NEVER_RULES:
+    if a.ho_ids or a.blocked or a.blind or getattr(a, "unread", None) or a.level == "critical" or ({a.rule_id, *(getattr(a, "seg_rules", None) or [])} & memory.NEVER_RULES):   # every segment rule, as memory.eligibility reads them (W-153 review)
         return False
     return not memory.INLINE.search(a.subject or "")
 
