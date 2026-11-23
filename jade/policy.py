@@ -1642,7 +1642,7 @@ def _ho_segment(a: Assessment, seg: str, dirs: tuple[str, ...], cwd: str, wroots
     bare, calls = _analyse(seg)
     if roots_only:
         toks = _path_view_tokens(bare, toks)   # PRE4-5: prose arguments are not paths
-    links = _hardlink_sources(bare)
+    links = _hardlink_sources(bare, fed=_xargs_inner(seg) is not None)
     into = _into_targets(bare)
     _ho_shell_segment(a, seg, bare, calls, toks, parent_too, dirs, cwd, sroots, links, into, git_work_tree)
     for d in (dirs or ("",)):
@@ -1690,6 +1690,7 @@ _NO_TARGET_DIR = re.compile(r"^-[A-Za-z]*T[A-Za-z]*$")
 _RSYNC_RELATIVE = re.compile(r"^-[A-Za-z]*R[A-Za-z]*$")
 _GLOB_CHARS = re.compile(r"[*?\[]")
 _COMPUTED_WORD = re.compile(r"[$`]|[@!+*?]\(")   # `$F`, `${F}`, `"$@"`, `$(...)`, a backtick, an extglob `@(..)`: the shell computes the name
+_UNKNOWN_NAME = re.compile(r"[\x00\x06]|[@!+]$")   # a NUL, the segmenter's mark (`{}`), an extglob prefix the segmenter cut at `(`: the name made is not the name read (W8)
 _RSYNC_REMOTE = re.compile(r"^(?:rsync://[^/]*/?|[^/]*?::|[^/]*?:)")
 
 
@@ -1761,12 +1762,14 @@ def _rsync_operands(args: list[str]) -> list[str]:
     return out
 
 
-def _hardlink_sources(bare: str) -> list[tuple[str, bool, bool]]:
+def _hardlink_sources(bare: str, fed: bool = False) -> list[tuple[str, bool, bool]]:
     """The names a hard-link command (`ln` without `-s`, `cp -l`/`--link`/`-al`, `link`) joins, as (path, parent_too, unless_dir): each source with
     parent_too (PRE2-3), and the new name: the destination itself unless it is a directory, else `dest/name` per source (`ln /tmp/x ~` makes `~/x`
     only, PRE3-8); a lone source links `./name`. The PRE3-8 narrowing applies to one plain literal source only: a glob, a contents source (`DIR/`, `DIR/.`),
     `-T`, several sources (PRE4-1), or a source the shell computes (`$F`, `"$@"`, `$(...)`, a backtick, an extglob: PRE5-2) keep the destination check
-    as it was."""
+    as it was. So does a source whose name the words do not give (W8): the segmenter's mark for `{}` of `find -exec` and `xargs -I{}`, a NUL (it ends the name
+    the shell makes), the stub of an extglob the segmenter cut at `(`; `-t D` with no source (they come on standard input); and any command `xargs` runs
+    (`fed`: its replace string, whatever it is spelled, and the words it appends are names that are not typed)."""
     words = [_word(w) for w in bare.split(" ") if w]
     if not words:
         return []
@@ -1784,9 +1787,10 @@ def _hardlink_sources(bare: str) -> list[tuple[str, bool, bool]]:
         dest, srcs, unless_dir = ".", ops, False
     out = [(src, True, False) for src in srcs]
     computed = {_word(w) for w in bare.split(" ")[1:] if _COMPUTED_WORD.search(w)}   # PRE5-2: a name the shell computes is not a plain literal
-    broad = len(srcs) != 1 or any(w == "--no-target-directory" or _NO_TARGET_DIR.match(w) for w in args) or any(
-        _GLOB_CHARS.search(s) or s in (".", "..") or s.endswith(("/", "/.")) or s in computed or _COMPUTED_WORD.search(s) for s in srcs)
-    if broad and srcs:
+    broad = fed or len(srcs) != 1 or any(w == "--no-target-directory" or _NO_TARGET_DIR.match(w) for w in args) or any(
+        _GLOB_CHARS.search(s) or s in (".", "..") or s.endswith(("/", "/.")) or s in computed or _COMPUTED_WORD.search(s) or _UNKNOWN_NAME.search(s)
+        for s in srcs)
+    if broad and (srcs or tdir):   # `-t D` with no source: the names come on standard input (W8 F1)
         out.append((dest, True, False))   # the old check: the destination with parent_too, directory or not
     elif unless_dir:
         out.append((dest, True, True))

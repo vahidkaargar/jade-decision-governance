@@ -734,3 +734,47 @@ def test_a_plain_hard_link_source_is_narrow():
 def test_a_hard_link_of_one_plain_literal_source_stays_narrow(wired, cmd, lost):
     a = away(cmd)
     assert not (lost & set(a.ho_ids)), (cmd, a.ho_ids)   # PRE3-8 narrowing: `~/x` is made, nothing protected
+
+
+# ------------------------------------------------------------------ wave 8 fix: a source whose name is not known keeps the destination check
+
+@pytest.mark.parametrize("cmd", [
+    "find /tmp/jx -name '.z*' -exec ln {} ~ \\;", "find /tmp/jx -name '.z*' -exec ln -f {} ~ \\;", "find /tmp/jx -name '.z*' -exec ln -- {} ~ \\;",
+    "find /tmp/jx -execdir ln {} ~ \\;", "find /tmp/jx -name '.z*' -exec cp -al {} ~ \\;", "find /tmp/jx -name '.z*' -exec cp -lf {} ~/ \\;",
+    "find /tmp/jx -name '.z*' | xargs -I{} ln {} ~", "find /tmp/jx -name '.z*' | xargs -n1 -I{} ln {} ~", "find /tmp/jx -name '.z*' -print0 | xargs -0 -I{} ln {} ~",
+    "find /tmp/jx -name '.z*' | xargs -I{} cp -al {} ~", "ls /tmp/jx | xargs -I@ ln /tmp/jx/@ ~", "echo .zshenv | xargs -I{} ln {} ~",
+    "echo /tmp/jx/.zshenv | xargs -I{} ln {} ~", "find /tmp/jx -name '.z*' | xargs -I% ln % ~", "find /tmp/jx | xargs ln /tmp/jx/a ~",
+    "find /tmp/jx -name '.z*' -exec ln -t ~ {} +", "find /tmp/jx -name '.z*' | xargs ln -t ~", "find /tmp/jx -name '.z*' | xargs cp -lt ~",
+    "xargs ln -t ~ < /tmp/list", 'find /tmp/jx -name ".z*" -exec ln {} "$HOME" \\;', "find /tmp/jx -name '.z*' -exec ln {} /tmp/n/../../$USER \\;",
+])
+def test_a_hard_link_of_a_name_find_or_xargs_feeds_keeps_the_destination_check(wired, cmd):
+    a = away(cmd.replace("/tmp/n/../../$USER", str(wired)))
+    assert ALL3 <= set(a.ho_ids), (cmd, a.ho_ids)   # W8 F1: `{}`, `-I@` and the sources on stdin are names that are not typed
+
+
+@pytest.mark.parametrize("src", ["\x06\x06", "/tmp/x/\x06\x06", "/tmp/x/.zshenv\x00", "/tmp/x/.zshenv\x00x", "/tmp/x/@", "/tmp/x/!", "/tmp/x/+"])
+def test_a_hard_link_source_with_a_mark_a_nul_or_an_extglob_stub_is_broad(src):
+    assert ("/h", True, False) in policy._hardlink_sources(f"ln -f {src} /h"), src
+
+
+def test_a_hard_link_with_a_target_directory_and_no_source_is_broad():
+    assert ("/h", True, False) in policy._hardlink_sources("ln -t /h")   # the sources come on standard input (`xargs ln -t D`)
+    assert ("/h", True, False) in policy._hardlink_sources("ln /tmp/x /h", fed=True)   # `xargs` appends words after the typed ones
+    assert ("/h", True, False) not in policy._hardlink_sources("ln /tmp/x /h")
+
+
+@pytest.mark.parametrize("cmd", [
+    "ln /tmp/jx/.zshenv$'\\x00' ~", "ln /tmp/jx/.zshenv$'\\0' ~", "ln $'/tmp/jx/.zshenv\\x00x' ~", 'ln "/tmp/jx/.zshenv"$\'\\x00\' ~',
+    "ln /tmp/jx/.zshenv$'\\x00'$'\\x00' ~", "ln -t ~ /tmp/jx/.zshenv$'\\x00'", "cp -al /tmp/jx/.zshenv$'\\x00' ~", 'cp -l /tmp/jx/.zshrc$\'\\x00\' "$HOME"',
+    "cd ~ && ln /tmp/jx/.zshenv$'\\x00' .", "ln /tmp/jx/hooks$'\\x00' ~/.claude", "ln /tmp/jx/jade$'\\x00' ~/.local/bin",
+])
+def test_a_hard_link_source_that_ends_in_a_nul_keeps_the_destination_check(wired, cmd):
+    a = away(cmd)
+    assert a.ho_ids, (cmd, a.ho_ids)   # W8 F2: the NUL ends the name the shell makes, `.zshenv`; the word as read is `.zshenv\x00`
+
+
+@pytest.mark.parametrize("cmd", ["ln -t ~ /tmp/jx/@(.zshenv)", "ln -t /tmp/n /tmp/jx/@(.zshenv)", "cp -lt ~ /tmp/jx/@(.zshenv)", "ln -t ~ /tmp/jx/@(.zshenv) /tmp/jx/b",
+                                 "ln -t ~ /tmp/jx/+(.zshenv)", "ln -t ~ /tmp/jx/!(a)"])
+def test_a_hard_link_of_an_extglob_source_keeps_the_destination_check(wired, cmd):
+    a = away(cmd.replace("/tmp/n", str(wired)))
+    assert ALL3 <= set(a.ho_ids), (cmd, a.ho_ids)   # W8 F3: the segmenter cuts the word at `(`, so the name read is `@`
