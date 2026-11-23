@@ -1258,6 +1258,8 @@ def _config_roots() -> tuple[str, ...]:
 
 def _expand_home(p: str) -> str:
     """`~`, `$HOME` and `${HOME}` at the start of a path word, which the shell expands before the command sees them."""
+    if p[:1] not in ("~", "$"):
+        return p   # only a leading `~` or `$HOME` is expanded: most paths are not looked up in the environment
     home = os.path.expanduser("~")
     for var in ("${HOME}", "$HOME"):
         if p == var or p.startswith(var + "/"):
@@ -1290,12 +1292,18 @@ def _volfs(key: str) -> bool:
 def _fold(p: str) -> str:
     """The comparison form of a real path, used on both sides of every root check: the macOS data-volume firmlink prefix removed
     (`/System/Volumes/Data/Users/x` is `/Users/x`, the same inode, and realpath does not resolve it: PRE2-2), Unicode NFC (APFS ignores NFC/NFD:
-    PRE2-9), case-folded where the volume ignores case. Each step only adds matches on another system."""
+    PRE2-9), case-folded where the volume ignores case. Each step only adds matches on another system. Remembered per (path, case rule): every root is
+    folded again for each path checked, and a command with many paths checks each one against every root set (W8 F3)."""
+    return _fold_for(p, _case_insensitive())
+
+
+@lru_cache(maxsize=16384)
+def _fold_for(p: str, insensitive: bool) -> str:
     if _DATA_FIRMLINK_RE.match(p):
         p = p[20:] or "/"
     if not p.isascii():
         p = unicodedata.normalize("NFC", p)
-    if _case_insensitive():
+    if insensitive:
         p = p.casefold()
         if not p.isascii():
             p = unicodedata.normalize("NFC", p)
@@ -1642,7 +1650,7 @@ def _ho_segment(a: Assessment, seg: str, dirs: tuple[str, ...], cwd: str, wroots
     bare, calls = _analyse(seg)
     if roots_only:
         toks = _path_view_tokens(bare, toks)   # PRE4-5: prose arguments are not paths
-    links = _hardlink_sources(bare)
+    links = _hardlink_sources(bare, fed=_xargs_inner(seg) is not None)
     into = _into_targets(bare)
     _ho_shell_segment(a, seg, bare, calls, toks, parent_too, dirs, cwd, sroots, links, into, git_work_tree)
     for d in (dirs or ("",)):
@@ -1690,6 +1698,7 @@ _NO_TARGET_DIR = re.compile(r"^-[A-Za-z]*T[A-Za-z]*$")
 _RSYNC_RELATIVE = re.compile(r"^-[A-Za-z]*R[A-Za-z]*$")
 _GLOB_CHARS = re.compile(r"[*?\[]")
 _COMPUTED_WORD = re.compile(r"[$`]|[@!+*?]\(")   # `$F`, `${F}`, `"$@"`, `$(...)`, a backtick, an extglob `@(..)`: the shell computes the name
+_UNKNOWN_NAME = re.compile(r"[\x00\x06]|[@!+]$")   # a NUL, the segmenter's mark (`{}`), an extglob prefix the segmenter cut at `(`: the name made is not the name read (W8)
 _RSYNC_REMOTE = re.compile(r"^(?:rsync://[^/]*/?|[^/]*?::|[^/]*?:)")
 
 
@@ -1761,12 +1770,14 @@ def _rsync_operands(args: list[str]) -> list[str]:
     return out
 
 
-def _hardlink_sources(bare: str) -> list[tuple[str, bool, bool]]:
+def _hardlink_sources(bare: str, fed: bool = False) -> list[tuple[str, bool, bool]]:
     """The names a hard-link command (`ln` without `-s`, `cp -l`/`--link`/`-al`, `link`) joins, as (path, parent_too, unless_dir): each source with
     parent_too (PRE2-3), and the new name: the destination itself unless it is a directory, else `dest/name` per source (`ln /tmp/x ~` makes `~/x`
     only, PRE3-8); a lone source links `./name`. The PRE3-8 narrowing applies to one plain literal source only: a glob, a contents source (`DIR/`, `DIR/.`),
     `-T`, several sources (PRE4-1), or a source the shell computes (`$F`, `"$@"`, `$(...)`, a backtick, an extglob: PRE5-2) keep the destination check
-    as it was."""
+    as it was. So does a source whose name the words do not give (W8): the segmenter's mark for `{}` of `find -exec` and `xargs -I{}`, a NUL (it ends the name
+    the shell makes), the stub of an extglob the segmenter cut at `(`; `-t D` with no source (they come on standard input); and any command `xargs` runs
+    (`fed`: its replace string, whatever it is spelled, and the words it appends are names that are not typed)."""
     words = [_word(w) for w in bare.split(" ") if w]
     if not words:
         return []
@@ -1784,9 +1795,10 @@ def _hardlink_sources(bare: str) -> list[tuple[str, bool, bool]]:
         dest, srcs, unless_dir = ".", ops, False
     out = [(src, True, False) for src in srcs]
     computed = {_word(w) for w in bare.split(" ")[1:] if _COMPUTED_WORD.search(w)}   # PRE5-2: a name the shell computes is not a plain literal
-    broad = len(srcs) != 1 or any(w == "--no-target-directory" or _NO_TARGET_DIR.match(w) for w in args) or any(
-        _GLOB_CHARS.search(s) or s in (".", "..") or s.endswith(("/", "/.")) or s in computed or _COMPUTED_WORD.search(s) for s in srcs)
-    if broad and srcs:
+    broad = fed or len(srcs) != 1 or any(w == "--no-target-directory" or _NO_TARGET_DIR.match(w) for w in args) or any(
+        _GLOB_CHARS.search(s) or s in (".", "..") or s.endswith(("/", "/.")) or s in computed or _COMPUTED_WORD.search(s) or _UNKNOWN_NAME.search(s)
+        for s in srcs)
+    if broad and (srcs or tdir):   # `-t D` with no source: the names come on standard input (W8 F1)
         out.append((dest, True, False))   # the old check: the destination with parent_too, directory or not
     elif unless_dir:
         out.append((dest, True, True))
@@ -1853,9 +1865,13 @@ def _into_targets_now(bare: str) -> list[tuple[str, bool, bool, bool]]:
                 if rel not in (".", "") and not rel.startswith(".."):   # `rsync -R a/b D` and `cp --parents a/b D` write `D/a/b`
                     out.append((os.path.join(_expand_home(dest), rel), recursive, True, False))
             # BSD cp and rsync copy what is inside `src/`; a glob source may name anything in its folder (recursive, or a dot pattern: PRE3-3)
-            contents = copyish and (x in ("", ".", "..", "~") or x.endswith(("/", "/.")) or (glob and (recursive or name.startswith((".", "[")))))
-            if contents:
+            contents = copyish and (x in ("", ".", "..") or x.endswith(("/", "/.")))
+            # A glob source and `~` may also be one name (a lone match, a file): they keep the entries below as well, so a glob destination that matches a
+            # FILE still reads as that file (`cp -R /tmp/x* proj/CLAUDE.m*`, W8 F1). Only a source that is surely a folder's contents stops here.
+            spreads = copyish and not contents and (x == "~" or (glob and (recursive or name.startswith((".", "[")))))
+            if contents or spreads:
                 out.append((dest, True, False, False))
+            if contents:
                 continue
             if name not in ("", ".", ".."):
                 out.append((os.path.join(_expand_home(dest), name), recursive, True, False))
