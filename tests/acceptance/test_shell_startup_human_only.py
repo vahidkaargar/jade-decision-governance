@@ -645,6 +645,7 @@ def test_a_spaced_home_in_prose_is_not_a_path(spaced_home, cmd):
     assert not a.ho_ids, (cmd, a.ho_ids)
 
 
+@pytest.mark.timing
 def test_many_git_config_key_words_are_linear():
     cmd = "GIT_CONFIG_KEY_1=core.worktree " * 8000 + "git checkout ."   # 248 KB
     assert len(cmd) > 240_000
