@@ -28,7 +28,7 @@ Claude Code is the only harness JADE is wired into, and macOS is the tested plat
 | Stage | State |
 |-------|-------|
 | DESIGN_READY | **Yes** — design approved by the maintainer 2026-11-09 |
-| IMPLEMENTED | **Yes** — `jade` 0.7.0. All five phases are built and their acceptance tests pass. What the code holds and what each release added: `docs/09-install-and-upgrade.md` section 1 and `CHANGELOG.md` |
+| IMPLEMENTED | **Yes** — `jade` 0.8.0. All five phases are built and their acceptance tests pass. What the code holds and what each release added: `docs/09-install-and-upgrade.md` section 1 and `CHANGELOG.md` |
 | LIVE (enforce) | **Each owner sets enforce mode on their own machine. What is on for your machine is what `jade check` says, not this table.** Enforce means: the five hooks are installed, the gate blocks high and critical calls with no approval, and a permit needs a signature only the `_jadeapprove` account can make. The daily job, the pre-push guard and branch protection are facts of one machine and one remote: `jade check` shows each as ok, FAIL, or "unknown: owner confirms" |
 | VALIDATED | No — needs 14 days of real ledger data in enforce mode, labelled outcomes and one full improvement cycle (`docs/08` section 5) |
 | PRODUCTION_APPROVED | No — a human decision (`docs/08`) |
@@ -46,7 +46,7 @@ This release is **enforce-ready**: it installs in advisory mode, and after you i
 **1. Install** (pinned to a release tag; installs `jade` and the `jev` compatibility shim)
 
 ```bash
-uv tool install git+https://github.com/vahidkaargar/jade-decision-governance@v0.7.0
+uv tool install git+https://github.com/vahidkaargar/jade-decision-governance@v0.8.0
 jade --version
 ```
 

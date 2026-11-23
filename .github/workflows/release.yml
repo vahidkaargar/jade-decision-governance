@@ -34,7 +34,9 @@ jobs:
     runs-on: ubuntu-latest
     # The suite has 15 800 tests: serial it runs far past 20 minutes, in parallel about 20 to 28 on a hosted runner (CI run 44597504328 took 28 minutes and
     # was cut by a 30 minute limit). The same two steps as ci.yml, and a limit with room.
-    timeout-minutes: 45
+    # The suite grew with the wave 7 lane merges: the same steps took up to 59m34s in CI (W-242), and 45 would cancel the release.
+    # 60 is the same limit as the CI test job (tests/test_ci_workflow.py allows at most 60 there).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
