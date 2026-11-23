@@ -778,3 +778,16 @@ def test_a_hard_link_source_that_ends_in_a_nul_keeps_the_destination_check(wired
 def test_a_hard_link_of_an_extglob_source_keeps_the_destination_check(wired, cmd):
     a = away(cmd.replace("/tmp/n", str(wired)))
     assert ALL3 <= set(a.ho_ids), (cmd, a.ho_ids)   # W8 F3: the segmenter cuts the word at `(`, so the name read is `@`
+
+
+def test_the_remembered_fold_follows_the_case_rule(monkeypatch):
+    monkeypatch.setattr(policy, "_case_insensitive", lambda: True)
+    assert policy._fold("/Users/X/.ZSHENV") == "/users/x/.zshenv"
+    monkeypatch.setattr(policy, "_case_insensitive", lambda: False)
+    assert policy._fold("/Users/X/.ZSHENV") == "/Users/X/.ZSHENV"   # W8 F3: the memo is keyed by the rule, not only the path
+
+
+def test_expand_home_leaves_a_plain_path_alone_and_expands_the_leading_forms(home):
+    h = os.environ["HOME"]
+    assert policy._expand_home("/tmp/a b") == "/tmp/a b" and policy._expand_home("rel/x") == "rel/x" and policy._expand_home("") == ""
+    assert policy._expand_home("~/x") == f"{h}/x" and policy._expand_home("$HOME/x") == f"{h}/x" and policy._expand_home("${HOME}") == h

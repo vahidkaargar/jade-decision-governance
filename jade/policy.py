@@ -1258,6 +1258,8 @@ def _config_roots() -> tuple[str, ...]:
 
 def _expand_home(p: str) -> str:
     """`~`, `$HOME` and `${HOME}` at the start of a path word, which the shell expands before the command sees them."""
+    if p[:1] not in ("~", "$"):
+        return p   # only a leading `~` or `$HOME` is expanded: most paths are not looked up in the environment
     home = os.path.expanduser("~")
     for var in ("${HOME}", "$HOME"):
         if p == var or p.startswith(var + "/"):
@@ -1290,12 +1292,18 @@ def _volfs(key: str) -> bool:
 def _fold(p: str) -> str:
     """The comparison form of a real path, used on both sides of every root check: the macOS data-volume firmlink prefix removed
     (`/System/Volumes/Data/Users/x` is `/Users/x`, the same inode, and realpath does not resolve it: PRE2-2), Unicode NFC (APFS ignores NFC/NFD:
-    PRE2-9), case-folded where the volume ignores case. Each step only adds matches on another system."""
+    PRE2-9), case-folded where the volume ignores case. Each step only adds matches on another system. Remembered per (path, case rule): every root is
+    folded again for each path checked, and a command with many paths checks each one against every root set (W8 F3)."""
+    return _fold_for(p, _case_insensitive())
+
+
+@lru_cache(maxsize=16384)
+def _fold_for(p: str, insensitive: bool) -> str:
     if _DATA_FIRMLINK_RE.match(p):
         p = p[20:] or "/"
     if not p.isascii():
         p = unicodedata.normalize("NFC", p)
-    if _case_insensitive():
+    if insensitive:
         p = p.casefold()
         if not p.isascii():
             p = unicodedata.normalize("NFC", p)
