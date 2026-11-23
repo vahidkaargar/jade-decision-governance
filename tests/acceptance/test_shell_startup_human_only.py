@@ -651,7 +651,9 @@ def test_many_git_config_key_words_are_linear():
     assert len(cmd) > 240_000
     t = time.perf_counter()
     policy.assess("Bash", {"command": cmd}, os.environ["HOME"])
-    assert time.perf_counter() - t < 1.0   # PRE4-6
+    # PRE4-6. Linear code takes about 1.07 s on the CI runner for Python 3.14 (three runs), so 1.0 s failed on a steady cost, not on noise.
+    # 3.0 s stays far below what a scan that grows with the square of the 8000 words would cost.
+    assert time.perf_counter() - t < 3.0
 
 
 # ------------------------------------------------------------------ wave 6 (security review PRE5-1, PRE5-2): back to the stricter check
